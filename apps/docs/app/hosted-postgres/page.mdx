@@ -1,0 +1,214 @@
+export const metadata = { title: "Hosted Postgres" };
+
+<p className="crumb">Connections</p>
+
+# Hosted Postgres
+
+<p className="lead">How to connect Rowkery to Postgres from Supabase, Neon, Amazon RDS and Aurora, Google Cloud SQL, Railway, Render, Heroku, DigitalOcean, or a server on your own Mac: where to find the connection string, which host and port to use, and which SSL setting to pick.</p>
+
+The quickest way in is the same everywhere: copy the connection string from the provider's dashboard and press <kbd>⌘V</kbd> outside a text field. The connection form opens filled in. [Setting up a connection](/setting-up-a-connection/) covers every field.
+
+Provider dashboards change. What follows matches each provider's documentation in October 2026; if a button has moved, the provider's own docs have the current steps.
+
+## What matters on Rowkery's side
+
+### The SSL setting
+
+Rowkery has four SSL settings, under **Advanced** in the connection form:
+
+| Setting | What it does |
+| --- | --- |
+| **Disable** | Never uses SSL |
+| **Prefer** | Uses SSL when the server offers it. The certificate isn't checked |
+| **Require** | Always uses SSL. The certificate isn't checked, so the connection is encrypted but Rowkery doesn't confirm who answered |
+| **Verify** | Always uses SSL, checks the certificate against your Mac's trusted certificates (plus the common public roots), and checks that it was issued for the host name you connect to |
+
+A new connection to a host off your Mac starts on **Verify**; one to your Mac starts on **Prefer**.
+
+When you choose a file under **CA certificate** (shown once Verify is picked), Rowkery trusts only the certificates in that file for this connection. Use it for a provider that signs its database certificates with its own authority, such as the Amazon RDS bundle. Leave it empty for a provider whose certificates come from a public authority.
+
+An `sslmode` in a URL you paste sets the SSL field:
+
+| In the URL | Rowkery's setting |
+| --- | --- |
+| `sslmode=disable` | Disable |
+| `sslmode=require` | Require |
+| `sslmode=verify-ca` or `sslmode=verify-full` | Verify |
+| `sslmode=prefer`, `sslmode=allow`, or anything else | Prefer |
+| No `sslmode` | Verify for a remote host, Prefer for this Mac |
+
+An `sslrootcert=…` in the URL fills the CA certificate field. Rowkery reads nothing else from the URL's query string, so options such as `channel_binding` or `pgbouncer=true` are ignored.
+
+Many providers' strings end in `sslmode=require`, which gives you Require. If the provider's certificate can be checked, switch to **Verify** under Advanced after pasting. If Verify fails with "Couldn't verify the server's certificate. Check SSL under Advanced.", the server's certificate isn't from an authority your Mac trusts: add the provider's CA file, or use Require.
+
+### Direct connections and poolers
+
+Rowkery keeps one server session for each query tab, and it relies on that session staying the same between your runs:
+
+- A `SET` you run in a tab stays for that tab's next statements, and a `BEGIN` stays open until you `COMMIT` or `ROLLBACK`.
+- Rowkery prepares each statement before running it, and keeps recent prepared statements on the session for reuse.
+- A long result is fetched page by page through a cursor that stays open on the tab's session while you scroll.
+
+Use a **direct connection** or a pooler in **session mode**. A pooler in **transaction mode** hands each transaction to whichever server connection is free, so a `SET` can be lost between statements and, on poolers that don't support prepared statements, queries can fail. Rowkery is a desktop client with a few sessions at a time, so it gains little from a transaction pooler anyway.
+
+Rowkery holds at most 10 sessions per saved connection, across all its windows, and closes a session after 2 minutes unused. Its sessions show up in `pg_stat_activity` with an application name starting `Rowkery`. Agents connected through MCP use separate, read-only sessions.
+
+### IP allow-lists
+
+Rowkery connects straight from your Mac, so an allow-list needs your Mac's public IP address. Through an SSH tunnel, the database sees the SSH host's address instead, so allow that. If your IP changes (a new network, a VPN), the server may stop answering: the window shows **Couldn't connect**, often with "did not answer in 10 s.", and offers **Retry** and **Edit…**.
+
+### SSH bastions
+
+For a database that's only reachable inside a private network, turn on **SSH tunnel** under Advanced and give the bastion's host, port, user, and a password or key file. Put the database's private host name in **Host**, as the bastion sees it. With **Verify**, Rowkery still checks the database's certificate against that host name, even though the connection goes through the tunnel.
+
+### Read replicas
+
+A replica refuses writes on its own. Set the connection's safe mode to **Read-only** as well, so a write is refused before it's sent, and label it so you can tell it from the primary. See [Environments and safe mode](/environments-and-safe-mode/).
+
+## Supabase
+
+Open your project and click **Connect** at the top of the dashboard. Pick a connection method and copy the string; replace the password placeholder with your database password.
+
+| Method | Host and port | User | Use it in Rowkery? |
+| --- | --- | --- | --- |
+| Direct connection | `db.PROJECT_REF.supabase.co:5432` | `postgres` | Yes. Supabase serves it over IPv6, or IPv4 with its IPv4 add-on |
+| Shared pooler, session mode | the pooler host from the Connect dialog, port `5432` | `postgres.PROJECT_REF` | Yes. Works over IPv4 on every plan |
+| Shared pooler, transaction mode | the same pooler host, port `6543` | `postgres.PROJECT_REF` | No. Supabase says it doesn't support prepared statements |
+| Dedicated pooler | `db.PROJECT_REF.supabase.co:6543` | `postgres` | No. It runs transaction mode only |
+
+If your network has no IPv6 and you don't have the IPv4 add-on, use the session pooler.
+
+```bash
+postgresql://postgres.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres
+```
+
+**SSL:** to check the server, Supabase has you use its certificate: in **Database settings**, under **SSL Configuration**, click **Download Certificate**, then in Rowkery pick **Verify** and choose that file as the CA certificate. **Require** encrypts without checking. Database settings also has a switch to refuse connections without SSL.
+
+**Allow-list:** **Network Restrictions** in Database settings applies to direct and pooled connections alike. With no restrictions set, any IP can connect. If your direct connection uses IPv6, add your IPv6 address too.
+
+## Neon
+
+Click **Connect** in the Neon Console. In **Connect to your branch**, pick the branch, compute, database and role, and copy the string.
+
+Neon gives a pooled string by default: its host has `-pooler` after the compute ID. Turn off **Connection pooling** in the same dialog for a direct one, and use that in Rowkery. Neon's pooler runs PgBouncer in transaction mode, where `SET` and `RESET` don't carry across statements (it does handle prepared statements).
+
+```bash
+postgresql://ROLE:PASSWORD@ep-COMPUTE_ID.REGION.aws.neon.tech/DATABASE?sslmode=require&channel_binding=require
+```
+
+**SSL:** Neon requires it, on the usual port 5432. Its certificates come from Let's Encrypt, which your Mac already trusts, so **Verify** works with the CA certificate field left empty. The pasted `sslmode=require` sets Require; switch it to Verify.
+
+## Amazon RDS and Aurora
+
+In the RDS console, open your instance (or cluster) and copy the **endpoint** and **port** from the **Connectivity & security** tab.
+
+- **Publicly accessible:** the same tab shows it under Security. With **No**, only resources inside the VPC can connect, so reach it through an SSH tunnel to a host in the VPC.
+- **Security group:** a new instance allows no access. Add an inbound rule to its VPC security group for the database port; **My IP** as the source allows your current address.
+- **Aurora** has a cluster endpoint for the writer and a reader endpoint (`…cluster-ro-…`) that spreads connections across the replicas. Rowkery opens a session per query tab, so on the reader endpoint two tabs may land on different replicas.
+
+```bash
+postgresql://USER:PASSWORD@INSTANCE.ACCOUNT_ID.REGION.rds.amazonaws.com:5432/DATABASE?sslmode=verify-full&sslrootcert=~/Downloads/global-bundle.pem
+```
+
+**SSL:** download AWS's certificate bundle, `https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem` (or your region's bundle), pick **Verify** and choose it as the CA certificate. The server's certificate names the instance endpoint, so connect by the endpoint, not an IP address. RDS for PostgreSQL 15 and later refuses connections without SSL by default (`rds.force_ssl` is on); earlier versions allow them unless you turn it on. Connections through RDS Proxy use AWS Certificate Manager certificates, so AWS says you don't need the RDS bundle there.
+
+## Google Cloud SQL
+
+Open the instance's **Connections** page.
+
+- **Allow-list:** on the **Networking** tab, under **Authorized networks**, click **Add network**, enter your Mac's public IP, then **Done** and **Save**. Google requires both the instance's address and yours to be IPv4.
+- **Host:** use the instance's public IP address.
+
+```bash
+postgresql://USER:PASSWORD@PUBLIC_IP:5432/DATABASE?sslmode=require
+```
+
+**SSL:** the instance's SSL setting is one of "Allow unencrypted network traffic" (the default), "Allow only SSL connections" or "Require trusted client certificates". Rowkery doesn't send a client certificate, so it can't connect to an instance set to require one.
+
+Rowkery's **Verify** checks the host name, and connecting by IP address gives it no name to check unless the certificate holds that address. Google puts the instance's DNS name in the certificate for instances on its shared CA or a customer-managed CA; for those, connect by that DNS name and choose the instance's `server-ca.pem` as the CA certificate. Otherwise use **Require**.
+
+## Railway
+
+Railway databases are private by default. To reach one from your Mac, open the Postgres service's **Settings**, go to **Networking**, and add **Public Access**. That creates a TCP proxy and fills the `DATABASE_PUBLIC_URL` variable, which is the string to paste. `DATABASE_URL` is for services inside your Railway project. Railway bills network egress through the proxy.
+
+The proxy has its own host and port, such as `shuttle.proxy.rlwy.net:15140`; always use the port Railway gives you.
+
+```bash
+postgresql://USER:PASSWORD@PROXY_HOST.proxy.rlwy.net:PROXY_PORT/DATABASE
+```
+
+**SSL:** Railway's Postgres image has SSL on. If **Verify** can't check its certificate, use **Require**.
+
+## Render
+
+Open the database in the Render Dashboard. **Connect** at the top right, and the database's **Info** page, show its **External Database URL**; that's the one for Rowkery. The internal URL works only from Render services in the same region.
+
+```bash
+postgresql://USER:PASSWORD@EXTERNAL_HOST:PORT/DATABASE
+```
+
+**SSL:** external connections are always encrypted with Render-managed certificates, and Render refuses `sslmode=disable`. If **Verify** can't check the certificate, use **Require**.
+
+**Allow-list:** on the Info page, the **Networking** section lists the address ranges that may connect. It allows any address (`0.0.0.0/0`) by default; narrow it to yours, or turn external access off.
+
+## Heroku
+
+Get the connection string with the Heroku CLI:
+
+```bash
+heroku config:get DATABASE_URL -a your-app
+```
+
+`heroku pg:credentials:url` (or `heroku data:pg:credentials:url` for Advanced databases) prints it too, and your app's **Settings** tab shows it among the config vars.
+
+```bash
+postgres://USER:PASSWORD@HOST:5432/DATABASE
+```
+
+**SSL:** Heroku Postgres requires it, and its docs connect with `sslmode=require`, which is **Require** in Rowkery.
+
+**The string can change.** Heroku rotates credentials when you ask (`heroku pg:credentials:rotate`) and sometimes on its own, after a hardware failure or a security issue. When Rowkery stops connecting with an authentication error, fetch the string again and update the connection with **Edit connection…**.
+
+Common Runtime databases are reachable from anywhere. Private and Shield databases have restricted network access; Heroku documents those separately.
+
+## DigitalOcean
+
+Open **Databases**, pick the cluster, and scroll the **Overview** page to **Connection Details**. Choose **Public network** (the private VPC host only works from inside that VPC) and the **Connection string** format, then copy it. The port is the one shown there.
+
+```bash
+postgresql://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require
+```
+
+**SSL:** the default `require` encrypts without checking the server. For **Verify**, click **Download CA certificate** in Connection Details (Standard Edition clusters) and choose that file as the CA certificate.
+
+**Allow-list:** add your Mac to the cluster's **trusted sources** before connecting.
+
+**Connection pools:** the **Database/Pool** selector in Connection Details gives a pool's details instead. New pools default to transaction mode; DigitalOcean recommends session mode for clients that use prepared statements. For Rowkery, connect to the cluster itself, or use a pool in session mode.
+
+## Postgres on your Mac
+
+Rowkery looks for Postgres on this Mac's ports 5432, 5433 and 54329 and lists what answers under **Found on this Mac** in Connect to start. Picking one connects as your Mac user name, to a database of the same name, with no password, and saves it labelled <Env name="local" />. If the server refuses, the connection form opens with those fields filled and the failing field marked, so you can correct it. A connection to this Mac starts on SSL **Prefer**.
+
+### Docker
+
+The official `postgres` image needs `POSTGRES_PASSWORD` set. The user is `postgres` unless you set `POSTGRES_USER`, and the database has the user's name unless you set `POSTGRES_DB`. Publish the port to your Mac with `-p`:
+
+```bash
+docker run --name pg -e POSTGRES_PASSWORD=secret -p 5432:5432 -d postgres
+```
+
+```bash
+postgresql://postgres:secret@localhost:5432/postgres
+```
+
+Found on this Mac tries your Mac user name, which this image doesn't have, so the form opens: set **User** to `postgres` and enter the password.
+
+### Postgres.app
+
+Postgres.app listens on `localhost`, port 5432, with your Mac user name as the user, a database of the same name, and no password. Found on this Mac picks exactly that.
+
+```bash
+postgresql://localhost
+```
+
+The first time Rowkery connects without a password, Postgres.app asks whether to allow it. If you click **Don't Allow**, Rowkery's connection fails with "Postgres.app rejected "trust" authentication". **Reset App Permission** in Postgres.app's settings asks again next time.

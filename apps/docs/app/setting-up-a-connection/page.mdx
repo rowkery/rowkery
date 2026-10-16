@@ -51,7 +51,7 @@ Under **Advanced**. A new connection to a host off your Mac starts on Verify; on
 | Disable | Never uses SSL |
 | Prefer | Uses SSL when the server offers it |
 | Require | Always uses SSL, without checking the certificate |
-| Verify | Always uses SSL and checks the certificate against your Mac's trusted certificates, or a CA file you choose |
+| Verify | Always uses SSL and checks the certificate and the host name, against your Mac's trusted certificates and a built-in set of public ones, or against a CA file you choose |
 
 ## SSH tunnel
 
@@ -59,7 +59,7 @@ Also under Advanced. Give the SSH host, user, and a password or key file. Rowker
 
 ## Environment
 
-A label that colours the window so you always know where you are: <Env name="prd" /> <Env name="stg" /> <Env name="dev" /> <Env name="local" />. Rowkery suggests one from the name and host. It changes nothing about what the connection can do; that's what safe mode is for.
+A label that colours the window so you always know where you are: <Env name="prd" /> <Env name="stg" /> <Env name="dev" /> <Env name="local" />. For Postgres, Rowkery suggests one from the name, database and host. It changes nothing about what the connection can do; that's what safe mode is for. [Environments and safe mode](/environments-and-safe-mode/) covers both.
 
 ## Safe mode
 
