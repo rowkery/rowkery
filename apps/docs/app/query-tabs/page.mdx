@@ -1,0 +1,158 @@
+export const metadata = { title: "Query tabs" };
+
+<p className="crumb">Working with data</p>
+
+# Query tabs
+
+<p className="lead">A query tab is an editor for SQL with its results underneath. This page covers running and cancelling queries, what each tab keeps between runs, how results load, and what you see when a query fails.</p>
+
+<Shot src="/img/query-tabs-overview.webp" width={1280} height={800} alt="A query tab with two statements. The second one, a SELECT from orders, has an orange bar beside it. The results below read 1,000+ rows in 38 ms, with Load more · 1,000 rows, a 1,000 rows page size menu, Export, and a small profile under each column header." />
+
+## Write and run
+
+Type SQL in the editor and press <kbd>⌘↵</kbd> (**Run statement**) to run the statement under the caret. That statement has an orange bar beside it, so you can see what will run before you press anything. If you select some text, the selection is what runs.
+
+<kbd>⌥⌘↵</kbd> (**Run all statements**) runs every statement in the editor. Both are in the **Query** menu, and Run all is also in the editor's **…** menu.
+
+While a query runs, the **Run** button shows how long it has been running, and the editor is read-only until it finishes. If all 10 of the connection's sessions are busy, the button reads **Waiting** and the results say **Waiting for a free connection** until one frees up.
+
+| Key | Command | What it runs |
+| --- | --- | --- |
+| <kbd>⌘↵</kbd> | Run statement | The statement under the caret, or the selection |
+| <kbd>⌥⌘↵</kbd> | Run all statements | Every statement in the editor, one after another |
+| <kbd>⌘E</kbd> | Explain statement | Nothing: it shows the plan. See [Query plans](/query-plans/) |
+| <kbd>⌃Space</kbd> | Complete at the caret | Nothing: it opens completion. See [Completion](/completion/) |
+
+### Editing helpers
+
+- Typing `'` or `"` adds the closing quote. Typing the closing quote steps over it, and <kbd>⌫</kbd> in an empty pair removes both. A quote typed over a selection wraps it.
+- Brackets aren't paired.
+- Pasting a connection URL into the editor shows **Looks like a connection URL** with **Connect**, in case you meant to open it. <kbd>Esc</kbd> keeps the text.
+
+### Schema changes
+
+When a statement creates, alters or drops a table, view, schema, type, function, procedure, sequence or extension, Rowkery reloads the schema, so the new names show in the schema column and in completion. A change made inside `BEGIN` shows after you `COMMIT`.
+
+## More than one statement
+
+Run all, or a selection holding several statements, runs them one at a time on the tab's session. The run stops at the first statement that fails, is cancelled, or is held by safe mode, and the results show the last statement that ran. If one fails, its error is marked in the editor where it happened.
+
+A statement that returns no rows, such as an `UPDATE` or a `SET`, shows **Query finished with no result set**.
+
+## Cancel a query
+
+Press <kbd>Esc</kbd> or <kbd>⌘.</kbd> (**Cancel query**), or click **Cancel** in the results header, to cancel the shown tab's query. While it runs, the header reads **Running** with the rows received so far and the time.
+
+<Shot src="/img/query-tabs-status.webp" width={1016} height={436} alt="Three query tabs: Query 1 with a green dot and 4ms, Query 2 with a red dot and 3ms, and Query 3 with a spinner and 7.6s. The results header reads Cancelling · 7.60 s with a Force stop button, and the Run button shows the running time." />
+
+After you cancel, the header reads **Cancelling** and the button becomes **Force stop** ("Stop it now, without waiting for the server"). Press it, or <kbd>Esc</kbd> again, to stop the run at once. If the server hasn't answered the cancel within 3 seconds, Rowkery stops the run by itself. A cancelled run shows **Query cancelled** with its time.
+
+<kbd>⌘.</kbd> only ever cancels, so use it when something else is open that would take <kbd>Esc</kbd> first, such as the completion list.
+
+**Stop all queries** (in the **Query** menu, the editor's **…** menu and <kbd>⌘K</kbd>) stops every running query in every window without waiting for the servers. Use it when a query is stuck and Cancel doesn't help.
+
+## Each tab has its own session
+
+On Postgres, each query tab runs on its own server session and keeps it between runs. That means:
+
+- A `SET`, such as `SET search_path` or `SET statement_timeout`, stays in effect for the following runs in that tab.
+- `BEGIN` opens a transaction that stays open across runs until you `COMMIT` or `ROLLBACK` in the same tab.
+- Temporary tables live as long as the tab's session.
+- A cancel stops only that tab's query.
+
+A tab's session closes after 2 minutes unused and reopens when you next run something. It's never closed while it holds a transaction you opened or a result that's still paging. Each saved connection holds at most 10 sessions, shared by its windows and tabs.
+
+If the connection drops while you have a transaction open, the server rolls that transaction back. The next run in that tab says so ("nothing since BEGIN was saved"), runs nothing, and asks you to run your statements again.
+
+<Note>
+
+Rowkery doesn't show a sign that a tab has a transaction open. While one is open, saving row edits in that tab is refused until you commit or roll back. See [Editing rows](/editing-rows/).
+
+</Note>
+
+## Tabs
+
+A new query tab is called **Query 1**, **Query 2** and so on. A running tab shows a spinner and its time. A finished one shows a green dot, or a red one if it failed, with its time until you run it again.
+
+| Do this | How |
+| --- | --- |
+| New query tab | **File › New Query Tab**, the **+** at the end of the tab row, or the tab menu |
+| Close a tab | <kbd>⌘W</kbd>, the tab's ×, or a middle-click on the tab |
+| Close the others | **Close other tabs** in the tab menu |
+| Reopen a closed tab | <kbd>⇧⌘T</kbd>, **File › Reopen Closed Tab**, or the tab menu |
+| Next or previous tab | **Go › Next Query Tab** and **Go › Previous Query Tab** |
+| Put the caret in the editor | **Go › Focus Editor** |
+| Reorder tabs | Drag a tab along the row |
+
+Right-click a query tab for its menu: **New query tab**, **Close tab**, **Close other tabs** (with **Undo**) and **Reopen closed tab**. Tabs can't be renamed.
+
+The Rowkery keymap has no key for a new query tab. With the TablePlus keymap it's <kbd>⌘T</kbd>, and with DataGrip <kbd>⇧⌘L</kbd>. See [Shortcuts and keymaps](/shortcuts-and-keymaps/).
+
+### Closing and reopening
+
+<kbd>⌘W</kbd> closes whichever you used last: the tab, or the window if your last click was on the window's pill or in the schema column. **File › Close Tab** reads **Close Window** when that's what it would close.
+
+Closing a tab with SQL in it shows a toast such as **Closed Query 2 with unsaved SQL** with **Undo**. Closing the last tab leaves an empty **Query 1**. Rowkery remembers the last 10 tabs you closed. A tab you reopen while its toast is up comes back with its rows; later, it comes back with its SQL and waits for you to run it. [Undo and Esc](/undo-and-esc/) has more on this.
+
+### What's saved
+
+Your tabs, the SQL in each one and which tab is shown are saved to Rowkery's config file and come back when you open the window again. Results aren't saved, so run the query again to see them. SQL is saved when you leave the editor or stop typing for a moment. See [Where Rowkery keeps things](/where-rowkery-keeps-things/).
+
+## Results
+
+Rows appear as they arrive, so you can read the first ones while the rest load.
+
+### Paging
+
+A single read (`SELECT`, `WITH`, `VALUES` or `TABLE`) with no `LIMIT`, `OFFSET`, `FETCH` or `INTO` of its own loads 1,000 rows at a time. The header then reads **1,000+ rows** with **Load more · 1,000 rows**, and scrolling to the end of the grid loads the next page too. The page size menu beside it offers **1,000 rows**, **5,000 rows** and **All rows**; it only appears for a result that pages.
+
+Paging reads through a cursor on the tab's session, so the next page continues the same query. It works inside a transaction you opened too. A read inside a transaction that has failed, or one with `FOR UPDATE` or `FOR SHARE`, runs in full instead. SQLite reads page the same way.
+
+A query with its own `LIMIT` returns exactly what it asks for, in one go.
+
+### The row limit
+
+A tab holds at most 1,000,000 rows. When a result gets to that many, loading stops and a toast says **Stopped at 1,000,000 rows**. Add a `WHERE` or `LIMIT` to narrow it down. To save a large result to a file, see [Exporting and copying](/exporting-and-copying/).
+
+### Reading the grid
+
+- Click a column header to sort the loaded rows.
+- Under each header, a small profile sums up the column from the first 5,000 rows: a histogram for numbers and dates, the top value and its share, or how many values are unique, plus how many are null.
+- `NULL` shows as the word NULL, so you can tell it from an empty string.
+- JSON and JSONB cells are tinted.
+- Large integers (`int8` beyond 9,007,199,254,740,991) and `numeric` values keep every digit.
+
+When a query reads exactly one table, the results header shows **Data** and **Structure** with the table's name, and the cell menu offers **Open as table tab**. See [Table tabs and filters](/table-tabs-and-filters/).
+
+To copy or save results, see [Exporting and copying](/exporting-and-copying/). To see one row in full, see [Quick Look](/quick-look/).
+
+### Clear results
+
+**Clear results** (**Query › Clear Results**, or the **…** menus) empties the shown tab's results and error, and leaves the SQL as it is.
+
+## Find in results
+
+Press <kbd>⌘F</kbd> (**Find in results**) on a query tab with rows to search the loaded rows.
+
+<Shot src="/img/query-tabs-find.webp" width={1016} height={560} alt="The Find in results field over a query result, with SEK typed and 1 of 250 beside it. The matching cell in the first row is highlighted." />
+
+The field shows **1 of 250** or **No matches**. Press <kbd>↵</kbd> for the next match and <kbd>⇧↵</kbd> for the previous one. <kbd>Esc</kbd> closes the field. Find searches the rows already loaded. On a table tab, <kbd>⌘F</kbd> is **Filter rows** instead; see [Table tabs and filters](/table-tabs-and-filters/).
+
+## When a query fails
+
+The results show the server's message, with help to fix it where Rowkery can offer some.
+
+<Shot src="/img/query-tabs-error.webp" width={1016} height={549} alt="A failed query: custmer_id has a dotted underline in the editor. The results read column custmer_id does not exist, then Did you mean customer_id? with a Replace and run button, the server's text with LINE 1 and a caret under the mistake, the code 42703, and Copy error and Report… buttons." />
+
+- **Where it went wrong.** When the server gives a position, the caret moves there, the word gets a dotted underline and its line number turns red. Any edit clears the mark.
+- **Did you mean.** For a column or table that doesn't exist, Rowkery looks for a close name (up to two letters off) among the statement's tables or the schema, and offers it as **Did you mean customer_id?** Click **Replace and run**, or press <kbd>↵</kbd> with the caret in the underlined word, to fix it and run again.
+- **The full text.** The server's message as psql would print it, with the line and a caret under the spot, and the SQLSTATE code such as `42703`.
+- **Copy error** copies that text, and **Report…** lets you send the error with a note of your own.
+
+## Recent queries
+
+Every statement you run is kept in the connection's history: the last 50, newest first. Find them in <kbd>⌘K</kbd> under **Recent queries**, or type `q:` to search only them. <kbd>↵</kbd> opens the SQL in the current tab if it's empty, or in a new tab, without running it. <kbd>⌥↵</kbd> inserts it at the caret. See [Search with ⌘K](/search/).
+
+## Timings
+
+**Timings** in <kbd>⌘K</kbd> (also in the **…** menus) opens a sheet with how long recent steps took against their budgets: the app's launch, and for the last query, the time from Run to the first rows, to rows on screen, and on the database. **Copy** copies the numbers, which helps when you report something slow. <kbd>Esc</kbd> closes it.

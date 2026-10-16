@@ -16,11 +16,24 @@ export const GROUPS: DocGroup[] = [
   },
   {
     title: "Connections",
-    pages: [{ href: "/setting-up-a-connection/", title: "Setting up a connection", file: "setting-up-a-connection/page.mdx" }],
+    pages: [
+      { href: "/setting-up-a-connection/", title: "Setting up a connection", file: "setting-up-a-connection/page.mdx" },
+    ],
+  },
+  {
+    title: "Working with data",
+    pages: [
+      { href: "/query-tabs/", title: "Query tabs", file: "query-tabs/page.mdx" },
+      { href: "/completion/", title: "Completion", file: "completion/page.mdx" },
+      { href: "/query-plans/", title: "Query plans", file: "query-plans/page.mdx" },
+      { href: "/sessions/", title: "Sessions", file: "sessions/page.mdx" },
+    ],
   },
   {
     title: "Agents",
-    pages: [{ href: "/connecting-to-agents/", title: "Connecting to agents", file: "connecting-to-agents/page.mdx" }],
+    pages: [
+      { href: "/connecting-to-agents/", title: "Connecting to agents", file: "connecting-to-agents/page.mdx" },
+    ],
   },
 ];
 

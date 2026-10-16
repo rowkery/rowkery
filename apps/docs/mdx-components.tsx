@@ -1,6 +1,7 @@
 import type { MDXComponents } from "mdx/types";
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import Link from "next/link";
+import { Clip } from "@/components/Clip";
 import { CodeBlock } from "@/components/CodeBlock";
 import { Card, Cards, Env, Note, Shot, Steps } from "@/components/Blocks";
 import { slug, textOf } from "@/lib/slug";
@@ -34,6 +35,7 @@ const components: MDXComponents = {
   ),
   Card,
   Cards,
+  Clip,
   Env,
   Note,
   Shot,
