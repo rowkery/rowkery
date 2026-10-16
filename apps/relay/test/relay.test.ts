@@ -64,7 +64,7 @@ test("rejects empty, oversized and malformed reports without calling GitHub", as
 test("only POST /report, and CORS preflight answers", async () => {
   const get = await relay.fetch(new Request("https://relay.example/report"), env);
   assert.equal(get.status, 405);
-  const other = await relay.fetch(new Request("https://relay.example/", { method: "POST" }), env);
+  const other = await relay.fetch(new Request("https://relay.example/other", { method: "POST" }), env);
   assert.equal(other.status, 404);
   const pre = await relay.fetch(new Request("https://relay.example/report", { method: "OPTIONS" }), env);
   assert.equal(pre.status, 204);
@@ -117,4 +117,17 @@ test("maps the picked type to a label", async () => {
   assert.deepEqual(calls[1].body.labels, ["user-report", "feedback"]);
   await post({ ...report, kind: "nonsense" });
   assert.deepEqual(calls[2].body.labels, ["user-report", "bug"]);
+});
+
+test("takes reports at the root too, for builds whose URL left off /report", async () => {
+  const res = await relay.fetch(
+    new Request("https://relay.example/", {
+      method: "POST",
+      headers: { "cf-connecting-ip": "5.6.7.8" },
+      body: JSON.stringify(report),
+    }),
+    env,
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, number: 7 });
 });

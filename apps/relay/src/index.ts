@@ -126,7 +126,8 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     const url = new URL(request.url);
-    if (url.pathname !== "/report") return json(404, { ok: false, error: "Not found" });
+    // The root also takes reports, so a build whose report URL left off /report still works.
+    if (url.pathname !== "/report" && url.pathname !== "/") return json(404, { ok: false, error: "Not found" });
     if (request.method !== "POST") return json(405, { ok: false, error: "Use POST" });
 
     const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
