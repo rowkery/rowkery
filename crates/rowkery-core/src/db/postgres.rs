@@ -20,7 +20,7 @@ pub use tokio_postgres_rustls::MakeRustlsConnect;
 use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::connections::{expand_home, PostgresConnection, PostgresSslMode};
-use crate::secrets::{get_secret, ConnectionSecrets, SecretKind};
+use crate::secrets::{forget_cached, get_secret, keychain_refused, ConnectionSecrets, SecretKind};
 use crate::ssh::{humanize_ssh_error, SshTunnel};
 
 use super::introspect::{
@@ -194,13 +194,7 @@ pub async fn open_session_via(
     let password = if let Some(secrets) = secrets {
         secrets.db_password.clone().unwrap_or_default()
     } else {
-        // The keychain can block (or prompt): off the async workers.
-        let id = connection_id.clone();
-        tokio::task::spawn_blocking(move || get_secret(&id, SecretKind::DbPassword))
-            .await
-            .map_err(|e| DriverError::Message(e.to_string()))?
-            .map_err(|e| DriverError::Message(e.to_string()))?
-            .unwrap_or_default()
+        stored_password(&connection_id).await?
     };
 
     let tag = new_tag();
@@ -239,12 +233,46 @@ pub async fn open_session_via(
         DriverError::Message(humanize_postgres_error(&e, &config.username))
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
-    let (client, connection_task) = if let Some(tls) = tls.clone() {
-        let (client, connection) = pg_config.connect(tls).await.map_err(humanize)?;
-        (client, drive_connection(connection, txn_warnings.clone()))
-    } else {
-        let (client, connection) = pg_config.connect(NoTls).await.map_err(humanize)?;
-        (client, drive_connection(connection, txn_warnings.clone()))
+    let connect = |pg_config: tokio_postgres::Config| {
+        let tls = tls.clone();
+        let txn_warnings = txn_warnings.clone();
+        async move {
+            if let Some(tls) = tls {
+                let (client, connection) = pg_config.connect(tls).await?;
+                Ok((client, drive_connection(connection, txn_warnings)))
+            } else {
+                let (client, connection) = pg_config.connect(NoTls).await?;
+                Ok::<_, tokio_postgres::Error>((client, drive_connection(connection, txn_warnings)))
+            }
+        }
+    };
+    let (client, connection_task) = match connect(pg_config.clone()).await {
+        Ok(connected) => connected,
+        // A long-lived process (the MCP server) remembers the password it
+        // read first; the app may have saved a new one since. Read it again
+        // and retry once, only when it changed.
+        Err(err) if secrets.is_none() && is_bad_password(&err) => {
+            let id = connection_id.clone();
+            let _ = tokio::task::spawn_blocking(move || forget_cached(&id)).await;
+            let fresh = stored_password(&connection_id).await?;
+            let result = if fresh != password {
+                pg_config.password(&fresh);
+                connect(pg_config).await
+            } else {
+                Err(err)
+            };
+            match result {
+                Ok(connected) => connected,
+                Err(err) if is_bad_password(&err) => {
+                    return Err(DriverError::Message(
+                        no_password_message(&connection_id, &config.username, fresh.is_empty())
+                            .unwrap_or_else(|| humanize_postgres_error(&err, &config.username)),
+                    ));
+                }
+                Err(err) => return Err(humanize(err)),
+            }
+        }
+        Err(err) => return Err(humanize(err)),
     };
 
     // Read-only connections are read-only at the server too, so a write that
@@ -1590,6 +1618,41 @@ impl ServerCertVerifier for EncryptOnly {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
     }
+}
+
+/// The connection's saved database password ("" when none is saved). The
+/// keychain can block (or prompt): off the async workers.
+async fn stored_password(connection_id: &str) -> Result<String, DriverError> {
+    let id = connection_id.to_string();
+    Ok(
+        tokio::task::spawn_blocking(move || get_secret(&id, SecretKind::DbPassword))
+            .await
+            .map_err(|e| DriverError::Message(e.to_string()))?
+            .map_err(|e| DriverError::Message(e.to_string()))?
+            .unwrap_or_default(),
+    )
+}
+
+fn is_bad_password(err: &tokio_postgres::Error) -> bool {
+    err.as_db_error()
+        .is_some_and(|db| db.code().code() == "28P01")
+        || error_chain(err).contains("password authentication failed")
+}
+
+/// Why no password reached Postgres, when none did: the keychain refused the
+/// read, or none is saved. `None` when a password was sent (it was wrong).
+fn no_password_message(connection_id: &str, username: &str, empty: bool) -> Option<String> {
+    if keychain_refused(connection_id) {
+        return Some(format!(
+            "Couldn't read the password for '{username}' from the Keychain, so none was sent. \
+             Allow Rowkery when macOS asks, then try again."
+        ));
+    }
+    empty.then(|| {
+        format!(
+            "Postgres asked for a password for '{username}' and none is saved for this connection."
+        )
+    })
 }
 
 pub fn humanize_postgres_error(err: &tokio_postgres::Error, username: &str) -> String {

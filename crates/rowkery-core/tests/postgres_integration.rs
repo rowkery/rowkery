@@ -609,3 +609,42 @@ async fn postgres_keyset_pages_match_one_ordered_query() {
         assert_eq!(paged, all, "order {order:?}");
     }
 }
+
+/// A long-lived process (the MCP server) read the password before the app
+/// saved a new one: the rejected login reads it again and connects. With
+/// nothing saved at all, the error says so instead of "rejected password".
+#[tokio::test]
+async fn postgres_rereads_a_password_saved_since() {
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    let base = std::env::temp_dir().join(format!("rowkery-pg-reread-{}", std::process::id()));
+    let (app, mcp) = (base.join("app"), base.join("mcp"));
+    let _ = std::fs::remove_dir_all(&base);
+    let config = PostgresConnection {
+        id: "reread-pg".into(),
+        ..pg_config()
+    };
+
+    // What another process saved: the right password.
+    std::env::set_var("ROWKERY_CONFIG_DIR", &app);
+    store_secret("reread-pg", SecretKind::DbPassword, &password).expect("store");
+    // This process still remembers an old one.
+    std::env::set_var("ROWKERY_CONFIG_DIR", &mcp);
+    store_secret("reread-pg", SecretKind::DbPassword, "old-password").expect("store old");
+    for file in ["secrets.enc", "secrets.key"] {
+        std::fs::copy(app.join(file), mcp.join(file)).expect("copy");
+    }
+    let mut session = open_session(config.id.clone(), config.clone())
+        .await
+        .expect("connects with the password saved since");
+    session_test(&mut session).await.expect("test");
+
+    let empty = PostgresConnection {
+        id: "never-saved-pg".into(),
+        ..pg_config()
+    };
+    let err = open_session(empty.id.clone(), empty)
+        .await
+        .err()
+        .expect("no password saved");
+    assert!(err.to_string().contains("none is saved"), "{err}");
+}
