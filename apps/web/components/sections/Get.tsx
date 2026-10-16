@@ -1,4 +1,4 @@
-import { BUILD_FROM_SOURCE_URL, REPO_URL, SPONSOR_URL, UNQUARANTINE } from "@/lib/site";
+import { BUILD_FROM_SOURCE_URL, DOCS_URL, REPO_URL, SPONSOR_URL, UNQUARANTINE } from "@/lib/site";
 import { CopyCommand } from "../CopyCommand";
 import { BUILD, DownloadButton } from "../Download";
 import { GitHubIcon, HeartIcon } from "../Icons";
@@ -53,6 +53,7 @@ export function Get() {
               <GitHubIcon />
               GitHub
             </a>
+            <a href={DOCS_URL}>Docs</a>
             <a href={SPONSOR_URL}>Sponsor</a>
             <span>
               Made by <a href="https://lucascodes.dev">Lucas Sim</a>

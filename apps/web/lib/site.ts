@@ -12,5 +12,8 @@ export const BUILD_FROM_SOURCE_URL = `${REPO_URL}#build-from-source`;
 export const DISCUSSIONS_URL = `${REPO_URL}/discussions`;
 export const SPONSOR_URL = "https://github.com/sponsors/rowkery";
 
+/** The documentation site, apps/docs. */
+export const DOCS_URL = "https://docs.rowkery.com";
+
 /** The command that lets macOS open the app while it isn't signed. */
 export const UNQUARANTINE = "xattr -dr com.apple.quarantine /Applications/Rowkery.app";
