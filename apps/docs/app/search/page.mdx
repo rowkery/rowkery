@@ -1,0 +1,154 @@
+export const metadata = { title: "Search with ⌘K" };
+
+<p className="crumb">Keys</p>
+
+# Search with ⌘K
+
+<p className="lead">⌘K finds a table, a query you ran, a saved connection or any command, and opens or runs it from the keyboard. It is also where a pasted connection string or SQLite path goes.</p>
+
+## Open it
+
+Press <kbd>⌘K</kbd> anywhere in the window, or click **Search tables, commands** at the right of the title bar. The search opens under that button with its field already focused, and it always starts empty. Press <kbd>⌘K</kbd> again, <kbd>Esc</kbd> or click outside it to close it.
+
+<Shot src="/img/search-empty.webp" width={503} height={486} alt="The ⌘K search open under the title bar's search button, before anything is typed: four recent queries with their age, then commands with their keys, the first row showing ↵ Open and ⌥↵ Insert." />
+
+The footer shows the keys for the highlighted row and, on the right, the name of the window's connection.
+
+## What it finds
+
+| Group | What's in it | Where it comes from |
+| --- | --- | --- |
+| **Tables** | Every table and view of the window's database, as `schema.name`, with its approximate row count | The schema shown in the schema column. Partitions are left out, so their parent table stands for them |
+| **Recent queries** | SQL you ran on this connection, newest first, with how long ago | The last 50 statements you ran on the connection. Running the same SQL again moves it to the top. Opening a table from the schema column or from ⌘K isn't added |
+| **Connections** | Your saved connections, with their environment and host. The one this window uses says **Connected** | Your connection list |
+| **Commands** | Every command that can run right now, with its key | The same list the menu bar and the shortcut sheet use |
+
+When a window is connected to more than one database, each table also shows the database it belongs to. With no connection open, the field reads **Search commands and connections…** and there are no tables or recent queries to find.
+
+Columns, databases and environments aren't items of their own. To change database, use **Switch database…** (<kbd>⇧⌘D</kbd>); to change the environment tag, use the **Set environment** commands below.
+
+### Before you type
+
+The empty search lists **Recent queries**, **Commands** and **Connections**, up to eight of each. The commands you pick most often from ⌘K come first, so the list soon matches what you use. If there's nothing to show, it says **Type to search**.
+
+## How matching works
+
+Type any part of a name. Matching ignores case.
+
+- A run of letters found together beats letters spread out: `ord` finds `public.orders` before a name that only has an o, an r and a d somewhere.
+- A match at the start of a word ranks higher. Words are split at `.`, `_`, `-`, `/` and spaces, so `items` finds `public.order_items`.
+- Matching a whole last segment ranks highest: `users` puts `public.users` above `public.users_old`.
+- Letters in order also match when they aren't next to each other: `fj` finds `failed_jobs`.
+- Earlier and shorter matches rank above later and longer ones.
+
+The matched letters are highlighted in each row. Each group shows its best eight matches, and the groups are ordered by their best match, so `new tab` puts Commands first and `orders` puts Tables first. When two groups tie, Tables lead, then Commands and Connections, then Recent queries.
+
+<Shot src="/img/search-mixed.webp" width={420} height={432} alt="⌘K with “ord” typed: Tables first (public.orders and public.order_items, with row counts), then recent queries that mention orders, then commands such as Keyboard shortcuts, with the matched letters in orange." />
+
+### Words commands also answer to
+
+Many commands match words that aren't in their title, so you can type what you have in mind. For example:
+
+| Type | To find |
+| --- | --- |
+| `help`, `keys`, `hotkeys` | Keyboard shortcuts |
+| `theme`, `dark`, `light` | The Appearance commands |
+| `plan`, `why is it slow` | Explain statement |
+| `kill`, `locks`, `blocking`, `pg_stat_activity` | Show sessions |
+| `kill`, `stuck`, `force stop` | Stop all queries |
+| `save`, `apply` | Commit changes |
+| `revert` | Discard changes |
+| `reload`, `rerun` | Refresh rows |
+| `csv`, `download` | Export results… |
+| `closed` | Reopen closed tab |
+| `sample`, `demo`, `tutorial` | Open the sample database |
+| `bug`, `feedback` | Report an issue… |
+| `update`, `upgrade`, `version` | Check for updates… |
+| `licenses`, `credits`, `fonts` | Third-party notices |
+| `mcp`, `claude`, `agent` | The Agents and MCP commands |
+| `present`, `privacy` | Start presenting |
+
+A word like this matches only as written (its letters can't be spread out), and it counts as strongly as the title. When several commands score about the same, the ones you've picked most from ⌘K come first.
+
+## Search one group
+
+Start with a prefix to search only one group. Each group's heading shows its prefix on the right.
+
+| Prefix | Searches |
+| --- | --- |
+| `t:` | Tables, such as `t:users` |
+| `q:` | Recent queries, such as `q:select` |
+| `>` | Commands, such as `>new tab` |
+
+Connections have no prefix. Press <kbd>⇥</kbd> instead to step through the groups: All, Tables, Recent queries, Connections, Commands, and back to All (<kbd>⇧⇥</kbd> goes the other way). The group you picked shows as a label in the field. <kbd>⌫</kbd> in an empty field, or <kbd>Esc</kbd>, goes back to All.
+
+A search limited to one group shows up to 60 matches.
+
+<Shot src="/img/search-scoped.webp" width={420} height={205} alt="⌘K with “>safe” typed: only Commands, listing Change safe mode…, Safe mode: Off and Safe mode: Read-only." />
+
+## Keys in the search
+
+| Key | What it does |
+| --- | --- |
+| <kbd>↑</kbd> <kbd>↓</kbd>, or <kbd>⌃N</kbd> <kbd>⌃P</kbd> | Move the highlight |
+| Page Up, Page Down | Move eight rows |
+| <kbd>↵</kbd> | Open the highlighted row (see below) |
+| <kbd>⌥↵</kbd> | Insert the table name or the query's SQL at the caret |
+| <kbd>⌘↵</kbd> | Open a table's Structure |
+| <kbd>⇥</kbd> / <kbd>⇧⇥</kbd> | Limit the search to the next or previous group |
+| <kbd>Esc</kbd> | Clear what you typed; then drop the group; then close |
+
+The highlighted row shows the keys that apply to it, and so does the footer. A click works like <kbd>↵</kbd>, and ⌥-click and ⌘-click work like <kbd>⌥↵</kbd> and <kbd>⌘↵</kbd>.
+
+### What ↵ does
+
+| Row | <kbd>↵</kbd> | <kbd>⌥↵</kbd> | <kbd>⌘↵</kbd> |
+| --- | --- | --- | --- |
+| Table | **Browse**: switches to the table's tab if it's open, otherwise opens it in a tab of its own | **Insert** its name, quoted only when it needs to be. Tables in `public` (or SQLite's `main`) are inserted without the schema | **Structure**: opens the table on its Structure view |
+| Recent query | **Open**: puts the SQL in a query tab (the current one if it's empty, otherwise a new one) without running it | **Insert** the whole SQL at the caret | |
+| Connection | **Switch**: this window connects to it | | |
+| Command | **Run** | | |
+
+On a table tab, <kbd>⌥↵</kbd> opens the filter editor and inserts the name there, because a table tab has no SQL editor. When you close ⌘K, the focus goes back to the editor unless the command moved it somewhere else.
+
+## Paste a connection string or a file path
+
+Paste (or type) into the search field and ⌘K recognises two kinds of text. The row it makes sits above every group, so <kbd>↵</kbd> takes it straight away.
+
+| You paste | First row | <kbd>↵</kbd> |
+| --- | --- | --- |
+| A `postgres://` or `postgresql://` URL, libpq keywords such as `host=… dbname=…`, a `psql -h … -U …` line, or a `DATABASE_URL=…` line | **New connection from URL**, with the host and database | Opens New connection filled in from it |
+| A path to a SQLite file: starting with `/`, `~/` or a drive letter, ending in `.sqlite`, `.sqlite3`, `.db` or `.db3` | **Open SQLite file**, with the path | Opens the file, reusing the saved connection on that path if there is one |
+
+Quotes around the text are ignored. Text that starts with a prefix (`t:`, `q:`, `>`) is always searched as text.
+
+<Shot src="/img/search-paste.webp" width={420} height={116} alt="A postgres:// URL pasted into ⌘K: the only row is New connection from URL, db.arcade.internal/arcade, with ↵." />
+
+[Setting up a connection](/setting-up-a-connection/#what-you-can-paste) lists every form a connection string can take.
+
+## Commands without a key
+
+Most commands also have a key, a place in the menu bar or both. These have neither, so ⌘K is the quickest way to them. Each one appears only while it can run.
+
+| Command | What it does |
+| --- | --- |
+| **Set environment: Local (local)**, **Development (dev)**, **Staging (stg)**, **Production (prd)** | Tags the window's connection with an environment. See [Environments and safe mode](/environments-and-safe-mode/) |
+| **Clear environment** | Removes the tag |
+| **Safe mode: Off**, **Confirm writes**, **Read-only** | Sets the connection's safe mode in one step (**Change safe mode…** opens the menu instead) |
+| **Explain with timings** | Runs the statement with timings and shows its plan (Postgres). See [Query plans](/query-plans/) |
+| **All tables as rows** | Lists the database's tables as a result you can sort and copy |
+| **Copy results as TSV**, **Copy all results as CSV**, **Copy all results as TSV** | Copies rows to the clipboard. While more rows remain unloaded, the first reads **Copy loaded 1,000 rows as TSV**, and the "all" versions fetch the whole result. See [Exporting and copying](/exporting-and-copying/) |
+| **Discard changes** | Throws away a table tab's staged edits, with Undo |
+| **Timings** | Shows how long recent steps took against their budgets |
+| **Allow MCP for this connection**, **Stop sharing this connection with MCP** | Turns agent sharing on or off for the window's connection |
+| **MCP activity**, **MCP access: what agents can reach**, **Edit MCP access: databases and tables** | Open the parts of the [Agents](/connecting-to-agents/) page |
+| **Connect Claude Code or Claude Desktop** | Opens Connect an agent |
+| **Review proposed changes** | Opens a change an agent proposed, while one is waiting. See [Proposed changes](/proposed-changes/) |
+| **Hide tips** | Stops the one-line tips that appear under some controls |
+| **Reset the sample database** | Writes the sample database back to how it started |
+
+## Every command
+
+Every command ⌘K can list, with its key on a Mac. Remember that each one shows only while it can run: **Cancel query** while a query runs, **Commit changes** while edits are staged, and so on.
+
+<CommandList />

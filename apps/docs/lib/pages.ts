@@ -46,6 +46,20 @@ export const GROUPS: DocGroup[] = [
       { href: "/other-agents/", title: "Other agents", file: "other-agents/page.mdx" },
     ],
   },
+  {
+    title: "Keys",
+    pages: [
+      { href: "/search/", title: "Search with ⌘K", file: "search/page.mdx" },
+      { href: "/shortcuts-and-keymaps/", title: "Shortcuts and keymaps", file: "shortcuts-and-keymaps/page.mdx" },
+      { href: "/undo-and-esc/", title: "Undo and Esc", file: "undo-and-esc/page.mdx" },
+    ],
+  },
+  {
+    title: "Help",
+    pages: [
+      { href: "/release-notes/", title: "Release notes", file: "release-notes/page.mdx" },
+    ],
+  },
 ];
 
 export const PAGES: (DocPage & { group: string })[] = GROUPS.flatMap((g) => g.pages.map((p) => ({ ...p, group: g.title })));

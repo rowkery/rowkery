@@ -1,31 +1,13 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
-import {
-  COMMANDS,
-  GESTURES,
-  SHEET_SECTIONS,
-  chordFor,
-  formatChord,
-  gestureKeys,
-  keysFor,
-  sheetSection,
-  type CommandState,
-  type SheetSection,
-} from "./commands";
+import { keysFor, sheetRows, type SheetRow, type SheetSection } from "./commands";
 import { KEYMAPS, KEYMAP_CHORDS, setKeymap, useKeymap } from "./keymaps";
 import { isMacPlatform } from "./platform";
 import { useUsedKeys } from "./usedKeys";
 import "./ShortcutsSheet.css";
 import { Keys } from "./Keys";
 
-interface Row {
-  id: string;
-  title: string;
-  keys: string;
+interface Row extends SheetRow {
   hay: string;
-  /** A command: it has a used dot and counts in "Used n of m". */
-  command: boolean;
-  /** The keymap moved this chord. */
-  remapped: boolean;
 }
 
 /**
@@ -47,37 +29,14 @@ export function ShortcutsSheet({ onClose, onNotices }: { onClose: () => void; on
   const [spy, setSpy] = useState<SheetSection | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const sections = useMemo(() => {
-    const by = new Map<SheetSection, Row[]>(SHEET_SECTIONS.map((s) => [s, []]));
-    for (const c of COMMANDS) {
-      const chord = chordFor(c, keymap);
-      // A key the grid or panel handles itself reads as its gesture row.
-      if (!chord || c.planned || GESTURES.some((g) => g.id === c.id)) continue;
-      // Titles that read the state (Show / Hide sidebar) show their default.
-      const title = typeof c.title === "function" ? c.title({ sidebarHidden: false } as CommandState) : c.title;
-      const keys = formatChord(chord, mac);
-      by.get(sheetSection(c))!.push({
-        id: c.id,
-        title,
-        keys,
-        hay: [title, keys, ...(c.synonyms ?? [])].join(" ").toLowerCase(),
-        command: true,
-        remapped: !!KEYMAP_CHORDS[keymap][c.id],
-      });
-    }
-    for (const g of GESTURES) {
-      const keys = gestureKeys(g, mac);
-      by.get(g.section)!.push({
-        id: g.id,
-        title: g.title,
-        keys,
-        hay: `${g.title} ${keys}`.toLowerCase(),
-        command: false,
-        remapped: false,
-      });
-    }
-    return SHEET_SECTIONS.map((name) => ({ name, rows: by.get(name)! })).filter((s) => s.rows.length > 0);
-  }, [keymap, mac]);
+  const sections = useMemo(
+    () =>
+      sheetRows(keymap, mac).map(({ name, rows }) => ({
+        name,
+        rows: rows.map((r): Row => ({ ...r, hay: [r.title, r.keys, ...(r.synonyms ?? [])].join(" ").toLowerCase() })),
+      })),
+    [keymap, mac],
+  );
 
   const commandRows = sections.flatMap((s) => s.rows.filter((r) => r.command));
   const usedCount = commandRows.filter((r) => (used[r.id] ?? 0) > 0).length;

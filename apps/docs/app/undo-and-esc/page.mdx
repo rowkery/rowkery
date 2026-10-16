@@ -1,0 +1,116 @@
+export const metadata = { title: "Undo and Esc" };
+
+<p className="crumb">Keys</p>
+
+# Undo and Esc
+
+<p className="lead">Rowkery rarely asks “Are you sure?”. Things you can take back happen at once, and a toast offers Undo for ten seconds. Esc always closes or stops the nearest thing first, so pressing it again and again is safe.</p>
+
+## Undo in the toast
+
+When you close, discard, hide or delete something, it happens straight away and a toast at the foot of the window says what happened, with an **Undo** button.
+
+<Shot src="/img/undo-and-esc-toast.webp" width={1016} height={200} alt="The toast at the foot of the grid: Closed Query 2 with unsaved SQL, then Undo with ⌥⌘Z in orange." />
+
+| You do | The toast says | Undo puts back |
+| --- | --- | --- |
+| Close a query tab or table tab | **Closed Query 2**, adding **with unsaved SQL** or **with 3 unsaved changes** when it had them | The tab where it was, with its SQL, filters, sort, staged edits and rows |
+| **Close other tabs** (right-click a tab) | **Closed 3 tabs** | All of them |
+| Close a window that has a connection | **Closed storefront / shop** | The window in its place, with its tabs. It connects again when you show it |
+| Delete a connection (in its form) | **Removed storefront** | The connection, and its windows. A second toast says **Restored** |
+| Discard staged edits | **Discarded 3 edits** | Every edit, as it was |
+| **Hide column** (a column header's menu) | **Hid email** | The column |
+| Switch database or connection while table tabs are open that it doesn't have | **Closed orders: not in shop**, or **Closed 3 table tabs not in shop** | Those tabs |
+
+Closing an empty query tab (no SQL and no result) shows no toast, since there is nothing to bring back. Closing the last tab leaves a fresh empty **Query 1**, so a window always has a tab. Closing a window with no connection has no toast either.
+
+### How to undo
+
+- Click **Undo** in the toast, or
+- Press <kbd>⌥⌘Z</kbd>. It works wherever the focus is, while the toast is on screen.
+
+<kbd>⌘Z</kbd> stays the usual text undo in the editor and other fields, so it never brings back a tab by surprise.
+
+### When Undo is no longer possible
+
+A toast with Undo stays for ten seconds (other toasts go after about two and a half). The action becomes final when the toast goes, and also as soon as another toast replaces it: only the latest toast can be undone.
+
+Some actions finish their work only at that moment. A deleted connection's password stays in your keychain until its toast has gone, so Undo can restore it without asking you for it again. If Rowkery quits before that, it removes the keychain item on the next launch.
+
+## Reopen a closed tab
+
+**Reopen closed tab** <kbd>⇧⌘T</kbd> brings back the tab you closed most recently, with a **Reopened** toast. Press it again for the one before. It's also in **File › Reopen Closed Tab**, in the menu you get by right-clicking a tab, and in the editor's **…** menu.
+
+- It works for the rest of the session, after the Undo toast has gone. Each window remembers its last ten closed tabs; they aren't kept after Rowkery quits.
+- A tab reopened while its Undo toast is still up comes back with its rows. Reopened later, it comes back with its SQL, filters and staged edits but without rows: a table tab loads its rows again, and a query tab waits for you to press <kbd>⌘↵</kbd>.
+
+## What ⌘W closes
+
+<kbd>⌘W</kbd> closes whichever you used last: the shown tab, or the whole window. If your last click or focus was in the tab row, the editor or the results, it closes the tab. If it was on the window's pill in the title bar or in the schema column, it closes the window. Opening a tab moves it back to closing tabs. **File › Close Tab** changes its name to **Close Window** to tell you which.
+
+When ⌘K, a picker, a sheet, New connection or the Agents page is open, <kbd>⌘W</kbd> closes that first, the same as <kbd>Esc</kbd>.
+
+## What Esc does
+
+<kbd>Esc</kbd> goes to whatever is nearest to the focus. Each press does one thing, so you can keep pressing it to back out step by step.
+
+### In the editor
+
+1. Closes the completion list, if it's open. It doesn't also cancel a running query.
+2. Cancels the running query (see below).
+3. Drops a write that safe mode is holding for you to confirm.
+
+### Running queries
+
+<kbd>Esc</kbd> or <kbd>⌘.</kbd> cancels the shown tab's query. The **Cancel** button then reads **Force stop**: press it, or <kbd>Esc</kbd> again, to stop the run outright without waiting for the server. If the server hasn't answered a cancel within three seconds, Rowkery stops the run by itself, since a dead connection never answers. <kbd>⌘.</kbd> does nothing but cancel, so use it when something else is open that would take <kbd>Esc</kbd> first.
+
+### In the grid
+
+1. Closes the cell editor without changing the cell.
+2. Closes Quick Look, if it's open.
+3. With the selection on a cell you've already changed, reverts that one cell.
+4. Clears the selection. The same press then goes on to the window: if a query is running it's cancelled, and on a table tab with staged edits they're discarded (with Undo).
+
+### On a table tab with staged edits
+
+With no cell open, no query running and nothing else to close, <kbd>Esc</kbd> discards all the staged edits on the tab. The toast offers Undo, which is why there is no confirmation. This doesn't happen while you're typing in a text field.
+
+If safe mode is set to **Confirm writes** and is holding your edits' commit, <kbd>Esc</kbd> drops the held commit and keeps the edits staged. If **Review SQL** is open in the inspector, <kbd>Esc</kbd> closes it.
+
+### Filters and finding
+
+| Where | Esc |
+| --- | --- |
+| The filter editor on a table tab | Closes it without adding the filter |
+| **Find in results** on a query tab | Closes the find field |
+| **Filter tables** in the schema column | Clears the filter and leaves the field |
+
+### Overlays
+
+| What's open | Esc |
+| --- | --- |
+| ⌘K | Clears what you typed; then the group you limited it to; then closes |
+| Keyboard shortcuts | Closes the keymap picker; then clears the search; then closes |
+| A menu, or the connection or database picker | Closes it |
+| New connection | Closes the form |
+| The Agents page | Steps back out of what you opened on it, then closes it |
+| A proposed change | Cancels rejecting it if you'd started to; then closes it |
+| The Sessions tab | Lets go of the session you picked |
+| Quick Look | Closes it |
+| Other sheets (Connect an agent, Report an issue, Timings, Third-party notices) | Close |
+
+### Toasts that offer something
+
+A few toasts offer an action instead of Undo, such as **Looks like a connection URL · Connect** when you paste one into the editor, or **Use name** when a query names a column that doesn't exist. <kbd>↵</kbd> takes the offer and <kbd>Esc</kbd> lets it go (the key still does what it does where you are). An offer that arrives without you asking, such as **View** on an agent's refused query, only takes a click.
+
+## Why there are so few confirmations
+
+A confirmation dialog stops you every time to guard against the rare mistake, and it's easy to click through without reading. With Undo, the action happens at once, and if it was a mistake you press <kbd>⌥⌘Z</kbd>.
+
+The only confirmations left are for writes to your database, where Undo isn't possible:
+
+- With safe mode on **Confirm writes**, a write stops and shows the exact SQL first. <kbd>⇧⌘↵</kbd> runs it and <kbd>Esc</kbd> drops it. See [Environments and safe mode](/environments-and-safe-mode/).
+- Staged edits run only when you press **Commit** <kbd>⌘S</kbd>. See [Editing rows](/editing-rows/).
+- A change an agent proposes runs only when you commit it. See [Proposed changes](/proposed-changes/).
+
+The commit key is <kbd>⇧⌘↵</kbd> rather than <kbd>⌘↵</kbd> on purpose, so pressing Run twice can never commit a write.

@@ -1138,6 +1138,9 @@ impl ServerHandler for RowkeryMcp {
     }
 }
 
+#[cfg(test)]
+mod docs_table;
+
 /// Tests that point `ROWKERY_CONFIG_DIR` somewhere hold this, one at a time.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

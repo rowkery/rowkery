@@ -1,0 +1,850 @@
+{
+  "sections": [
+    {
+      "name": "Connection",
+      "rows": [
+        {
+          "title": "New connection…",
+          "keys": "⌘N"
+        },
+        {
+          "title": "Save and connect",
+          "keys": "⌘↵"
+        },
+        {
+          "title": "Switch connection…",
+          "keys": "⇧⌘O"
+        },
+        {
+          "title": "Switch database…",
+          "keys": "⇧⌘D"
+        },
+        {
+          "title": "Open a SQLite file…",
+          "keys": "⌘O"
+        },
+        {
+          "title": "Refresh schema",
+          "keys": "⌘R"
+        }
+      ]
+    },
+    {
+      "name": "Query",
+      "rows": [
+        {
+          "title": "Run statement",
+          "keys": "⌘↵"
+        },
+        {
+          "title": "Run all statements",
+          "keys": "⌥⌘↵"
+        },
+        {
+          "title": "Explain statement",
+          "keys": "⌘E"
+        },
+        {
+          "title": "Edit SQL",
+          "keys": "⌘E"
+        },
+        {
+          "title": "Filter rows",
+          "keys": "⌘F"
+        },
+        {
+          "title": "Cancel query",
+          "keys": "⌘."
+        },
+        {
+          "title": "Refresh rows",
+          "keys": "⇧⌘R"
+        },
+        {
+          "title": "Export results…",
+          "keys": "⇧⌘E"
+        }
+      ]
+    },
+    {
+      "name": "Editor",
+      "rows": [
+        {
+          "title": "Complete at the caret",
+          "keys": "⌃Space"
+        },
+        {
+          "title": "Expand * into the column list",
+          "keys": "⇥ after *"
+        }
+      ]
+    },
+    {
+      "name": "Grid",
+      "rows": [
+        {
+          "title": "Quick Look",
+          "keys": "Space"
+        },
+        {
+          "title": "Edit cell",
+          "keys": "↵"
+        },
+        {
+          "title": "Set NULL",
+          "keys": "⌥⇧N"
+        },
+        {
+          "title": "Delete row",
+          "keys": "⌫"
+        },
+        {
+          "title": "Commit the held write",
+          "keys": "⇧⌘↵"
+        },
+        {
+          "title": "Follow foreign key",
+          "keys": "⌘↵"
+        },
+        {
+          "title": "Remove filter",
+          "keys": "⌫"
+        },
+        {
+          "title": "Insert row",
+          "keys": "⌘I"
+        },
+        {
+          "title": "Duplicate row",
+          "keys": "⌘D"
+        },
+        {
+          "title": "Commit changes",
+          "keys": "⌘S"
+        },
+        {
+          "title": "Review SQL for changes",
+          "keys": "⇧⌘P"
+        },
+        {
+          "title": "Copy the cell, or the block as CSV",
+          "keys": "⌘C"
+        },
+        {
+          "title": "Copy the block with column names",
+          "keys": "⇧⌘C"
+        },
+        {
+          "title": "Select the whole result",
+          "keys": "⌘A"
+        },
+        {
+          "title": "Extend the selection",
+          "keys": "⇧-click · ⇧↑↓←→"
+        },
+        {
+          "title": "Select whole rows",
+          "keys": "drag row numbers"
+        },
+        {
+          "title": "Count the rows exactly",
+          "keys": "#"
+        },
+        {
+          "title": "Discard pending edits (Undo in the toast)",
+          "keys": "esc"
+        }
+      ]
+    },
+    {
+      "name": "Schema panel",
+      "rows": [
+        {
+          "title": "Filter schema",
+          "keys": "/"
+        },
+        {
+          "title": "Insert name",
+          "keys": "⌥↵"
+        },
+        {
+          "title": "Browse the table",
+          "keys": "↵"
+        },
+        {
+          "title": "Open a table in its own tab",
+          "keys": "⌘-click"
+        }
+      ]
+    },
+    {
+      "name": "View",
+      "rows": [
+        {
+          "title": "Hide sidebar",
+          "keys": "⌘B"
+        },
+        {
+          "title": "Show data",
+          "keys": "⌥⌘1"
+        },
+        {
+          "title": "Show structure",
+          "keys": "⌥⌘2"
+        }
+      ]
+    },
+    {
+      "name": "Navigate",
+      "rows": [
+        {
+          "title": "Search tables, queries and commands",
+          "keys": "⌘K"
+        },
+        {
+          "title": "Find in results",
+          "keys": "⌘F"
+        },
+        {
+          "title": "Close query tab",
+          "keys": "⌘W"
+        },
+        {
+          "title": "Retry connecting",
+          "keys": "⌘R"
+        },
+        {
+          "title": "Edit the failed connection…",
+          "keys": "⌘E"
+        },
+        {
+          "title": "Back",
+          "keys": "⌘["
+        },
+        {
+          "title": "Forward",
+          "keys": "⌘]"
+        },
+        {
+          "title": "Reopen closed tab",
+          "keys": "⇧⌘T"
+        }
+      ]
+    },
+    {
+      "name": "Windows",
+      "rows": [
+        {
+          "title": "New window",
+          "keys": "⌘T"
+        },
+        {
+          "title": "Close window",
+          "keys": "⇧⌘W"
+        },
+        {
+          "title": "Agents",
+          "keys": "⇧⌘A"
+        },
+        {
+          "title": "Switch to window 1–9",
+          "keys": "⌘1–9"
+        },
+        {
+          "title": "Filter tables in Edit access",
+          "keys": "⌘F"
+        }
+      ]
+    },
+    {
+      "name": "Help",
+      "rows": [
+        {
+          "title": "Keyboard shortcuts",
+          "keys": "⇧⌘/"
+        },
+        {
+          "title": "Keyboard shortcuts, from the grid or panel",
+          "keys": "?"
+        }
+      ]
+    }
+  ],
+  "keymaps": [
+    {
+      "label": "TablePlus",
+      "swaps": [
+        {
+          "title": "New query tab",
+          "rowkery": "",
+          "keys": "⌘T"
+        },
+        {
+          "title": "New window",
+          "rowkery": "⌘T",
+          "keys": "⌥⌘T"
+        },
+        {
+          "title": "Show data",
+          "rowkery": "⌥⌘1",
+          "keys": "⌃⌘["
+        },
+        {
+          "title": "Show structure",
+          "rowkery": "⌥⌘2",
+          "keys": "⌃⌘]"
+        }
+      ]
+    },
+    {
+      "label": "DataGrip",
+      "swaps": [
+        {
+          "title": "New query tab",
+          "rowkery": "",
+          "keys": "⇧⌘L"
+        },
+        {
+          "title": "Refresh schema",
+          "rowkery": "⌘R",
+          "keys": "⌥⌘Y"
+        }
+      ]
+    }
+  ],
+  "menus": [
+    {
+      "menu": "File",
+      "items": [
+        {
+          "title": "New Query Tab",
+          "keys": ""
+        },
+        {
+          "title": "Reopen Closed Tab",
+          "keys": "⇧⌘T"
+        },
+        {
+          "title": "Close Tab",
+          "keys": "⌘W"
+        }
+      ]
+    },
+    {
+      "menu": "Connection",
+      "items": [
+        {
+          "title": "New Connection…",
+          "keys": "⌘N"
+        },
+        {
+          "title": "Open SQLite File…",
+          "keys": "⌘O"
+        },
+        {
+          "title": "Open the Sample Database",
+          "keys": ""
+        },
+        {
+          "title": "Switch Connection…",
+          "keys": "⇧⌘O"
+        },
+        {
+          "title": "Switch Database…",
+          "keys": "⇧⌘D"
+        },
+        {
+          "title": "Edit Connection…",
+          "keys": ""
+        },
+        {
+          "title": "Change Safe Mode…",
+          "keys": ""
+        },
+        {
+          "title": "Refresh Schema",
+          "keys": "⌘R"
+        },
+        {
+          "title": "Reconnect",
+          "keys": ""
+        }
+      ]
+    },
+    {
+      "menu": "Query",
+      "items": [
+        {
+          "title": "Run Statement",
+          "keys": "⌘↵"
+        },
+        {
+          "title": "Run All Statements",
+          "keys": "⌥⌘↵"
+        },
+        {
+          "title": "Cancel Query",
+          "keys": "⌘."
+        },
+        {
+          "title": "Stop All Queries",
+          "keys": ""
+        },
+        {
+          "title": "Edit SQL",
+          "keys": "⌘E"
+        },
+        {
+          "title": "Filter Rows",
+          "keys": "⌘F"
+        },
+        {
+          "title": "Refresh Rows",
+          "keys": "⇧⌘R"
+        },
+        {
+          "title": "Copy Results as CSV",
+          "keys": ""
+        },
+        {
+          "title": "Export Results…",
+          "keys": "⇧⌘E"
+        },
+        {
+          "title": "Clear Results",
+          "keys": ""
+        }
+      ]
+    },
+    {
+      "menu": "View",
+      "items": [
+        {
+          "title": "Hide Sidebar",
+          "keys": "⌘B"
+        },
+        {
+          "title": "Start Presenting",
+          "keys": ""
+        },
+        {
+          "title": "Data",
+          "keys": "⌥⌘1"
+        },
+        {
+          "title": "Structure",
+          "keys": "⌥⌘2"
+        },
+        {
+          "title": "Sessions",
+          "keys": ""
+        },
+        {
+          "title": "Match System Appearance",
+          "keys": ""
+        },
+        {
+          "title": "Light Appearance",
+          "keys": ""
+        },
+        {
+          "title": "Dark Appearance",
+          "keys": ""
+        }
+      ]
+    },
+    {
+      "menu": "Go",
+      "items": [
+        {
+          "title": "Back",
+          "keys": "⌘["
+        },
+        {
+          "title": "Forward",
+          "keys": "⌘]"
+        },
+        {
+          "title": "Next Query Tab",
+          "keys": ""
+        },
+        {
+          "title": "Previous Query Tab",
+          "keys": ""
+        },
+        {
+          "title": "Focus Editor",
+          "keys": ""
+        }
+      ]
+    },
+    {
+      "menu": "Window",
+      "items": [
+        {
+          "title": "New Window",
+          "keys": "⌘T"
+        },
+        {
+          "title": "Close Window",
+          "keys": "⇧⌘W"
+        },
+        {
+          "title": "Next Window",
+          "keys": ""
+        },
+        {
+          "title": "Previous Window",
+          "keys": ""
+        },
+        {
+          "title": "Agents",
+          "keys": "⇧⌘A"
+        }
+      ]
+    },
+    {
+      "menu": "Help",
+      "items": [
+        {
+          "title": "Keyboard Shortcuts",
+          "keys": "⇧⌘/"
+        },
+        {
+          "title": "Show Key Hints",
+          "keys": ""
+        },
+        {
+          "title": "Check for Updates…",
+          "keys": ""
+        },
+        {
+          "title": "Report an Issue…",
+          "keys": ""
+        },
+        {
+          "title": "Third-party Notices",
+          "keys": ""
+        }
+      ]
+    }
+  ],
+  "palette": [
+    {
+      "title": "Run statement",
+      "keys": "⌘↵"
+    },
+    {
+      "title": "Run all statements",
+      "keys": "⌥⌘↵"
+    },
+    {
+      "title": "Explain statement",
+      "keys": "⌘E"
+    },
+    {
+      "title": "Explain with timings",
+      "keys": ""
+    },
+    {
+      "title": "Edit SQL",
+      "keys": "⌘E"
+    },
+    {
+      "title": "Filter rows",
+      "keys": "⌘F"
+    },
+    {
+      "title": "Find in results",
+      "keys": "⌘F"
+    },
+    {
+      "title": "Cancel query",
+      "keys": "⌘."
+    },
+    {
+      "title": "Stop all queries",
+      "keys": ""
+    },
+    {
+      "title": "New query tab",
+      "keys": ""
+    },
+    {
+      "title": "Close query tab",
+      "keys": "⌘W"
+    },
+    {
+      "title": "Next query tab",
+      "keys": ""
+    },
+    {
+      "title": "Previous query tab",
+      "keys": ""
+    },
+    {
+      "title": "Focus editor",
+      "keys": ""
+    },
+    {
+      "title": "Filter schema",
+      "keys": "/"
+    },
+    {
+      "title": "Hide sidebar",
+      "keys": "⌘B"
+    },
+    {
+      "title": "Show sessions",
+      "keys": ""
+    },
+    {
+      "title": "Start presenting",
+      "keys": ""
+    },
+    {
+      "title": "New connection…",
+      "keys": "⌘N"
+    },
+    {
+      "title": "Keyboard shortcuts",
+      "keys": "⇧⌘/"
+    },
+    {
+      "title": "Show key hints",
+      "keys": ""
+    },
+    {
+      "title": "Check for updates…",
+      "keys": ""
+    },
+    {
+      "title": "Report an issue…",
+      "keys": ""
+    },
+    {
+      "title": "Third-party notices",
+      "keys": ""
+    },
+    {
+      "title": "Hide tips",
+      "keys": ""
+    },
+    {
+      "title": "Use system window controls (next launch)",
+      "keys": ""
+    },
+    {
+      "title": "Switch connection…",
+      "keys": "⇧⌘O"
+    },
+    {
+      "title": "Switch database…",
+      "keys": "⇧⌘D"
+    },
+    {
+      "title": "New window",
+      "keys": "⌘T"
+    },
+    {
+      "title": "Open a SQLite file…",
+      "keys": "⌘O"
+    },
+    {
+      "title": "Open the sample database",
+      "keys": ""
+    },
+    {
+      "title": "Reset the sample database",
+      "keys": ""
+    },
+    {
+      "title": "Close window",
+      "keys": "⇧⌘W"
+    },
+    {
+      "title": "Next window",
+      "keys": ""
+    },
+    {
+      "title": "Previous window",
+      "keys": ""
+    },
+    {
+      "title": "Refresh rows",
+      "keys": "⇧⌘R"
+    },
+    {
+      "title": "Refresh schema",
+      "keys": "⌘R"
+    },
+    {
+      "title": "Retry connecting",
+      "keys": "⌘R"
+    },
+    {
+      "title": "Reconnect and reload schema",
+      "keys": ""
+    },
+    {
+      "title": "Edit connection…",
+      "keys": ""
+    },
+    {
+      "title": "Set environment: Local (local)",
+      "keys": ""
+    },
+    {
+      "title": "Set environment: Development (dev)",
+      "keys": ""
+    },
+    {
+      "title": "Set environment: Staging (stg)",
+      "keys": ""
+    },
+    {
+      "title": "Set environment: Production (prd)",
+      "keys": ""
+    },
+    {
+      "title": "Clear environment",
+      "keys": ""
+    },
+    {
+      "title": "Appearance: match the system",
+      "keys": ""
+    },
+    {
+      "title": "Appearance: light",
+      "keys": ""
+    },
+    {
+      "title": "Appearance: dark",
+      "keys": ""
+    },
+    {
+      "title": "Back",
+      "keys": "⌘["
+    },
+    {
+      "title": "Forward",
+      "keys": "⌘]"
+    },
+    {
+      "title": "Reopen closed tab",
+      "keys": "⇧⌘T"
+    },
+    {
+      "title": "Change safe mode…",
+      "keys": ""
+    },
+    {
+      "title": "Safe mode: Off",
+      "keys": ""
+    },
+    {
+      "title": "Safe mode: Confirm writes",
+      "keys": ""
+    },
+    {
+      "title": "Safe mode: Read-only",
+      "keys": ""
+    },
+    {
+      "title": "Allow MCP for this connection",
+      "keys": ""
+    },
+    {
+      "title": "Stop sharing this connection with MCP",
+      "keys": ""
+    },
+    {
+      "title": "MCP activity",
+      "keys": ""
+    },
+    {
+      "title": "MCP access: what agents can reach",
+      "keys": ""
+    },
+    {
+      "title": "Edit MCP access: databases and tables",
+      "keys": ""
+    },
+    {
+      "title": "Connect Claude Code or Claude Desktop",
+      "keys": ""
+    },
+    {
+      "title": "Review proposed changes",
+      "keys": ""
+    },
+    {
+      "title": "Agents",
+      "keys": "⇧⌘A"
+    },
+    {
+      "title": "Copy results as TSV",
+      "keys": ""
+    },
+    {
+      "title": "Copy results as CSV",
+      "keys": ""
+    },
+    {
+      "title": "Copy all results as CSV",
+      "keys": ""
+    },
+    {
+      "title": "Copy all results as TSV",
+      "keys": ""
+    },
+    {
+      "title": "Export results…",
+      "keys": "⇧⌘E"
+    },
+    {
+      "title": "Clear results",
+      "keys": ""
+    },
+    {
+      "title": "Timings",
+      "keys": ""
+    },
+    {
+      "title": "All tables as rows",
+      "keys": ""
+    },
+    {
+      "title": "Show data",
+      "keys": "⌥⌘1"
+    },
+    {
+      "title": "Show structure",
+      "keys": "⌥⌘2"
+    },
+    {
+      "title": "Quick Look",
+      "keys": "Space"
+    },
+    {
+      "title": "Insert row",
+      "keys": "⌘I"
+    },
+    {
+      "title": "Duplicate row",
+      "keys": "⌘D"
+    },
+    {
+      "title": "Commit changes",
+      "keys": "⌘S"
+    },
+    {
+      "title": "Review SQL for changes",
+      "keys": "⇧⌘P"
+    },
+    {
+      "title": "Discard changes",
+      "keys": ""
+    }
+  ]
+}
