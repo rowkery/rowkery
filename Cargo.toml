@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rowkery-core",
+    "crates/rowkery-bridge",
+    "crates/rowkery-mcp",
+    "apps/rowkery-tauri/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/rowkery/rowkery"
+homepage = "https://rowkery.com"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# Not "abort": wry catches the Objective-C exception WebKit throws when the
+# page has dropped a request an async command is answering, and objc2 can't
+# catch it under panic=abort (the app aborted instead: "panic in a function
+# that cannot unwind"). The bridge's catch_unwind around each core command
+# needs unwinding too.
+panic = "unwind"
+
+# Symbolicated macOS crash logs: `cargo build --profile profiling`
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = true
+panic = "unwind"

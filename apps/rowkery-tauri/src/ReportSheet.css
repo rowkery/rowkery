@@ -1,0 +1,215 @@
+/* Report an Issue sheet: an opaque Paper sheet (App.css, Paper sheets) with the kind of
+   report, a bordered text field, the details sent with it (each behind its own switch)
+   and an ink Send. */
+.rp-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 78px 16px 16px;
+}
+
+.rp-sheet {
+  width: 520px;
+  max-width: 100%;
+  max-height: calc(100vh - 100px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* The title takes the free space, so esc stays right with or without the sub line. */
+.rp-head .sheet-title {
+  flex: 1;
+}
+
+.rp-sub {
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.rp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 14px 16px 16px;
+  overflow-y: auto;
+}
+
+/* A bordered field, the accent ring when it has the caret. */
+.rp-text {
+  min-height: 112px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 6px;
+  outline: none;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line2);
+  color: var(--text);
+  font: 13px/19px var(--sans);
+  resize: vertical;
+  transition: box-shadow 0.18s ease;
+}
+
+.rp-text::placeholder {
+  color: var(--dim);
+}
+
+.rp-text:focus {
+  box-shadow: inset 0 0 0 1.5px var(--acc);
+}
+
+/* Type: the Data | Structure segment. */
+.rp-kinds {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--hover);
+  align-self: flex-start;
+}
+
+.rp-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  cursor: default;
+  transition: color 0.18s ease;
+}
+
+.rp-kind[aria-checked="true"] {
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  color: var(--text);
+}
+
+.rp-label {
+  margin: 4px 0 -4px;
+}
+
+.rp-incl {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.rp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 7px 12px;
+}
+
+.rp-row + .rp-row {
+  box-shadow: inset 0 1px 0 var(--rowline);
+}
+
+.rp-k {
+  flex-shrink: 0;
+  width: 92px;
+  font-size: 12.5px;
+}
+
+.rp-v {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mute);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-row.off .rp-v {
+  opacity: 0.45;
+}
+
+.rp-mask {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--hover);
+}
+
+.rp-lock {
+  display: flex;
+  justify-content: flex-end;
+  width: 30px;
+  color: var(--text-dim);
+}
+
+.rp-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 30px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: var(--faint);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.rp-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--knob);
+  box-shadow: var(--shadow);
+  transition: transform 0.2s var(--ease-out);
+}
+
+.rp-switch[aria-checked="true"] {
+  background: var(--acc);
+}
+
+.rp-switch[aria-checked="true"]::after {
+  transform: translateX(12px);
+}
+
+.rp-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--acc) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.rp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.rp-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-failure {
+  margin: -2px 2px 0;
+  color: var(--del);
+  font-size: 12px;
+}
+
+/* .rp-btn is a .sheet-btn (App.css); ink for Send. */

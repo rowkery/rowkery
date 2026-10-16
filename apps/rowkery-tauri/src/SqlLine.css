@@ -1,0 +1,540 @@
+/* A table tab's head (Paper, 2026-10-10): a QUERY row with the SQL that ran
+   and a WHERE row with the chips, wrapping, the count at its end. 12/16/10 px
+   padding and a 1 px rule; the grid header sits right under it. */
+.sql-line {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--sans);
+  font-size: 12px;
+  container-type: inline-size;
+}
+
+/* QUERY and WHERE: 600 10 px sans tracked .08em, dim. */
+.sql-line-label {
+  flex-shrink: 0;
+  font: 600 10px var(--sans);
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.sql-line-pill {
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--hover);
+}
+
+.sql-line-query {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 21px;
+}
+
+/* The statement: what gives way when room runs out is the SELECT list
+   (ellipsis), then ORDER BY; LIMIT keeps its place. */
+.sql-line-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: pre;
+  font: 12px var(--mono);
+  color: var(--text);
+}
+
+.sql-line-text > * {
+  flex-shrink: 0;
+}
+
+.sql-line-head {
+  flex: 0 1 auto;
+}
+
+.sql-line-where-sql {
+  flex: 0 3 auto;
+}
+
+.sql-line-rest {
+  flex: 0 2 auto;
+}
+
+.sql-line-body {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sql-line-tail {
+  white-space: pre;
+}
+
+/* Edit SQL: an underlined link at the QUERY row's end. */
+.sql-line-edit {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: 12px var(--sans);
+  color: var(--mute);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.sql-line-edit:hover {
+  color: var(--acc);
+}
+
+/* WHERE: chips wrap onto more lines; the count keeps the row's right end. */
+.sql-line-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+
+/* Its chips sit in the row itself, so they wrap with it. */
+.sql-line-chips {
+  display: contents;
+}
+
+.sql-chip-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+/* A chip reads as words in the SQL's colours: col ink, op purple, value orange. */
+.sql-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 4px 0 9px;
+  border-radius: 13px;
+  background: var(--accbg);
+  font: 12.5px var(--mono);
+  color: var(--text);
+  white-space: pre;
+  cursor: pointer;
+  outline: none;
+  animation: pop 0.2s ease;
+  transition: background-color 0.18s ease;
+}
+
+.sql-chip:hover,
+.sql-chip:focus-visible {
+  background: var(--accbg2);
+}
+
+.sql-chip:focus-visible {
+  box-shadow: 0 0 0 1.5px var(--acc);
+}
+
+.sql-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sql-chip .k,
+.sql-chip .p {
+  color: var(--kw);
+}
+
+.sql-chip .s,
+.sql-chip .n {
+  color: var(--num);
+}
+
+.sql-chip-and {
+  font: 500 10.5px var(--sans);
+  color: var(--dim);
+}
+
+.sql-chip-x {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.sql-chip-x:hover {
+  background: var(--bg);
+  color: var(--del);
+}
+
+.sql-where-text {
+  font: 12.5px var(--mono);
+}
+
+/* + Filter ⌘F: a dashed pill. */
+.sql-line-add {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px dashed var(--line2);
+  border-radius: 13px;
+  background: transparent;
+  font: 12px var(--sans);
+  color: var(--mute);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.sql-line-add:hover {
+  border-color: var(--acc);
+  color: var(--acc);
+  background: var(--accbg);
+}
+
+.sql-line-add kbd {
+  font: 10.5px var(--mono);
+}
+
+/* ⌘F's chip editor, an inline pill: column and operator selects, the value, Add ↵ and ×. */
+.chip-editor {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 460px;
+  min-width: 300px;
+  height: 28px;
+  padding: 0 4px 0 6px;
+  border-radius: 14px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1.5px var(--acc);
+  font: 12.5px var(--mono);
+  container-type: inline-size;
+  animation: pop 0.18s ease;
+}
+
+.chip-editor-lead {
+  font: 500 10.5px var(--sans);
+  color: var(--dim);
+  padding: 0 2px;
+}
+
+.chip-field {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 180px;
+  height: 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--hover);
+  font: 12px var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chip-field:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* The operator reads as a word, whole; the chip it writes shows the SQL. */
+.chip-op {
+  flex-shrink: 0;
+  max-width: none;
+  color: var(--kw);
+}
+
+.chip-caret {
+  font-size: 9px;
+  color: var(--dim);
+}
+
+.chip-value {
+  flex: 1 1 0;
+  min-width: 90px;
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  color: var(--num);
+}
+
+/* The value is transparent inside the ringed pill (no tinted box, no
+   statement band). */
+.chip-value .sql-editor-wrap.compact {
+  flex: 1 1 0;
+  min-width: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.chip-value .sql-highlight {
+  color: var(--num);
+}
+
+.chip-value .sql-highlight .ln.st {
+  background: transparent;
+}
+
+.chip-value .sql-highlight .ln.st::after {
+  display: none;
+}
+
+.chip-add {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--acc);
+  color: var(--onfill);
+  font: 600 11px var(--sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.chip-add:hover {
+  background: var(--acc2);
+}
+
+.chip-cancel {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.chip-cancel:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* Narrow: the value field keeps the room, Add's word goes. */
+@container (max-width: 360px) {
+  .chip-editor .chip-add {
+    display: none;
+  }
+}
+
+/* One tip at a time, 12 px, under the head. */
+.sql-line-tip {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 16px;
+  z-index: 5;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: var(--pop);
+  font-size: 12px;
+  color: var(--mute);
+  pointer-events: none;
+}
+
+/* The editor's token colours (sqlHighlight.ts classes). */
+.sql-line .k {
+  color: var(--kw);
+}
+.sql-line .f {
+  color: var(--fn);
+}
+.sql-line .s {
+  color: var(--str);
+}
+.sql-line .n {
+  color: var(--num);
+}
+.sql-line .c {
+  color: var(--cm);
+  font-style: italic;
+}
+.sql-line .p {
+  color: var(--mute);
+}
+.sql-line .sql-chip .p {
+  color: var(--kw);
+}
+.sql-line .sql-chip .s {
+  color: var(--num);
+}
+
+/* LIMIT n is the page-size control: it reads as SQL, clicks as a menu. */
+.sql-limit {
+  padding: 1px 3px;
+  margin: 0 -3px 0 1px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.sql-limit:hover {
+  background: var(--hover);
+}
+
+.sql-limit-none {
+  margin-left: 8px;
+  font: 11px var(--sans);
+  color: var(--mute);
+}
+
+/* The clause a gesture rewrote (sort, hide column, page size): a neutral
+   wash for 600 ms, never the accent. Only the background changes; Reduce
+   Motion skips it. */
+.sql-wash {
+  border-radius: 4px;
+  animation: sql-wash 600ms ease-out;
+}
+
+@keyframes sql-wash {
+  0%,
+  55% {
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--line2);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sql-wash,
+  .sql-chip,
+  .chip-editor {
+    animation: none;
+  }
+}
+
+/* SELECT 42 columns: the count stands in for a long list (display only). */
+[data-collapsed] {
+  color: var(--mute);
+}
+
+/* The WHERE row's right end: count · time, links, ↻, `…`. */
+.sql-line-end {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sql-line-count {
+  color: var(--mute);
+}
+
+/* "312 of 36,152 rows": the shown rows are the number that matters. */
+.sql-line-count b {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.sql-line-ms,
+.sql-line-notice {
+  color: var(--mute);
+}
+
+.sql-line-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--del);
+}
+
+.sql-line-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--mute);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.sql-line-link:hover {
+  color: var(--acc);
+}
+
+.sql-line-refresh {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.sql-line-refresh:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.sql-line-refresh:disabled {
+  opacity: 0.4;
+}
+
+/* A narrow head drops the keycap and the time first. */
+@container (max-width: 720px) {
+  .sql-line-add kbd,
+  .sql-line-ms {
+    display: none;
+  }
+  .sql-line-end {
+    gap: 8px;
+  }
+}

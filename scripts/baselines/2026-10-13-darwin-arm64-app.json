@@ -1,0 +1,131 @@
+{
+  "date": "2026-10-13",
+  "platform": "darwin-arm64",
+  "host": "Apple M1 Max",
+  "source": "latency-proof.sh",
+  "runs": {
+    "cold": {
+      "webview_ready": 372.6,
+      "window_painted": 425.6,
+      "socket_warm": 644.6,
+      "socket_open_ms": 47,
+      "socket_warm_vs_webview_ready": 272,
+      "queries": [
+        {
+          "t": 758.6,
+          "first_frame": 6,
+          "first_frame_painted": 20,
+          "rows": 1,
+          "db_ms": 2
+        },
+        {
+          "t": 866.6,
+          "first_frame": 6,
+          "first_frame_painted": 25,
+          "rows": 100,
+          "db_ms": 4
+        },
+        {
+          "t": 972.6,
+          "first_frame": 8,
+          "first_frame_painted": 17,
+          "rows": 40,
+          "db_ms": 6
+        },
+        {
+          "t": 1081.6,
+          "first_frame": 12,
+          "first_frame_painted": 24,
+          "rows": 1000,
+          "db_ms": 8
+        },
+        {
+          "t": 1194.6,
+          "first_frame": 7,
+          "first_frame_painted": 26,
+          "rows": 1,
+          "db_ms": 5
+        },
+        {
+          "t": 1201.6,
+          "first_frame": 20,
+          "first_frame_painted": 40,
+          "rows": 1000,
+          "db_ms": 17
+        }
+      ],
+      "first_query_frame": 6,
+      "first_frame": 8,
+      "first_frame_painted": 25,
+      "browse_click_to_sent": 0,
+      "sidebar_click_rows": 40,
+      "rust_marks": {
+        "process-start": 0,
+        "bridge-spawned": 3.6,
+        "setup": 286.5
+      }
+    },
+    "warm": {
+      "webview_ready": 332.4,
+      "window_painted": 464.4,
+      "socket_warm": 6.7,
+      "socket_open_ms": null,
+      "socket_warm_vs_webview_ready": -325.7,
+      "queries": [
+        {
+          "t": 643.4,
+          "first_frame": 6,
+          "first_frame_painted": 20,
+          "rows": 1,
+          "db_ms": 4
+        },
+        {
+          "t": 750.4,
+          "first_frame": 8,
+          "first_frame_painted": 28,
+          "rows": 100,
+          "db_ms": 5
+        },
+        {
+          "t": 859.4,
+          "first_frame": 6,
+          "first_frame_painted": 15,
+          "rows": 40,
+          "db_ms": 4
+        },
+        {
+          "t": 965.4,
+          "first_frame": 12,
+          "first_frame_painted": 25,
+          "rows": 1000,
+          "db_ms": 10
+        },
+        {
+          "t": 1077.4,
+          "first_frame": 14,
+          "first_frame_painted": 34,
+          "rows": 1,
+          "db_ms": 11
+        },
+        {
+          "t": 1092.4,
+          "first_frame": 20,
+          "first_frame_painted": 40,
+          "rows": 1000,
+          "db_ms": 17
+        }
+      ],
+      "first_query_frame": 6,
+      "first_frame": 12,
+      "first_frame_painted": 28,
+      "browse_click_to_sent": 1,
+      "sidebar_click_rows": 41,
+      "rust_marks": {
+        "process-start": 0,
+        "bridge-spawned": 0.6,
+        "socket-warm": 6.7,
+        "setup": 258.7
+      }
+    }
+  }
+}

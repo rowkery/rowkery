@@ -1,0 +1,128 @@
+/* The key strip (KeyStrip.tsx): 11 px, --text-dim, never bolder than 500. */
+.key-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 16px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+  animation: key-strip-in 160ms ease-out;
+}
+
+.key-strip-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.key-strip-sep {
+  margin-right: 2px;
+  opacity: 0.6;
+}
+
+.key-strip kbd {
+  font: 500 10.5px var(--mono);
+  color: var(--mute);
+}
+
+/* Editor: left of Run in the composer. In a narrow window the keys that
+   don't fit wrap onto a second line that is cut off, so the strip loses
+   its last keys whole and never runs under the editor's text. */
+.composer .key-strip {
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  overflow: hidden;
+  margin-right: 4px;
+}
+
+/* The grid's and the editor's strips stay (2026-10-13): 12.5 px,
+   half strength until the pointer is on them. */
+.key-strip[data-persistent] {
+  height: 22px;
+  font-size: 12.5px;
+  line-height: 22px;
+  opacity: 0.5;
+  pointer-events: auto;
+  transition: opacity 0.18s ease;
+}
+
+.key-strip[data-persistent]:hover {
+  opacity: 1;
+}
+
+.key-strip[data-persistent] kbd {
+  font-size: 12px;
+}
+
+/* Grid: centred over the sheet's bottom edge, above the horizontal
+   scrollbar (10 px), no reserved height. */
+.key-strip[data-key-strip="grid"] {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 0 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+}
+
+/* Panel: under the filter box; its line stays reserved until it retires. */
+.key-strip[data-key-strip-slot] {
+  animation: none;
+}
+
+.key-strip[data-key-strip="panel"],
+.key-strip[data-key-strip-slot] {
+  padding: 0 8px 6px;
+  overflow: hidden;
+}
+
+/* A retired strip's residue: one dim keyboard glyph where the keys were. */
+.key-strip-glyph {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.key-strip-glyph:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.composer .key-strip-glyph {
+  margin-right: 4px;
+}
+
+.sb-body > .key-strip-glyph {
+  margin: 0 0 2px 10px;
+}
+
+@keyframes key-strip-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .key-strip {
+    animation: none;
+    transition: none;
+  }
+}

@@ -1,0 +1,60 @@
+export const metadata = { title: "Quick setup" };
+
+<p className="crumb">Get started</p>
+
+# Quick setup
+
+<p className="lead">Install Rowkery, run your first query on the sample database, then connect your own.</p>
+
+<Steps>
+
+### Install the app
+
+Download `Rowkery.dmg` from the [latest release](https://github.com/rowkery/rowkery/releases/latest), open it and drag Rowkery into Applications.
+
+The alpha isn't signed by Apple yet, so macOS blocks the first launch. Open **System Settings › Privacy & Security** and choose **Open Anyway**, or run this once in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Rowkery.app
+```
+
+### Look around the sample database
+
+The first launch opens a small SQLite database with kiosks, games, players and wallets. Its first query has already run, so you start with rows on screen.
+
+Click a table on the left to browse it. Press <kbd>Space</kbd> on a row to see all of it in Quick Look.
+
+### Connect your own database
+
+Press <kbd>⌘T</kbd> for a new window. It offers four ways in:
+
+<Shot src="/img/connect-to-start.webp" width={1200} height={780} alt="Connect to start: New connection, Open a SQLite file, Paste a postgres URL and Open the sample database, with a saved connection below." />
+
+The quickest is to copy a `postgres://` URL and press <kbd>⌘V</kbd> anywhere outside a text field. The form opens filled in. [Setting up a connection](/setting-up-a-connection/) covers every field.
+
+### Run a query
+
+Type SQL in the editor and press <kbd>⌘↵</kbd> to run the statement under the caret, or <kbd>⌥⌘↵</kbd> to run them all. <kbd>Esc</kbd> cancels a query that's taking too long.
+
+```sql
+SELECT handle, sum(total) AS total
+  FROM orders JOIN players ON players.id = orders.player_id
+ GROUP BY handle
+ ORDER BY total DESC
+ LIMIT 10;
+```
+
+### Share it with your agent
+
+This step is optional. Open the Agents page with <kbd>⇧⌘A</kbd>, turn sharing on for the connection, and connect Claude Desktop or Claude Code in one click. [Connecting to agents](/connecting-to-agents/) has the details.
+
+</Steps>
+
+## Updates
+
+Rowkery checks for a new version after launch and installs it the next time you restart the app. **Help › Check for Updates…** checks right away.
+
+## Two keys to remember
+
+- <kbd>⌘K</kbd> finds any table, recent query, connection or command.
+- <kbd>⇧⌘/</kbd> opens the shortcut sheet. Holding <kbd>⌘</kbd> also shows each control's key right on it.

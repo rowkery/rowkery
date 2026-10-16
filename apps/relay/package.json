@@ -1,0 +1,10 @@
+{
+  "name": "rowkery-report-relay",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "deploy": "npx wrangler@4 deploy"
+  }
+}

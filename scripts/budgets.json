@@ -1,0 +1,16 @@
+{
+  "_doc": "Latency budgets (docs/spec.md, Speed and Measurement). warm_ms: local Postgres on a warm boot; remote_ms: a remote database (null = 1 RTT + 10 ms, measured per run). Read by latency-proof.sh (via latency-ledger.mjs) and latency-browser-proof.mjs. enforced_from: from this phase on a regression fails the gate: a metric more than 25% + 15 ms slower than scripts/baselines/reference-<platform>-<app|browser>.json, or over a budget the reference met (scripts/lib/latency-judge.mjs); misses the reference already has are reported, not failed.",
+  "enforced_from": "phase-2",
+  "budgets": {
+    "window_painted": { "what": "shell-painted − process-start, warm launch", "warm_ms": 400, "remote_ms": 400, "source": "app" },
+    "socket_warm_vs_webview_ready": { "what": "socket-warm − webview-ready: the socket is warm before the webview is ready", "warm_ms": 0, "remote_ms": 0, "source": "app" },
+    "cached_panel": { "what": "catalog-cached-painted − shell-painted (lands in feat/schema-cache)", "warm_ms": 16, "remote_ms": 16, "source": "app" },
+    "first_frame": { "what": "first-frame − run-sent, ⌘↵ on a warm session (median)", "warm_ms": 50, "remote_ms": null, "source": "app" },
+    "first_frame_painted": { "what": "first-frame-painted − run-sent (median); informational until the frame path lands", "warm_ms": 66, "remote_ms": null, "source": "app" },
+    "sidebar_click_rows": { "what": "browse-click → first-frame-painted of that browse", "warm_ms": 30, "remote_ms": null, "source": "app" },
+    "palette_open": { "what": "⌘K keydown → palette painted (UI thread)", "warm_ms": 16, "remote_ms": 16, "source": "browser" },
+    "window_switch": { "what": "window switch → new window painted (UI thread)", "warm_ms": 16, "remote_ms": 16, "source": "browser" },
+    "keystroke_5000": { "what": "editor keystroke → highlight committed, 5,000-line text (UI thread, median)", "warm_ms": 8, "remote_ms": 8, "source": "browser" },
+    "scroll_frame_40col": { "what": "longest scroll step of a 40-column, 5,000-row result: scroll → React commit + layout (UI thread)", "warm_ms": 10, "remote_ms": 10, "source": "browser" }
+  }
+}

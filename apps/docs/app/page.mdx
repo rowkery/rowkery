@@ -1,0 +1,44 @@
+export const metadata = { title: { absolute: "Rowkery Docs" } };
+
+<p className="crumb">Get started</p>
+
+# Rowkery
+
+<p className="lead">Rowkery is a Mac app for Postgres and SQLite. You can browse and edit your data yourself, or let an AI agent read it through the server built into the app. Only you can change it.</p>
+
+<Shot src="/img/window.webp" width={1600} height={1000} alt="A Rowkery window: the arcade database's tables on the left, a query in the editor and its 24 rows below." caption="A window on the arcade database, with safe mode set to Confirm writes" />
+
+## What you can do with it
+
+<Cards>
+  <Card href="/quick-setup/#run-a-query" title="Query and browse">Write SQL with completion, or click a table and filter it without writing any</Card>
+  <Card href="/setting-up-a-connection/#safe-mode" title="Stay safe on production">Label each connection, and have writes shown as SQL first or refused</Card>
+  <Card href="/connecting-to-agents/" title="Work with your agent">Share the tables you pick. The agent reads, and you commit any change</Card>
+  <Card href="/quick-setup/#two-keys-to-remember" title="Find anything with ⌘K">Tables, recent queries, connections and every command</Card>
+</Cards>
+
+## The window
+
+Each window is one connection and one database. Open as many as you like; they sit as pills in the title bar, and <kbd>⌘1</kbd>–<kbd>⌘9</kbd> switch between them.
+
+- **Schema column** on the left: the database, its host and environment, then your tables and views. <kbd>⌘B</kbd> hides it.
+- **Tabs** in the middle: query tabs for SQL you write, table tabs for browsing a table.
+- **Inspector** on the right: Quick Look, Review SQL or New connection, beside your data and never over it.
+
+## What it needs
+
+- macOS on Apple Silicon or Intel. Linux and Windows build from source, but they aren't tested the way the Mac app is.
+- Nothing else. The Postgres and SQLite drivers are part of the app, and there's no account to make.
+
+<Note>
+
+**Rowkery is in alpha.** It isn't signed by Apple yet, so the first launch needs one extra step. [Quick setup](/quick-setup/) shows it.
+
+</Note>
+
+## Where to go next
+
+<Cards>
+  <Card href="/quick-setup/" title="Quick setup">Install, open the sample, connect your own database</Card>
+  <Card href="/connecting-to-agents/" title="Connecting to agents">Claude Desktop, Claude Code or any MCP client</Card>
+</Cards>

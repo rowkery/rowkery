@@ -1,0 +1,362 @@
+/* Review a change an agent proposed. Nothing runs when it opens (2026-10-16): each statement's SQL under its verb and table fills
+   the sheet on the left, with the triggers they fire and Dry run in a dock
+   at its foot. After the dry run each statement's rows sit under its SQL,
+   old value struck through over the new one. The proposal sits in an
+   inspector column on the right with Discard / Open in a tab / Commit at its
+   foot. A page like the Agents page: under the title bar, over the schema
+   column. */
+.proposal-page {
+  position: absolute;
+  z-index: 3;
+  top: var(--titlebar-h);
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  min-height: 0;
+  background: var(--bg);
+  outline: none;
+  animation: rise 0.28s var(--ease-out);
+}
+
+.presence[data-closing] .proposal-page {
+  animation: fade-out 110ms ease-in forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proposal-page,
+  .presence[data-closing] .proposal-page {
+    animation: none;
+  }
+}
+
+.pp-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pp-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.pp-previews {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pp-stmt {
+  padding-bottom: 14px;
+}
+
+.pp-stmt + .pp-stmt {
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.pp-stmt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 16px 8px;
+  color: var(--text);
+  font: 600 12px var(--mono);
+}
+
+.pp-stmt-head span {
+  color: var(--mute);
+  font: 400 12px var(--sans);
+}
+
+.pp-stmt-head b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pp-stmt-sql {
+  padding: 0 16px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.pp-stmt:not(:has(.pp-stmt-head)) .pp-stmt-sql {
+  padding-top: 14px;
+}
+
+.pp-preview {
+  margin-top: 12px;
+}
+
+/* The dock: the triggers the change fires, Dry run, and what it did. */
+.pp-dock {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  background: var(--panel);
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.pp-triggers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 120px;
+  overflow: auto;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pp-triggers b {
+  color: var(--text);
+  font: 600 12px var(--mono);
+}
+
+.pp-triggers code {
+  margin-left: 4px;
+  color: var(--mute);
+  font: 12px var(--mono);
+}
+
+.pp-dry-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.pp-dry-row .insp-btn {
+  height: 32px;
+  padding: 0 12px;
+}
+
+.pp-dry-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.pp-dry-line[data-error] {
+  color: var(--del);
+  white-space: normal;
+}
+
+.pp-none,
+.pp-more {
+  margin: 0;
+  padding: 10px 16px;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.pp-scroll {
+  overflow-x: auto;
+}
+
+.pp-grid {
+  border-collapse: collapse;
+  font: 12px/18px var(--mono);
+  color: var(--text);
+}
+
+.pp-grid th {
+  position: sticky;
+  top: 0;
+  padding: 6px 12px;
+  background: var(--bg);
+  box-shadow: inset 0 -1px 0 var(--line);
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.pp-grid th[data-changed] {
+  color: var(--acc2);
+}
+
+.pp-grid td {
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--rowline);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+/* Columns an UPDATE left alone step back, so the change reads first. */
+.pp-grid td[data-cell="same"] {
+  color: var(--dim);
+}
+
+.pp-grid td[data-cell="changed"] {
+  background: var(--accbg);
+}
+
+.pp-old,
+.pp-new {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pp-old {
+  color: var(--dim);
+  text-decoration: line-through;
+}
+
+.pp-new {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pp-grid tr[data-row="insert"] td {
+  background: var(--okbg);
+}
+
+.pp-grid tr[data-row="delete"] td {
+  background: var(--delbg);
+  color: var(--dim);
+  text-decoration: line-through;
+}
+
+/* The proposal: an inspector column beside the rows. */
+.pp-side {
+  width: 360px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  box-shadow: inset 1px 0 0 var(--line);
+}
+
+.pp-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.pp-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.pp-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mute);
+}
+
+.pp-ago {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--mute);
+}
+
+.pp-reason {
+  margin: 0;
+  padding: 2px 0 2px 10px;
+  box-shadow: inset 2px 0 0 var(--line2);
+  color: var(--text2);
+  font-size: 13px;
+  line-height: 19px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pp-count {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.pp-expect {
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.pp-expect[data-match] {
+  color: var(--mute);
+}
+
+.pp-cols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pp-cols code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accbg);
+  color: var(--acc2);
+  font: 12px/18px var(--mono);
+}
+
+.pp-warn {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--del);
+}
+
+.pp-warn svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.pp-reject {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.pp-note-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px var(--sans);
+  outline: none;
+}
+
+.pp-note-input:focus {
+  border-color: var(--acc);
+}

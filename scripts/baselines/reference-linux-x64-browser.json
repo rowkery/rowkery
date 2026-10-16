@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-05",
+  "platform": "linux-x64",
+  "host": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+  "source": "latency-browser-proof.mjs (Chromium, stubbed invoke)",
+  "results": {
+    "palette_open": 8.4,
+    "palette_open_painted": 23.7,
+    "window_switch": 7.2,
+    "window_switch_painted": 40.2,
+    "keystroke_5000": 90.1,
+    "keystroke_5000_max": 119.1,
+    "scroll_frame_40col": 33.5,
+    "scroll_frame_40col_median": 18.3
+  }
+}

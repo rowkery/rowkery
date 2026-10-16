@@ -1,0 +1,611 @@
+#![cfg(feature = "postgres-integration")]
+
+use rowkery_core::connections::{PostgresConnection, PostgresSslMode};
+use rowkery_core::db::postgres::{open_session, session_query_stream, session_test};
+use rowkery_core::secrets::{store_secret, SecretKind};
+
+fn pg_config() -> PostgresConnection {
+    let host = std::env::var("ROWKERY_PG_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let port = std::env::var("ROWKERY_PG_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(5432);
+    let database = std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into());
+    let username = std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into());
+    PostgresConnection {
+        id: "integration-pg".into(),
+        name: "integration".into(),
+        host,
+        port,
+        database,
+        username,
+        ssl_mode: PostgresSslMode::Disable,
+        ssl_root_cert: None,
+        ssh: None,
+        environment: None,
+        safe_mode: Default::default(),
+        allow_mcp: false,
+        mcp_hidden_tables: Vec::new(),
+        mcp_until: None,
+        mcp_samples_off: false,
+        mcp_access: None,
+        masked_columns: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn postgres_connect_and_select() {
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+
+    let config = pg_config();
+    let mut session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+    session_test(&mut session).await.expect("test");
+
+    let rows = session_query_stream(&session, "SELECT 1 AS one", |_batch, _| Ok(()))
+        .await
+        .expect("query");
+    assert_eq!(rows, 1);
+}
+
+/// Types decoded from the binary wire format must match Postgres's own text output.
+#[tokio::test]
+async fn postgres_decodes_dates_uuid_numeric() {
+    use rowkery_core::db::Value;
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-decode-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+
+    let cases = [
+        "'2026-09-26 14:43:23.12'::timestamp",
+        "'1969-07-20 20:17:40'::timestamp",
+        "'infinity'::timestamp",
+        "'2026-09-26'::date",
+        "'1899-12-31'::date",
+        "'14:43:23.000501'::time",
+        "'200ea567-baf1-4c2e-9d3a-0123456789ab'::uuid",
+        "12345.678::numeric",
+        "-0.0005::numeric",
+        "10000::numeric",
+        "0.00::numeric(10,2)",
+        "123456789012345678901234567890.5::numeric",
+        "'NaN'::numeric",
+        "(-7)::int2",
+        "1.5::float4",
+    ];
+    for expr in cases {
+        let sql = format!("SELECT {expr} AS v, ({expr})::text AS t");
+        let mut got = None;
+        session_query_stream(&session, &sql, |batch, _| {
+            got = batch.rows.into_iter().next();
+            Ok(())
+        })
+        .await
+        .expect("query");
+        let row = got.expect("row");
+        let Value::Text(expected) = &row[1] else {
+            panic!("text column for {expr}: {:?}", row[1]);
+        };
+        let actual = match &row[0] {
+            Value::Text(s) => s.clone(),
+            Value::Int(n) => n.to_string(),
+            Value::Float(f) => f.to_string(),
+            other => panic!("{expr}: unexpected {other:?}"),
+        };
+        assert_eq!(&actual, expected, "{expr}");
+    }
+
+    let mut got = None;
+    session_query_stream(
+        &session,
+        "SELECT '2026-09-26 14:43:23+00'::timestamptz AS v, NULL::timestamptz AS n",
+        |batch, _| {
+            got = batch.rows.into_iter().next();
+            Ok(())
+        },
+    )
+    .await
+    .expect("query");
+    let row = got.expect("row");
+    assert_eq!(row[0], Value::Text("2026-09-26 14:43:23+00".into()));
+    assert_eq!(row[1], Value::Null);
+}
+
+/// int8 at the edges of its range reaches the webview exact: as a BigInt
+/// string past ±(2^53 − 1), a plain number inside it; numeric stays text.
+#[tokio::test]
+async fn postgres_int8_extremes_travel_exact() {
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-int8-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+    let mut got = None;
+    session_query_stream(
+        &session,
+        "SELECT 9223372036854775807::int8, (-9223372036854775807 - 1)::int8, \
+         9007199254740993::int8, 9007199254740991::int8, 42::int8, \
+         99999999999999999999.5::numeric",
+        |batch, _| {
+            got = batch.rows.into_iter().next();
+            Ok(())
+        },
+    )
+    .await
+    .expect("query");
+    let json = serde_json::to_string(&got.expect("row")).unwrap();
+    assert_eq!(
+        json,
+        r#"[{"BigInt":"9223372036854775807"},{"BigInt":"-9223372036854775808"},{"BigInt":"9007199254740993"},{"Int":9007199254740991},{"Int":42},{"Text":"99999999999999999999.5"}]"#
+    );
+}
+
+/// A refused statement keeps its SQLSTATE and position; a slow stream sends
+/// its first rows before the batch fills, and times its first row.
+#[tokio::test]
+async fn postgres_errors_and_slow_streams() {
+    use rowkery_core::db::postgres::{session_query_stream_with, StreamOptions};
+    use rowkery_core::db::DriverError;
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-stream-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+
+    let err = session_query_stream(&session, "SELECT id FROM no_such_table", |_, _| Ok(()))
+        .await
+        .expect_err("missing table");
+    match err {
+        DriverError::Server {
+            sqlstate,
+            position,
+            message,
+        } => {
+            assert_eq!(sqlstate, "42P01");
+            assert_eq!(position, Some(16));
+            assert!(message.contains("no_such_table"), "{message}");
+        }
+        other => panic!("expected a server error, got {other:?}"),
+    }
+
+    // Five rows 60 ms apart: the first batch can't wait for 200 rows. Each row
+    // is over 8 KB because Postgres only flushes its output buffer when it fills
+    // (or the statement ends), so smaller rows arrive together anyway.
+    let mut batches = Vec::new();
+    let stats = session_query_stream_with(
+        &session,
+        "SELECT g, repeat('x', 9000), pg_sleep(0.06) FROM generate_series(1, 5) g",
+        StreamOptions::default(),
+        |batch, _| {
+            batches.push(batch.rows.len());
+            Ok(())
+        },
+    )
+    .await
+    .expect("query");
+    assert_eq!(stats.rows, 5);
+    assert!(
+        batches.len() > 1,
+        "first rows should not wait for the rest: {batches:?}"
+    );
+    let first = stats.first_row.expect("first row").as_millis();
+    assert!((40..250).contains(&first), "first row at {first} ms");
+}
+
+/// Structure view data: defaults, primary/unique indexes, access method and foreign keys;
+/// completion data: enums, functions, search path.
+#[tokio::test]
+async fn postgres_introspects_structure() {
+    use rowkery_core::db::postgres::{session_introspect, session_table_indexes};
+    use rowkery_core::db::{RowEstimate, TableKind};
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-structure-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+
+    let setup = r"
+        DROP SCHEMA IF EXISTS it_structure CASCADE;
+        CREATE SCHEMA it_structure;
+        CREATE TABLE it_structure.players (
+            id bigserial PRIMARY KEY,
+            handle text NOT NULL UNIQUE,
+            region text NOT NULL DEFAULT 'sg'
+        );
+        CREATE TABLE it_structure.wallets (
+            id bigserial PRIMARY KEY,
+            player_id bigint NOT NULL REFERENCES it_structure.players(id) ON DELETE CASCADE,
+            tags text[]
+        );
+        CREATE INDEX wallets_tags_gin ON it_structure.wallets USING gin (tags);
+        CREATE TABLE it_structure.events (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            seq int GENERATED BY DEFAULT AS IDENTITY,
+            label text
+        );
+        CREATE VIEW it_structure.sg_players AS SELECT id, handle FROM it_structure.players WHERE region = 'sg';
+        CREATE MATERIALIZED VIEW it_structure.wallet_counts AS SELECT player_id, count(*) AS n FROM it_structure.wallets GROUP BY player_id;
+        CREATE TYPE it_structure.wallet_state AS ENUM ('open', 'frozen', 'closed');
+        CREATE FUNCTION it_structure.wallet_total(p bigint) RETURNS bigint LANGUAGE sql AS 'SELECT p';
+        COMMENT ON TABLE it_structure.wallets IS 'One wallet per player.
+Balances live in wallet_counts.';
+        COMMENT ON COLUMN it_structure.wallets.player_id IS 'The player this wallet belongs to.'
+    ";
+    for stmt in setup.split(';').filter(|s| !s.trim().is_empty()) {
+        session_query_stream(&session, stmt, |_b, _| Ok(()))
+            .await
+            .expect("setup");
+    }
+
+    let catalog = session_introspect(&session).await.expect("introspect");
+    let schema = catalog.databases[0]
+        .schemas
+        .iter()
+        .find(|s| s.name == "it_structure")
+        .expect("schema");
+    let players = schema.tables.iter().find(|t| t.name == "players").unwrap();
+    let wallets = schema.tables.iter().find(|t| t.name == "wallets").unwrap();
+
+    // Identity columns fill themselves: they read as a default (⌘I starts after them).
+    let events = schema.tables.iter().find(|t| t.name == "events").unwrap();
+    let default_of = |name: &str| {
+        events
+            .columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .default
+            .clone()
+    };
+    assert_eq!(
+        default_of("id").as_deref(),
+        Some("generated always as identity")
+    );
+    assert_eq!(
+        default_of("seq").as_deref(),
+        Some("generated by default as identity")
+    );
+    assert_eq!(default_of("label"), None);
+
+    // COMMENT ON TABLE / COLUMN, whole (the UI shows the first line).
+    assert_eq!(
+        wallets.comment.as_deref(),
+        Some("One wallet per player.\nBalances live in wallet_counts.")
+    );
+    assert!(players.comment.is_none());
+    let player_id = wallets
+        .columns
+        .iter()
+        .find(|c| c.name == "player_id")
+        .unwrap();
+    assert_eq!(
+        player_id.comment.as_deref(),
+        Some("The player this wallet belongs to.")
+    );
+    assert!(wallets
+        .columns
+        .iter()
+        .find(|c| c.name == "tags")
+        .unwrap()
+        .comment
+        .is_none());
+
+    let region = players.columns.iter().find(|c| c.name == "region").unwrap();
+    assert_eq!(region.default.as_deref(), Some("'sg'::text"));
+    assert!(players.table_bytes.is_some());
+
+    assert_eq!(players.primary_key, vec!["id"]);
+    // Index details are fetched per table when Structure opens.
+    assert!(players.indexes_deferred && players.indexes.is_empty());
+    let details = session_table_indexes(
+        &session,
+        "it_structure",
+        &["players".to_string(), "wallets".to_string()],
+    )
+    .await
+    .expect("table indexes");
+    let (players_ix, wallets_ix) = (&details[0], &details[1]);
+    assert_eq!(players_ix.table, "players");
+    assert!(players_ix.index_bytes.is_some());
+
+    let pkey = players_ix.indexes.iter().find(|i| i.primary).expect("pkey");
+    assert_eq!(pkey.columns, vec!["id"]);
+    assert_eq!(pkey.method.as_deref(), Some("btree"));
+    assert!(players_ix
+        .indexes
+        .iter()
+        .any(|i| i.unique && !i.primary && i.columns == vec!["handle"]));
+
+    let gin = wallets_ix
+        .indexes
+        .iter()
+        .find(|i| i.name == "wallets_tags_gin")
+        .unwrap();
+    assert_eq!(gin.method.as_deref(), Some("gin"));
+
+    assert_eq!(wallets.foreign_keys.len(), 1);
+    let fk = &wallets.foreign_keys[0];
+    assert_eq!(fk.columns, vec!["player_id"]);
+    assert_eq!(fk.ref_schema, "it_structure");
+    assert_eq!(fk.ref_table, "players");
+    assert_eq!(fk.ref_columns, vec!["id"]);
+    assert_eq!(fk.on_delete, "CASCADE");
+
+    let state = catalog
+        .enums
+        .iter()
+        .find(|e| e.schema == "it_structure" && e.name == "wallet_state")
+        .expect("enum");
+    assert_eq!(state.labels, vec!["open", "frozen", "closed"]);
+    let total = catalog
+        .functions
+        .iter()
+        .find(|f| f.schema == "it_structure" && f.name == "wallet_total")
+        .expect("function");
+    assert_eq!(total.args, "p bigint");
+    assert_eq!(total.returns, "bigint");
+    assert!(catalog.search_path.iter().any(|s| s == "public"));
+
+    assert_eq!(players.kind, TableKind::Table);
+    let view = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "sg_players")
+        .unwrap();
+    assert_eq!(view.kind, TableKind::View);
+    let view_cols: Vec<_> = view.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(view_cols, vec!["id", "handle"]);
+    assert_eq!(view.row_estimate, RowEstimate::Unknown);
+    assert!(view.table_bytes.is_none());
+    let matview = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "wallet_counts")
+        .unwrap();
+    assert_eq!(matview.kind, TableKind::MaterializedView);
+    assert_eq!(matview.columns.len(), 2);
+
+    session_query_stream(&session, "DROP SCHEMA it_structure CASCADE", |_b, _| Ok(()))
+        .await
+        .expect("cleanup");
+}
+
+/// Read-only connections are read-only at the server: a write the text check
+/// can't see (here sent straight to the session) still fails.
+#[tokio::test]
+async fn postgres_read_only_session_refuses_writes() {
+    use rowkery_core::safety::SafeMode;
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-ro-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let mut config = pg_config();
+    config.safe_mode = SafeMode::ReadOnly;
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+    let err = session_query_stream(
+        &session,
+        "CREATE TEMP TABLE rowkery_ro_probe AS SELECT 1 AS one",
+        |_, _| Ok(()),
+    )
+    .await
+    .expect_err("read-only session");
+    assert!(err.to_string().contains("read-only transaction"), "{err}");
+    let rows = session_query_stream(&session, "SELECT 1", |_, _| Ok(()))
+        .await
+        .expect("reads still run");
+    assert_eq!(rows, 1);
+}
+
+/// Sessions through one SSH tunnel: the second reuses the first's tunnel.
+#[tokio::test]
+async fn postgres_sessions_share_an_ssh_tunnel() {
+    use rowkery_core::connections::{SshAuthMethod, SshConfig};
+    use rowkery_core::db::postgres::open_session_via;
+    use rowkery_core::ssh::OPEN_TUNNELS;
+    use std::sync::atomic::Ordering;
+    let Ok(ssh_host) = std::env::var("ROWKERY_SSH_HOST") else {
+        eprintln!("skip (set ROWKERY_SSH_HOST)");
+        return;
+    };
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-ssh-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    store_secret("integration-pg", SecretKind::SshPassword, "rowkeryssh").expect("store ssh");
+    let mut config = pg_config();
+    config.host = "127.0.0.1".into();
+    config.ssh = Some(SshConfig {
+        host: ssh_host,
+        port: 2222,
+        username: "rowkery".into(),
+        auth_method: SshAuthMethod::Password,
+        private_key_path: None,
+        trust_host: true,
+    });
+    let before = OPEN_TUNNELS.load(Ordering::Relaxed);
+    let a = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        open_session_via(config.id.clone(), config.clone(), None, None),
+    )
+    .await
+    .expect("first session in time")
+    .expect("first session");
+    let b = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        open_session_via(config.id.clone(), config.clone(), None, a.tunnel()),
+    )
+    .await
+    .expect("second session in time")
+    .expect("second session");
+    assert_eq!(OPEN_TUNNELS.load(Ordering::Relaxed) - before, 1);
+    let n = session_query_stream(&b, "SELECT 1", |_, _| Ok(()))
+        .await
+        .expect("query b");
+    assert_eq!(n, 1);
+    let n = session_query_stream(&a, "SELECT 1", |_, _| Ok(()))
+        .await
+        .expect("query a");
+    assert_eq!(n, 1);
+    drop((a, b));
+}
+
+/// Keyset pages over Postgres types that travel as text (timestamptz,
+/// numeric, uuid), NULLs and mixed directions return what one ordered query
+/// does.
+#[tokio::test]
+async fn postgres_keyset_pages_match_one_ordered_query() {
+    use rowkery_core::db::{table_browse_query, BrowseOptions, BrowseOrder, EngineKind, Value};
+    use std::collections::HashMap;
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+    let rows = |sql: String| {
+        let session = &session;
+        async move {
+            let mut names = Vec::new();
+            let mut out: Vec<Vec<Value>> = Vec::new();
+            session_query_stream(session, &sql, |b, _| {
+                names = b.columns.iter().map(|c| c.name.clone()).collect();
+                out.extend(b.rows);
+                Ok(())
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            (names, out)
+        }
+    };
+    rows("DROP TABLE IF EXISTS pg_temp.keyset_t".into()).await;
+    rows("CREATE TEMP TABLE keyset_t (id bigint PRIMARY KEY, at timestamptz, amount numeric(12,3), ref uuid, label text)".into()).await;
+    rows(
+        "INSERT INTO keyset_t SELECT i,
+            CASE WHEN i % 6 = 0 THEN NULL ELSE timestamptz '2024-01-01 00:00:00.123456+00' + (i % 4) * interval '1 hour' END,
+            CASE WHEN i % 5 = 0 THEN NULL ELSE (i % 3) * 1.125 END,
+            md5((i % 2)::text)::uuid,
+            CASE WHEN i % 7 = 0 THEN NULL ELSE 'l' || (i % 3) END
+          FROM generate_series(1, 83) i"
+            .into(),
+    )
+    .await;
+    let o = |column: &str, desc: bool| BrowseOrder {
+        column: column.into(),
+        desc,
+    };
+    for order in [
+        vec![],
+        vec![o("at", true)],
+        vec![o("amount", false), o("label", true)],
+        vec![o("ref", false), o("at", false), o("amount", true)],
+    ] {
+        let base = BrowseOptions {
+            order: order.clone(),
+            key: vec!["id".into()],
+            ..BrowseOptions::first_page(0)
+        };
+        let (_, all) = rows(table_browse_query(
+            EngineKind::Postgres,
+            "pg_temp",
+            "keyset_t",
+            &base,
+        ))
+        .await;
+        let mut paged: Vec<Vec<Value>> = Vec::new();
+        let mut after = None;
+        loop {
+            let opts = BrowseOptions {
+                limit: 5,
+                offset: paged.len() as u32,
+                after: after.clone(),
+                ..base.clone()
+            };
+            let sql = table_browse_query(EngineKind::Postgres, "pg_temp", "keyset_t", &opts);
+            assert!(!sql.contains("OFFSET"), "{sql}");
+            let (names, page) = rows(sql).await;
+            let n = page.len();
+            if let Some(last) = page.last() {
+                after = Some(
+                    names
+                        .iter()
+                        .cloned()
+                        .zip(last.iter().cloned())
+                        .collect::<HashMap<_, _>>(),
+                );
+            }
+            paged.extend(page);
+            if n < 5 {
+                break;
+            }
+        }
+        assert_eq!(paged.len(), 83);
+        assert_eq!(paged, all, "order {order:?}");
+    }
+}

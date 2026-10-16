@@ -1,0 +1,750 @@
+/* Results grid (Paper, 2026-10-10). Row height is fixed (30 px) so
+   virtualization stays O(visible rows). */
+
+/* The grid runs full bleed on the paper: a 46 px header on a --line2 rule,
+   30 px rows on --rowline rules, column rules inset -1 px. */
+.results-grid-wrap {
+  --rg-sheet: transparent;
+  --rg-header-bg: var(--bg);
+  /* The sticky row-number gutter hides cells scrolled beneath it. */
+  --rg-gutter-bg: var(--bg);
+  --rg-cell-active: var(--acc);
+  /* Rule between columns, so a long value visibly ends at its cell. */
+  --rg-rule: var(--rowline);
+  --rg-sel: var(--hover);
+  background: var(--rg-sheet);
+  outline: none;
+  /* Its size comes from the card, never its rows: a scroll step lays out and
+     paints inside the sheet only. */
+  contain: strict;
+}
+
+/* Stands in for the columns scrolled out to the left (column virtualization). */
+.rg-colpad {
+  flex-shrink: 0;
+}
+
+.rg-inner {
+  position: relative;
+  min-width: 100%;
+}
+
+/* Narrow results still fill the sheet, so the header strip and row tints
+   reach its right edge. */
+.rg-header,
+.rg-body,
+.rg-row {
+  min-width: 100%;
+}
+
+/* Header */
+
+.rg-header {
+  display: flex;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 46px;
+  background: var(--rg-header-bg);
+  box-shadow: inset 0 -1px 0 var(--line2);
+}
+
+.rg-header-cell {
+  position: relative;
+  box-shadow: inset -1px 0 0 var(--rg-rule);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: background-color 0.18s ease;
+}
+
+.rg-header-cell.rg-sortable {
+  cursor: pointer;
+}
+
+.rg-header-cell:hover {
+  background: var(--hover);
+}
+
+.rg-header-cell.rg-num {
+  align-items: flex-end;
+}
+
+.rg-header-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  font: 600 12.5px/1.25 var(--sans);
+  color: var(--text);
+}
+
+.rg-header-cell.rg-num .rg-header-name {
+  justify-content: flex-end;
+}
+
+.rg-header-label,
+.rg-header-type {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rg-header-type {
+  flex-shrink: 1000;
+  font: 400 10.5px/1.3 var(--mono);
+  color: var(--dim);
+}
+
+.rg-header-label {
+  flex-shrink: 1;
+}
+
+/* Column profile: the shape of the fetched rows under the name. Every
+   profile is 15 px tall (a 4 px bar over its 11 px caption), so names line
+   up across the header. */
+.rg-profile {
+  flex-shrink: 0;
+  display: flex;
+  width: 100%;
+  height: 15px;
+}
+
+.rg-hist {
+  height: 12px;
+  margin-top: 3px;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.rg-hist i {
+  flex: 1;
+  min-width: 0;
+  background: var(--line2);
+  border-radius: 1px 1px 0 0;
+  transform-origin: bottom;
+}
+
+/* Table tabs: a profile segment filters on its value, a drag across bins filters BETWEEN. */
+.rg-pickable {
+  cursor: pointer;
+}
+
+.rg-segs i.rg-pickable:hover {
+  filter: brightness(1.8);
+}
+
+.rg-hist.rg-pickable {
+  cursor: col-resize;
+}
+
+.rg-hist i.rg-bin-picked {
+  background: var(--acc);
+}
+
+.rg-header-cell.rg-col-active .rg-hist i {
+  background: var(--faint);
+}
+
+/* Segments with their caption: the 4 px bar over one 10 px line. */
+.rg-split {
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 0;
+}
+
+.rg-split > * {
+  flex-shrink: 0;
+}
+
+.rg-segs {
+  display: flex;
+  gap: 2px;
+  height: 4px;
+}
+
+.rg-segs i {
+  flex-basis: 0;
+  min-width: 2px;
+  border-radius: 2px;
+  /* Ink at half its share: the biggest value darkest. */
+  background: color-mix(in srgb, var(--text) calc(var(--a) * 50%), transparent);
+  transform-origin: left;
+}
+
+.rg-segs i[data-tone="true"] {
+  background: var(--ok);
+}
+
+.rg-segs i[data-tone="null"] {
+  background: var(--hover);
+}
+
+.rg-cap {
+  /* Plex Mono's descenders overhang its line box: 1 px of room under it. */
+  padding-bottom: 1px;
+  font: 400 10px/10px var(--mono);
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rg-header-cell.rg-num .rg-cap {
+  text-align: right;
+}
+
+/* Primary key and foreign key columns. */
+.rg-key-pk,
+.rg-key-fk {
+  flex-shrink: 0;
+}
+
+.rg-key-pk {
+  color: var(--mute);
+}
+
+.rg-key-fk {
+  color: var(--blue);
+}
+
+/* A sensitive column (agents see a stand-in). */
+.rg-marked {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--mute);
+}
+
+/* Presenting: the value is dots. */
+.rg-cell.rg-cell-hidden {
+  color: var(--mute);
+  letter-spacing: 0.08em;
+  user-select: none;
+}
+
+.rg-header-cell.rg-col-active .rg-header-label {
+  color: var(--rg-cell-active);
+}
+
+/* Columns inside a selected block. */
+.rg-header-cell.rg-col-sel {
+  background: var(--hover);
+}
+
+/* The sort glyph, ▲ / ▼ in the accent: what you asked for. */
+.rg-sort {
+  flex-shrink: 0;
+  color: var(--acc);
+  font: 10px var(--sans);
+}
+
+/* The handle shows only under the pointer. */
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 7px;
+  cursor: col-resize;
+}
+
+.col-resize-handle:hover {
+  box-shadow: inset -2px 0 0 var(--line2);
+}
+
+/* Row-number gutter, pinned while scrolling sideways. It paints the row's
+   tint over its own opaque fill so zebra and hover run through it. */
+
+.rg-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex-shrink: 0;
+  padding-right: 10px;
+  text-align: right;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  background:
+    linear-gradient(var(--rg-tint), var(--rg-tint)),
+    var(--rg-gutter-bg);
+  box-shadow:
+    inset -1px 0 0 var(--rg-rule),
+    inset 0 -1px 0 var(--rowline);
+  cursor: default;
+}
+
+.rg-gutter-head {
+  z-index: 3;
+  background: var(--rg-header-bg);
+  box-shadow:
+    inset -1px 0 0 var(--rg-rule),
+    inset 0 -1px 0 var(--line2);
+}
+
+/* Body */
+
+.rg-body {
+  position: relative;
+}
+
+.rg-row {
+  --rg-tint: transparent;
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  height: 30px;
+  line-height: 29px;
+  background: var(--rg-tint);
+  box-shadow: inset 0 -1px 0 var(--rowline);
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: default;
+  contain: strict;
+}
+
+/* Paper rows are ruled, not striped. */
+.rg-row:hover {
+  --rg-tint: var(--hover);
+}
+
+.rg-row:hover .rg-gutter,
+.rg-row.rg-row-active .rg-gutter {
+  color: var(--mute);
+}
+
+/* The row Quick Look shows: the accent wash, its number in the accent. */
+.rg-row.rg-row-looked {
+  --rg-tint: var(--accbg);
+}
+
+.rg-row.rg-row-looked .rg-gutter,
+.rg-row.rg-row-sel .rg-gutter {
+  color: var(--acc);
+}
+
+/* The cells' font and colour are inherited from the row: a cell entering
+   on a scroll computes as little style as it can. */
+.rg-cell {
+  flex-shrink: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: inset -1px 0 0 var(--rg-rule);
+}
+
+.rg-cell.rg-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.rg-cell.rg-true {
+  color: var(--ok);
+}
+
+.rg-cell.rg-false {
+  color: var(--dim);
+}
+
+.rg-cell.rg-json {
+  color: var(--ok);
+}
+
+/* Timestamps: the date and the fraction / zone step back from the time. */
+.rg-ts-date {
+  color: var(--dim);
+}
+
+.rg-ts-rest {
+  color: var(--dim);
+}
+
+/* Cells in a selected block (drag, ⇧-click, ⌘A). The rule stays visible. */
+/* Find in results (⌘F on a query tab): every match washed, the current one brighter. */
+.rg-cell.rg-find {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+}
+
+.rg-cell.rg-find-current {
+  background: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+.rg-cell.rg-cell-sel {
+  background: var(--rg-sel);
+}
+
+/* The selected cell: a 1.5 px accent outline, radius 3, inset. */
+.rg-cell.rg-cell-active {
+  border-radius: 3px;
+  outline: 1.5px solid var(--acc);
+  outline-offset: -1.5px;
+  color: var(--text);
+}
+
+.rg-cell.rg-cell-active .rg-ts-date,
+.rg-cell.rg-cell-active .rg-ts-rest {
+  color: inherit;
+}
+
+/* NULL: a small chip, never a value you could mistake for text. */
+.rg-null {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font: 600 9.5px/1.2 var(--sans);
+  letter-spacing: 0.06em;
+  color: var(--mute); /* --dim on --hover is 4.2:1 at 9.5 px; --mute clears 4.5. */
+  background: var(--hover);
+  vertical-align: 1px;
+}
+
+/* A fresh run's rows cascade in and the profiles grow. `translate` stacks
+   on the row's virtualizer `transform`. */
+.rg-reveal .rg-row {
+  animation: rg-row-in 0.3s ease both;
+  animation-delay: calc(min(var(--i), 14) * 28ms);
+}
+
+.rg-reveal .rg-hist i {
+  animation: rg-grow-y 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(120ms + var(--j) * 18ms);
+}
+
+.rg-reveal .rg-segs i {
+  animation: rg-grow-x 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(120ms + var(--j) * 40ms);
+}
+
+@keyframes rg-row-in {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+
+@keyframes rg-grow-y {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+@keyframes rg-grow-x {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rg-empty,
+  .rg-reveal .rg-row,
+  .rg-reveal .rg-hist i,
+  .rg-reveal .rg-segs i {
+    animation: none;
+  }
+}
+
+/* A secondary sort key: a small "2" by its arrow. */
+.rg-sort-rank {
+  margin-left: 1px;
+  font-size: 9px;
+  font-weight: 600;
+  vertical-align: super;
+  line-height: 0;
+}
+
+/* A query tab sorts only the rows it loaded: the hollow arrow, dimmer. */
+.rg-sort.rg-sort-client {
+  color: var(--text-muted);
+}
+
+/* Where hidden columns were: a 6 px grip on the boundary; click shows them. */
+.rg-hidden-grip {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  z-index: 3;
+  width: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 16%, transparent);
+  cursor: pointer;
+}
+
+.rg-hidden-grip:hover {
+  background: color-mix(in srgb, var(--text) 32%, transparent);
+}
+
+.find-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.find-bar input {
+  width: 180px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  outline: none;
+}
+
+.find-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+
+/* Pending edits (Paper): a dot in the gutter, ink an edited row, red a row
+   marked for delete (washed, dim, struck through), green a new row (washed).
+   An edited cell carries a 2 px ink bar at its left and weight 500. */
+.rg-row-edit {
+  --rg-mark: var(--ink);
+}
+
+.rg-row-insert {
+  --rg-mark: var(--ok);
+  --rg-tint: var(--okbg);
+}
+
+.rg-row-delete {
+  --rg-mark: var(--del);
+  --rg-tint: var(--delbg);
+}
+
+.rg-cell.rg-cell-edited {
+  font-weight: 500;
+  box-shadow:
+    inset 2px 0 0 var(--ink),
+    inset -1px 0 0 var(--rg-rule);
+}
+
+.rg-row-delete .rg-cell {
+  color: var(--dim);
+  text-decoration: line-through;
+}
+
+.rg-mark-dot {
+  position: absolute;
+  top: 12px;
+  left: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rg-mark);
+}
+
+.rg-inserts {
+  position: relative;
+}
+
+.rg-cell.rg-cell-default {
+  color: var(--dim);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  font-style: italic;
+  font-weight: 400;
+}
+
+/* A filtered table tab with no rows: one line, the way out in the accent. */
+.rg-empty {
+  position: sticky;
+  left: 0;
+  padding: 28px 20px;
+  font: 12.5px var(--sans);
+  color: var(--dim);
+  animation: fade 0.2s ease;
+}
+
+.rg-empty-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--acc);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* The empty filter's Add row: a ghost button under the note.
+   A populated table has none: its rows page, so there is no foot. */
+.rg-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  margin: 10px 0 0 -10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: 12px var(--sans);
+  cursor: pointer;
+  transition: color 0.18s ease, background-color 0.18s ease;
+}
+
+.rg-add-row:hover {
+  color: var(--acc);
+  background: var(--accbg);
+}
+
+.rg-insert-remove {
+  display: none;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.rg-row-insert:hover .rg-insert-remove {
+  display: grid;
+  place-items: center;
+}
+
+/* Cell editors sit over their cell; the ring stays. */
+.rg-editor {
+  position: absolute;
+  z-index: 4;
+  height: 30px;
+}
+
+.rg-editor-input,
+.rg-editor-bool,
+.rg-editor-json textarea {
+  box-sizing: border-box;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  outline: none;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1.5px var(--acc);
+  color: var(--text-strong);
+  font: 12.5px var(--mono);
+}
+
+.rg-editor-input {
+  height: 30px;
+  padding: 0 9px;
+}
+
+.rg-editor-input.rg-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.rg-editor-input::placeholder {
+  color: var(--text-dim);
+}
+
+.rg-editor [aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1.5px var(--danger);
+}
+
+.rg-editor-bool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 9px;
+}
+
+.rg-editor-hint,
+.rg-editor-foot {
+  color: var(--text-dim);
+  font: 10.5px var(--sans);
+}
+
+.rg-editor-hint {
+  margin-left: auto;
+}
+
+.rg-editor-json {
+  min-width: 360px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--shade) 50%, transparent), inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.rg-editor-json textarea {
+  display: block;
+  min-height: 150px;
+  padding: 8px;
+  line-height: 17px;
+  resize: vertical;
+}
+
+.rg-editor-foot {
+  display: block;
+  padding: 6px 2px 0;
+}
+
+.rg-editor-error,
+.rg-editor-list {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--shade) 50%, transparent), inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.rg-editor-error {
+  padding: 4px 8px;
+  color: var(--del);
+  font: 11px var(--sans);
+  white-space: nowrap;
+}
+
+/* The enum list and the foreign key picker: 8 rows at most. */
+.rg-editor-list {
+  width: max(100%, 200px);
+  max-height: calc(8 * 26px + 8px);
+  padding: 4px;
+  overflow: auto;
+}
+
+.rg-editor-list > div {
+  height: 26px;
+  padding: 0 8px;
+  overflow: hidden;
+  border-radius: 6px;
+  color: var(--text);
+  font: 12px/26px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.rg-editor-list > div.on,
+.rg-editor-list > div:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-strong);
+}
+

@@ -1,0 +1,277 @@
+/* ---------- The Sessions tab (2026-10-15) ----------
+   A table tab's shape: a line under the tab row (the idle chip, the count,
+   whether it's live), then the list on the sheet. Blocking is red (--del),
+   idle in transaction amber (--warning), other waits blue; orange stays on
+   the WHERE-style chip. Rows update in place: no flash, no motion. */
+
+.sessions-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  font: 12px var(--sans);
+  color: var(--mute);
+}
+
+.sessions-title {
+  font: 600 15px var(--font-display);
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.sessions-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px 0 9px;
+  border-radius: 13px;
+  background: var(--accbg);
+  font: 12.5px var(--mono);
+  color: var(--text);
+}
+
+.sessions-chip button,
+.sessions-addchip {
+  border: 0;
+  background: transparent;
+  color: var(--mute);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sessions-chip button {
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  line-height: 1;
+}
+
+.sessions-chip button:hover {
+  background: var(--accbg2);
+  color: var(--text);
+}
+
+.sessions-addchip {
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 13px;
+  box-shadow: inset 0 0 0 1px var(--line2);
+  font: 12px var(--sans);
+}
+
+.sessions-addchip:hover {
+  color: var(--text);
+}
+
+.sessions-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.sessions-gap {
+  flex: 1;
+}
+
+.sessions-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.sessions-live i {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ok);
+}
+
+.sessions-live[data-sessions-live="paused"] i {
+  background: var(--faint);
+}
+
+.sessions-live[data-sessions-live="error"] {
+  color: var(--del);
+}
+
+.sessions-live[data-sessions-live="error"] i {
+  background: var(--del);
+}
+
+.sessions-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+
+.sessions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 12.5px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text2);
+}
+
+.sessions-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 34px;
+  padding: 0 10px;
+  background: var(--panel);
+  box-shadow: inset 0 -1px 0 var(--line2);
+  font: 600 12.5px var(--sans);
+  color: var(--text);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.sessions-table td {
+  height: 30px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--rowline);
+  white-space: nowrap;
+}
+
+.sessions-table .num {
+  text-align: right;
+}
+
+.sessions-table .wide {
+  width: 100%;
+}
+
+.sessions-table .query {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sessions-table .who {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sessions-table tbody tr {
+  cursor: default;
+}
+
+.sessions-table tbody tr:hover td {
+  background: var(--hover);
+}
+
+.sessions-table tbody tr[data-session-picked] td {
+  background: var(--sel);
+  color: var(--text);
+}
+
+.sessions-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font: 500 11.5px var(--sans);
+}
+
+.sessions-tag.you {
+  background: var(--kbd);
+  color: var(--text);
+}
+
+.sessions-tag.idle {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+}
+
+.sessions-tag.lock {
+  background: var(--delbg);
+  color: var(--del);
+}
+
+.sessions-tag.wait {
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
+  color: color-mix(in srgb, var(--blue) var(--tagmix), var(--text));
+}
+
+.sessions-none {
+  color: var(--faint);
+}
+
+.sessions-blocking {
+  color: var(--del);
+}
+
+.sessions-pid {
+  margin-right: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--del);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.sessions-empty {
+  padding: 40px 16px;
+  font: 13px var(--sans);
+  color: var(--mute);
+  text-align: center;
+}
+
+/* The inspector's session view. */
+.inspector[data-inspector="session"] {
+  width: var(--insp-session, 320px);
+}
+
+.session-detail {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 18px;
+}
+
+.session-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  font: 12.5px var(--sans);
+}
+
+.session-facts dt {
+  color: var(--mute);
+}
+
+.session-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: 12px var(--mono);
+  color: var(--text);
+}
+
+.session-sql {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font: 12px/1.5 var(--mono);
+  color: var(--text2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-hidden {
+  margin: 0;
+  font: 12.5px var(--sans);
+  color: var(--mute);
+}

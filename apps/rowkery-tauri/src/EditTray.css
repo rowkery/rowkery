@@ -1,0 +1,321 @@
+/* The edits bar at the grid's foot (Paper, 2026-10-10): 46 px on a --line2
+   rule, the bar fill. Left the count and a dot per kind, right Review SQL,
+   Discard and Commit in ink (Run stays the only orange). It rises in and
+   leaves faster. Also Review SQL's sheet. */
+
+.edit-tray {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 46px;
+  padding: 0 10px 0 16px;
+  border-top: 1px solid var(--line2);
+  background: var(--bar);
+  color: var(--text);
+  font: 12.5px var(--sans);
+  white-space: nowrap;
+  animation: rise 0.2s var(--ease-out);
+}
+
+.presence[data-closing] .edit-tray {
+  animation: tray-out 0.12s ease-in forwards;
+}
+
+@keyframes tray-out {
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edit-tray,
+  .presence[data-closing] .edit-tray {
+    animation: none;
+  }
+}
+
+.edit-tray-count {
+  font: 600 13px var(--sans);
+  color: var(--text);
+}
+
+/* The dots give way first when the main column is narrow (an inspector open). */
+.edit-tray-dots {
+  min-width: 0;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.edit-tray-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.edit-tray-dot i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.edit-tray-dot i[data-kind="deleted"] {
+  background: var(--del);
+}
+
+.edit-tray-dot i[data-kind="inserted"] {
+  background: var(--ok);
+}
+
+.edit-tray-done-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.edit-tray-error {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--del);
+  text-overflow: ellipsis;
+}
+
+.edit-tray-text {
+  color: var(--text);
+}
+
+.edit-tray-dim {
+  color: var(--dim);
+}
+
+.edit-tray-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--mute);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.edit-tray-link:hover {
+  color: var(--acc);
+}
+
+.edit-tray-gap {
+  flex: 1;
+  min-width: 12px;
+}
+
+/* Review SQL: bordered. */
+.edit-tray-review {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  font: 500 12.5px var(--sans);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.18s ease;
+}
+
+.edit-tray-review:hover {
+  border-color: var(--dim);
+}
+
+.edit-tray-review kbd {
+  font: 10.5px var(--mono);
+  color: var(--dim);
+}
+
+/* With the inspector open the bar is narrower: tighter, and Review SQL drops
+   its keycap (its tooltip and the shortcut sheet keep it). The bar is inside
+   its window, so the window's own attribute says so: no `.app-frame:has()`,
+   whose `kbd` made every window switch re-check each element of the app. */
+.workspace[data-inspector] .edit-tray,
+.app-frame[data-connect] .edit-tray {
+  gap: 12px;
+}
+
+.workspace[data-inspector] .edit-tray-keys,
+.app-frame[data-connect] .edit-tray-keys {
+  display: none;
+}
+
+/* Discard: a ghost that turns red under the pointer. */
+.edit-tray-discard {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font: 500 12.5px var(--sans);
+  color: var(--mute);
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.edit-tray-discard:hover {
+  color: var(--del);
+  background: var(--delbg);
+}
+
+/* Links in Review SQL's foot. */
+.edit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mute);
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.edit-link:hover {
+  color: var(--text);
+}
+
+.edit-link kbd {
+  font: 10.5px var(--mono);
+  color: var(--dim);
+}
+
+/* Commit: ink, the one dark button. */
+.edit-commit {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--inkfg);
+  font: 600 12.5px var(--sans);
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.edit-commit:hover:not(:disabled) {
+  background: var(--ink2);
+}
+
+.edit-commit kbd {
+  font: 10.5px var(--mono);
+  opacity: 0.75; /* 0.6 was 4.2:1 on dark ink */
+}
+
+.edit-commit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* A narrow window drops the keycaps first. */
+@media (max-width: 1000px) {
+  .edit-tray kbd {
+    display: none;
+  }
+}
+
+/* Review SQL: 640 wide, near-opaque, radius 12. */
+.rv-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 78px 16px 16px;
+  background: color-mix(in srgb, var(--shade) 42%, transparent);
+}
+
+.rv-sheet {
+  display: flex;
+  flex-direction: column;
+  width: 640px;
+  max-width: 100%;
+  max-height: calc(100vh - 100px);
+  border-radius: 12px;
+  outline: none;
+  background: var(--bg);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent),
+    0 30px 80px color-mix(in srgb, var(--shade) 60%, transparent);
+  color: var(--text);
+}
+
+.rv-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 18px 10px;
+}
+
+.rv-head h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.rv-sub,
+.rv-note {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.rv-sql {
+  display: flex;
+  min-height: 120px;
+  max-height: 360px;
+  margin: 0 12px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--bg-editor);
+}
+
+.rv-sql > * {
+  flex: 1;
+}
+
+.rv-error {
+  padding: 12px;
+  color: var(--del);
+  font-size: 12.5px;
+}
+
+.rv-note {
+  margin: 10px 18px 0;
+  color: var(--text-muted);
+}
+
+.rv-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px 14px 18px;
+  font-size: 13px;
+}

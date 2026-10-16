@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/rowkery.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rowkery</title>
+  </head>
+
+  <body>
+    <script>
+      // Before the bundle: the platform class and the theme, so the first
+      // frame is already the right sheet. The setting lives in config.json
+      // (core gives the window the same appearance before it exists);
+      // theme.ts keeps a copy of it under this key for this first paint only,
+      // and applies config.json's value before the first render.
+      (function () {
+        var mac = /Mac|iPhone|iPod|iPad/i.test(navigator.platform) || /Mac OS X/i.test(navigator.userAgent);
+        var root = document.documentElement;
+        if (mac) root.classList.add("platform-mac");
+        var setting = null;
+        try {
+          setting = localStorage.getItem("rowkery-paint-theme");
+        } catch (e) {}
+        var dark =
+          setting === "dark" ||
+          (setting !== "light" && !!window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        root.dataset.theme = dark ? "dark" : "light";
+        root.style.colorScheme = dark ? "dark" : "light";
+        root.style.background = dark ? "#1a1a1a" : "#ffffff";
+      })();
+    </script>
+    <div id="root"></div>
+    <!-- First script to run: the page has started (timings.ts reads it). -->
+    <script>performance.mark("webview-ready");</script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,140 @@
+{
+  "kinds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "last": true,
+  "query_id": 42,
+  "rows": [
+    [
+      {
+        "Bool": true
+      },
+      {
+        "Int": -7
+      },
+      {
+        "BigInt": "9223372036854775807"
+      },
+      {
+        "Float": "1.5"
+      },
+      {
+        "Text": "12345.678"
+      },
+      {
+        "Text": "it's ünïcode"
+      },
+      {
+        "Text": "{\"a\":1}"
+      },
+      {
+        "Bytes": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "byteLength": 20
+      },
+      {
+        "Int": 42
+      }
+    ],
+    [
+      null,
+      null,
+      {
+        "BigInt": "-9007199254740993"
+      },
+      null,
+      null,
+      {
+        "Text": ""
+      },
+      null,
+      {
+        "Bytes": [
+          222,
+          173
+        ],
+        "byteLength": 2
+      },
+      {
+        "Text": "text"
+      }
+    ],
+    [
+      {
+        "Bool": false
+      },
+      {
+        "Int": 2147483647
+      },
+      null,
+      {
+        "Float": "NaN"
+      },
+      {
+        "Text": "-0.0005"
+      },
+      null,
+      {
+        "Text": "[]"
+      },
+      null,
+      null
+    ],
+    [
+      {
+        "Bool": true
+      },
+      {
+        "Int": 0
+      },
+      {
+        "Int": 3
+      },
+      {
+        "Float": "-Infinity"
+      },
+      {
+        "Text": "NaN"
+      },
+      {
+        "Text": "x"
+      },
+      {
+        "Text": "null"
+      },
+      {
+        "Bytes": [],
+        "byteLength": 0
+      },
+      {
+        "Float": "2.25"
+      }
+    ]
+  ],
+  "sent_at_ms": 1700000000000.0,
+  "seq": 1
+}

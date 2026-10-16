@@ -1,0 +1,162 @@
+/* Connect an agent: as a sheet (over the connection sheet; the shell is in
+   AgentsPage.css, narrower here), or inline under the Agents page's head. */
+.mc-sheet {
+  width: 560px;
+}
+
+/* Inline: the same card, in place on the page (a 1 px line, no shadow). */
+.mc-inline {
+  display: flex;
+  flex-direction: column;
+  max-width: 760px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  animation: pop 0.16s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-inline {
+    animation: none;
+  }
+}
+
+.mc-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 4px;
+}
+
+.mc-lead {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mc-term {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--hover);
+  color: var(--text);
+  font: 12px/1.6 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+.mc-term .p {
+  color: var(--dim);
+  user-select: none;
+}
+
+.mc-term .o,
+.mc-term .run {
+  color: var(--mute);
+}
+
+.mc-term .e {
+  color: var(--del);
+}
+
+.mc-facts {
+  margin: 0;
+  color: var(--mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mc-note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--mute);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.mc-note b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mc-note > span:last-child {
+  grid-column: 2;
+  overflow-wrap: anywhere;
+}
+
+.mc-note code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--text);
+  font: 11.5px var(--mono);
+}
+
+.mc-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+}
+
+.mc-dot[data-k="ok"] {
+  background: var(--ok);
+}
+
+.mc-dot[data-k="warn"] {
+  background: var(--warning);
+}
+
+.mc-dot[data-k="err"] {
+  background: var(--del);
+}
+
+.mc-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+/* Run, Done, Try again: the sheet's one primary action, ink (Paper keeps
+   the orange for the editor's Run). */
+.mc-run,
+.mc-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--inkfg);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.mc-run:hover:not([disabled]),
+.mc-done:hover {
+  border-color: var(--ink2);
+  background: var(--ink2);
+}
+
+.mc-run[disabled] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.mc-run kbd,
+.mc-done kbd {
+  font: 11px var(--mono);
+  opacity: 0.7;
+}

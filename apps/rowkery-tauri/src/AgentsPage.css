@@ -1,0 +1,1462 @@
+/* The Agents page, in Paper (2026-10-10): in place of the schema column,
+   editor and grid, straight on the sheet. A 42 px head ruled like the tab row, then two
+   columns with a 1 px rule between them that scroll on their own: access on
+   the left, the activity log on the right. */
+.agents-page {
+  position: absolute;
+  z-index: 2;
+  top: var(--titlebar-h);
+  bottom: 0;
+  /* Over the schema column too: it's hidden while the page is open. */
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  outline: none;
+  animation: rise 0.28s var(--ease-out);
+}
+
+.presence[data-closing] .agents-page {
+  animation: fade-out 110ms ease-in forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agents-page,
+  .presence[data-closing] .agents-page {
+    animation: none;
+  }
+}
+
+/* The head sits under the title bar, its buttons flush right. */
+.ag-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 42px;
+  padding: 0 16px;
+  flex-shrink: 0;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+.ag-title {
+  margin: 0;
+  color: var(--text);
+  font: 600 15px var(--font-display);
+}
+
+/* The head never overflows under the ⌘K button: the live line gives way
+   first (ellipsis), and goes when the page is narrow. */
+.ag-head .mcp-live {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agents-page[data-stacked] .ag-head .mcp-live {
+  display: none;
+}
+
+.ag-connect {
+  flex-shrink: 0;
+  padding: 14px 16px;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+.ag-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
+}
+
+.ag-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 14px;
+}
+
+/* The rule between the columns. */
+.ag-col-activity {
+  box-shadow: inset 1px 0 0 var(--line);
+}
+
+/* Stacked (AgentsPage measures its width): one column, the page scrolls as
+   a whole; nothing sticks or scrolls on its own inside it. */
+.agents-page[data-stacked] .ag-body {
+  display: block;
+  overflow: auto;
+}
+
+.agents-page[data-stacked] .ag-col {
+  display: block;
+  overflow: visible;
+}
+
+.agents-page[data-stacked] .ag-col-activity {
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.agents-page[data-stacked] .ag-col-head {
+  position: static;
+}
+
+.agents-page[data-stacked] .mcp-list {
+  overflow: visible;
+}
+
+.ag-col-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 44px;
+  padding: 8px 16px;
+  flex-shrink: 0;
+  background: var(--bg);
+}
+
+/* Column labels: sentence case, medium, muted (2026-10-14: no tracked caps). */
+.ag-h2,
+.ag-h3 {
+  display: flex;
+  align-items: center;
+  /* As tall as the bordered buttons, so both columns' labels sit level. */
+  min-height: 28px;
+  gap: 8px;
+  margin: 0;
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  white-space: nowrap;
+}
+
+.ag-count {
+  color: var(--text2);
+  font: 600 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-stop-all {
+  margin-left: auto;
+}
+
+/* ---------- Shared pieces: head controls, chips, buttons ---------- */
+
+.mcp-grow {
+  flex: 1 1 auto;
+}
+
+/* Jump to Access | Activity: the Data | Structure segment. */
+.mcp-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--hover);
+}
+
+.mcp-seg button {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.mcp-seg button:hover {
+  color: var(--text);
+}
+
+.mcp-seg button[aria-selected="true"] {
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  color: var(--text);
+}
+
+.mcp-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mute);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.mcp-live::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.mcp-live[data-on]::before {
+  background: var(--ok);
+}
+
+/* The esc keycap, as in the palette's field. */
+.mcp-esc {
+  height: 20px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--kbd);
+  color: var(--mute);
+  font: 10.5px var(--mono);
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.mcp-esc:hover {
+  color: var(--text);
+}
+
+.mcp-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Filters: bordered pills; the pressed one is ink on paper's wash. */
+.mcp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.mcp-chip:hover {
+  border-color: var(--dim);
+  color: var(--text);
+}
+
+.mcp-chip[aria-pressed="true"] {
+  border-color: var(--text2);
+  background: var(--hover);
+  color: var(--text);
+}
+
+.mcp-n {
+  color: var(--dim);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.mcp-chip[aria-pressed="true"] .mcp-n {
+  color: var(--text2);
+}
+
+.mcp-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.mcp-dot[data-env="prd"] {
+  background: var(--env-prd);
+}
+.mcp-dot[data-env="stg"] {
+  background: var(--env-stg);
+}
+.mcp-dot[data-env="dev"] {
+  background: var(--env-dev);
+}
+.mcp-dot[data-env="local"] {
+  background: var(--env-local);
+}
+
+/* The title bar's bordered button. */
+.mcp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text2);
+  font: 500 12px var(--sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.18s ease;
+}
+
+.mcp-btn:hover {
+  border-color: var(--dim);
+}
+
+/* The one primary action of a view: ink, white on dark. */
+.mcp-btn.ink {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--inkfg);
+}
+
+.mcp-btn.ink:hover {
+  border-color: var(--ink2);
+  background: var(--ink2);
+}
+
+/* A head action that isn't the view's own: no border until hovered. */
+.mcp-btn.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--mute);
+}
+
+.mcp-btn.quiet:hover {
+  border-color: var(--line2);
+  color: var(--text);
+}
+
+.mcp-btn kbd {
+  color: var(--dim);
+  font: 11px var(--mono);
+}
+
+.mcp-btn:focus-visible,
+.mcp-chip:focus-visible,
+.mcp-esc:focus-visible,
+.mcp-seg button:focus-visible,
+.mcp-mini-seg button:focus-visible,
+.mcp-cn[data-mcp-edit]:focus-visible,
+.ag-row:focus-visible,
+.ag-tick:focus-visible,
+.ag-db-name:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--acc) 60%, transparent);
+  outline-offset: 1px;
+}
+
+.mcp-muted {
+  color: var(--mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mcp-none {
+  margin: 0;
+  padding: 4px 16px 12px;
+}
+
+.mcp-empty {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 4px 16px 22px;
+  max-width: 52ch;
+}
+
+.mcp-empty p {
+  margin: 0;
+}
+
+.mcp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 10px 16px;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+/* ---------- Activity: the log ---------- */
+
+.mcp-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 12px;
+  outline: none;
+}
+
+/* The list is focused by the page itself; the picked row shows where ↑↓ act.
+   Only a keyboard arriving by ⇥ draws the ring. */
+.mcp-list:focus-visible .mcp-entry[aria-selected="true"] {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+}
+
+.mcp-row {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.mcp-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 6px 2px 0;
+  color: var(--dim);
+  font: 500 12px var(--sans);
+}
+
+.mcp-group em {
+  font: 500 12px var(--sans);
+  font-style: normal;
+  color: var(--mute);
+}
+
+/* One call: a card ruled in --line on the sheet. */
+.mcp-entry {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: default;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.mcp-entry:hover {
+  border-color: var(--line2);
+}
+
+.mcp-entry[aria-selected="true"] {
+  border-color: var(--line2);
+  background: var(--panel);
+}
+
+.mcp-time {
+  padding-top: 1px;
+  color: var(--dim);
+  font: 11.5px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.mcp-what {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-line1 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-tool {
+  color: var(--text);
+  font: 500 12px var(--mono);
+}
+
+.mcp-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.mcp-db {
+  color: var(--text2);
+}
+
+.mcp-sql {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 12px/18px var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  user-select: text;
+}
+
+.mcp-entry[aria-selected="true"] .mcp-sql {
+  -webkit-line-clamp: 12;
+}
+
+.mcp-meta {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  color: var(--mute);
+  font: 11.5px var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The verdict pill: ok green, refused / would refuse amber, failed red,
+   each on its own wash. */
+.mcp-verdict {
+  padding: 1px 7px;
+  border-radius: 4px;
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.04em;
+}
+
+.mcp-verdict[data-verdict="ok"] {
+  background: var(--okbg);
+  color: color-mix(in srgb, var(--ok) var(--tagmix), var(--text));
+}
+
+.mcp-verdict[data-verdict="refused"],
+.mcp-verdict[data-verdict="flagged"] {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+}
+
+.mcp-verdict[data-verdict="error"] {
+  background: var(--delbg);
+  color: color-mix(in srgb, var(--del) var(--tagmix), var(--text));
+}
+
+.mcp-reason {
+  grid-column: 2 / 4;
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+  font-size: 12px;
+}
+
+.mcp-entry[data-verdict="error"] .mcp-reason {
+  color: var(--del);
+}
+
+.mcp-acts {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+/* The picked call in full: Access, Request, Response side by side. */
+.mcp-detail {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.3fr);
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.mcp-box {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  user-select: text;
+}
+
+.mcp-box h5 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--dim);
+  font: 500 12px var(--sans);
+}
+
+.mcp-box h5 small {
+  margin-left: auto;
+  color: var(--dim);
+  font: 10.5px var(--mono);
+}
+
+.mcp-kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.mcp-kv dt {
+  color: var(--mute);
+}
+
+.mcp-kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.mcp-kv dd b {
+  font-weight: 500;
+}
+
+.mcp-json {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text2);
+  font: 11.5px/1.45 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcp-json .j-k {
+  color: var(--fn);
+}
+.mcp-json .j-s {
+  color: var(--str);
+}
+.mcp-json .j-n {
+  color: var(--num);
+}
+
+.mcp-cut {
+  color: var(--dim);
+}
+
+/* Narrow log: the three boxes stack. */
+.agents-page[data-stacked] .mcp-detail {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* ---------- Access: each connection's switch ---------- */
+
+.mcp-conns {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px;
+}
+
+.mcp-cn {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  transition: border-color 0.18s ease;
+}
+
+.mcp-cn[data-shared] {
+  border-color: var(--line2);
+  box-shadow: var(--shadow);
+}
+
+/* A shared card opens its Edit access. */
+.mcp-cn[data-mcp-edit] {
+  cursor: pointer;
+}
+
+.mcp-cn[data-mcp-edit]:not([data-editing]):hover {
+  border-color: var(--dim);
+}
+
+/* The card whose Edit access is open beside it. */
+.mcp-cn[data-editing] {
+  border-color: var(--acc);
+  box-shadow: inset 0 0 0 1px var(--acc);
+}
+
+.mcp-cn-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.mcp-cn-name {
+  overflow: hidden;
+  color: var(--mute);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-cn[data-shared] .mcp-cn-name {
+  color: var(--text);
+}
+
+.mcp-cn .nc-switch {
+  margin-left: auto;
+}
+
+.mcp-cn-sub {
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.mcp-cn-sub b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.mcp-cn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.mcp-cn-stats {
+  color: var(--mute);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mcp-cn-stats b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.mcp-cn-stats b[data-refused] {
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+}
+
+.mcp-mini-seg {
+  display: inline-flex;
+  justify-self: start;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--hover);
+}
+
+.mcp-mini-seg button {
+  height: 20px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.mcp-mini-seg button:hover {
+  color: var(--text);
+}
+
+.mcp-mini-seg button[aria-checked="true"] {
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  color: var(--text);
+}
+
+/* The env word tag, as the schema column's head prints it (.env-tag). */
+.mcp-tag {
+  padding: 0 6px;
+  border-radius: 4px;
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.04em;
+  line-height: 18px;
+}
+
+.mcp-tag[data-env="prd"] {
+  background: color-mix(in srgb, var(--env-prd) 16%, transparent);
+  color: color-mix(in srgb, var(--env-prd) var(--tagmix), var(--text));
+}
+.mcp-tag[data-env="stg"] {
+  background: color-mix(in srgb, var(--env-stg) 14%, transparent);
+  color: color-mix(in srgb, var(--env-stg) var(--tagmix), var(--text));
+}
+.mcp-tag[data-env="dev"] {
+  background: color-mix(in srgb, var(--env-dev) 14%, transparent);
+  color: color-mix(in srgb, var(--env-dev) var(--tagmix), var(--text));
+}
+.mcp-tag[data-env="local"] {
+  background: color-mix(in srgb, var(--env-local) 14%, transparent);
+  color: color-mix(in srgb, var(--env-local) var(--tagmix), var(--text));
+}
+
+/* ---------- The window tabs and the connection sheet ---------- */
+
+/* A window tab's MCP tag: an agent read this connection in the last minute.
+   A click opens the Agents page. */
+.win-mcp {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--okbg);
+  color: color-mix(in srgb, var(--ok) var(--tagmix), var(--text));
+  font: 700 9px var(--sans);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.win-mcp::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+/* The connection sheet's Allow MCP stats. */
+.nc-mcp-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 0 14px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nc-mcp-stats b {
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.nc-mcp-stats .mcp-btn {
+  height: 24px;
+}
+
+.nc-mcp-acts {
+  display: flex;
+  flex-basis: 100%;
+  gap: 6px;
+}
+
+/* ---------- Connect an agent as a sheet (over the connection sheet) ---------- */
+
+/* A Paper sheet (App.css, Paper sheets). */
+.mcp-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 56px 16px 16px;
+}
+
+.mcp-sheet {
+  width: 660px;
+  max-width: 100%;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mcp-title {
+  flex-shrink: 0;
+}
+
+/* ---------- Edit access: databases, then tables, in the log's place ---------- */
+
+.ag-editor {
+  padding-bottom: 0;
+}
+
+.ag-ed-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font: 600 12.5px var(--sans);
+}
+
+.ag-ed-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  gap: 0 16px;
+  padding: 0 16px;
+}
+
+.ag-ed-dbs,
+.ag-ed-tables {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  min-width: 0;
+  padding-bottom: 12px;
+}
+
+.ag-ed-thead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.agents-page[data-stacked] .ag-ed-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ag-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 12.5px var(--sans);
+  outline: none;
+}
+
+.ag-filter input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.ag-filter::placeholder,
+.ag-filter input::placeholder {
+  color: var(--dim);
+}
+
+.ag-filter:focus-visible,
+.ag-filter:focus-within {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+}
+
+.ag-filter kbd {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--kbd);
+  color: var(--dim);
+  font: 11px var(--mono);
+  line-height: 18px;
+}
+
+.ag-list {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ag-error {
+  margin: 0;
+  color: var(--del);
+}
+
+/* One row of a list: a tick box, the name, a count. The whole row ticks. */
+.ag-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px 10px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: 12.5px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-row:hover {
+  background: var(--hover);
+}
+
+.ag-row[data-off] {
+  color: var(--mute);
+}
+
+/* All databases / All tables: the list's head, ruled off. */
+.ag-row-all {
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.ag-schema {
+  height: 26px;
+  margin-top: 6px;
+  color: var(--dim);
+  font: 500 12px var(--sans);
+}
+
+.ag-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-mono {
+  font: 12px var(--mono);
+}
+
+.ag-dim {
+  color: var(--dim);
+}
+
+.ag-row-n {
+  color: var(--dim);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ag-big {
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+  font: 11px var(--sans);
+}
+
+/* A database: its tick shares it; its name lists its tables. */
+.ag-db {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  height: 30px;
+  border-radius: 6px;
+}
+
+.ag-db:hover,
+.ag-db[data-picked] {
+  background: var(--hover);
+}
+
+.ag-tick {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ag-db-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 12.5px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-db-name .ag-row-name {
+  flex: 1 1 auto;
+}
+
+.ag-db[data-picked] .ag-db-name {
+  font-weight: 500;
+}
+
+/* The tick box: a control (a --line2 border); orange when on. */
+.ag-cb {
+  position: relative;
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line2);
+  border-radius: 3px;
+  background: var(--bg);
+}
+
+.ag-cb[data-on] {
+  border-color: var(--acc);
+  background: var(--acc);
+}
+
+/* The mark is drawn centred in the box (a mask, so it takes a token). */
+.ag-cb[data-on]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--tick);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.6 6.2 5 8.5l4.4-5' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.6 6.2 5 8.5l4.4-5' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 12px 12px no-repeat;
+}
+
+.ag-cb[data-mixed] {
+  border-color: var(--acc);
+}
+
+.ag-cb[data-mixed]::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 5px;
+  width: 6px;
+  height: 2px;
+  background: var(--acc);
+}
+
+/* ---------- What can the agent do: a sheet over the page ---------- */
+
+.ag-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: start center;
+  padding: 20px 16px;
+  overflow: auto;
+  background: var(--scrim);
+}
+
+.ag-sheet {
+  display: grid;
+  gap: 12px;
+  width: 860px;
+  max-width: 100%;
+  padding: 14px 22px 16px;
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: var(--pop);
+}
+
+.ag-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ag-sheet-head h2 {
+  margin: 0;
+  color: var(--text);
+  font: 600 17px var(--font-display);
+}
+
+.ag-sheet-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ag-flow {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: var(--sans);
+}
+
+.ag-node rect {
+  fill: var(--bg);
+  stroke: var(--line2);
+}
+
+.ag-node-main rect {
+  fill: var(--panel);
+  stroke: var(--text2);
+}
+
+.ag-node-you rect {
+  fill: var(--accbg);
+  stroke: var(--acc);
+}
+
+.ag-t1 {
+  fill: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ag-t2,
+.ag-lbl {
+  fill: var(--mute);
+  font-size: 11px;
+}
+
+.ag-arr,
+.ag-flow-head {
+  fill: none;
+  stroke: var(--dim);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ag-brk {
+  fill: none;
+  stroke: var(--line2);
+  stroke-width: 1;
+}
+
+.ag-two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.ag-panel {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.ag-panel.ag-never {
+  border-color: color-mix(in srgb, var(--del) 25%, var(--line));
+  background: var(--delbg);
+}
+
+.ag-panel h3 {
+  margin: 0;
+  color: var(--dim);
+  font: 500 12px var(--sans);
+}
+
+.ag-panel.ag-never h3 {
+  color: var(--del);
+}
+
+.ag-panel ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text2);
+  font-size: 12.5px;
+}
+
+.ag-panel li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.ag-panel li b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ag-ic {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  color: var(--ok);
+}
+
+.ag-never .ag-ic {
+  color: var(--del);
+}
+
+.ag-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 20px;
+  margin-top: 6px;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.ag-tools div {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 10px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--rowline);
+}
+
+.ag-tools code {
+  color: var(--text);
+  font: 12px var(--mono);
+}
+
+.agents-page[data-stacked] .ag-two,
+.agents-page[data-stacked] .ag-tools {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ag-row:disabled,
+.ag-tick:disabled {
+  cursor: default;
+}
+
+.ag-panel-note {
+  margin: 2px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--del) 20%, var(--line));
+  color: var(--ink);
+  font: 400 12px/1.45 var(--sans);
+}
+
+/* Sensitive columns: a table's columns open beside the list. */
+.ag-ed-body[data-columns] {
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) minmax(240px, 300px);
+}
+
+.agents-page[data-stacked] .ag-ed-body[data-columns] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ag-ed-cols {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  min-width: 0;
+  padding: 0 0 12px 16px;
+  border-left: 1px solid var(--line);
+}
+
+.agents-page[data-stacked] .ag-ed-cols {
+  padding-left: 0;
+  border-left: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.ag-cols-table {
+  color: var(--text);
+}
+
+/* A table row: the tick row, and its columns button at the end. */
+.ag-trow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.ag-trow:hover,
+.ag-trow[data-picked] {
+  background: var(--hover);
+}
+
+.ag-trow .ag-row:hover {
+  background: transparent;
+}
+
+.ag-cols-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  min-width: 28px;
+  margin-right: 2px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  font: 11px var(--mono);
+  cursor: pointer;
+}
+
+.ag-cols-btn:hover,
+.ag-cols-btn[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.ag-cols-btn[data-masked] {
+  color: var(--acc);
+}
+
+.ag-cols-btn .ag-ic,
+.ag-eye .ag-ic {
+  width: 14px;
+  height: 14px;
+  color: inherit;
+}
+
+.ag-x {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.ag-x:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.ag-mask-suggested {
+  align-self: flex-start;
+}
+
+/* A column row: the whole row masks it; the eye says which way it is. */
+.ag-col {
+  grid-template-columns: minmax(0, 1fr) auto auto 26px;
+}
+
+.ag-eye {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--faint);
+}
+
+.ag-col[data-masked] .ag-eye {
+  color: var(--acc);
+  background: var(--accbg);
+}
+
+.ag-personal {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+  font: 11px var(--sans);
+  white-space: nowrap;
+}

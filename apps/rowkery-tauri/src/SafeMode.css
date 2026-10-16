@@ -1,0 +1,205 @@
+/* Safe mode: the Confirm writes strip in the results card, the Read-only
+   refusal, and the marks on the window tab and connection card. */
+
+/* Paper (2026-10-10): a full-width accent-wash strip on a 1 px rule. */
+.safe-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accbg);
+  animation: safe-in 160ms var(--ease-out);
+}
+
+.safe-bar.danger {
+  background: var(--delbg);
+}
+
+@keyframes safe-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.safe-bar-icon {
+  display: flex;
+  color: var(--acc);
+}
+
+.safe-bar.danger .safe-bar-icon {
+  color: var(--del);
+}
+
+.safe-bar-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.safe-bar-text > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.safe-bar-text b {
+  color: var(--text);
+  font: 600 13px var(--sans);
+}
+
+.safe-bar-text .safe-bar-warn {
+  color: var(--del);
+}
+
+.safe-btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 500 12.5px var(--sans);
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.safe-btn:hover {
+  border-color: var(--dim);
+}
+
+.safe-btn:focus-visible {
+  outline: 1.5px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.safe-btn kbd {
+  font: 10.5px var(--mono);
+  color: var(--dim);
+}
+
+.safe-btn.go {
+  border-color: transparent;
+  background: var(--acc);
+  color: var(--onfill);
+}
+
+.safe-btn.danger {
+  border-color: transparent;
+  background: var(--del);
+  color: var(--onfill);
+}
+
+.safe-btn.go kbd,
+.safe-btn.danger kbd {
+  color: var(--onfill);
+  opacity: 0.7;
+}
+
+.safe-btn.go:hover {
+  background: var(--acc2);
+}
+
+.safe-btn.danger:hover {
+  filter: brightness(0.92);
+}
+
+/* The last results stay in view, faded, while a write waits. */
+.results-card.held > :not(.card-toolbar):not(.safe-bar) {
+  opacity: 0.28;
+  filter: saturate(0.4);
+  pointer-events: none;
+}
+
+.safe-refuse {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+
+.safe-refuse-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text-strong);
+}
+
+.safe-refuse b {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.safe-refuse p {
+  max-width: 380px;
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.safe-refuse code {
+  color: var(--text-strong);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .safe-bar {
+    animation: none;
+  }
+}
+
+/* Held edits: the statements, as they will run, in a 4-line scrolling block. */
+.safe-bar-edits {
+  align-items: flex-start;
+}
+
+.safe-bar-text .safe-bar-sql {
+  max-height: calc(4 * 17px + 12px);
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+  font: 11.5px/17px var(--mono);
+  white-space: pre;
+}
+
+/* Commit is ink: Run stays the only orange. */
+.safe-btn.commit {
+  border-color: transparent;
+  background: var(--ink);
+  color: var(--inkfg);
+  font-weight: 600;
+}
+
+.safe-btn.commit:hover {
+  background: var(--ink2);
+}
+
+.safe-btn.commit kbd {
+  color: var(--inkfg);
+  opacity: 0.6;
+}

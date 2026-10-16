@@ -1,0 +1,23 @@
+[package]
+name = "rowkery-mcp"
+version.workspace = true
+edition = "2021"
+publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+rowkery-core = { path = "../rowkery-core" }
+# `hooks`: the authorizer that lists the tables a SQLite statement reads.
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
+rmcp = { version = "3", default-features = false, features = ["server", "transport-io"] }
+# The keyed hash behind masked values (`mask::stand_in`).
+hmac = "0.12"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "time", "sync"] }
+
+[features]
+postgres-integration = []

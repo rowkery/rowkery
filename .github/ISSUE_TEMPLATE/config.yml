@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/rowkery/rowkery/discussions
+    about: Ask a question or talk through an idea in GitHub Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/rowkery/rowkery/security/advisories/new
+    about: Report it privately, as SECURITY.md describes, not in a public issue.

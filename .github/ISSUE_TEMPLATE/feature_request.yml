@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something Rowkery should do.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. For a question or an idea you'd like to talk through first, [Discussions](https://github.com/rowkery/rowkery/discussions) may be a better fit.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task or problem, in your own words, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help
+      description: How you picture it working. Rough is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: Workarounds, or how other tools handle it.
+  - type: input
+    id: database
+    attributes:
+      label: Database
+      description: If it's about one engine, which one.
+      placeholder: "Postgres"

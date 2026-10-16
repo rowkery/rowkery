@@ -1,0 +1,42 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "",
+        "width": 1280,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 600,
+        "visible": false,
+        "decorations": true,
+        "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 24
+        }
+      }
+    ],
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "macOS": {
+      "dmg": {
+        "background": "../brand/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    }
+  }
+}

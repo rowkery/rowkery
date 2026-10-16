@@ -1,0 +1,23 @@
+.DS_Store
+*.log
+.idea/
+.vscode/
+target/
+node_modules/
+.wrangler/
+
+# Secrets
+.env*
+!.env.example
+*.key
+*.pem
+
+# Local tool output
+.claude/
+.impeccable/
+
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+apps/web/out/

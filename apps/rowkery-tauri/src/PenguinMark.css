@@ -1,0 +1,28 @@
+/* The penguin (PenguinMark.tsx). Posture: the mark is never redrawn, only posed. */
+.penguin-box {
+  display: inline-block;
+  line-height: 0;
+}
+
+.penguin {
+  display: block;
+  overflow: visible;
+  color: inherit;
+}
+
+/* The bottom centre of the mark: the feet it stands and leans on. */
+.penguin-body {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+
+.penguin[data-pose="ready"] .penguin-body {
+  transform: none;
+}
+
+/* Mounts already tilted; no transition in or out. */
+.penguin[data-pose="tilted"] .penguin-body {
+  transform: rotate(-10deg);
+}
+
+/* The belly and eye are holes in the one path, never a separate colour. */

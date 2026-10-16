@@ -1,0 +1,176 @@
+/* ⌘E's plan in the results card: the hint, then one row per step. Amber
+   marks the slowest step (it is not something you asked for, so not orange);
+   red tags a row guess 10× off. */
+
+.plan {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-size: 12px;
+}
+
+.plan-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 12px 14px 6px;
+  padding: 11px 14px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--warning) 13%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.plan-hint-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--warning);
+}
+
+.plan-hint-text {
+  flex: 1;
+  min-width: 0;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.plan-hint-text code {
+  display: block;
+  margin-top: 3px;
+  font: 12px var(--mono);
+  color: var(--text2);
+  white-space: pre-wrap;
+}
+
+.plan-steps {
+  padding: 6px 0 10px;
+  font-family: var(--mono);
+}
+
+.plan-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(80px, 150px) 70px minmax(150px, auto);
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--rowline);
+  background: none;
+  color: var(--text2);
+  font: inherit;
+  text-align: left;
+}
+
+.plan-head {
+  min-height: 24px;
+  border-bottom-color: var(--line);
+  color: var(--mute);
+  font: 11.5px var(--sans);
+}
+
+.plan-step {
+  cursor: pointer;
+}
+
+.plan-step:hover {
+  background: var(--hover);
+}
+
+.plan-step:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: -2px;
+}
+
+.plan-step[data-slowest],
+.plan-step[data-slowest]:hover {
+  background: color-mix(in srgb, var(--warning) 13%, transparent);
+}
+
+.plan-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-indent {
+  flex: none;
+  align-self: stretch;
+  width: 13px;
+  margin-left: 6px;
+  border-left: 1px solid var(--line2);
+}
+
+.plan-kind {
+  color: var(--text);
+}
+
+.plan-on {
+  margin-left: 7px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--rowline);
+  overflow: hidden;
+}
+
+.plan-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--faint);
+}
+
+.plan-step[data-slowest] .plan-bar i {
+  background: var(--warning);
+}
+
+.plan-row .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.plan-loops {
+  color: var(--dim);
+}
+
+.plan-miss {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--del) 10%, transparent);
+  color: var(--del);
+  font: 500 11px var(--sans);
+}
+
+.plan-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--rowline);
+  background: var(--panel);
+  color: var(--text2);
+  font-size: 11.5px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.plan-details b {
+  margin-right: 6px;
+  color: var(--mute);
+  font: 500 11.5px var(--sans);
+}

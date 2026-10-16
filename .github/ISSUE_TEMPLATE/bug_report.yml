@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in Rowkery doesn't work the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The easiest route is **Help › Report an Issue…** inside the app, but this form works too.
+
+        Found a security problem? Please don't file it here; see [SECURITY.md](https://github.com/rowkery/rowkery/blob/main/SECURITY.md).
+  - type: input
+    id: rowkery-version
+    attributes:
+      label: Rowkery version
+      description: Rowkery › About Rowkery
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Apple menu › About This Mac. On Linux or Windows, name the system and its version.
+      placeholder: "macOS 15.4, Apple Silicon"
+    validations:
+      required: true
+  - type: input
+    id: database
+    attributes:
+      label: Database and version
+      description: The engine you were connected to, and its version.
+      placeholder: "Postgres 16.4"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, step by step. Leave out passwords and private data.
+      placeholder: |
+        1. Open a connection to …
+        2. Run …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Error messages and screenshots help.
+    validations:
+      required: true

@@ -1,0 +1,20 @@
+[package]
+name = "rowkery-bridge"
+version.workspace = true
+edition = "2021"
+publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+futures = "0.3"
+rowkery-core = { path = "../rowkery-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+tempfile = "3"

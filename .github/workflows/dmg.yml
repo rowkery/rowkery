@@ -1,0 +1,29 @@
+name: Create DMG
+
+# Builds an unsigned universal DMG (Apple Silicon + Intel) with `make dmg universal`
+# and uploads it as the run's artifact. Manual only, like CI: Actions > Create DMG > Run workflow.
+# The repo secret VITE_ROWKERY_REPORT_URL (the report relay's /report URL, see
+# apps/relay/README.md) is baked in so Help > Report an Issue can send.
+on:
+  workflow_dispatch:
+
+jobs:
+  dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the version; `make dmg universal` adds both Mac targets.
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: make dmg universal
+        env:
+          VITE_ROWKERY_REPORT_URL: ${{ secrets.VITE_ROWKERY_REPORT_URL }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rowkery-${{ github.sha }}
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          compression-level: 0

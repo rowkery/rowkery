@@ -1,0 +1,72 @@
+name: Latency (WebView2)
+
+# The latency proof on Windows: builds the release binary with the latency
+# proof steps, runs scripts/latency-proof.sh under WebView2 against a
+# Postgres on the runner (port 54329, user/db/password rowkery, seeded with
+# scripts/test-seed.sql) and uploads the ledger and the baseline.
+#
+# Gating, once per release: the run fails on any miss of the remote budgets
+# in scripts/budgets.json (LATENCY_BUDGETS=remote, LATENCY_FAIL_ON_MISS=1),
+# not only on a regression. A remote budget of null means 1 RTT + 10 ms; the
+# RTT is the `rtt_ms` input (0 for the runner's own Postgres).
+#
+# Manual only, like ci.yml and dmg.yml: Actions > Latency (WebView2) > Run
+# workflow. Never add push or pull_request triggers (AGENTS.md).
+on:
+  workflow_dispatch:
+    inputs:
+      rtt_ms:
+        description: "Round trip to the database in ms (remote budgets of null are 1 RTT + 10 ms)"
+        required: false
+        default: "0"
+      record_only:
+        description: "Record the ledger without failing on a miss (a first Windows run)"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  latency:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      LATENCY_BUDGETS: remote
+      LATENCY_RTT_MS: ${{ inputs.rtt_ms }}
+      LATENCY_FAIL_ON_MISS: ${{ inputs.record_only && '0' || '1' }}
+      LATENCY_ENFORCE: ${{ inputs.record_only && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the version.
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Postgres on 54329
+        uses: ikalnytskyi/action-setup-postgres@v6
+        with:
+          username: rowkery
+          password: rowkery
+          database: rowkery
+          port: 54329
+      - name: Postgres tools on PATH, output folder
+        run: |
+          if [ -n "${PGBIN:-}" ]; then echo "$PGBIN" >> "$GITHUB_PATH"; fi
+          echo "ROWKERY_LATENCY_OUT=$(cygpath -u "$RUNNER_TEMP")/latency" >> "$GITHUB_ENV"
+      - name: Install app dependencies
+        working-directory: apps/rowkery-tauri
+        run: npm ci
+      - name: Latency proof
+        env:
+          PGPASSWORD: rowkery
+        run: scripts/latency-proof.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: latency-webview2-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/latency
+            scripts/baselines/*-win32-*.json
+          if-no-files-found: warn

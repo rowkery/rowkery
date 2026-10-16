@@ -1,0 +1,387 @@
+//! The `sessions` tool: what's running on a shared Postgres database, who
+//! waits on whom, for an agent asked "why is this slow?". Read-only; it
+//! can't stop anything.
+//!
+//! Query text is shown with every literal replaced by `?` and comments
+//! dropped, so values typed into other people's queries never reach the
+//! agent. A query naming a table the user hasn't shared is blanked. Reading
+//! `pg_stat_activity` through `query` is refused for the same reason
+//! ([`ACTIVITY_REFUSAL`]).
+
+use std::collections::HashSet;
+
+use rowkery_core::db::postgres::ServerSession;
+use rowkery_core::db::SchemaCatalog;
+use serde_json::{json, Value as Json};
+
+use crate::access::Tables;
+
+/// More than anyone reads; the busiest come first.
+const MAX_SESSIONS: usize = 100;
+
+pub const HIDDEN_QUERY: &str = "(reads a table not shared with agents)";
+
+/// Functions that return other sessions' query text as typed.
+const ACTIVITY_FUNCTIONS: &[&str] = &[
+    "pg_stat_get_activity",
+    "pg_stat_get_backend_activity",
+    "pg_stat_statements",
+];
+
+pub fn reads_activity(called: &[String]) -> bool {
+    called
+        .iter()
+        .any(|n| ACTIVITY_FUNCTIONS.contains(&n.as_str()))
+}
+
+pub const ACTIVITY_REFUSAL: &str = "Refused: pg_stat_activity and pg_stat_statements show other sessions' queries with the values typed into them. Use the sessions tool, which shows them with values replaced by ?.";
+
+/// The query with string, number and dollar-quoted literals as `?`, comments
+/// dropped and whitespace folded; and the names it mentions (bare words
+/// folded to lower case, quoted ones as written).
+pub fn redact(sql: &str) -> (String, Vec<String>) {
+    let b = sql.as_bytes();
+    let n = b.len();
+    let mut out = String::with_capacity(n);
+    let mut names = Vec::new();
+    let mut i = 0;
+    let space = |out: &mut String| {
+        if !out.is_empty() && !out.ends_with(' ') {
+            out.push(' ');
+        }
+    };
+    while i < n {
+        let c = b[i];
+        match c {
+            b'\'' => {
+                i += 1;
+                while i < n {
+                    if b[i] == b'\'' {
+                        if b.get(i + 1) == Some(&b'\'') {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    // E'…' strings escape quotes with a backslash.
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(n);
+                out.push('?');
+            }
+            b'"' => {
+                let start = i + 1;
+                i = start;
+                while i < n && b[i] != b'"' {
+                    i += 1;
+                }
+                let name = &sql[start..i.min(n)];
+                names.push(name.to_string());
+                out.push('"');
+                out.push_str(name);
+                out.push('"');
+                i = (i + 1).min(n);
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < n && b[i] != b'\n' {
+                    i += 1;
+                }
+                space(&mut out);
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < n && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(n);
+                space(&mut out);
+            }
+            b'$' if b.get(i + 1).is_some_and(u8::is_ascii_digit) => {
+                // `$1`: a parameter, not a value.
+                let start = i;
+                i += 1;
+                while i < n && b[i].is_ascii_digit() {
+                    i += 1;
+                }
+                out.push_str(&sql[start..i]);
+            }
+            b'$' => {
+                // `$tag$ … $tag$`; an unclosed one runs to the end.
+                let tag_end = sql[i + 1..].find('$').map(|p| i + 1 + p).filter(|&e| {
+                    sql[i + 1..e]
+                        .bytes()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+                });
+                match tag_end {
+                    Some(e) => {
+                        let tag = &sql[i..=e];
+                        i = sql[e + 1..].find(tag).map_or(n, |p| e + 1 + p + tag.len());
+                        out.push('?');
+                    }
+                    None => {
+                        out.push('$');
+                        i += 1;
+                    }
+                }
+            }
+            _ if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
+                let start = i;
+                while i < n
+                    && (b[i].is_ascii_alphanumeric()
+                        || b[i] == b'_'
+                        || b[i] == b'$'
+                        || b[i] >= 0x80)
+                {
+                    i += 1;
+                }
+                let word = &sql[start..i];
+                // E'…', B'…', X'…', N'…': the prefix goes with the literal.
+                let prefix = word.len() == 1
+                    && matches!(word.as_bytes()[0] | 0x20, b'e' | b'b' | b'x' | b'n')
+                    && b.get(i) == Some(&b'\'');
+                if !prefix {
+                    names.push(word.to_lowercase());
+                    out.push_str(word);
+                }
+            }
+            _ if c.is_ascii_digit()
+                || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) =>
+            {
+                while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || b[i] == b'_') {
+                    // 1e-5
+                    if (b[i] | 0x20) == b'e' && matches!(b.get(i + 1), Some(b'-' | b'+')) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                out.push('?');
+            }
+            _ if c.is_ascii_whitespace() => {
+                space(&mut out);
+                i += 1;
+            }
+            _ => {
+                let ch = sql[i..].chars().next().unwrap_or(' ');
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    (out.trim().to_string(), names)
+}
+
+/// Names of the tables agents may not see (the bare table name, so a query
+/// naming it with or without its schema is caught).
+pub fn hidden_names(catalog: &SchemaCatalog, rule: &Tables) -> HashSet<String> {
+    if !rule.restricts() {
+        return HashSet::new();
+    }
+    catalog
+        .databases
+        .iter()
+        .flat_map(|db| db.schemas.iter())
+        .flat_map(|s| s.tables.iter().map(move |t| (s.name.as_str(), t)))
+        .filter(|(s, t)| !rule.allows_node(catalog, s, t))
+        .map(|(_, t)| t.name.clone())
+        .collect()
+}
+
+/// The query as an agent sees it.
+pub fn shown_query(sql: &str, hidden: &HashSet<String>) -> String {
+    let (text, names) = redact(sql);
+    if names
+        .iter()
+        .any(|name| hidden.iter().any(|h| h.eq_ignore_ascii_case(name)))
+    {
+        HIDDEN_QUERY.into()
+    } else {
+        text
+    }
+}
+
+/// How long it's been at what it's doing (the query while active, the
+/// transaction while idle in one, else the state).
+fn age(s: &ServerSession) -> Option<f64> {
+    let state = s.state.as_deref().unwrap_or("");
+    if state == "active" {
+        s.query_secs
+    } else if state.starts_with("idle in transaction") {
+        s.xact_secs
+    } else {
+        s.state_secs
+    }
+}
+
+fn secs(v: Option<f64>) -> Json {
+    v.map_or(Json::Null, |s| json!((s.max(0.0) * 10.0).round() / 10.0))
+}
+
+/// The tool's answer: sessions that need looking at first (blocking others,
+/// then waiting on a lock, then the longest at it), idle ones left out
+/// unless `include_idle`.
+pub fn shape(sessions: &[ServerSession], hidden: &HashSet<String>, include_idle: bool) -> Json {
+    let blocking = |pid: i32| {
+        sessions
+            .iter()
+            .filter(|s| s.blocked_by.contains(&pid))
+            .count()
+    };
+    let idle = |s: &ServerSession| s.state.as_deref() == Some("idle");
+    let mut shown: Vec<&ServerSession> = sessions
+        .iter()
+        .filter(|s| include_idle || !idle(s))
+        .collect();
+    let rank = |s: &ServerSession| {
+        if blocking(s.pid) > 0 {
+            0
+        } else if !s.blocked_by.is_empty() {
+            1
+        } else {
+            2
+        }
+    };
+    shown.sort_by(|a, b| {
+        rank(a).cmp(&rank(b)).then(
+            age(b)
+                .unwrap_or(-1.0)
+                .total_cmp(&age(a).unwrap_or(-1.0))
+                .then(a.pid.cmp(&b.pid)),
+        )
+    });
+    let more = shown.len().saturating_sub(MAX_SESSIONS);
+    let rows: Vec<Json> = shown
+        .iter()
+        .take(MAX_SESSIONS)
+        .map(|s| {
+            let application = match &s.rowkery_tag {
+                Some(tag) => s.application[..s.application.len() - tag.len() - 1].to_string(),
+                None => s.application.clone(),
+            };
+            let mut row = json!({
+                "pid": s.pid,
+                "user": s.user,
+                "application": application,
+                "state": s.state,
+                "for_secs": secs(age(s)),
+                "transaction_secs": secs(s.xact_secs),
+            });
+            if let Some(wait) = &s.wait {
+                row["waiting_on"] = json!(wait);
+            }
+            if !s.blocked_by.is_empty() {
+                row["blocked_by"] = json!(s.blocked_by);
+            }
+            let n = blocking(s.pid);
+            if n > 0 {
+                row["blocking"] = json!(n);
+            }
+            row["query"] = match &s.query {
+                Some(q) if !q.trim().is_empty() => json!(shown_query(q, hidden)),
+                Some(_) => Json::Null,
+                None => json!("(not visible to this login)"),
+            };
+            row
+        })
+        .collect();
+    let mut out = json!({ "sessions": rows });
+    let idle_left_out = if include_idle {
+        0
+    } else {
+        sessions.iter().filter(|s| idle(s)).count()
+    };
+    if idle_left_out > 0 {
+        out["idle_not_shown"] = json!(idle_left_out);
+    }
+    if more > 0 {
+        out["more"] = json!(more);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hidden(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn literals_become_question_marks() {
+        let (text, _) = redact(
+            "SELECT * FROM users WHERE email = 'a@b.com' AND id IN (1, 2.5, 1e-5)\n  AND note = E'it\\'s' -- secret 42\n  AND x = $1 AND body = $q$hello$q$ /* 'x' */ LIMIT 10",
+        );
+        assert_eq!(
+            text,
+            "SELECT * FROM users WHERE email = ? AND id IN (?, ?, ?) AND note = ? AND x = $1 AND body = ? LIMIT ?"
+        );
+        let (text, _) = redact("select 'it''s', B'101', x'ff', col2 from t9");
+        assert_eq!(text, "select ?, ?, ?, col2 from t9");
+        // pg_stat_activity cuts long queries mid-literal.
+        let (text, _) = redact("insert into t values ('half a sec");
+        assert_eq!(text, "insert into t values (?");
+    }
+
+    #[test]
+    fn a_query_naming_a_hidden_table_is_blanked() {
+        let h = hidden(&["payroll"]);
+        for sql in [
+            "select * from payroll",
+            "SELECT * FROM public.PAYROLL",
+            "select * from \"payroll\" p",
+            "update payroll set salary = 1",
+        ] {
+            assert_eq!(shown_query(sql, &h), HIDDEN_QUERY, "{sql}");
+        }
+        assert_eq!(
+            shown_query("select * from orders where note = 'payroll'", &h),
+            "select * from orders where note = ?"
+        );
+    }
+
+    fn session(pid: i32, state: &str, secs: f64, blocked_by: Vec<i32>) -> ServerSession {
+        ServerSession {
+            pid,
+            user: Some("app".into()),
+            application: "psql".into(),
+            client: Some("10.0.0.5".into()),
+            state: Some(state.into()),
+            wait: None,
+            xact_secs: Some(secs),
+            query_secs: Some(secs),
+            state_secs: Some(secs),
+            query: Some("select 1".into()),
+            blocked_by,
+            can_stop: true,
+            rowkery_tag: None,
+        }
+    }
+
+    #[test]
+    fn blockers_come_first_and_idle_is_left_out() {
+        let rows = vec![
+            session(1, "active", 50.0, vec![]),
+            session(2, "idle in transaction", 3.0, vec![]),
+            session(3, "active", 9.0, vec![2]),
+            session(4, "idle", 900.0, vec![]),
+        ];
+        let out = shape(&rows, &HashSet::new(), false);
+        let pids: Vec<i64> = out["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["pid"].as_i64().unwrap())
+            .collect();
+        assert_eq!(pids, vec![2, 3, 1]);
+        assert_eq!(out["sessions"][0]["blocking"], 1);
+        assert_eq!(out["sessions"][1]["blocked_by"], json!([2]));
+        assert_eq!(out["idle_not_shown"], 1);
+        // The client's address isn't passed on.
+        assert!(!out.to_string().contains("10.0.0.5"));
+        let all = shape(&rows, &HashSet::new(), true);
+        assert_eq!(all["sessions"].as_array().unwrap().len(), 4);
+    }
+}

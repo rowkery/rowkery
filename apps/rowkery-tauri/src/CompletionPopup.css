@@ -1,0 +1,116 @@
+/* Editor completion list: a Paper card (paper, a 1 px line, a soft drop). */
+.ac-popup {
+  position: fixed;
+  z-index: 60;
+  width: 420px;
+  max-width: calc(100vw - 16px);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--pop);
+  transform-origin: 24px 0;
+  animation: pop-in 110ms var(--ease-out);
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+.ac-popup.above {
+  transform-origin: 24px 100%;
+}
+
+.ac-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+.ac-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.ac-row.active {
+  background: var(--row-selected);
+  color: var(--text-strong);
+}
+
+.ac-icon {
+  flex-shrink: 0;
+  width: 14px;
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+}
+
+.ac-table .ac-icon,
+.ac-cte .ac-icon,
+.ac-alias .ac-icon {
+  color: var(--blue);
+}
+
+.ac-view .ac-icon,
+.ac-matview .ac-icon {
+  color: var(--kw);
+}
+
+.ac-function .ac-icon {
+  color: var(--acc);
+}
+
+.ac-icon .ac-pk {
+  color: var(--accent-soft);
+}
+
+.ac-icon .ac-fk {
+  color: var(--blue);
+}
+
+.ac-glyph {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.ac-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ac-label mark {
+  background: transparent;
+  color: var(--accent-soft);
+}
+
+.ac-keyword .ac-label {
+  color: var(--text-muted);
+}
+
+.ac-row.active.ac-keyword .ac-label {
+  color: var(--text-strong);
+}
+
+.ac-detail {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-popup {
+    animation: none;
+  }
+}

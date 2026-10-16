@@ -1,0 +1,394 @@
+//! SSH local port-forward via `russh`.
+
+use std::collections::HashMap;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use russh::client::{self, Config, Handler};
+use russh::keys::decode_secret_key;
+use russh::Channel;
+use russh_keys::key::PublicKey;
+use russh_keys::PublicKeyBase64;
+use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
+use crate::config::config_dir;
+use crate::connections::{expand_home, SshAuthMethod, SshConfig};
+use crate::secrets::{get_secret, ConnectionSecrets, SecretError, SecretKind};
+
+#[derive(Debug, Error)]
+pub enum SshError {
+    #[error("{0}")]
+    Message(String),
+    #[error("secret store: {0}")]
+    Secret(#[from] SecretError),
+}
+
+/// The tunnel's error for people. Specific causes first: the host key, a
+/// refused login, then the tunnel failing to open, which keeps its inner
+/// cause (it used to swallow it, so a changed host key read as a timeout).
+pub fn humanize_ssh_error(err: &SshError, bastion_host: &str) -> String {
+    let msg = err.to_string();
+    if msg.contains("has CHANGED") || msg.contains("Unknown SSH host key") {
+        return msg;
+    }
+    if msg.contains("Permission denied") {
+        return "SSH: Permission denied (publickey)".to_string();
+    }
+    if msg.starts_with("Could not open tunnel") {
+        return msg;
+    }
+    if msg.contains("Connection refused") || msg.contains("timed out") {
+        return format!("Could not open tunnel to {bastion_host}: {msg}");
+    }
+    format!("SSH: {msg}")
+}
+
+/// What `check_server_key` found wrong, for the error after the handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyProblem {
+    Unknown,
+    Changed,
+}
+
+fn known_hosts_path() -> PathBuf {
+    config_dir().join("ssh_known_hosts")
+}
+
+fn load_known_hosts() -> HashMap<String, String> {
+    let path = known_hosts_path();
+    if !path.exists() {
+        return HashMap::new();
+    }
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let host = parts.next().unwrap_or_default();
+        let fingerprint = parts.next().unwrap_or_default();
+        if !host.is_empty() && !fingerprint.is_empty() {
+            map.insert(host.to_string(), fingerprint.to_string());
+        }
+    }
+    map
+}
+
+fn persist_known_host(host: &str, fingerprint: &str) -> Result<(), SshError> {
+    fs::create_dir_all(config_dir()).map_err(|e| SshError::Message(e.to_string()))?;
+    let mut map = load_known_hosts();
+    map.insert(host.to_string(), fingerprint.to_string());
+    let mut lines = Vec::new();
+    for (h, fp) in map {
+        lines.push(format!("{h} {fp}"));
+    }
+    fs::write(known_hosts_path(), lines.join("\n"))
+        .map_err(|e| SshError::Message(e.to_string()))?;
+    Ok(())
+}
+
+fn host_key_fingerprint(key: &PublicKey) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = key.public_key_bytes();
+    let digest = Sha256::digest(bytes);
+    format!(
+        "SHA256:{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, digest)
+    )
+}
+
+struct ClientHandler {
+    host: String,
+    trust_host: bool,
+    known_hosts: HashMap<String, String>,
+    problem: Arc<std::sync::Mutex<Option<KeyProblem>>>,
+}
+
+#[async_trait]
+impl Handler for ClientHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
+        let fingerprint = host_key_fingerprint(server_public_key);
+        let host_key = self.host.clone();
+        let note = |p| {
+            if let Ok(mut slot) = self.problem.lock() {
+                *slot = Some(p);
+            }
+        };
+        if let Some(expected) = self.known_hosts.get(&host_key) {
+            if expected == &fingerprint {
+                return Ok(true);
+            }
+            note(KeyProblem::Changed);
+            return Err(russh::Error::UnknownKey);
+        }
+        if self.trust_host
+            || std::env::var("ROWKERY_SSH_TRUST_HOSTS")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+        {
+            persist_known_host(&host_key, &fingerprint).map_err(|_| russh::Error::UnknownKey)?;
+            return Ok(true);
+        }
+        note(KeyProblem::Unknown);
+        Err(russh::Error::UnknownKey)
+    }
+}
+
+/// A local port forwarded over SSH to the database. Every connection to
+/// `local_port` gets its own direct-tcpip channel on the one SSH connection,
+/// so a window's sessions share a tunnel.
+/// `get_secret` on the blocking pool: the keychain can block or prompt.
+async fn secret_off_thread(
+    connection_id: &str,
+    kind: SecretKind,
+) -> Result<Option<String>, SshError> {
+    let id = connection_id.to_string();
+    tokio::task::spawn_blocking(move || get_secret(&id, kind))
+        .await
+        .map_err(|e| SshError::Message(e.to_string()))?
+        .map_err(SshError::from)
+}
+
+pub struct SshTunnel {
+    pub local_port: u16,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+    /// Set once the SSH connection under it has gone.
+    dead: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Tunnels open now (tests count them).
+pub static OPEN_TUNNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How long connecting and authenticating may take before the tunnel gives up.
+pub const SSH_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// SSH keepalives: one every 15 s, and the connection is given up after
+/// three unanswered.
+const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const SSH_KEEPALIVE_MAX: usize = 3;
+
+impl SshTunnel {
+    /// True while the SSH connection still carries new channels.
+    pub fn is_alive(&self) -> bool {
+        !self.dead.load(std::sync::atomic::Ordering::Relaxed) && !self.task.is_finished()
+    }
+
+    /// `open`, giving up after [`SSH_OPEN_TIMEOUT`] (an unreachable bastion
+    /// otherwise waits for the OS's TCP timeout).
+    pub async fn open_with_timeout(
+        ssh: &SshConfig,
+        connection_id: &str,
+        remote_host: &str,
+        remote_port: u16,
+        secrets: Option<&ConnectionSecrets>,
+    ) -> Result<Self, SshError> {
+        tokio::time::timeout(
+            SSH_OPEN_TIMEOUT,
+            Self::open(ssh, connection_id, remote_host, remote_port, secrets),
+        )
+        .await
+        .map_err(|_| {
+            SshError::Message(format!(
+                "Could not open tunnel to {}: timed out after {} s",
+                ssh.host,
+                SSH_OPEN_TIMEOUT.as_secs()
+            ))
+        })?
+    }
+
+    pub async fn open(
+        ssh: &SshConfig,
+        connection_id: &str,
+        remote_host: &str,
+        remote_port: u16,
+        // Secrets typed into an unsaved form win over the keychain.
+        secrets: Option<&ConnectionSecrets>,
+    ) -> Result<Self, SshError> {
+        let config = Arc::new(Config {
+            inactivity_timeout: Some(Duration::from_secs(3600)),
+            // A tunnel whose server stopped answering (sleep, a network
+            // change) closes within a minute, so queries through it fail
+            // instead of waiting on it forever.
+            keepalive_interval: Some(SSH_KEEPALIVE_INTERVAL),
+            keepalive_max: SSH_KEEPALIVE_MAX,
+            ..Default::default()
+        });
+        let host_key = format!("{}:{}", ssh.host, ssh.port);
+        let problem = Arc::new(std::sync::Mutex::new(None));
+        let handler = ClientHandler {
+            host: host_key.clone(),
+            trust_host: ssh.trust_host,
+            known_hosts: load_known_hosts(),
+            problem: problem.clone(),
+        };
+        let addr = format!("{}:{}", ssh.host, ssh.port);
+        let mut handle = client::connect(config, &addr, handler).await.map_err(|e| {
+            let why = match problem.lock().ok().and_then(|p| *p) {
+                Some(KeyProblem::Changed) => {
+                    format!("SSH host key for {host_key} has CHANGED; nothing was sent")
+                }
+                Some(KeyProblem::Unknown) => format!("Unknown SSH host key for {host_key}"),
+                None => e.to_string(),
+            };
+            SshError::Message(format!("Could not open tunnel to {}: {why}", ssh.host))
+        })?;
+
+        let auth_ok = match ssh.auth_method {
+            SshAuthMethod::Password => {
+                let supplied = secrets.and_then(|s| s.ssh_password.clone());
+                let password = match supplied {
+                    Some(p) => Some(p),
+                    None => secret_off_thread(connection_id, SecretKind::SshPassword).await?,
+                }
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| SshError::Message("SSH password not stored".into()))?;
+                handle
+                    .authenticate_password(&ssh.username, password)
+                    .await
+                    .map_err(|e| SshError::Message(e.to_string()))?
+            }
+            SshAuthMethod::KeyFile => {
+                let path = ssh
+                    .private_key_path
+                    .as_ref()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| SshError::Message("SSH private key path is required".into()))?;
+                let key_text = fs::read_to_string(expand_home(path))
+                    .map_err(|e| SshError::Message(format!("Could not read key file: {e}")))?;
+                let passphrase = match secrets.and_then(|s| s.ssh_key_passphrase.clone()) {
+                    Some(p) => Some(p),
+                    None => secret_off_thread(connection_id, SecretKind::SshKeyPassphrase).await?,
+                };
+                let key = decode_secret_key(&key_text, passphrase.as_deref())
+                    .map_err(|e| SshError::Message(format!("Invalid SSH key: {e}")))?;
+                handle
+                    .authenticate_publickey(&ssh.username, Arc::new(key))
+                    .await
+                    .map_err(|e| SshError::Message(e.to_string()))?
+            }
+        };
+        if !auth_ok {
+            return Err(SshError::Message(
+                "SSH: Permission denied (publickey)".into(),
+            ));
+        }
+
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .map_err(|e| SshError::Message(e.to_string()))?;
+        let local_port = listener
+            .local_addr()
+            .map_err(|e| SshError::Message(e.to_string()))?
+            .port();
+
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let remote_host = remote_host.to_string();
+        let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gone = dead.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept = listener.accept() => {
+                        match accept {
+                            Ok((tcp, _)) => {
+                                match handle
+                                    .channel_open_direct_tcpip(
+                                        remote_host.clone(),
+                                        remote_port as u32,
+                                        "127.0.0.1",
+                                        0,
+                                    )
+                                    .await
+                                {
+                                    // Each socket on its own task: sessions share the tunnel.
+                                    Ok(channel) => {
+                                        tokio::spawn(pipe_tcp_channel(tcp, channel));
+                                    }
+                                    Err(_) if handle.is_closed() => break,
+                                    Err(_) => {}
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            gone.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        OPEN_TUNNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self {
+            local_port,
+            shutdown: Some(shutdown_tx),
+            task,
+            dead,
+        })
+    }
+}
+
+async fn pipe_tcp_channel(tcp: TcpStream, mut channel: Channel<client::Msg>) -> Result<(), String> {
+    let (mut tcp_rd, mut tcp_wr) = tcp.into_split();
+    // Plain channel data. (`make_writer_ext(Some(n))` sends SSH *extended* data
+    // of type n, like stderr, which sshd never forwards to the database: the
+    // tunnel carried nothing.)
+    let mut ch_wr = channel.make_writer();
+    let mut ch_rd = channel.make_reader();
+
+    let client_to_remote = async {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = tcp_rd.read(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            ch_wr
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    };
+
+    let remote_to_client = async {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = ch_rd.read(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            tcp_wr
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    };
+
+    tokio::try_join!(client_to_remote, remote_to_client).map(|_| ())
+}
+
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.task.abort();
+        OPEN_TUNNELS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}

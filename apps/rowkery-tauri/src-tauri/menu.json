@@ -1,0 +1,301 @@
+[
+  {
+    "submenu": "File",
+    "items": [
+      {
+        "id": "new-tab",
+        "title": "New Query Tab",
+        "accelerator": null
+      },
+      {
+        "id": "reopen-closed-tab",
+        "title": "Reopen Closed Tab",
+        "accelerator": "CmdOrCtrl+Shift+T"
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "close-tab",
+        "title": "Close Tab",
+        "accelerator": "CmdOrCtrl+W"
+      }
+    ]
+  },
+  {
+    "submenu": "Connection",
+    "items": [
+      {
+        "id": "new-connection",
+        "title": "New Connection…",
+        "accelerator": "CmdOrCtrl+N"
+      },
+      {
+        "id": "open-sqlite-file",
+        "title": "Open SQLite File…",
+        "accelerator": "CmdOrCtrl+O"
+      },
+      {
+        "id": "open-sample",
+        "title": "Open the Sample Database",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "switch-connection",
+        "title": "Switch Connection…",
+        "accelerator": "CmdOrCtrl+Shift+O"
+      },
+      {
+        "id": "switch-database",
+        "title": "Switch Database…",
+        "accelerator": "CmdOrCtrl+Shift+D"
+      },
+      {
+        "id": "edit-connection",
+        "title": "Edit Connection…",
+        "accelerator": null
+      },
+      {
+        "id": "change-safe-mode",
+        "title": "Change Safe Mode…",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "refresh-schema",
+        "title": "Refresh Schema",
+        "accelerator": "CmdOrCtrl+R"
+      },
+      {
+        "id": "reconnect",
+        "title": "Reconnect",
+        "accelerator": null
+      }
+    ]
+  },
+  {
+    "submenu": "Query",
+    "items": [
+      {
+        "id": "run",
+        "title": "Run Statement",
+        "accelerator": "CmdOrCtrl+Enter"
+      },
+      {
+        "id": "run-all",
+        "title": "Run All Statements",
+        "accelerator": "CmdOrCtrl+Alt+Enter"
+      },
+      {
+        "id": "cancel",
+        "title": "Cancel Query",
+        "accelerator": "CmdOrCtrl+."
+      },
+      {
+        "id": "stop-all-queries",
+        "title": "Stop All Queries",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "open-in-query",
+        "title": "Edit SQL",
+        "accelerator": "CmdOrCtrl+E"
+      },
+      {
+        "id": "filter-rows",
+        "title": "Filter Rows",
+        "accelerator": "CmdOrCtrl+F"
+      },
+      {
+        "id": "refresh-rows",
+        "title": "Refresh Rows",
+        "accelerator": "CmdOrCtrl+Shift+R"
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "copy-csv",
+        "title": "Copy Results as CSV",
+        "accelerator": null
+      },
+      {
+        "id": "export",
+        "title": "Export Results…",
+        "accelerator": "CmdOrCtrl+Shift+E"
+      },
+      {
+        "id": "clear-results",
+        "title": "Clear Results",
+        "accelerator": null
+      }
+    ]
+  },
+  {
+    "submenu": "View",
+    "items": [
+      {
+        "id": "toggle-sidebar",
+        "title": "Hide Sidebar",
+        "accelerator": "CmdOrCtrl+B"
+      },
+      {
+        "id": "presenting",
+        "title": "Start Presenting",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "show-data",
+        "title": "Data",
+        "accelerator": "CmdOrCtrl+Alt+1"
+      },
+      {
+        "id": "show-structure",
+        "title": "Structure",
+        "accelerator": "CmdOrCtrl+Alt+2"
+      },
+      {
+        "id": "show-sessions",
+        "title": "Sessions",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "theme:auto",
+        "title": "Match System Appearance",
+        "accelerator": null
+      },
+      {
+        "id": "theme:light",
+        "title": "Light Appearance",
+        "accelerator": null
+      },
+      {
+        "id": "theme:dark",
+        "title": "Dark Appearance",
+        "accelerator": null
+      }
+    ]
+  },
+  {
+    "submenu": "Go",
+    "items": [
+      {
+        "id": "history-back",
+        "title": "Back",
+        "accelerator": "CmdOrCtrl+["
+      },
+      {
+        "id": "history-forward",
+        "title": "Forward",
+        "accelerator": "CmdOrCtrl+]"
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "next-tab",
+        "title": "Next Query Tab",
+        "accelerator": null
+      },
+      {
+        "id": "prev-tab",
+        "title": "Previous Query Tab",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "focus-editor",
+        "title": "Focus Editor",
+        "accelerator": null
+      }
+    ]
+  },
+  {
+    "submenu": "Window",
+    "items": [
+      {
+        "id": "new-window",
+        "title": "New Window",
+        "accelerator": "CmdOrCtrl+T"
+      },
+      {
+        "id": "close-window",
+        "title": "Close Window",
+        "accelerator": "CmdOrCtrl+Shift+W"
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "next-window",
+        "title": "Next Window",
+        "accelerator": null
+      },
+      {
+        "id": "prev-window",
+        "title": "Previous Window",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "agents",
+        "title": "Agents",
+        "accelerator": "CmdOrCtrl+Shift+A"
+      }
+    ]
+  },
+  {
+    "submenu": "Help",
+    "items": [
+      {
+        "id": "keyboard-shortcuts",
+        "title": "Keyboard Shortcuts",
+        "accelerator": "CmdOrCtrl+Shift+/"
+      },
+      {
+        "id": "show-key-hints",
+        "title": "Show Key Hints",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "check-updates",
+        "title": "Check for Updates…",
+        "accelerator": null
+      },
+      {
+        "id": "report-issue",
+        "title": "Report an Issue…",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "third-party-notices",
+        "title": "Third-party Notices",
+        "accelerator": null
+      }
+    ]
+  }
+]

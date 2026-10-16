@@ -1,0 +1,33 @@
+[package]
+name = "rowkery-tauri"
+version.workspace = true
+description = "Rowkery desktop shell (Tauri + React)"
+authors = ["Rowkery"]
+edition = "2021"
+publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "rowkery_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# The end-to-end test hook (src/e2e.rs, scripts/e2e/). Never in a release.
+e2e = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rowkery-bridge = { path = "../../../crates/rowkery-bridge" }
+rowkery-core = { path = "../../../crates/rowkery-core" }
+rowkery-mcp = { path = "../../../crates/rowkery-mcp" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"

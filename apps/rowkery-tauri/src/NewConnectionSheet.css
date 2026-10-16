@@ -1,0 +1,524 @@
+/* New connection, in the inspector column (Paper, 2026-10-10; it was a
+   modal sheet). The column's shell, head and foot are Inspector.css; this is
+   the form: stacked labels, 32 px inputs on the paper with an inset ring,
+   segmented controls with a raised thumb, the probe line, the MCP row. */
+
+/* The window stays usable beside it: no scrim, no layout box of its own. */
+.nc-overlay {
+  display: contents;
+}
+
+.nc-segment.nc-engine {
+  padding: 2px;
+}
+
+.nc-segment.nc-engine button {
+  flex: none;
+  height: 22px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.nc-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+
+/* ---------- Fields ---------- */
+
+.nc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The prototype stacks the identity fields, one per line; Host and Port
+   share one (port 88 px) so the MCP row stays above the fold at 800 px,
+   with the URL paste field the prototype doesn't have. */
+.nc-section[data-section="identity"] .nc-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.nc-section[data-section="identity"] .nc-grid.cols-4 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 10px;
+}
+
+.nc-section[data-section="identity"] .nc-grid.cols-4 .span-3 {
+  grid-column: auto;
+}
+
+.nc-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.nc-grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.nc-grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.nc-grid.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.nc-grid .span-2 {
+  grid-column: span 2;
+}
+
+.nc-grid .span-3 {
+  grid-column: span 3;
+}
+
+.nc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.nc-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--mute);
+}
+
+.nc-label-aside,
+.nc-suggested {
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+.nc-error-text {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10.5px;
+  color: var(--del);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nc-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line2);
+  color: var(--text);
+  font: 13px var(--sans);
+  outline: none;
+  transition: box-shadow 0.18s ease;
+}
+
+.nc-input.mono {
+  font: 12.5px var(--mono);
+}
+
+.nc-input::placeholder {
+  color: var(--dim);
+}
+
+.nc-input:focus {
+  box-shadow:
+    inset 0 0 0 1.5px var(--acc),
+    0 0 0 3px var(--accbg);
+}
+
+.nc-field.invalid .nc-input {
+  box-shadow: inset 0 0 0 1.5px var(--del);
+}
+
+/* libpq's defaults (localhost, 5432) are dim until edited. */
+.nc-input.nc-default:not(:focus) {
+  color: var(--mute);
+}
+
+.nc-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nc-input-row .nc-input {
+  flex: 1 1 auto;
+}
+
+/* ---------- Segmented controls: the raised paper thumb ---------- */
+
+.nc-segment {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--hover);
+}
+
+.nc-segment button {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mute);
+  font: 400 12px var(--sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.nc-segment button:hover {
+  color: var(--text);
+}
+
+.nc-segment button[aria-selected="true"] {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: var(--shadow);
+}
+
+.nc-segment button:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.nc-env-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--env);
+}
+
+.nc-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ---------- The probe line ---------- */
+
+.nc-probe {
+  display: flex;
+  align-items: center;
+  min-height: 18px;
+  margin-top: -6px;
+}
+
+.nc-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  transition: color 0.3s ease;
+}
+
+.nc-status.idle {
+  color: var(--dim);
+}
+
+.nc-status.ok {
+  color: var(--ok);
+}
+
+.nc-status.error {
+  color: var(--del);
+}
+
+.nc-status .conn-dot {
+  flex-shrink: 0;
+}
+
+.nc-status.idle .conn-dot.idle {
+  background: var(--faint);
+  box-shadow: none;
+}
+
+.conn-dot.idle {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--dim);
+}
+
+/* ---------- Advanced, hints, groups ---------- */
+
+.nc-disclosure {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.nc-disclosure:hover {
+  color: var(--text);
+}
+
+.nc-caret {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--dim);
+  transition: transform 0.12s var(--ease-out);
+}
+
+.nc-disclosure[aria-expanded="true"] .nc-caret {
+  transform: rotate(90deg);
+}
+
+.nc-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: rise 0.2s var(--ease-out);
+}
+
+p.nc-hint {
+  margin: -4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+/* Why the server's certificate wasn't accepted, in place of the hint. */
+p.nc-hint[data-invalid] {
+  color: var(--del);
+}
+
+.nc-group {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.nc-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.nc-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.nc-toggle-row + .nc-toggle-row {
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.nc-toggle-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.nc-toggle-label {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.nc-toggle-sub,
+.nc-toggle-meta {
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.nc-toggle-meta {
+  font-family: var(--mono);
+}
+
+/* Share with agents: the prototype's 48 px bordered row. */
+.nc-mcp {
+  transition: border-color 0.18s ease;
+}
+
+.nc-mcp:hover {
+  border-color: var(--dim);
+}
+
+.nc-mcp-row {
+  min-height: 48px;
+}
+
+/* The 30 × 18 toggle; the accent when on. */
+.nc-switch {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9px;
+  background: var(--faint);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.nc-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--knob);
+  box-shadow: var(--shadow);
+  transition: transform 0.2s var(--ease-out);
+}
+
+.nc-switch:checked {
+  background: var(--acc);
+}
+
+.nc-switch:checked::after {
+  transform: translateX(12px);
+}
+
+.nc-switch:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+
+.nc-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--mute);
+  cursor: pointer;
+}
+
+.nc-check input {
+  margin: 0;
+  accent-color: var(--acc);
+}
+
+.nc-mcp-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 12px;
+  box-shadow: inset 0 1px 0 var(--line);
+  font-size: 11.5px;
+  color: var(--mute);
+}
+
+.nc-mcp-stats b {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.nc-mcp-acts {
+  display: flex;
+  gap: 6px;
+}
+
+.nc-mcp-connect {
+  display: flex;
+}
+
+.nc-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 64px;
+  border: 1px dashed var(--line2);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--dim);
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.nc-drop[data-dragging] {
+  border-color: var(--acc);
+  background: var(--accbg);
+  color: var(--text);
+}
+
+/* A small bordered button inside the form (Choose…). */
+.nc-btn {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 500 12px var(--sans);
+  cursor: pointer;
+  transition: border-color 0.18s ease;
+}
+
+.nc-btn:hover:not(:disabled) {
+  border-color: var(--dim);
+}
+
+/* ---------- Foot ---------- */
+
+/* Save and connect: dim until the form can connect. */
+.nc-save:not([data-ready]) {
+  opacity: 0.5;
+}
+
+.nc-delete {
+  color: var(--del);
+}
+
+.nc-delete:hover:not(:disabled) {
+  background: var(--delbg);
+  color: var(--del);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nc-advanced-body {
+    animation: none;
+  }
+  .nc-caret,
+  .nc-switch,
+  .nc-switch::after {
+    transition: none;
+  }
+}

@@ -1,0 +1,2094 @@
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use futures::TryStreamExt;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+
+use crate::edits::{ApplyCounts, ApplyFailure, RowStatement};
+use crate::safety::{locks_rows, SafeMode};
+use tokio_postgres::config::SslMode;
+use tokio_postgres::error::SqlState;
+use tokio_postgres::types::Type;
+use tokio_postgres::{AsyncMessage, CancelToken, Client, NoTls, Row, Statement};
+pub use tokio_postgres_rustls::MakeRustlsConnect;
+use webpki_roots::TLS_SERVER_ROOTS;
+
+use crate::connections::{expand_home, PostgresConnection, PostgresSslMode};
+use crate::secrets::{get_secret, ConnectionSecrets, SecretKind};
+use crate::ssh::{humanize_ssh_error, SshTunnel};
+
+use super::introspect::{
+    ColumnNode, DatabaseNode, EnumNode, ForeignKeyNode, FunctionNode, IndexNode, RowEstimate,
+    SchemaCatalog, SchemaNode, TableIndexes, TableKind, TableNode,
+};
+use super::{Column, DriverError, RowBatch, Value};
+
+mod activity;
+pub use activity::{
+    rowkery_tag, session_activity, session_locks_held, session_stop, HeldLock, ServerSession,
+    StopKind,
+};
+
+const BATCH_SIZE: usize = 200;
+
+/// Every session's `application_name` starts with this, then a space and
+/// its [`PostgresSession::tag`], so the Sessions tab can tell which tab a
+/// server session belongs to.
+pub const APP_NAME: &str = "Rowkery";
+
+/// A new session's tag: 8 hex digits, unique for this process and unlikely
+/// to match another install's.
+fn new_tag() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
+        ^ (u64::from(std::process::id()) << 32);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mixed = (seed ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    format!("{:08x}", (mixed >> 32) as u32)
+}
+
+pub struct PostgresSession {
+    config: PostgresConnection,
+    connection_id: String,
+    /// Shared with the window's other sessions (one SSH connection per window).
+    tunnel: Option<Arc<SshTunnel>>,
+    client: Client,
+    #[allow(dead_code)]
+    connection_task: tokio::task::JoinHandle<()>,
+    pub cancel_token: CancelToken,
+    /// The session's TLS setup, reused to send a cancel request; `None` when SSL is off.
+    pub tls: Option<MakeRustlsConnect>,
+    /// `BEGIN` warnings (SQLSTATE 25001) seen so far: one after ours means
+    /// the user's own transaction was already open.
+    txn_warnings: Arc<AtomicU64>,
+    /// A query tab's paged result, waiting for its next `FETCH`.
+    cursor: Option<OpenCursor>,
+    /// Whether the user has a transaction open on this session, as far as
+    /// we know: cursors are never declared inside one.
+    txn: TxnState,
+    /// Statements prepared on this session, newest last (`prepared`).
+    statements: std::sync::Mutex<std::collections::VecDeque<(String, Statement)>>,
+    /// In its `application_name` after [`APP_NAME`].
+    tag: String,
+    /// Whatever the owner ties to the session's life (the bridge keeps its
+    /// place under the per-connection cap here): dropped with the session.
+    guard: Option<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+/// Prepared statements kept per session: a re-run, and every cursor
+/// `FETCH`, skips the prepare round trip.
+const STATEMENT_CACHE: usize = 64;
+
+/// What we know about the user's transaction on a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxnState {
+    /// None open (a new session, or after our own COMMIT / ROLLBACK).
+    None,
+    /// The user's transaction is open (ours found it with a `BEGIN` warning,
+    /// or `BEGIN` was refused because it had failed).
+    Users,
+    /// A statement that can open or end one ran since we last knew.
+    Unknown,
+}
+
+/// The cursor a query tab pages through (`CURSOR`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenCursor {
+    /// Declared in a transaction we began (committed when it closes), not
+    /// in one the user has open.
+    pub ours: bool,
+}
+
+/// The one cursor a session pages a query tab through.
+pub const CURSOR: &str = "rowkery_page";
+
+impl PostgresSession {
+    pub fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    pub fn config(&self) -> &PostgresConnection {
+        &self.config
+    }
+
+    /// True once the socket is gone (server restart, network drop).
+    pub fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
+    /// What we know about the user's transaction on this session.
+    pub fn txn_state(&self) -> TxnState {
+        self.txn
+    }
+
+    /// Names this session in `pg_stat_activity` (`Rowkery <tag>`).
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    /// Ties `guard` to this session: it is dropped when the session is.
+    pub fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
+        self.guard = Some(guard);
+    }
+
+    /// Something was tied to this session with [`Self::hold`].
+    pub fn holds(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    /// Unties what [`Self::hold`] tied, to hand it to another session.
+    pub fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.guard.take()
+    }
+}
+
+pub async fn open_session(
+    connection_id: String,
+    config: PostgresConnection,
+) -> Result<PostgresSession, DriverError> {
+    open_session_with_secrets(connection_id, config, None).await
+}
+
+pub async fn open_session_with_secrets(
+    connection_id: String,
+    config: PostgresConnection,
+    secrets: Option<&ConnectionSecrets>,
+) -> Result<PostgresSession, DriverError> {
+    open_session_via(connection_id, config, secrets, None).await
+}
+
+/// How long connecting to Postgres may take (TCP, TLS, auth).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Opens a session, through `tunnel` when the connection uses SSH and the
+/// tunnel is still alive (else a new one, which `session.tunnel()` returns
+/// for the next session to share).
+pub async fn open_session_via(
+    connection_id: String,
+    config: PostgresConnection,
+    secrets: Option<&ConnectionSecrets>,
+    tunnel: Option<Arc<SshTunnel>>,
+) -> Result<PostgresSession, DriverError> {
+    let mut port = config.port;
+    let mut tunnel = tunnel.filter(|t| config.ssh.is_some() && t.is_alive());
+
+    if let Some(ssh) = config.ssh.clone() {
+        if tunnel.is_none() {
+            let opened =
+                SshTunnel::open_with_timeout(&ssh, &connection_id, &config.host, port, secrets)
+                    .await
+                    .map_err(|e| DriverError::Message(humanize_ssh_error(&e, &ssh.host)))?;
+            tunnel = Some(Arc::new(opened));
+        }
+        port = tunnel.as_ref().map(|t| t.local_port).unwrap_or(port);
+    }
+
+    let password = if let Some(secrets) = secrets {
+        secrets.db_password.clone().unwrap_or_default()
+    } else {
+        // The keychain can block (or prompt): off the async workers.
+        let id = connection_id.clone();
+        tokio::task::spawn_blocking(move || get_secret(&id, SecretKind::DbPassword))
+            .await
+            .map_err(|e| DriverError::Message(e.to_string()))?
+            .map_err(|e| DriverError::Message(e.to_string()))?
+            .unwrap_or_default()
+    };
+
+    let tag = new_tag();
+    let mut pg_config = tokio_postgres::Config::new();
+    // Through a tunnel the socket goes to the local end, but the certificate
+    // is still checked against the real host name.
+    pg_config.host(&config.host);
+    if tunnel.is_some() {
+        pg_config.hostaddr(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+    pg_config
+        .port(port)
+        .user(&config.username)
+        .dbname(&config.database)
+        .password(&password)
+        .connect_timeout(CONNECT_TIMEOUT)
+        // Shows in pg_stat_activity, so a DBA can tell Rowkery's sessions
+        // apart, and the Sessions tab which tab each one is.
+        .application_name(format!("{APP_NAME} {tag}"))
+        // Sessions stay open between queries, so notice a dead peer (laptop
+        // sleep, NAT timeout) well before the OS default of two hours.
+        .keepalives_idle(Duration::from_secs(30))
+        .keepalives_interval(Duration::from_secs(10))
+        .keepalives_retries(3)
+        .ssl_mode(match config.ssl_mode {
+            PostgresSslMode::Disable => SslMode::Disable,
+            PostgresSslMode::Prefer => SslMode::Prefer,
+            PostgresSslMode::Require | PostgresSslMode::Verify => SslMode::Require,
+        });
+
+    let tls = match config.ssl_mode {
+        PostgresSslMode::Disable => None,
+        mode => Some(make_tls_connector(mode, config.ssl_root_cert.as_deref())?),
+    };
+    let humanize = |e: tokio_postgres::Error| {
+        DriverError::Message(humanize_postgres_error(&e, &config.username))
+    };
+    let txn_warnings = Arc::new(AtomicU64::new(0));
+    let (client, connection_task) = if let Some(tls) = tls.clone() {
+        let (client, connection) = pg_config.connect(tls).await.map_err(humanize)?;
+        (client, drive_connection(connection, txn_warnings.clone()))
+    } else {
+        let (client, connection) = pg_config.connect(NoTls).await.map_err(humanize)?;
+        (client, drive_connection(connection, txn_warnings.clone()))
+    };
+
+    // Read-only connections are read-only at the server too, so a write that
+    // safe mode's text check misses (a function call in a SELECT) still fails.
+    if config.safe_mode == SafeMode::ReadOnly {
+        client
+            .batch_execute("SET default_transaction_read_only = on")
+            .await
+            .map_err(humanize)?;
+    }
+
+    let cancel_token = client.cancel_token();
+
+    Ok(PostgresSession {
+        config,
+        connection_id,
+        tunnel,
+        client,
+        connection_task,
+        cancel_token,
+        tls,
+        txn_warnings,
+        cursor: None,
+        txn: TxnState::None,
+        statements: Default::default(),
+        tag,
+        guard: None,
+    })
+}
+
+/// Runs the connection, counting `BEGIN`'s "already a transaction in
+/// progress" warnings. A notice is handled before the messages after it,
+/// so the count is current when the batch that caused it returns.
+fn drive_connection<S, T>(
+    mut connection: tokio_postgres::Connection<S, T>,
+    txn_warnings: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match futures::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                Some(Ok(AsyncMessage::Notice(notice))) => {
+                    if notice.code() == &SqlState::ACTIVE_SQL_TRANSACTION {
+                        txn_warnings.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(err)) => {
+                    eprintln!("postgres connection error: {err}");
+                    break;
+                }
+                None => break,
+            }
+        }
+    })
+}
+
+impl PostgresSession {
+    /// The SSH tunnel this session goes through, to share with the next one.
+    pub fn tunnel(&self) -> Option<Arc<SshTunnel>> {
+        self.tunnel.clone()
+    }
+}
+
+pub async fn session_test(session: &mut PostgresSession) -> Result<(), DriverError> {
+    session
+        .client
+        .simple_query("SELECT 1")
+        .await
+        .map_err(|e| DriverError::Message(humanize_postgres_error(&e, &session.config.username)))?;
+    Ok(())
+}
+
+/// One empty round trip; false if the server doesn't answer within `limit`.
+pub async fn session_ping(session: &PostgresSession, limit: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(limit, session.client.simple_query("")).await,
+        Ok(Ok(_))
+    )
+}
+
+/// `16.3` from `SHOW server_version` (drops the distro suffix).
+pub async fn session_server_version(session: &PostgresSession) -> Result<String, DriverError> {
+    let row = session
+        .client
+        .query_one("SHOW server_version", &[])
+        .await
+        .map_err(|e| DriverError::Message(e.to_string()))?;
+    let full: String = row.get(0);
+    Ok(full
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string())
+}
+
+fn map_query_error(err: &tokio_postgres::Error, username: &str) -> DriverError {
+    if err.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
+        return DriverError::Cancelled;
+    }
+    let message = humanize_postgres_error(err, username);
+    match err.as_db_error() {
+        Some(db) => DriverError::Server {
+            message,
+            sqlstate: db.code().code().to_string(),
+            position: match db.position() {
+                Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p),
+                _ => None,
+            },
+        },
+        None => DriverError::Message(message),
+    }
+}
+
+/// How `session_query_stream_with` batches rows.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamOptions {
+    /// Rows per batch at most.
+    pub batch_rows: usize,
+    /// A partial batch is sent once its first row has waited this long, so a
+    /// slow query shows its first rows (and a live count) without waiting
+    /// for a full batch. Checked as rows arrive.
+    pub max_wait: std::time::Duration,
+}
+
+impl Default for StreamOptions {
+    fn default() -> Self {
+        Self {
+            batch_rows: BATCH_SIZE,
+            max_wait: std::time::Duration::from_millis(10),
+        }
+    }
+}
+
+/// What a stream did besides its rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StreamStats {
+    /// Rows returned, or rows affected for a statement without a result set.
+    pub rows: u64,
+    /// From the call to the first row's arrival; `None` when no row came.
+    pub first_row: Option<std::time::Duration>,
+}
+
+/// `sql` prepared on the session: from its cache when `cacheable`, else a
+/// fresh statement closed when it drops. The `bool` is true when it came
+/// from the cache.
+///
+/// Prepared, not `query_typed_raw`: that sends parse, bind and execute at
+/// once and looks up a column type it doesn't know (an enum, a domain, an
+/// extension's type) while the rows are already on their way. Its response
+/// channel holds one message, so a result larger than the buffers stalls
+/// the connection behind rows nobody reads, and the lookup never answers:
+/// `SELECT *` on a table with an enum hung for good. Preparing looks the
+/// types up before anything runs.
+async fn prepared(
+    session: &PostgresSession,
+    sql: &str,
+    cacheable: bool,
+) -> Result<(Statement, bool), tokio_postgres::Error> {
+    if !cacheable {
+        return Ok((session.client.prepare(sql).await?, false));
+    }
+    if let Ok(cache) = session.statements.lock() {
+        if let Some((_, st)) = cache.iter().find(|(k, _)| k == sql) {
+            return Ok((st.clone(), true));
+        }
+    }
+    let st = session.client.prepare(sql).await?;
+    if let Ok(mut cache) = session.statements.lock() {
+        if cache.len() >= STATEMENT_CACHE {
+            cache.pop_front();
+        }
+        cache.push_back((sql.to_string(), st.clone()));
+    }
+    Ok((st, false))
+}
+
+/// Whether `sql`'s prepared statement may be kept and reused: only a plain
+/// query, whose result shape is fixed by its text and the schema. A utility
+/// statement's shape is settled when it runs (`FETCH` takes the columns of
+/// whichever cursor has that name now, `EXECUTE` those of whichever
+/// prepared statement, `SHOW` …), so a cached one would decode the next
+/// result with the last one's types.
+fn cacheable_sql(sql: &str) -> bool {
+    let head = sql
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(head.as_str(), "select" | "with" | "values" | "table")
+}
+
+/// Starts `sql`, prepared; the statement names the result's columns even
+/// when no row comes. The cache is used only while the session is known to
+/// be outside any transaction (none of the user's, no cursor of ours): a
+/// cached statement the server no longer takes (its result type changed
+/// with the schema) fails at bind, which would abort an open transaction.
+/// Outside one nothing is lost, so it is prepared again, once.
+async fn start_query(
+    session: &PostgresSession,
+    sql: &str,
+) -> Result<(Statement, tokio_postgres::RowStream), tokio_postgres::Error> {
+    let none = std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>;
+    let outside_txn = session.txn == TxnState::None && session.cursor.is_none();
+    let (st, cached) = prepared(session, sql, outside_txn && cacheable_sql(sql)).await?;
+    match session.client.query_raw(&st, none()).await {
+        Err(e)
+            if cached
+                && (e.code() == Some(&SqlState::FEATURE_NOT_SUPPORTED)
+                    || e.code() == Some(&SqlState::INVALID_SQL_STATEMENT_NAME)) =>
+        {
+            if let Ok(mut cache) = session.statements.lock() {
+                cache.retain(|(k, _)| k != sql);
+            }
+            let (st, _) = prepared(session, sql, true).await?;
+            let rows = session.client.query_raw(&st, none()).await?;
+            Ok((st, rows))
+        }
+        Err(e) => Err(e),
+        Ok(rows) => Ok((st, rows)),
+    }
+}
+
+/// Runs `sql` (one or more statements, no rows wanted) in one simple-protocol
+/// round trip: transaction control, `DECLARE`, `CLOSE`, `SET`.
+pub async fn session_execute(session: &PostgresSession, sql: &str) -> Result<(), DriverError> {
+    session
+        .client
+        .batch_execute(sql)
+        .await
+        .map_err(|e| map_query_error(&e, &session.config.username))
+}
+
+pub async fn session_query_stream<F>(
+    session: &PostgresSession,
+    sql: &str,
+    on_batch: F,
+) -> Result<u64, DriverError>
+where
+    F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
+{
+    session_query_stream_with(session, sql, StreamOptions::default(), on_batch)
+        .await
+        .map(|stats| stats.rows)
+}
+
+/// `session_query_stream`, batching by `opts` and timing the first row.
+pub async fn session_query_stream_with<F>(
+    session: &PostgresSession,
+    sql: &str,
+    opts: StreamOptions,
+    mut on_batch: F,
+) -> Result<StreamStats, DriverError>
+where
+    F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
+{
+    let started = std::time::Instant::now();
+    let username = session.config.username.clone();
+    let trimmed = sql.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let returns_rows = [
+        "select", "with", "show", "explain", "values", "table", "fetch",
+    ]
+    .iter()
+    .any(|kw| lower.starts_with(kw));
+    if !returns_rows {
+        let (_st, stream) = start_query(session, trimmed)
+            .await
+            .map_err(|e| map_query_error(&e, &username))?;
+        futures::pin_mut!(stream);
+        while stream
+            .try_next()
+            .await
+            .map_err(|e| map_query_error(&e, &username))?
+            .is_some()
+        {}
+        return Ok(StreamStats {
+            rows: stream.rows_affected().unwrap_or(0),
+            first_row: None,
+        });
+    }
+
+    let (st, stream) = start_query(session, trimmed)
+        .await
+        .map_err(|e| map_query_error(&e, &username))?;
+    futures::pin_mut!(stream);
+    // From the statement, not the first row: a result with no rows still
+    // has its columns.
+    let columns: Vec<Column> = st
+        .columns()
+        .iter()
+        .map(|col| Column {
+            name: col.name().to_string(),
+            type_name: col.type_().name().to_string(),
+        })
+        .collect();
+    let mut total_rows = 0u64;
+    let mut batch_rows: Vec<Vec<Value>> = Vec::with_capacity(opts.batch_rows);
+    let mut first_batch = true;
+    let mut first_row = None;
+    // When the oldest row of the batch being built arrived.
+    let mut batch_since = started;
+
+    while let Some(row) = stream
+        .try_next()
+        .await
+        .map_err(|e| map_query_error(&e, &username))?
+    {
+        let row: Row = row;
+        if first_row.is_none() {
+            first_row = Some(started.elapsed());
+        }
+        let mut values = Vec::with_capacity(columns.len());
+        for i in 0..columns.len() {
+            values.push(postgres_value_to_core(&row, i));
+        }
+        if batch_rows.is_empty() {
+            batch_since = std::time::Instant::now();
+        }
+        batch_rows.push(values);
+        total_rows += 1;
+
+        if batch_rows.len() >= opts.batch_rows || batch_since.elapsed() >= opts.max_wait {
+            let batch = RowBatch {
+                columns: columns.clone(),
+                rows: batch_rows,
+            };
+            batch_rows = Vec::with_capacity(opts.batch_rows);
+            on_batch(batch, first_batch)?;
+            first_batch = false;
+        }
+    }
+
+    if !batch_rows.is_empty() || first_batch {
+        let batch = RowBatch {
+            columns,
+            rows: batch_rows,
+        };
+        on_batch(batch, first_batch)?;
+    }
+
+    Ok(StreamStats {
+        rows: total_rows,
+        first_row,
+    })
+}
+
+/// The first page of `sql` through `CURSOR`. `Ok(None)` when the statement
+/// can't be a cursor, and the caller runs it plainly.
+///
+/// When the session is known to have no transaction open, one pipelined
+/// round sends `BEGIN; SAVEPOINT`, the `DECLARE … NO SCROLL CURSOR` on its
+/// own (`declare_sql`), `RELEASE` and the first `FETCH FORWARD rows`
+/// (`rows` 0 fetches all). Our transaction commits when the cursor ends.
+/// After a statement that may have opened one, `BEGIN` goes alone first: its
+/// "already a transaction in progress" warning means the user's is open.
+///
+/// Inside the user's transaction the cursor is declared in it, between a
+/// savepoint and its release, with no `BEGIN` and no `COMMIT`: closing it
+/// leaves their transaction open and as it was. A failed transaction, and a
+/// read with a locking clause (a cursor would lock only the rows fetched),
+/// run plainly. The `bool` is true while rows remain.
+pub async fn session_query_cursor<F>(
+    session: &mut PostgresSession,
+    sql: &str,
+    rows: u32,
+    opts: StreamOptions,
+    on_batch: F,
+) -> Result<Option<(StreamStats, bool)>, DriverError>
+where
+    F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
+{
+    session_close_cursor(session).await;
+    let mut users = session.txn == TxnState::Users;
+    let mut begin = "BEGIN; ";
+    if session.txn == TxnState::Unknown {
+        let before = session.txn_warnings.load(Ordering::SeqCst);
+        match session.client.batch_execute("BEGIN").await {
+            Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => {
+                session.txn = TxnState::Users;
+                return Ok(None);
+            }
+            Err(err) => return Err(map_query_error(&err, &session.config.username)),
+            Ok(()) if session.txn_warnings.load(Ordering::SeqCst) != before => {
+                session.txn = TxnState::Users;
+                users = true;
+            }
+            // Ours is open.
+            Ok(()) => begin = "",
+        }
+    }
+    if users {
+        if locks_rows(sql) {
+            return Ok(None);
+        }
+        begin = "";
+    }
+    let before = session.txn_warnings.load(Ordering::SeqCst);
+    let opening = format!("{begin}SAVEPOINT rowkery_sp");
+    let declare = declare_sql(CURSOR, sql);
+    let fetch = fetch_sql(rows);
+    // Still one pipelined round: each request goes out, in this order, the
+    // first time `join!` polls it. The DECLARE travels alone through the
+    // extended protocol, so a second statement hidden in `sql` is refused by
+    // the server instead of run.
+    let (opened, declared, released, fetched) = tokio::join!(
+        session.client.batch_execute(&opening),
+        session.client.query_typed(&declare, &[]),
+        session.client.batch_execute("RELEASE SAVEPOINT rowkery_sp"),
+        session_query_stream_with(session, &fetch, opts, on_batch),
+    );
+    // The first failure is the one that counts; the later ones are 25P02.
+    let declared = opened.and(declared.map(drop)).and(released);
+    // Known to have none open, so `BEGIN` can't warn; if it did anyway, the
+    // savepoint keeps their transaction as it was and ours never commits it.
+    let warned = session.txn_warnings.load(Ordering::SeqCst) != before;
+    if warned {
+        eprintln!("rowkery: BEGIN warned on a session known to have no transaction open");
+    }
+    let in_users = users || warned;
+    if let Err(err) = declared {
+        if err.code() != Some(&SqlState::IN_FAILED_SQL_TRANSACTION) {
+            let undo = if in_users {
+                "ROLLBACK TO SAVEPOINT rowkery_sp; RELEASE SAVEPOINT rowkery_sp"
+            } else {
+                "ROLLBACK"
+            };
+            let _ = session.client.batch_execute(undo).await;
+        }
+        session.txn = if in_users {
+            TxnState::Users
+        } else {
+            TxnState::None
+        };
+        return Ok(None);
+    }
+    session.txn = if in_users {
+        TxnState::Users
+    } else {
+        TxnState::None
+    };
+    session.cursor = Some(OpenCursor { ours: !in_users });
+    finish_fetch(session, rows, fetched).await.map(Some)
+}
+
+/// `DECLARE name NO SCROLL CURSOR FOR sql`. Only ever sent on its own
+/// through the extended protocol ([`session_declare_cursor`]), never in a
+/// simple-protocol batch: there `SELECT 1; COMMIT; DELETE …` would run every
+/// statement, whatever safe mode made of the text. The newline ends a
+/// trailing `--` comment.
+fn declare_sql(cursor: &str, sql: &str) -> String {
+    format!("DECLARE {cursor} NO SCROLL CURSOR FOR {sql}\n")
+}
+
+/// Declares `cursor` over `sql` in the session's open transaction, as one
+/// extended-protocol statement: Postgres refuses `sql` holding a second
+/// statement ("cannot insert multiple commands into a prepared statement")
+/// rather than running it. A DECLARE returns no columns, so nothing waits
+/// on a type lookup.
+pub async fn session_declare_cursor(
+    session: &PostgresSession,
+    cursor: &str,
+    sql: &str,
+) -> Result<(), DriverError> {
+    session
+        .client
+        .query_typed(&declare_sql(cursor, sql), &[])
+        .await
+        .map(drop)
+        .map_err(|e| map_query_error(&e, &session.config.username))
+}
+
+/// A statement ran as written on the session: unless it only reads, it may
+/// have opened or ended a transaction (BEGIN, COMMIT, CALL, DO …), so the
+/// next cursor asks first.
+pub fn session_note_statement(session: &mut PostgresSession, reads_only: bool) {
+    if !reads_only {
+        session.txn = TxnState::Unknown;
+    }
+}
+
+/// Asks the server whether a transaction block is open on the session and
+/// records the answer. `SAVEPOINT` is refused outside a block (25P01) and in
+/// a failed one (25P02); inside a live one it is released at once, and as a
+/// utility statement it takes no snapshot, so the user's transaction is left
+/// as it was. Stays `Unknown` when the server doesn't answer within `limit`.
+pub async fn session_probe_txn(session: &mut PostgresSession, limit: Duration) -> TxnState {
+    if session.txn != TxnState::Unknown || session.cursor.is_some() {
+        return session.txn;
+    }
+    let probe = tokio::time::timeout(
+        limit,
+        session.client.batch_execute("SAVEPOINT rowkery_probe"),
+    )
+    .await;
+    session.txn = match probe {
+        Ok(Ok(())) => {
+            let released = tokio::time::timeout(
+                limit,
+                session
+                    .client
+                    .batch_execute("RELEASE SAVEPOINT rowkery_probe"),
+            )
+            .await;
+            if matches!(released, Ok(Ok(()))) {
+                TxnState::Users
+            } else {
+                TxnState::Unknown
+            }
+        }
+        Ok(Err(err)) if err.code() == Some(&SqlState::NO_ACTIVE_SQL_TRANSACTION) => TxnState::None,
+        Ok(Err(err)) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => TxnState::Users,
+        _ => TxnState::Unknown,
+    };
+    session.txn
+}
+
+/// The next `rows` of the tab's open cursor (0: the rest).
+pub async fn session_fetch_more<F>(
+    session: &mut PostgresSession,
+    rows: u32,
+    opts: StreamOptions,
+    on_batch: F,
+) -> Result<(StreamStats, bool), DriverError>
+where
+    F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
+{
+    if session.cursor.is_none() {
+        return Err(DriverError::Message(
+            "These rows are no longer open; run the query again".into(),
+        ));
+    }
+    let fetched = session_query_stream_with(session, &fetch_sql(rows), opts, on_batch).await;
+    finish_fetch(session, rows, fetched).await
+}
+
+/// Whether the session holds a paged result with rows left.
+pub fn session_has_cursor(session: &PostgresSession) -> bool {
+    session.cursor.is_some()
+}
+
+/// Closes the tab's cursor, committing the transaction it began. Every run
+/// on the tab calls it first, so nothing else runs inside our transaction.
+pub async fn session_close_cursor(session: &mut PostgresSession) {
+    if let Some(cursor) = session.cursor.take() {
+        let sql = if cursor.ours {
+            format!("CLOSE {CURSOR}; COMMIT")
+        } else {
+            format!("CLOSE {CURSOR}")
+        };
+        let _ = session.client.batch_execute(&sql).await;
+    }
+}
+
+/// Runs staged row edits as one transaction on the session: every statement
+/// must change exactly one row, or the whole batch rolls back and the
+/// failure names the statement. Never inside the user's own transaction:
+/// that is refused untouched, since our COMMIT would end it.
+pub async fn session_apply_changes(
+    session: &mut PostgresSession,
+    statements: &[RowStatement],
+) -> Result<ApplyCounts, ApplyFailure> {
+    session_apply_changes_within(session, statements, None).await
+}
+
+/// `session_apply_changes` where `BEGIN` and each statement get `step` to
+/// answer (a lock wait, or a socket that died without saying). On a timeout
+/// the statement is cancelled and the transaction rolled back, before any
+/// `COMMIT` was sent, so nothing was saved; `COMMIT` itself has no limit and
+/// is never retried. If even the rollback doesn't answer, the session is
+/// left `Unknown` for the caller to drop (the server rolls back when it goes).
+pub async fn session_apply_changes_within(
+    session: &mut PostgresSession,
+    statements: &[RowStatement],
+    step: Option<Duration>,
+) -> Result<ApplyCounts, ApplyFailure> {
+    let limit = step.unwrap_or(Duration::MAX);
+    let late = |what: &str| {
+        format!(
+            "{what} didn't answer within {} s, so it was stopped and nothing was saved.",
+            limit.as_secs()
+        )
+    };
+    let username = session.config.username.clone();
+    let message = |e: &tokio_postgres::Error| map_query_error(e, &username).into_message();
+    session_close_cursor(session).await;
+    let users = || {
+        ApplyFailure::other(
+            "This tab has a transaction open. Commit or roll it back before saving edits.",
+        )
+    };
+    if session.txn == TxnState::Users {
+        return Err(users());
+    }
+    // `BEGIN` alone first: a warning (or a refusal, when it failed) means the
+    // user's transaction is open, and nothing else is sent.
+    let before = session.txn_warnings.load(Ordering::SeqCst);
+    let Ok(begun) = tokio::time::timeout(limit, session.client.batch_execute("BEGIN")).await else {
+        abandon_apply(session, limit).await;
+        return Err(ApplyFailure::other(late("BEGIN")));
+    };
+    match begun {
+        Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => {
+            session.txn = TxnState::Users;
+            return Err(users());
+        }
+        Err(err) => return Err(ApplyFailure::other(message(&err))),
+        Ok(()) if session.txn_warnings.load(Ordering::SeqCst) != before => {
+            session.txn = TxnState::Users;
+            return Err(users());
+        }
+        Ok(()) => {}
+    }
+    session.txn = TxnState::None;
+    // Literals are built with `''` doubling only: backslashes must stay literal.
+    let set = tokio::time::timeout(
+        limit,
+        session
+            .client
+            .batch_execute("SET LOCAL standard_conforming_strings = on"),
+    )
+    .await;
+    match set {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            rollback(&session.client).await;
+            return Err(ApplyFailure::other(message(&err)));
+        }
+        Err(_) => {
+            abandon_apply(session, limit).await;
+            return Err(ApplyFailure::other(late("The database")));
+        }
+    }
+    let mut counts = ApplyCounts::default();
+    for (index, statement) in statements.iter().enumerate() {
+        let ran =
+            tokio::time::timeout(limit, session.client.execute(statement.sql.as_str(), &[])).await;
+        let Ok(ran) = ran else {
+            abandon_apply(session, limit).await;
+            let named = statement.describe();
+            return Err(ApplyFailure {
+                index: Some(index),
+                message: late(&named),
+                statement: Some(named),
+                rows: None,
+            });
+        };
+        match ran {
+            Ok(1) => counts.add(statement.verb, 1),
+            Ok(rows) => {
+                rollback(&session.client).await;
+                return Err(ApplyFailure::count(index, statement, rows));
+            }
+            Err(err) => {
+                rollback(&session.client).await;
+                return Err(ApplyFailure::error(index, statement, message(&err)));
+            }
+        }
+    }
+    // A deferred constraint can still refuse the batch here.
+    if let Err(err) = session.client.batch_execute("COMMIT").await {
+        if session.client.is_closed() {
+            // The server may have committed before the socket went.
+            return Err(ApplyFailure::other(
+                "The connection dropped during COMMIT, so the changes may or may not be saved. Reload the table to check.",
+            ));
+        }
+        rollback(&session.client).await;
+        return Err(ApplyFailure::other(message(&err)));
+    }
+    Ok(counts)
+}
+
+async fn rollback(client: &Client) {
+    let _ = client.batch_execute("ROLLBACK").await;
+}
+
+/// A step of an apply timed out: cancel it and roll back, both bounded. If
+/// the rollback doesn't come back, the session is `Unknown` (ours may still
+/// be open), for the caller to drop rather than reuse.
+async fn abandon_apply(session: &mut PostgresSession, limit: Duration) {
+    let limit = limit.min(Duration::from_secs(5));
+    let _ = tokio::time::timeout(
+        limit,
+        cancel_with_token(session.cancel_token.clone(), session.tls.clone()),
+    )
+    .await;
+    let rolled = tokio::time::timeout(limit, session.client.batch_execute("ROLLBACK")).await;
+    session.txn = if matches!(rolled, Ok(Ok(()))) {
+        TxnState::None
+    } else {
+        TxnState::Unknown
+    };
+}
+
+fn fetch_sql(rows: u32) -> String {
+    if rows == 0 {
+        format!("FETCH ALL FROM {CURSOR}")
+    } else {
+        format!("FETCH FORWARD {rows} FROM {CURSOR}")
+    }
+}
+
+/// A short page means the end: close. A failed fetch (cancel, an error in
+/// a row) aborted the transaction: roll ours back.
+async fn finish_fetch(
+    session: &mut PostgresSession,
+    rows: u32,
+    fetched: Result<StreamStats, DriverError>,
+) -> Result<(StreamStats, bool), DriverError> {
+    match fetched {
+        Ok(stats) => {
+            let more = rows > 0 && stats.rows >= u64::from(rows);
+            if !more {
+                session_close_cursor(session).await;
+            }
+            Ok((stats, more))
+        }
+        Err(err) => {
+            if session.cursor.take().is_some_and(|c| c.ours) {
+                let _ = session.client.batch_execute("ROLLBACK").await;
+            }
+            Err(err)
+        }
+    }
+}
+
+pub async fn cancel_with_token(
+    token: CancelToken,
+    tls: Option<MakeRustlsConnect>,
+) -> Result<(), DriverError> {
+    match tls {
+        None => token.cancel_query(NoTls).await,
+        Some(tls) => token.cancel_query(tls).await,
+    }
+    .map_err(|e| DriverError::Message(e.to_string()))
+}
+
+/// A database on the server, for the database switcher.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DatabaseInfo {
+    pub name: String,
+    /// Null when the user may not connect to it (size needs CONNECT).
+    pub size_bytes: Option<i64>,
+}
+
+/// Databases the server accepts connections to, templates left out.
+pub async fn session_list_databases(
+    session: &PostgresSession,
+) -> Result<Vec<DatabaseInfo>, DriverError> {
+    let rows = session
+        .client
+        .query(
+            r"
+            SELECT datname::text,
+                   CASE WHEN has_database_privilege(datname, 'CONNECT')
+                        THEN pg_catalog.pg_database_size(datname) END
+            FROM pg_catalog.pg_database
+            WHERE datallowconn AND NOT datistemplate
+            ORDER BY datname
+            ",
+            &[],
+        )
+        .await
+        .map_err(|e| map_query_error(&e, &session.config.username))?;
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo {
+            name: row.get(0),
+            size_bytes: row.get(1),
+        })
+        .collect())
+}
+
+/// A fingerprint of the catalog's shape over columns that only change with
+/// DDL (oid, name, schema, kind, column count of every user relation, and
+/// every constraint), so a cached catalog can be confirmed in one round trip.
+/// Row estimates and sizes are left out: they move without the schema moving.
+pub async fn session_catalog_fingerprint(session: &PostgresSession) -> Result<String, DriverError> {
+    let row = session
+        .client
+        .query_one(
+            r"
+            SELECT coalesce(md5(string_agg(
+                       c.oid || ':' || c.relname || ':' || c.relnamespace || ':' || c.relkind::text || ':' || c.relnatts,
+                       ',' ORDER BY c.oid)), '')
+                   || '/' ||
+                   coalesce((SELECT md5(string_agg(
+                       k.oid || ':' || k.conrelid || ':' || k.contype::text || ':' || coalesce(k.conkey::text, ''),
+                       ',' ORDER BY k.oid))
+                     FROM pg_catalog.pg_constraint k
+                     JOIN pg_catalog.pg_namespace kn ON kn.oid = k.connamespace
+                     WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')), '')
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p', 'v', 'm')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND n.nspname NOT LIKE 'pg_toast%'
+            ",
+            &[],
+        )
+        .await
+        .map_err(|e| DriverError::Message(e.to_string()))?;
+    Ok(row.get(0))
+}
+
+pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatalog, DriverError> {
+    let db_name = session.config.database.clone();
+    let client = &session.client;
+
+    // Sizes come from `relpages` so introspection never stats every relation file.
+    let tables_q = client.query(
+        r"
+        SELECT n.nspname AS schema_name,
+               c.relname AS table_name,
+               c.reltuples::float8 AS reltuples,
+               parent.relname AS partition_of,
+               c.relpages::bigint * current_setting('block_size')::bigint AS table_bytes,
+               c.relkind::text AS relkind,
+               pg_catalog.obj_description(c.oid, 'pg_class') AS comment
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_catalog.pg_inherits inh
+               ON c.relispartition AND inh.inhrelid = c.oid
+        LEFT JOIN pg_catalog.pg_class parent
+               ON parent.oid = inh.inhparent AND parent.relnamespace = c.relnamespace
+        WHERE c.relkind IN ('r', 'p', 'v', 'm')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY 1, 2
+        ",
+        &[],
+    );
+
+    // pg_attribute over information_schema: real type names (`text[]`, enums,
+    // `varchar(255)`) instead of `ARRAY` / `USER-DEFINED`, and a cheaper plan.
+    // Partitions share their parent's columns, so they are not sent again.
+    let columns_q = client.query(
+        r"
+        SELECT n.nspname, c.relname, a.attname,
+               pg_catalog.format_type(a.atttypid, a.atttypmod),
+               NOT a.attnotnull,
+               -- An identity column fills itself but has no pg_attrdef row.
+               COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid),
+                        CASE a.attidentity
+                          WHEN 'a' THEN 'generated always as identity'
+                          WHEN 'd' THEN 'generated by default as identity'
+                        END),
+               pg_catalog.col_description(a.attrelid, a.attnum)
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+        WHERE c.relkind IN ('r', 'p', 'v', 'm')
+          AND NOT c.relispartition
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY 1, 2, a.attnum
+        ",
+        &[],
+    );
+
+    // Primary keys from pg_index: information_schema's views cost several
+    // times more on large catalogs. Index details load per table on demand
+    // (`session_table_indexes`); they took ~45% of this load on 10k tables.
+    let pks_q = client.query(
+        r"
+        SELECT n.nspname, t.relname, a.attname
+        FROM pg_catalog.pg_index ix
+        JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+        CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+        WHERE ix.indisprimary
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_toast%'
+        ORDER BY 1, 2, k.ord
+        ",
+        &[],
+    );
+
+    // For completion: where unqualified names resolve, enum labels, and the
+    // user's own functions (extension members like PostGIS's are left out).
+    let search_path_q = client.query("SELECT current_schemas(false)::text[]", &[]);
+    let enums_q = client.query(
+        r"
+        SELECT n.nspname, t.typname,
+               ARRAY(SELECT e.enumlabel::text FROM pg_catalog.pg_enum e
+                     WHERE e.enumtypid = t.oid ORDER BY e.enumsortorder)
+        FROM pg_catalog.pg_type t
+        JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+        WHERE t.typtype = 'e'
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY 1, 2
+        ",
+        &[],
+    );
+    let functions_q = client.query(
+        r"
+        SELECT n.nspname, p.proname,
+               pg_catalog.pg_get_function_identity_arguments(p.oid),
+               pg_catalog.pg_get_function_result(p.oid)
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.prokind IN ('f', 'a', 'w')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_toast%'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_depend dep
+            WHERE dep.classid = 'pg_catalog.pg_proc'::regclass
+              AND dep.objid = p.oid AND dep.deptype = 'e')
+        ORDER BY 1, 2
+        LIMIT 2000
+        ",
+        &[],
+    );
+
+    // conparentid = 0 skips the copies Postgres makes on every partition.
+    let fks_q = client.query(
+        r"
+        SELECT n.nspname, t.relname, con.conname,
+               ARRAY(SELECT a.attname::text
+                     FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                     JOIN pg_catalog.pg_attribute a
+                       ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+                     ORDER BY k.ord),
+               rn.nspname, rt.relname,
+               ARRAY(SELECT a.attname::text
+                     FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+                     JOIN pg_catalog.pg_attribute a
+                       ON a.attrelid = con.confrelid AND a.attnum = k.attnum
+                     ORDER BY k.ord),
+               con.confdeltype::text
+        FROM pg_catalog.pg_constraint con
+        JOIN pg_catalog.pg_class t ON t.oid = con.conrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_catalog.pg_class rt ON rt.oid = con.confrelid
+        JOIN pg_catalog.pg_namespace rn ON rn.oid = rt.relnamespace
+        WHERE con.contype = 'f'
+          AND con.conparentid = 0
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY 1, 2, 3
+        ",
+        &[],
+    );
+
+    // tokio-postgres pipelines concurrent queries on one connection: one round trip.
+    let (table_rows, column_rows, pk_rows, fk_rows, search_path_rows, enum_rows, function_rows) =
+        futures::try_join!(
+            tables_q,
+            columns_q,
+            pks_q,
+            fks_q,
+            search_path_q,
+            enums_q,
+            functions_q
+        )
+        .map_err(|e| DriverError::Message(e.to_string()))?;
+
+    use std::collections::HashMap;
+
+    let mut schemas: HashMap<String, HashMap<String, TableNode>> = HashMap::new();
+
+    for row in table_rows {
+        let schema = row.get::<_, String>(0);
+        let table = row.get::<_, String>(1);
+        let reltuples: f64 = row.get(2);
+        let partition_of: Option<String> = row.get(3);
+        let kind = match row.get::<_, String>(5).as_str() {
+            "v" => TableKind::View,
+            "m" => TableKind::MaterializedView,
+            _ => TableKind::Table,
+        };
+        // A plain view has no storage and no statistics of its own.
+        let table_bytes: Option<i64> = if kind == TableKind::View {
+            None
+        } else {
+            row.get(4)
+        };
+        let row_estimate = if reltuples < 0.0 || kind == TableKind::View {
+            RowEstimate::Unknown
+        } else {
+            RowEstimate::Approximate(reltuples.round() as u64)
+        };
+        schemas.entry(schema).or_default().insert(
+            table.clone(),
+            TableNode {
+                name: table,
+                kind,
+                columns: Vec::new(),
+                primary_key: Vec::new(),
+                indexes: Vec::new(),
+                row_estimate,
+                partition_of,
+                foreign_keys: Vec::new(),
+                table_bytes,
+                index_bytes: None,
+                // A plain view has no indexes to fetch.
+                indexes_deferred: kind != TableKind::View,
+                comment: row.get(6),
+            },
+        );
+    }
+
+    for row in column_rows {
+        let schema = row.get::<_, String>(0);
+        let table = row.get::<_, String>(1);
+        let name = row.get::<_, String>(2);
+        let type_name = row.get::<_, String>(3);
+        let nullable: bool = row.get(4);
+        let default: Option<String> = row.get(5);
+        let comment: Option<String> = row.get(6);
+        if let Some(table_node) = schemas.get_mut(&schema).and_then(|t| t.get_mut(&table)) {
+            table_node.columns.push(ColumnNode {
+                name,
+                type_name,
+                nullable,
+                default,
+                comment,
+            });
+        }
+    }
+
+    for row in pk_rows {
+        let schema = row.get::<_, String>(0);
+        let table = row.get::<_, String>(1);
+        let column = row.get::<_, String>(2);
+        if let Some(table_node) = schemas.get_mut(&schema).and_then(|t| t.get_mut(&table)) {
+            table_node.primary_key.push(column);
+        }
+    }
+
+    for row in fk_rows {
+        let schema = row.get::<_, String>(0);
+        let table = row.get::<_, String>(1);
+        let on_delete = match row.get::<_, String>(7).as_str() {
+            "r" => "RESTRICT",
+            "c" => "CASCADE",
+            "n" => "SET NULL",
+            "d" => "SET DEFAULT",
+            _ => "NO ACTION",
+        };
+        if let Some(table_node) = schemas.get_mut(&schema).and_then(|t| t.get_mut(&table)) {
+            table_node.foreign_keys.push(ForeignKeyNode {
+                name: row.get(2),
+                columns: row.get(3),
+                ref_schema: row.get(4),
+                ref_table: row.get(5),
+                ref_columns: row.get(6),
+                on_delete: on_delete.to_string(),
+            });
+        }
+    }
+
+    let mut schema_nodes = Vec::new();
+    for (schema_name, tables_map) in schemas {
+        let mut tables = tables_map.into_values().collect::<Vec<_>>();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        schema_nodes.push(SchemaNode {
+            name: schema_name,
+            tables,
+        });
+    }
+    schema_nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let search_path = search_path_rows
+        .first()
+        .map(|row| row.get::<_, Vec<String>>(0))
+        .unwrap_or_default();
+    let enums = enum_rows
+        .iter()
+        .map(|row| EnumNode {
+            schema: row.get(0),
+            name: row.get(1),
+            labels: row.get(2),
+        })
+        .collect();
+    let functions = function_rows
+        .iter()
+        .map(|row| FunctionNode {
+            schema: row.get(0),
+            name: row.get(1),
+            args: row.get(2),
+            returns: row.get(3),
+        })
+        .collect();
+
+    Ok(SchemaCatalog {
+        databases: vec![DatabaseNode {
+            name: db_name,
+            schemas: schema_nodes,
+        }],
+        search_path,
+        enums,
+        functions,
+    })
+}
+
+/// Indexes of `tables` in `schema`, with sizes and scan counts, for Structure.
+pub async fn session_table_indexes(
+    session: &PostgresSession,
+    schema: &str,
+    tables: &[String],
+) -> Result<Vec<TableIndexes>, DriverError> {
+    let rows = session
+        .client
+        .query(
+            r"
+            SELECT t.relname, i.relname,
+                   pg_catalog.pg_get_indexdef(ix.indexrelid),
+                   ix.indisunique, ix.indisprimary, am.amname,
+                   i.relpages::bigint * current_setting('block_size')::bigint,
+                   s.idx_scan
+            FROM pg_catalog.pg_index ix
+            JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_catalog.pg_am am ON am.oid = i.relam
+            LEFT JOIN pg_catalog.pg_stat_user_indexes s ON s.indexrelid = ix.indexrelid
+            WHERE n.nspname = $1 AND t.relname = ANY($2)
+            ORDER BY 1, 2
+            ",
+            &[&schema, &tables],
+        )
+        .await
+        .map_err(|e| DriverError::Message(e.to_string()))?;
+
+    let mut out: Vec<TableIndexes> = tables
+        .iter()
+        .map(|table| TableIndexes {
+            schema: schema.to_string(),
+            table: table.clone(),
+            indexes: Vec::new(),
+            index_bytes: None,
+        })
+        .collect();
+    for row in rows {
+        let table: String = row.get(0);
+        let indexdef: String = row.get(2);
+        let size_bytes: Option<i64> = row.get(6);
+        let Some(entry) = out.iter_mut().find(|t| t.table == table) else {
+            continue;
+        };
+        if let Some(bytes) = size_bytes {
+            entry.index_bytes = Some(entry.index_bytes.unwrap_or(0) + bytes);
+        }
+        entry.indexes.push(IndexNode {
+            name: row.get(1),
+            columns: parse_index_columns(&indexdef),
+            unique: row.get(3),
+            primary: row.get(4),
+            method: Some(row.get(5)),
+            size_bytes,
+            scans: row.get(7),
+        });
+    }
+    Ok(out)
+}
+
+/// What the plan hints need about `tables` (schema, table): each one's
+/// estimated rows and its indexes. Tables it can't read are left out.
+pub async fn session_plan_facts(
+    session: &PostgresSession,
+    tables: &[(Option<String>, String)],
+) -> crate::plan::PlanFacts {
+    let mut facts = crate::plan::PlanFacts::default();
+    let mut schemas: Vec<&str> = tables
+        .iter()
+        .map(|(s, _)| s.as_deref().unwrap_or("public"))
+        .collect();
+    schemas.sort_unstable();
+    schemas.dedup();
+    for schema in schemas {
+        let names: Vec<String> = tables
+            .iter()
+            .filter(|(s, _)| s.as_deref().unwrap_or("public") == schema)
+            .map(|(_, t)| t.clone())
+            .collect();
+        let rows = session
+            .client
+            .query(
+                r"
+                SELECT c.relname, c.reltuples::float8
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = $1 AND c.relname = ANY($2)
+                ",
+                &[&schema, &names],
+            )
+            .await
+            .unwrap_or_default();
+        let Ok(indexes) = session_table_indexes(session, schema, &names).await else {
+            continue;
+        };
+        for t in indexes {
+            let estimate = rows
+                .iter()
+                .find(|r| r.get::<_, String>(0) == t.table)
+                .map(|r| r.get::<_, f64>(1))
+                .filter(|n| *n >= 0.0);
+            facts.tables.push(crate::plan::TableFacts {
+                schema: Some(t.schema),
+                table: t.table,
+                rows: estimate,
+                indexes: t
+                    .indexes
+                    .into_iter()
+                    .map(|i| crate::plan::IndexFacts {
+                        name: i.name,
+                        columns: i.columns,
+                    })
+                    .collect(),
+            });
+        }
+    }
+    facts
+}
+
+fn parse_index_columns(indexdef: &str) -> Vec<String> {
+    let upper = indexdef.to_uppercase();
+    let start = upper.find('(').map(|i| i + 1);
+    let end = upper.rfind(')');
+    match (start, end) {
+        (Some(s), Some(e)) if e > s => indexdef[s..e]
+            .split(',')
+            .map(|c| c.trim().trim_matches('"').to_string())
+            .filter(|c| !c.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// TLS for a session. `Verify` checks the chain and host name against the CA
+/// file when one is given, else the system trust store plus Mozilla's roots.
+/// `Prefer` and `Require` encrypt without checking the certificate, as libpq
+/// does, so self-signed and private-CA servers connect.
+fn make_tls_connector(
+    mode: PostgresSslMode,
+    root_cert: Option<&str>,
+) -> Result<MakeRustlsConnect, DriverError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| DriverError::Message(e.to_string()))?;
+    let config = if mode == PostgresSslMode::Verify {
+        builder
+            .with_root_certificates(root_store(root_cert)?)
+            .with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(EncryptOnly(provider)))
+            .with_no_client_auth()
+    };
+    Ok(MakeRustlsConnect::new(config))
+}
+
+fn root_store(root_cert: Option<&str>) -> Result<RootCertStore, DriverError> {
+    let Some(path) = root_cert.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(system_roots().clone());
+    };
+    let path = expand_home(path);
+    let certs = CertificateDer::pem_file_iter(&path)
+        .and_then(|iter| iter.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| {
+            DriverError::Message(format!(
+                "Couldn't read CA certificate {}: {e}",
+                path.display()
+            ))
+        })?;
+    let mut roots = RootCertStore::empty();
+    if roots.add_parsable_certificates(certs).0 == 0 {
+        return Err(DriverError::Message(format!(
+            "No certificates found in {}",
+            path.display()
+        )));
+    }
+    Ok(roots)
+}
+
+/// Corporate and locally added CAs live in the system store; the Mozilla
+/// roots cover machines where it can't be read. Loaded once, since reading
+/// the macOS trust settings takes a while and every session needs them.
+fn system_roots() -> &'static RootCertStore {
+    static ROOTS: OnceLock<RootCertStore> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut roots = RootCertStore::empty();
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+        roots
+    })
+}
+
+/// Accepts any server certificate but still checks the handshake signatures,
+/// so the connection is encrypted to whoever holds the certificate's key.
+#[derive(Debug)]
+struct EncryptOnly(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for EncryptOnly {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+pub fn humanize_postgres_error(err: &tokio_postgres::Error, username: &str) -> String {
+    if let Some(db) = err.as_db_error() {
+        if db.code().code() == "28P01" {
+            return format!("Postgres rejected password for '{username}'");
+        }
+        return db.message().to_string();
+    }
+    let text = error_chain(err);
+    if text.contains("password authentication failed") {
+        return format!("Postgres rejected password for '{username}'");
+    }
+    if text.contains("server does not support TLS") {
+        return "The server doesn't accept SSL. Check SSL under Advanced.".into();
+    }
+    if text.contains("invalid peer certificate") {
+        let reason = text
+            .rsplit("invalid peer certificate: ")
+            .next()
+            .unwrap_or("");
+        return format!(
+            "Couldn't verify the server's certificate ({reason}). Check SSL under Advanced."
+        );
+    }
+    text
+}
+
+/// The error with its causes, since tokio-postgres keeps TLS and IO details
+/// in the source chain.
+fn error_chain(err: &tokio_postgres::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
+fn quoted_after(haystack: &str, prefix: &str) -> Option<String> {
+    let rest = haystack.split_once(prefix).map(|(_, after)| after.trim())?;
+    let after_quote = rest.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(after_quote[..end].to_string())
+}
+
+/// Map a Postgres connection error string onto form fields (for probe/save UI).
+pub fn map_postgres_error_to_fields(message: &str) -> crate::connections::PostgresFieldErrors {
+    use crate::connections::PostgresFieldErrors;
+
+    let mut errors = PostgresFieldErrors::default();
+    if message.contains("does not exist") {
+        if let Some(role) = quoted_after(message, "role") {
+            errors.username = Some(format!("Role \"{role}\" does not exist on this server"));
+            return errors;
+        }
+        if let Some(db) = quoted_after(message, "database") {
+            errors.database = Some(format!("Database \"{db}\" does not exist on this server"));
+            return errors;
+        }
+    }
+    if message.contains("could not translate host name")
+        || message.contains("Name or service not known")
+        || message.contains("Connection refused")
+    {
+        errors.host = Some(message.to_string());
+        return errors;
+    }
+    errors
+}
+
+/// One cell: decoded from its binary wire value when the type is known
+/// (`decode_raw`), else through tokio-postgres's own conversions, else
+/// `<type name>`.
+fn postgres_value_to_core(row: &Row, index: usize) -> Value {
+    let ty = row.columns().get(index).map(|c| c.type_().clone());
+    if let Some(ty) = ty.as_ref() {
+        if let Some(v) = decode_known_type(row, index, ty) {
+            return v;
+        }
+    }
+    if let Ok(v) = row.try_get::<_, Option<bool>>(index) {
+        return match v {
+            Some(b) => Value::Bool(b),
+            None => Value::Null,
+        };
+    }
+    if let Ok(v) = row.try_get::<_, Option<i64>>(index) {
+        return match v {
+            Some(n) => Value::Int(n),
+            None => Value::Null,
+        };
+    }
+    if let Ok(v) = row.try_get::<_, Option<i32>>(index) {
+        return match v {
+            Some(n) => Value::Int(n as i64),
+            None => Value::Null,
+        };
+    }
+    if let Ok(v) = row.try_get::<_, Option<f64>>(index) {
+        return match v {
+            Some(n) => Value::Float(n),
+            None => Value::Null,
+        };
+    }
+    if let Ok(v) = row.try_get::<_, Option<String>>(index) {
+        return match v {
+            Some(s) => Value::Text(s),
+            None => Value::Null,
+        };
+    }
+    if let Ok(v) = row.try_get::<_, Option<Vec<u8>>>(index) {
+        return match v {
+            Some(b) => Value::Bytes(b),
+            None => Value::Null,
+        };
+    }
+    if let Ok(v) = row.try_get::<_, Option<serde_json::Value>>(index) {
+        return match v {
+            Some(json) => Value::Text(json.to_string()),
+            None => Value::Null,
+        };
+    }
+    let type_name = ty.as_ref().unwrap_or(&Type::TEXT).name().to_string();
+    Value::Text(format!("<{type_name}>"))
+}
+
+/// Accepts any column type and hands back the raw binary wire value, so we can
+/// decode types tokio-postgres only supports behind optional crates (dates,
+/// uuid, numeric) without pulling those crates in.
+struct RawValue<'a>(&'a [u8]);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for RawValue<'a> {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(RawValue(raw))
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+}
+
+fn decode_known_type(row: &Row, index: usize, ty: &Type) -> Option<Value> {
+    match row.try_get::<_, Option<RawValue>>(index) {
+        Ok(None) => Some(Value::Null),
+        Ok(Some(RawValue(bytes))) => decode_raw(ty, bytes),
+        Err(_) => None,
+    }
+}
+
+/// A binary wire value of type `ty`, or `None` for a type decoded no
+/// other way than the generic `FromSql` paths (and then a placeholder).
+fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
+    use tokio_postgres::types::{FromSql, Kind};
+    match ty.kind() {
+        // An enum's binary value is its label.
+        Kind::Enum(_) => return std::str::from_utf8(b).ok().map(|s| Value::Text(s.into())),
+        Kind::Domain(base) => return decode_raw(base, b),
+        Kind::Array(element) => return decode_array(element, b).map(Value::Text),
+        _ => {}
+    }
+    match *ty {
+        Type::BOOL => match b {
+            [v] => Some(Value::Bool(*v != 0)),
+            _ => None,
+        },
+        Type::INT2 => Some(Value::Int(i16::from_be_bytes(b.try_into().ok()?) as i64)),
+        Type::INT4 => Some(Value::Int(i32::from_be_bytes(b.try_into().ok()?) as i64)),
+        Type::INT8 => Some(Value::Int(i64::from_be_bytes(b.try_into().ok()?))),
+        Type::FLOAT4 => Some(Value::Float(f32::from_be_bytes(b.try_into().ok()?) as f64)),
+        Type::FLOAT8 => Some(Value::Float(f64::from_be_bytes(b.try_into().ok()?))),
+        Type::OID => Some(Value::Int(u32::from_be_bytes(b.try_into().ok()?) as i64)),
+        Type::NUMERIC => decode_numeric(b).map(Value::Text),
+        Type::UUID => decode_uuid(b).map(Value::Text),
+        Type::DATE => decode_date(b).map(Value::Text),
+        Type::TIME => decode_time(b).map(Value::Text),
+        Type::TIMESTAMP => decode_timestamp(b).map(Value::Text),
+        Type::TIMESTAMPTZ => decode_timestamp(b).map(|s| Value::Text(format!("{s}+00"))),
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
+            std::str::from_utf8(b).ok().map(|s| Value::Text(s.into()))
+        }
+        Type::BYTEA => Some(Value::Bytes(b.to_vec())),
+        Type::JSON | Type::JSONB => serde_json::Value::from_sql(ty, b)
+            .ok()
+            .map(|json| Value::Text(json.to_string())),
+        _ => None,
+    }
+}
+
+/// Whether arrays of `element` are shown as text (else a placeholder).
+fn array_element_shown(element: &Type) -> bool {
+    use tokio_postgres::types::Kind;
+    matches!(element.kind(), Kind::Enum(_))
+        || matches!(
+            *element,
+            Type::TEXT
+                | Type::VARCHAR
+                | Type::BPCHAR
+                | Type::NAME
+                | Type::INT2
+                | Type::INT4
+                | Type::INT8
+                | Type::FLOAT4
+                | Type::FLOAT8
+                | Type::BOOL
+                | Type::NUMERIC
+                | Type::UUID
+                | Type::DATE
+                | Type::TIME
+                | Type::TIMESTAMP
+                | Type::TIMESTAMPTZ
+        )
+}
+
+/// Postgres's text output of a float (`Infinity`, not Rust's `inf`).
+fn format_pg_float(f: f64, as_f32: bool) -> String {
+    if f.is_nan() {
+        "NaN".into()
+    } else if f.is_infinite() {
+        if f > 0.0 { "Infinity" } else { "-Infinity" }.into()
+    } else if as_f32 {
+        (f as f32).to_string()
+    } else {
+        f.to_string()
+    }
+}
+
+/// One array element as Postgres's array output writes it: in double
+/// quotes (with `"` and `\` escaped) when it is empty, reads as NULL, or
+/// holds a brace, comma, quote, backslash or white space.
+fn quote_array_element(text: &str) -> String {
+    let needs = text.is_empty()
+        || text.eq_ignore_ascii_case("null")
+        || text.chars().any(|c| {
+            matches!(
+                c,
+                '{' | '}' | ',' | '"' | '\\' | ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'
+            )
+        });
+    if !needs {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// A one-dimensional binary array (`ndim`, has-null flag, element oid, then
+/// per dimension its length and lower bound, then per element a length,
+/// -1 for NULL, and the bytes) as Postgres's text output: `{a,NULL,"c d"}`,
+/// `[0:1]={a,b}` when it doesn't start at 1. `None` for more dimensions or
+/// an element type not shown.
+fn decode_array(element: &Type, b: &[u8]) -> Option<String> {
+    if !array_element_shown(element) {
+        return None;
+    }
+    let int =
+        |i: usize| -> Option<i32> { Some(i32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?)) };
+    match int(0)? {
+        0 => return Some("{}".into()),
+        1 => {}
+        _ => return None,
+    }
+    let len = usize::try_from(int(12)?).ok()?;
+    let lower = int(16)?;
+    let mut pos = 20;
+    let mut parts = Vec::with_capacity(len.min(4096));
+    for _ in 0..len {
+        let n = int(pos)?;
+        pos += 4;
+        let Ok(n) = usize::try_from(n) else {
+            parts.push("NULL".to_string());
+            continue;
+        };
+        let raw = b.get(pos..pos + n)?;
+        pos += n;
+        let text = match decode_raw(element, raw)? {
+            Value::Text(s) => s,
+            Value::Int(n) => n.to_string(),
+            Value::Float(f) => format_pg_float(f, *element == Type::FLOAT4),
+            Value::Bool(v) => if v { "t" } else { "f" }.to_string(),
+            _ => return None,
+        };
+        parts.push(quote_array_element(&text));
+    }
+    let body = format!("{{{}}}", parts.join(","));
+    Some(if lower == 1 {
+        body
+    } else {
+        format!("[{}:{}]={body}", lower, i64::from(lower) + len as i64 - 1)
+    })
+}
+
+fn decode_uuid(b: &[u8]) -> Option<String> {
+    if b.len() != 16 {
+        return None;
+    }
+    let mut out = String::with_capacity(36);
+    for (i, byte) in b.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Some(out)
+}
+
+/// Days since 2000-01-01 (Postgres epoch) → `YYYY-MM-DD`.
+fn format_pg_date(days: i64) -> String {
+    // Howard Hinnant's civil_from_days, shifted from the Unix epoch.
+    let z = days + 10_957 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn format_time_of_day(micros: i64) -> String {
+    let secs = micros / 1_000_000;
+    let frac = micros % 1_000_000;
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    if frac == 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        let frac = format!("{frac:06}");
+        format!("{h:02}:{m:02}:{s:02}.{}", frac.trim_end_matches('0'))
+    }
+}
+
+fn decode_date(b: &[u8]) -> Option<String> {
+    let days = i32::from_be_bytes(b.try_into().ok()?);
+    Some(match days {
+        i32::MAX => "infinity".into(),
+        i32::MIN => "-infinity".into(),
+        d => format_pg_date(d as i64),
+    })
+}
+
+fn decode_time(b: &[u8]) -> Option<String> {
+    Some(format_time_of_day(i64::from_be_bytes(b.try_into().ok()?)))
+}
+
+fn decode_timestamp(b: &[u8]) -> Option<String> {
+    let micros = i64::from_be_bytes(b.try_into().ok()?);
+    Some(match micros {
+        i64::MAX => "infinity".into(),
+        i64::MIN => "-infinity".into(),
+        us => {
+            const DAY: i64 = 86_400_000_000;
+            let days = us.div_euclid(DAY);
+            let tod = us.rem_euclid(DAY);
+            format!("{} {}", format_pg_date(days), format_time_of_day(tod))
+        }
+    })
+}
+
+/// Postgres binary NUMERIC: ndigits, weight, sign, dscale, then base-10000 digits.
+fn decode_numeric(b: &[u8]) -> Option<String> {
+    let rd = |i: usize| -> Option<i16> { Some(i16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?])) };
+    let ndigits = rd(0)? as usize;
+    let weight = rd(2)? as i32;
+    let sign = rd(4)? as u16;
+    let dscale = rd(6)?.max(0) as usize;
+    match sign {
+        0xC000 => return Some("NaN".into()),
+        0xD000 => return Some("Infinity".into()),
+        0xF000 => return Some("-Infinity".into()),
+        _ => {}
+    }
+    let digits: Vec<i16> = (0..ndigits).map(|i| rd(8 + i * 2)).collect::<Option<_>>()?;
+    let digit_at = |pos: i32| -> i16 {
+        usize::try_from(pos)
+            .ok()
+            .and_then(|p| digits.get(p).copied())
+            .unwrap_or(0)
+    };
+
+    let mut out = String::new();
+    if sign == 0x4000 {
+        out.push('-');
+    }
+    if weight < 0 {
+        out.push('0');
+    } else {
+        for pos in 0..=weight {
+            let d = digit_at(pos);
+            if pos == 0 {
+                out.push_str(&d.to_string());
+            } else {
+                out.push_str(&format!("{d:04}"));
+            }
+        }
+    }
+    if dscale > 0 {
+        let mut frac = String::with_capacity(dscale + 4);
+        let mut pos = weight + 1;
+        while frac.len() < dscale {
+            frac.push_str(&format!("{:04}", digit_at(pos)));
+            pos += 1;
+        }
+        frac.truncate(dscale);
+        out.push('.');
+        out.push_str(&frac);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    #[test]
+    fn formats_dates_around_the_epoch() {
+        assert_eq!(format_pg_date(0), "2000-01-01");
+        assert_eq!(format_pg_date(-1), "1999-12-31");
+        assert_eq!(format_pg_date(9765), "2026-09-26");
+        assert_eq!(format_pg_date(59), "2000-02-29");
+    }
+
+    #[test]
+    fn formats_timestamps() {
+        let us: i64 = (9765 * 86_400 + 14 * 3600 + 43 * 60 + 23) * 1_000_000 + 120_000;
+        assert_eq!(
+            decode_timestamp(&us.to_be_bytes()).as_deref(),
+            Some("2026-09-26 14:43:23.12")
+        );
+        assert_eq!(
+            decode_timestamp(&(-1i64).to_be_bytes()).as_deref(),
+            Some("1999-12-31 23:59:59.999999")
+        );
+    }
+
+    #[test]
+    fn formats_uuid() {
+        let b: Vec<u8> = (0u8..16).collect();
+        assert_eq!(
+            decode_uuid(&b).as_deref(),
+            Some("00010203-0405-0607-0809-0a0b0c0d0e0f")
+        );
+    }
+
+    fn numeric(ndigits: i16, weight: i16, sign: u16, dscale: i16, digits: &[i16]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for v in [ndigits, weight, sign as i16, dscale] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        for d in digits {
+            b.extend_from_slice(&d.to_be_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn formats_numeric() {
+        // 12345.678 → digits [1, 2345, 6780], weight 1, dscale 3
+        let b = numeric(3, 1, 0, 3, &[1, 2345, 6780]);
+        assert_eq!(decode_numeric(&b).as_deref(), Some("12345.678"));
+        // -0.0005 → digits [5], weight -1, dscale 4
+        let b = numeric(1, -1, 0x4000, 4, &[5]);
+        assert_eq!(decode_numeric(&b).as_deref(), Some("-0.0005"));
+        // 10000 → digits [1], weight 1, dscale 0
+        let b = numeric(1, 1, 0, 0, &[1]);
+        assert_eq!(decode_numeric(&b).as_deref(), Some("10000"));
+        // 0.00 → no digits, dscale 2
+        let b = numeric(0, 0, 0, 2, &[]);
+        assert_eq!(decode_numeric(&b).as_deref(), Some("0.00"));
+    }
+}
+
+#[cfg(test)]
+mod map_error_tests {
+    use super::map_postgres_error_to_fields;
+
+    #[test]
+    fn maps_missing_role_to_username() {
+        let errors = map_postgres_error_to_fields(r#"role "postgres" does not exist"#);
+        assert_eq!(
+            errors.username.as_deref(),
+            Some("Role \"postgres\" does not exist on this server")
+        );
+    }
+}

@@ -1,0 +1,18 @@
+# Rowkery report relay. Setup steps in README.md.
+name = "rowkery-report-relay"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[vars]
+# Reports from the app are filed here: a private repo, so what users send
+# (their errors and queries) isn't public. Public issues stay on rowkery/rowkery.
+GITHUB_REPO = "rowkery/reports"
+
+# A few reports per minute per IP; more get a 429.
+[[ratelimits]]
+name = "REPORT_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 3
+  period = 60
