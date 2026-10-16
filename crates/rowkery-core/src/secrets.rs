@@ -690,6 +690,35 @@ mod tests {
     }
 
     #[test]
+    fn forget_cached_reads_a_secret_saved_elsewhere_since() {
+        let _guard = test_guard();
+        store_secret("k6", SecretKind::DbPassword, "old").unwrap();
+        // Another process saves a new one; this run still answers from memory.
+        fallback_set(&entry_account("k6", SecretKind::DbPassword), "new").unwrap();
+        assert_eq!(
+            get_secret("k6", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("old")
+        );
+        forget_cached("k6");
+        assert_eq!(
+            get_secret("k6", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("new")
+        );
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_refused_keychain_is_told_apart() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], true);
+        assert!(!keychain_refused("k7"), "nothing read yet");
+        assert_eq!(get_secret("k7", SecretKind::DbPassword).unwrap(), None);
+        assert!(keychain_refused("k7"));
+        assert!(!keychain_refused("k8"));
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
     fn a_file_secret_moves_into_the_connection_item() {
         let _guard = test_guard();
         let account = entry_account("k4", SecretKind::DbPassword);
