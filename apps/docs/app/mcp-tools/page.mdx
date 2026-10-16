@@ -1,0 +1,288 @@
+export const metadata = { title: "MCP tools" };
+
+<p className="crumb">Reference</p>
+
+# MCP tools
+
+<p className="lead">Everything an agent can call on Rowkery's MCP server: the limits every query runs under, the instructions the server gives the agent, each tool and its inputs, what the answers look like, and every refusal an agent can get back.</p>
+
+## How agents call Rowkery
+
+Rowkery's MCP server is the app itself, started with `--mcp`. Your agent's client (Claude Desktop, Claude Code or any other MCP client) starts it as a stdio server and talks to it over standard input and output:
+
+```bash
+/Applications/Rowkery.app/Contents/MacOS/Rowkery --mcp
+```
+
+It opens no window and no network port. Rowkery doesn't need to be open for it to work. On every call it reads the same `config.json` and keychain items as the app, so a change you make on the Agents page applies to the agent's next call. [Connecting to agents](/connecting-to-agents/) shows how to add it to a client.
+
+- **Answers** come back as one text block holding JSON. A refusal or an error comes back as one plain sentence, marked as an error, so the agent can read why and try again.
+- **Connections** are named by the `id` or the `name` that `list_connections` returns. Names match without regard to case.
+- **Databases** are optional. A call without one uses the connection's own database, or the first shared one if its own isn't shared. A SQLite connection has one database, `main`, whatever the call asks for.
+- **Tables** can be written as `table` or `schema.table`. A bare name is found in whichever schema has it, the search path first when several do.
+- **Every call is logged** to the activity log on the Agents page, with the arguments exactly as sent (cut at 4 KB), what was shared at the time, the row count, the time taken and the verdict. The log never holds rows.
+- **All tools are marked read-only** for the client, except `propose_change`, which is marked as not read-only and not destructive: it only queues a change for you.
+
+A good order for an agent is `list_connections`, then `list_tables` or `search_schema`, then `describe_table` for each table it will use, then `query`.
+
+## Limits
+
+Every query an agent runs is held to these limits. They are fixed in the server, the same for every connection.
+
+<McpLimits />
+
+- **Rows.** The agent can ask for any number of rows from 1 to the maximum with `max_rows`. Rowkery caps the query by wrapping it in an outer `SELECT … LIMIT`, so the query's own `ORDER BY` and `LIMIT` stay as written. When the cap cuts the result, `more` is `true`.
+- **Time.** On Postgres the limit is the session's `statement_timeout`; on SQLite the query is interrupted. Separately, Rowkery gives up on any one step that waits on the database (connecting, reading the schema, running the query) after 20 seconds.
+- **Big tables.** Before running a query, Rowkery reads its plan. On Postgres, a plan that reads a table of more than 100,000 rows (by the planner's estimate) from start to end is refused, and the refusal names the table and its indexes so the agent can filter on one. A plain browse that stops early under the row cap is fine. On SQLite, a local file nobody else is waiting on, the query runs anyway with a note.
+- **Text and size.** Text longer than 200 characters is cut and ends with `…`; binary values come back as `<N bytes>`. Rows stop once the JSON would pass 64 KB. Either way the answer carries a note saying so.
+- **Read-only.** Every Postgres query runs on a read-only session (`default_transaction_read_only`), set again before every statement, so nothing a query does can loosen it. SQLite files are opened with writes refused.
+
+## Instructions agents get
+
+When a client connects, the server sends it these instructions, which most agents read before their first call:
+
+<McpInstructions />
+
+## Tools
+
+<McpTools />
+
+## Example: a query
+
+The agent asks which cities' kiosks took the most money in the sample database:
+
+```json
+{
+  "name": "query",
+  "arguments": {
+    "connection": "arcade",
+    "sql": "SELECT k.city, count(*) AS sessions, sum(s.paid_cents) AS takings_cents FROM kiosk_sessions s JOIN kiosks k ON k.id = s.kiosk_id GROUP BY k.city ORDER BY takings_cents DESC",
+    "max_rows": 3
+  }
+}
+```
+
+Rowkery answers with the column names once and each row as an array:
+
+```json
+{
+  "columns": ["city", "sessions", "takings_cents"],
+  "elapsed_ms": 2,
+  "more": true,
+  "row_count": 3,
+  "rows": [
+    ["Utrecht", 50, 26250],
+    ["Copenhagen", 50, 22500],
+    ["Lyon", 50, 18750]
+  ],
+  "types": ["TEXT", "integer", "integer"]
+}
+```
+
+| Field | What it holds |
+| --- | --- |
+| `columns` | The column names, in order |
+| `rows` | One array per row, values in the same order as `columns`. NULL is `null` |
+| `row_count` | How many rows came back |
+| `more` | `true` when the row cap or the 64 KB limit cut the result |
+| `elapsed_ms` | How long the query took on the database |
+| `types` | Each column's type as the database names it (Postgres type names such as `int8` or `timestamptz`; on SQLite the declared type). Left out when no column has one |
+| `masked` | The columns whose values are stand-ins. Only there when the result holds a sensitive column |
+| `notes` | Only there when something was cut or a SQLite query read a big table end to end |
+
+The notes an agent can see are `text over 200 chars was cut`, `stopped at N rows to stay under 64 KB`, and on SQLite `Note: this reads main.events (~250000 rows; indexed: (id)) end to end. Filter on an indexed column, or aggregate a narrower range.`
+
+### What explain returns
+
+`explain` takes the same `sql` and returns `plan`, one line per step (for example `Seq Scan on public.orders  rows≈1200000  cost 20000`). It can also hold `slowest_step`, a `hint` (with `hint_sql`, such as a `CREATE INDEX`, when the hint has one) and `query_would_refuse`, the refusal `query` would give the same SQL. It reads the plan with `EXPLAIN`, never `EXPLAIN ANALYZE`, so the query never runs.
+
+## Example: a proposed change
+
+The agent can't write, but it can ask you to. It sends the statements and a reason you'll read beside them:
+
+```json
+{
+  "name": "propose_change",
+  "arguments": {
+    "connection": "arcade",
+    "sql": "UPDATE wallets SET balance_cents = balance_cents + 500 WHERE player_id = 7",
+    "reason": "Refund the 5 euro top-up that failed on kiosk 3 yesterday.",
+    "expect_rows": 1
+  }
+}
+```
+
+Nothing runs. Rowkery checks the statements, queues them for you and answers at once:
+
+```json
+{
+  "id": "p_11db31b530ca",
+  "note": "Waiting for the user to review it in Rowkery. Call check_proposal with this id later; don't send it again.",
+  "state": "waiting",
+  "statements": 1
+}
+```
+
+Later the agent calls `check_proposal` with `{ "id": "p_11db31b530ca" }` and gets one of these:
+
+| `state` | The rest of the answer |
+| --- | --- |
+| `waiting` | Only the `id`. You haven't decided yet |
+| `committed` | `rows`, the rows each statement changed (such as `[1]`), and `at_ms`, when you committed |
+| `rejected` | `note` if you wrote one, `at_ms`, and `hint`: "The user rejected this change. Don't send it again." |
+| `failed` | `error`, why the commit failed, and `at_ms`. Nothing was saved unless the error says otherwise |
+| `expired` | Only the `id`. Nobody decided within 24 hours |
+
+What you see and do with it is on [Proposed changes](/proposed-changes/).
+
+### What a proposal may hold
+
+- One to 20 `INSERT`, `UPDATE` and `DELETE` statements, run in order in one transaction when you commit. No `WITH` queries, no `RETURNING`, no `UPDATE … FROM` and no `DELETE … USING`.
+- Only tables you share, on a connection that isn't Read-only.
+- Only Postgres's built-in functions, as for queries, and no mention of a sensitive column.
+- A reason under 1,000 characters, and SQL under 20 KB.
+- At most 5 proposals can wait on one connection at a time.
+
+The checks run when the agent proposes, and Rowkery runs them again before it shows you the dry run and again before it commits, against your settings at that moment.
+
+## Refusals and errors
+
+Every message below is the exact text an agent gets back. Parts in capitals or quotes, such as a table name or a count, are filled in for the call.
+
+### Connections, databases and tables
+
+| Message | What it means |
+| --- | --- |
+| `Missing "sql".` (or another input's name) | A required input was left out or empty |
+| `No shared connection called "NAME". list_connections shows the ones shared; a connection is shared when "Allow MCP" is on in its sheet in Rowkery.` | No connection by that id or name is shared now: it doesn't exist, its switch on the Agents page is off, or its sharing time ran out |
+| `No database on this connection is shared yet.` | The connection is shared, but you haven't picked any of its databases in Edit access |
+| `No database called "NAME".` | That database doesn't exist, or isn't shared. The two read the same on purpose |
+| `No table "NAME". Try search_schema.` | No table by that name in the database |
+| `No table called "NAME".` | The table exists but isn't shared (`describe_table`) |
+| `"NAME" is in several schemas: a.NAME, b.NAME. Pass schema.table.` | A bare table name matched more than one schema, none of them on the search path |
+| `Couldn't read Rowkery's config: …` | `config.json` couldn't be read or parsed |
+| `Unknown tool "NAME".` | The client called a tool the server doesn't have |
+
+`list_connections` itself never refuses. When some saved connections aren't shared, its answer adds `not_shared` with how many.
+
+### The statement
+
+| Message | What it means |
+| --- | --- |
+| `Empty query.` | The SQL holds no statement, only comments or spaces |
+| `Refused: DELETE is not a read. This server only runs SELECT queries.` | Any write or schema change, named by its verb (`UPDATE`, `DROP TABLE`, `SET`…) |
+| `Refused: SHOW can't be run here. Send a SELECT (use the explain tool for plans).` | A read that isn't a `SELECT`, `WITH`, `VALUES` or `TABLE` statement, such as `SHOW`, `EXPLAIN` or `PRAGMA` |
+| `Refused: 2 statements. Send one SELECT per call.` | More than one statement in one call |
+
+### Tables you haven't shared
+
+| Message | What it means |
+| --- | --- |
+| `Refused: this reads a table the user hasn't shared with agents in Rowkery. A view or join needs every table it reads shared. Leave it out of the query, or ask the user to share it.` | The plan reads a table you haven't shared, directly or through a view, a join or a `WITH` query. When you share only some tables, Postgres's statistics (`pg_statistic`, which `pg_stats` reads) count as unshared too, since they hold sample values of every column |
+| `Refused: pg_stat_activity and pg_stat_statements show other sessions' queries with the values typed into them. Use the sessions tool, which shows them with values replaced by ?.` | A query reading other sessions' query text |
+
+### Big tables
+
+| Message | What it means |
+| --- | --- |
+| `Refused: the plan reads public.events (~4100000 rows; indexed: (id), (created_at)) end to end. Filter on an indexed column, or aggregate a narrower range.` | Postgres would read a table of over 100,000 rows from start to end. The message lists the table's indexes (`none` when it has none) |
+
+### Functions
+
+Agents can call Postgres's own functions that only compute on their arguments (every immutable built-in, such as `lower` or `count`, plus a list of safe ones for dates, JSON, text search and catalog descriptions). Rowkery checks the SQL as sent and again in the plan, where views and SQL functions are expanded.
+
+| Message | What it means |
+| --- | --- |
+| `Refused: pg_read_file() reads or writes files on the database server. Agents can call Postgres's built-in functions that only compute on their arguments. Leave it out of the query.` | A function refused by name. The reason changes with the function, as in the list below |
+| `Refused: NAME() isn't one of the built-in functions agents can call: ones that only compute on their arguments, like count, sum, date_trunc, lower or jsonb_extract_path_text. Leave it out of the query.` | A built-in function that isn't immutable and isn't on the safe list |
+| `Refused: SCHEMA.NAME() is defined in the database, not built into Postgres. What it runs never shows in the plan, so it could read tables that aren't shared. Agents can call only Postgres's built-in functions.` | A function written in SQL or a procedural language, or an extension's function, such as tablefunc's `crosstab` |
+| `Refused: NAME() here may be SCHEMA.NAME(), which is defined in the database rather than built into Postgres. Write pg_catalog.NAME(…) for the built-in.` | A bare name your database also defines in another schema |
+| `Refused: the operator OP here may be SCHEMA.OP, which calls a function defined in the database whose body isn't in the plan. Use a built-in operator or function instead.` | An operator backed by your own code |
+| `Refused: SCHEMA.VIEW is a view that calls a function defined in the database, whose body isn't in the plan. Query the tables under it instead.` | A view over your own code, or over another such view |
+| `Refused: casting to or checking SCHEMA.TYPE runs a function defined in the database, whose body isn't in the plan. Leave it out of the query.` | A domain or type whose check or cast runs your own code |
+| `Refused: names written with Unicode escapes (U&"…") can't be checked here. Write the name plainly.` | A `U&"…"` name |
+
+The reasons a function is refused by name:
+
+| Reason in the message | Functions |
+| --- | --- |
+| runs a query given as text, which can read tables the plan never shows | `ts_rewrite`, `ts_stat`, `connectby`, `xpath_table`, the `*_to_xml` functions, `crosstab…`, `dblink…` |
+| reaches other hosts from the database server | `http…` |
+| reads or writes files on the database server | `pg_read_file`, `pg_read_binary_file`, `pg_stat_file`, `pg_current_logfile`, `loread`, `lowrite`, `pg_ls_…`, `pg_file_…`, `lo_…` |
+| changes the server's or the session's state | `pg_terminate_backend`, `pg_cancel_backend`, `pg_reload_conf`, `set_config`, `nextval`, `setval`, `pg_notify`, `pg_advisory_…` locks, `pg_stat_reset…` and any `…_reset`, replication and backup functions, among others |
+| only waits, holding the agent's session | `pg_sleep…` |
+
+### Sensitive columns
+
+| Message | What it means |
+| --- | --- |
+| `Refused: players.email is masked. You can return it as it is or count it, but not filter, sort, group or join on it, or use it in an expression.` | A sensitive column used in a `WHERE`, `ORDER BY`, `GROUP BY`, join or expression (Postgres) |
+| `Refused: a masked column can only be returned from the main SELECT, not out of a subquery, WITH query, INTERSECT or EXCEPT. Select it from its table directly.` | A sensitive column passed up through a subquery (Postgres) |
+| `Refused: the plan walks INDEX, an index on a masked column, which would give away the order of its values. Filter or sort on another column.` | The plan would read an index on a sensitive column (Postgres) |
+| `Refused: a whole-row value of TABLE would carry its masked columns. Name the columns you need instead.` | A whole row, such as `SELECT t FROM players t` or `row_to_json(t)` (Postgres) |
+| `Refused: TABLE has a masked column (COLUMN) that is no longer in the table. Ask the user to check the table's masked columns in Rowkery.` | A column you marked was renamed or dropped |
+| `Refused: on SQLite a masked column can only be returned as it is, from the main SELECT, with no sorting, grouping, subqueries or combined results in the same query.` | SQLite's stricter rule: a query that returns a sensitive column can't also sort, group, count or combine results, and can't filter on it |
+| `Refused: Rowkery couldn't read the key it masks values with from the keychain (…).` | The keychain didn't give Rowkery the connection's masking key (for example, you chose Deny on the keychain prompt), so no stand-ins can be made |
+
+### Time
+
+| Message | What it means |
+| --- | --- |
+| `Stopped after 10 s (statement timeout). Filter on an indexed column or aggregate less.` | The query ran past the time limit and was stopped |
+| `Timed out connecting.` | The database didn't accept a connection within 20 seconds |
+| `Timed out reading the schema.`, `Timed out reading indexes.`, `Timed out.` | The database didn't answer a schema read, an index read or a `list_databases` / `sessions` call within 20 seconds |
+| `Timed out waiting for the server.` | The server stopped answering mid-query; Rowkery cancelled it and drops that session |
+
+Any other error from the database, such as a syntax error or a missing column, comes back as the database's own message.
+
+### Looking at sessions
+
+| Message | What it means |
+| --- | --- |
+| `SQLite has no other sessions to show; sessions is for Postgres connections.` | `sessions` was called on a SQLite connection |
+
+In a `sessions` answer, a query that reads a table you haven't shared shows as `(reads a table not shared with agents)`, and one the login can't see as `(not visible to this login)`.
+
+### Proposed changes
+
+These come from `propose_change`. Its statements also get the table, function and sensitive-column refusals above.
+
+| Message | What it means |
+| --- | --- |
+| `Refused: NAME is Read-only in Rowkery, so it takes no changes, proposed or not.` | The connection's safe mode is Read-only |
+| `Refused: a proposed change can only hold INSERT, UPDATE and DELETE statements, and this one starts with DROP TABLE. Schema changes, CTEs and function calls stay with the user.` | A statement of another kind, named by its verb |
+| `Refused: leave out RETURNING. Rowkery shows the user the changed rows itself.` | A statement with `RETURNING` |
+| `Refused: UPDATE … FROM isn't accepted in a proposed change. Name the rows with WHERE … IN (SELECT …) instead.` | An `UPDATE … FROM`, or `DELETE … USING` |
+| `Refused: Rowkery couldn't tell which table this UPDATE changes.` | The target table couldn't be read from the statement |
+| `Refused: Rowkery can't be sure where a string or comment in this statement ends. Write strings as '…' with '' for a quote, and close every comment.` | An unclosed string or comment, or a quoting style Rowkery can't follow |
+| `There's no statement in sql.` | The SQL holds no statement |
+| `Refused: a proposed change holds at most 20 statements. Split it into smaller changes.` | More than 20 statements |
+| `Keep reason under 1000 characters.` | The reason is too long |
+| `The SQL is over 20 KB. Propose a smaller change.` | The SQL is too long |
+| `Refused: players.email is masked, and a proposed change can't read, write or filter on a masked column.` | A statement mentions a sensitive column |
+| `Refused: 5 changes on this connection are already waiting for the user. Wait for them to be reviewed (check_proposal) before proposing more.` | Five proposals are already waiting on this connection |
+| `Couldn't save the proposal: …` | The queue file couldn't be written |
+| `No proposal called "ID".` | `check_proposal` was given an id that isn't in the queue (proposals are kept for a week) |
+
+## How masked values look
+
+The values of a column you mark as sensitive are never sent to an agent. In its place the agent gets a stand-in: `masked:` and ten hex digits.
+
+```json
+{
+  "columns": ["id", "nickname", "email"],
+  "masked": ["email"],
+  "rows": [
+    [1, "blink_1", "masked:2bf19f676e"],
+    [2, "comet_2", "masked:820c50d3e3"],
+    [3, "dash_3", "masked:d6ea0aaebf"]
+  ]
+}
+```
+
+- **The same value always gives the same stand-in** on one connection, so an agent can still tell whether two rows hold the same email. A different connection gives different stand-ins.
+- **NULL stays `null`.**
+- **The stand-in can't be turned back into the value.** It is a keyed hash (HMAC-SHA256) under a random key Rowkery keeps for each connection in your keychain.
+- **The agent knows which columns are masked.** `describe_table` lists them under `masked`, `search_schema` adds `(masked)` after the column, and a query's answer lists them under `masked`.
+
+How to mark a column, and how Presenting hides the same columns on your screen, is on [Sensitive columns and Presenting](/sensitive-columns-and-presenting/).
