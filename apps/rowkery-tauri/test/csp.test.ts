@@ -31,8 +31,8 @@ describe("content security policy", () => {
   });
 
   test("a report URL adds its origin, and nothing else, to connect-src", () => {
-    const d = directives(appCsp("https://rowkery-report-relay.example.workers.dev/report?x=1"));
-    expect(d["connect-src"]).toEqual(["ipc:", "http://ipc.localhost", "https://rowkery-report-relay.example.workers.dev"]);
+    const d = directives(appCsp("https://report-relay.example.workers.dev/report?x=1"));
+    expect(d["connect-src"]).toEqual(["ipc:", "http://ipc.localhost", "https://report-relay.example.workers.dev"]);
     expect(directives(devCsp("https://relay.example.dev/report"))["connect-src"]).toContain("https://relay.example.dev");
     expect(reportOrigin("not a url")).toBeNull();
     expect(reportOrigin("javascript:alert(1)")).toBeNull();

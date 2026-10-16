@@ -24,13 +24,13 @@ npm test          # Node 22+, fake GitHub, nothing is filed
    cd apps/relay
    npx wrangler@4 login
    npx wrangler@4 secret put GITHUB_TOKEN   # paste the token
-   npm run deploy                           # prints https://rowkery-report-relay.<you>.workers.dev
+   npm run deploy                           # prints https://report-relay.<you>.workers.dev
    ```
 
 5. **Point the app at it.** In `apps/rowkery-tauri/.env` (read at build time):
 
    ```bash
-   VITE_ROWKERY_REPORT_URL=https://rowkery-report-relay.<you>.workers.dev/report
+   VITE_ROWKERY_REPORT_URL=https://report-relay.<you>.workers.dev/report
    ```
 
    Rebuild the app (`make dev`, `make dmg`). Without a URL the sheet still opens and offers Copy report.
