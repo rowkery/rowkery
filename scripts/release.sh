@@ -47,7 +47,8 @@ tag="v$version"
   || die "tauri.conf.json has no updater public key; run scripts/updater-key.sh once"
 [[ -f "$key" ]] || die "no update signing key at $key; run scripts/updater-key.sh once"
 pkg_version="$(node -p "require('$app/package.json').version")"
-crate_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$app/src-tauri/Cargo.toml" | head -1)"
+# The crates share [workspace.package] version in the root Cargo.toml.
+crate_version="$(awk '/^\[/{w=($0=="[workspace.package]")} w && /^version *=/{gsub(/.*= *"|".*/,""); print; exit}' "$root/Cargo.toml")"
 [[ "$pkg_version" == "$version" && "$crate_version" == "$version" ]] \
   || die "versions disagree: tauri.conf.json $version, package.json $pkg_version, Cargo.toml $crate_version"
 git -C "$root" diff --quiet HEAD -- || die "uncommitted changes: a release must match a commit"
