@@ -101,7 +101,7 @@ kbd { font-size: 13px; background: var(--box); color: #fff; border-radius: 6px; 
 .shot video { display: block; width: 100%; height: auto; border-radius: 16px; background: #111; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05); }
 .shot figcaption { font-size: 13.5px; color: var(--grey); margin-top: 10px; }
 /* A tall screen beside the paragraphs that follow it. */
-.shot.side { float: left; width: 260px; margin: 6px 32px 16px 0; }
+.shot-side { float: left; width: 260px; margin: 6px 32px 16px 0; }
 .clear { clear: both; }
 /* Generated tables (components/Generated.tsx). */
 .keys-words { color: var(--grey); font-size: 13.5px; }
@@ -187,7 +187,7 @@ td:first-child { color: #fff; font-weight: 500; white-space: nowrap; }
   .links { margin-left: 0; }
   .links .white { padding: 0 16px; }
   .cards { grid-template-columns: minmax(0, 1fr); }
-  .shot.side { float: none; width: auto; max-width: 300px; margin: 24px 0; }
+  .shot-side { float: none; width: auto; max-width: 300px; margin: 24px 0; }
   .steps { padding-left: 52px; }
   .steps::before { left: 17px; }
   .steps h3::before { left: -52px; }
