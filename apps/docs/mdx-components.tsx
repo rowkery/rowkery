@@ -3,6 +3,7 @@ import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import Link from "next/link";
 import { Clip } from "@/components/Clip";
 import { CodeBlock } from "@/components/CodeBlock";
+import { CommandList, KeymapTable, McpInstructions, McpLimits, McpTools, MenuTable, ReleaseNotes, ShortcutTable } from "@/components/Generated";
 import { Card, Cards, Env, Note, Shot, Steps } from "@/components/Blocks";
 import { slug, textOf } from "@/lib/slug";
 
@@ -36,6 +37,14 @@ const components: MDXComponents = {
   Card,
   Cards,
   Clip,
+  CommandList,
+  KeymapTable,
+  McpInstructions,
+  McpLimits,
+  McpTools,
+  MenuTable,
+  ReleaseNotes,
+  ShortcutTable,
   Env,
   Note,
   Shot,

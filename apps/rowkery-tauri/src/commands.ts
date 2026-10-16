@@ -1056,6 +1056,46 @@ export const GESTURES: Gesture[] = [
   { id: "esc-discard", title: "Discard pending edits (Undo in the toast)", section: "Grid", keys: { mac: "esc", other: "Esc" } },
 ];
 
+/** One row of the shortcut sheet: a command with a key, or a gesture. */
+export interface SheetRow {
+  id: string;
+  title: string;
+  keys: string;
+  synonyms?: string[];
+  /** A command: it has a used dot and counts in "Used n of m". */
+  command: boolean;
+  /** The keymap moved this chord. */
+  remapped: boolean;
+}
+
+/**
+ * The shortcut sheet's sections and rows under a keymap: every command with a
+ * key (titles that read the state show their default), then the gestures.
+ * The sheet draws it, and the docs' shortcut table is generated from it
+ * (test/docs-tables.test.ts), so neither can drift from the registry.
+ */
+export function sheetRows(keymap: KeymapId, mac: boolean): { name: SheetSection; rows: SheetRow[] }[] {
+  const by = new Map<SheetSection, SheetRow[]>(SHEET_SECTIONS.map((s) => [s, []]));
+  for (const c of COMMANDS) {
+    const chord = chordFor(c, keymap);
+    // A key the grid or panel handles itself reads as its gesture row.
+    if (!chord || c.planned || GESTURES.some((g) => g.id === c.id)) continue;
+    const title = typeof c.title === "function" ? c.title({ sidebarHidden: false } as CommandState) : c.title;
+    by.get(sheetSection(c))!.push({
+      id: c.id,
+      title,
+      keys: formatChord(chord, mac),
+      synonyms: c.synonyms,
+      command: true,
+      remapped: !!KEYMAP_CHORDS[keymap][c.id],
+    });
+  }
+  for (const g of GESTURES) {
+    by.get(g.section)!.push({ id: g.id, title: g.title, keys: gestureKeys(g, mac), command: false, remapped: false });
+  }
+  return SHEET_SECTIONS.map((name) => ({ name, rows: by.get(name)! })).filter((s) => s.rows.length > 0);
+}
+
 /** Keycap text for a gesture. */
 export function gestureKeys(g: Gesture, mac: boolean): string {
   if (g.chord) return formatChord(g.chord, mac);

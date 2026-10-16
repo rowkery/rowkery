@@ -1,0 +1,290 @@
+{
+  "instructions": "Rowkery gives read-only access to the database connections the user shared from the Rowkery app. Start with list_connections. Before writing a query, look at the tables with list_tables or search_schema and call describe_table for each table you will use, so you know its columns and indexes. Filter on indexed columns, aggregate in SQL (count, sum, group by) instead of pulling rows, and ask for no more rows than you will read. Queries are single SELECT statements; results are capped (200 rows by default, 1000 at most) and a plan that reads a table of more than 100,000 rows end to end is refused, so rewrite it with an indexed WHERE. explain shows the plan without running the query. Columns the user marked sensitive come back masked (masked: and ten hex digits; the same value always gives the same stand-in). You can return or count a masked column but not filter, sort, group or join on it; describe_table lists them. For a slow or stuck database, sessions shows what's running, what each session waits on and who blocks whom. Queries never change data: the session is read-only. To change data, call propose_change with the INSERT, UPDATE or DELETE statements and why: the user reviews a dry run in Rowkery and commits or rejects it, and check_proposal tells you which. Don't send a rejected change again.",
+  "limits": {
+    "big_table_rows": 100000,
+    "cell_chars": 200,
+    "default_rows": 200,
+    "max_rows": 1000,
+    "payload_bytes": 65536,
+    "timeout_s": 10
+  },
+  "tools": [
+    {
+      "description": "Saved Rowkery connections the user shared with MCP: id, name, engine, environment label, masked host, default database.",
+      "inputs": [],
+      "name": "list_connections",
+      "read_only": true
+    },
+    {
+      "description": "Databases on a Postgres connection (SQLite has one, \"main\").",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "list_databases",
+      "read_only": true
+    },
+    {
+      "description": "Tables and views with approximate row counts and column counts. Cached for the session; refresh reloads the schema.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "Reload the schema from the database",
+          "maximum": null,
+          "minimum": null,
+          "name": "refresh",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "name": "list_tables",
+      "read_only": true
+    },
+    {
+      "description": "Find tables and columns whose name contains the text. Cheaper than listing a big schema.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "Part of a table or column name",
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "search_schema",
+      "read_only": true
+    },
+    {
+      "description": "Columns (type, nullability, default), primary key, indexes with their columns, foreign keys both ways and enum labels. Use it to pick indexed columns before querying.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "Table name, optionally schema.table",
+          "maximum": null,
+          "minimum": null,
+          "name": "table",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "describe_table",
+      "read_only": true
+    },
+    {
+      "description": "The query plan without running the query (EXPLAIN, never ANALYZE), its slowest step, one hint when a rule matches (a missing index, a sort on disk), and whether query would refuse it for reading a big table end to end.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "One SELECT statement",
+          "maximum": null,
+          "minimum": null,
+          "name": "sql",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "explain",
+      "read_only": true
+    },
+    {
+      "description": "Run one read-only SELECT. Returns column names once, rows as arrays, and more: true when the row cap cut the result. Capped at max_rows (default 200, max 1000); refused if the plan reads a table of over 100,000 rows end to end; 10 s timeout.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": null,
+          "maximum": 1000,
+          "minimum": 1,
+          "name": "max_rows",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "One SELECT statement",
+          "maximum": null,
+          "minimum": null,
+          "name": "sql",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "query",
+      "read_only": true
+    },
+    {
+      "description": "What's running on a Postgres database: each session's user, application, state, how long it has been at it, what it waits on and which sessions block it. Blockers come first; idle sessions are left out unless include_idle. Query text has its values replaced by ?, and a query on a table not shared with you is blanked.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "Also list idle sessions",
+          "maximum": null,
+          "minimum": null,
+          "name": "include_idle",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "name": "sessions",
+      "read_only": true
+    },
+    {
+      "description": "Ask the user to make a change to the data. Send INSERT, UPDATE and DELETE statements (no CTEs, RETURNING, UPDATE … FROM or DELETE … USING) on shared tables, with reason saying why. Nothing runs now: Rowkery shows the user a dry run and only they can commit it. Returns an id at once; call check_proposal later to learn whether it was committed, rejected or expired (after 24 h). Masked columns can't be mentioned, and functions defined in the database can't be called.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "How many rows you expect to change in all, shown next to the dry run's count",
+          "maximum": null,
+          "minimum": 0,
+          "name": "expect_rows",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "Why, in a sentence the user will read next to the SQL",
+          "maximum": null,
+          "minimum": null,
+          "name": "reason",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "One or more INSERT, UPDATE or DELETE statements, run in order in one transaction",
+          "maximum": null,
+          "minimum": null,
+          "name": "sql",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "propose_change",
+      "read_only": false
+    },
+    {
+      "description": "What became of a change sent with propose_change: waiting, committed (with rows changed), rejected (with the user's note, if any), failed or expired.",
+      "inputs": [
+        {
+          "description": "The id propose_change returned",
+          "maximum": null,
+          "minimum": null,
+          "name": "id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "check_proposal",
+      "read_only": true
+    }
+  ]
+}

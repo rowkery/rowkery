@@ -1,0 +1,50 @@
+export const metadata = { title: "Release notes" };
+
+<p className="crumb">Help</p>
+
+# Release notes
+
+<p className="lead">What changed in each version of Rowkery, newest first, and how you get a new version.</p>
+
+## How updates arrive
+
+Rowkery updates itself. You don't need to download a new copy by hand.
+
+<Steps>
+
+### It checks quietly
+
+About 15 seconds after launch, and then every six hours while it's open, Rowkery asks for the latest release. If you're up to date, it says nothing.
+
+### It downloads in the background
+
+When there's a newer version, Rowkery downloads it and checks its signature against the key built into the app. A download that doesn't match is never installed.
+
+### You choose when to restart
+
+A toast says **Rowkery 0.1.1 is ready**, with **Restart** and “or it installs when you quit”. Click **Restart** (or press <kbd>↵</kbd>) to install it now and reopen. If you leave it, the update installs when you next quit, and the next launch runs the new version. Rowkery never restarts on its own.
+
+</Steps>
+
+If a query is running in any window when you choose **Restart**, nothing restarts. The toast says **A query is running** (or how many are), and you can restart once it finishes, or quit to install.
+
+### Check now
+
+Choose **Help › Check for Updates…**, or **Check for updates…** in <kbd>⌘K</kbd>. You'll see **Checking for updates…** and then one of:
+
+| Toast | What it means |
+| --- | --- |
+| **Rowkery is up to date**, with the version | You have the latest release |
+| **Rowkery 0.1.1 is ready** | An update was downloaded; restart to install it |
+| **Couldn't check for updates**, with the reason | The check failed, for example with no network. Try again later |
+| **This build doesn't update itself** | A copy you built yourself, such as with `make dmg`. Update it by building again. See [Build from source](/build-from-source/) |
+
+Only one check runs at a time: a check from the menu waits for one already running. Once an update is downloaded, every check reports it straight away.
+
+### Where releases live
+
+Every release is published on GitHub at [github.com/rowkery/rowkery/releases](https://github.com/rowkery/rowkery/releases). The [latest release](https://github.com/rowkery/rowkery/releases/latest) has `Rowkery.dmg` for a fresh install, and a `SHA256SUMS` file if you want to check the download. The update check reads the same latest release, so drafts and pre-releases are never offered as updates.
+
+<Note>The alpha isn't signed by Apple, so after an update macOS asks again for access to each connection's password in your keychain.</Note>
+
+<ReleaseNotes />
