@@ -1,0 +1,206 @@
+export const metadata = { title: "Windows and switching" };
+
+<p className="crumb">Connections</p>
+
+# Windows and switching
+
+<p className="lead">Each Rowkery window shows one connection and one database. This page covers opening, switching, reordering and closing windows, moving a window to another connection or database, and what Rowkery restores when you launch it again.</p>
+
+## Windows in the title bar
+
+Every window has a pill in the title bar. Click a pill to show that window; the others keep running in the background, so a long query in a window you left carries on.
+
+<Shot src="/img/windows-and-switching-pills.webp" width={1600} height={48} alt="The title bar with five window pills: storefront with a red dot (shown), storefront with an orange dot, analytics with a blue dot, Docker Postgres with a green dot and an empty New window with the penguin, then +, Confirm writes, MCP · shared and Search tables, commands." caption="Four windows on four environments, an empty window, then the shown window's Safe mode and MCP" />
+
+A pill shows:
+
+- The engine's logo (Postgres or SQLite), or the penguin for a window with no connection yet, named **New window**.
+- The connection's name.
+- A dot in the connection's environment colour: <Env name="prd" /> <Env name="stg" /> <Env name="dev" /> <Env name="local" />. [Environments and safe mode](/environments-and-safe-mode/) explains the labels.
+- A spinner while the window connects, or while a window you aren't looking at still has queries running.
+- A warning mark when the window couldn't connect.
+- An **MCP** tag when an agent read that connection in the last minute. Click it to open the Agents page.
+- **×** on the shown pill, and on any pill under the pointer, to close the window.
+
+Hover a pill for its full description: the connection, the database, the environment's full name, and its key (<kbd>⌘1</kbd> to <kbd>⌘9</kbd> for the first nine windows).
+
+On the right of the title bar, the shown window has its **Safe mode** and **MCP** buttons (only while it's connected), then **Search**, which opens <kbd>⌘K</kbd>.
+
+## Open a new window
+
+| Do this | What happens |
+| --- | --- |
+| Click **+** after the last pill | A new, empty window opens and is shown |
+| <kbd>⌘T</kbd>, or **Window › New Window** | The same |
+| Right-click a pill, **New window** | The same |
+| Pick a database with <kbd>⌘↵</kbd> in the database switcher | That database opens in a new window on the same connection |
+| Save a new connection while the shown window already has one | The new connection gets its own window |
+
+A new window has no connection, so it shows **Connect to start**.
+
+If you use the TablePlus keymap, New window moves to <kbd>⌥⌘T</kbd> and <kbd>⌘T</kbd> opens a query tab instead. [Shortcuts and keymaps](/shortcuts-and-keymaps/) lists what each keymap changes.
+
+## Switch between windows
+
+| Key or action | What it does |
+| --- | --- |
+| <kbd>⌘1</kbd> to <kbd>⌘9</kbd> | Shows the first to ninth window, in pill order |
+| **Window › Next Window** | Shows the window to the right, wrapping round to the first |
+| **Window › Previous Window** | Shows the window to the left, wrapping round to the last |
+| Click a pill | Shows that window. It also leaves the Agents page if it was open |
+
+Next Window and Previous Window are also in <kbd>⌘K</kbd>. They have no key of their own, and they're available only when you have more than one window.
+
+### Reorder windows
+
+Drag a pill left or right. Pressing a pill shows it, so the pill you drag is always the shown window. <kbd>⌘1</kbd> to <kbd>⌘9</kbd> follow the new order.
+
+### The pill's menu
+
+Right-click a pill to show that window and open its menu:
+
+| Item | When it's there |
+| --- | --- |
+| **Switch database…** | The window is connected to Postgres |
+| **Switch connection…** | The window has a connection |
+| **Edit connection…** | The window has a connection |
+| **Reconnect** | The window has a connection |
+| **New window** | Always |
+| **Close window** | Always |
+
+## Close a window
+
+- Click **×** on its pill, or middle-click the pill.
+- Press <kbd>⇧⌘W</kbd>, or choose **Window › Close Window**.
+- Press <kbd>⌘W</kbd> after you last clicked the window's pill or its schema column. <kbd>⌘W</kbd> closes whichever you used last: the query tab, or the window. **File › Close Tab** in the menu bar renames itself **Close Window** when <kbd>⌘W</kbd> would close the window.
+
+Closing a window with a connection shows a toast, such as **Closed storefront / shop**, with **Undo**. Undo puts the window back where it was, with its tabs, and it connects again when you show it.
+
+Closing the last window leaves one empty window, so there's always a window to work in.
+
+## Switch connection
+
+Press <kbd>⇧⌘O</kbd> (**Connection › Switch Connection…**) to point the shown window at another saved connection.
+
+<Shot side src="/img/windows-and-switching-connection-switcher.webp" width={431} height={395} alt="The Switch connection picker: storefront prd under Pinned and marked Connected, the Sample database under Sample, then storefront stg, analytics dev, Docker Postgres local and billing-replica, with New connection… ⌘N at the foot." />
+
+The list opens with the filter box focused, so you can start typing at once.
+
+- **Pinned** connections come first, then the **Sample** database, then the rest in the order you saved them. Hover a row and click the pin to pin it to the top, or click again to unpin it. Pins are saved, and Connect to start uses the same order.
+- Each row shows the connection's name, its environment tag, and where it points (host, port and database, or the file's path for SQLite).
+- The shown window's connection says **Connected**, **Connecting…** or **Failed**. A green dot marks connections open in another window.
+- Type to filter by name, by host or database, or by an environment word such as `prd`.
+- <kbd>↑</kbd> <kbd>↓</kbd> move, <kbd>↵</kbd> switches, <kbd>Esc</kbd> closes the list.
+- <kbd>⌘E</kbd>, or the pencil on a row, edits that connection.
+- **New connection…** <kbd>⌘N</kbd> at the foot opens the connection form.
+
+<div className="clear" />
+
+Switching keeps the window's tabs. Query tabs stay as they are. A table tab whose table doesn't exist on the new connection closes, and a toast such as **Closed orders: not in shop** offers **Undo** to bring it back.
+
+## Switch database
+
+On a Postgres connection, press <kbd>⇧⌘D</kbd> (**Connection › Switch Database…**), or click the database name at the top of the schema column.
+
+<Shot side src="/img/windows-and-switching-database-switcher.webp" width={388} height={290} alt="The Switch database picker listing analytics, postgres, shop (ticked), shop_archive and shop_staging_copy with their sizes, and ↵ Switch this window, ⌘↵ Open in new window at the foot." />
+
+- Rowkery reads the list from the server each time it opens, on one short session, so nothing is polled while it's closed. It lists every database you can connect to, with its size, and leaves out templates.
+- The current database has a tick.
+- Type to filter. An exact name comes first, then names that start with what you typed, then names that contain it, so <kbd>↵</kbd> takes what you typed.
+- <kbd>↵</kbd> switches this window to the database. <kbd>⌘↵</kbd>, or <kbd>⌘</kbd>-click, opens it in a new window.
+
+Switch database needs a connected Postgres window. A SQLite file has one database, so the head of the schema column shows the file's name instead.
+
+<div className="clear" />
+
+## A window with no connection
+
+A new window shows **Connect to start**, with the penguin and the line "Nothing connects until you choose."
+
+| Choice | Key | What it does |
+| --- | --- | --- |
+| **New connection** | <kbd>⌘N</kbd> | Opens the connection form beside your data |
+| **Open a SQLite file…** | <kbd>⌘O</kbd> | Picks a file. You can also drop a `.sqlite` or `.db` file anywhere on the window; the heading changes to **Drop to open** |
+| **Paste a postgres:// URL** | <kbd>⌘V</kbd> | Opens the form filled in from the URL on your clipboard |
+| **Open the sample database** | <kbd>↵</kbd> | Opens the bundled sample |
+
+Under them, **Your connections** lists up to eight saved connections, pinned first, each with **Connect ↵**. With more than eight, **Show all…** <kbd>⇧⌘O</kbd> opens the full list. On a Mac, **Found on this Mac** lists Postgres servers answering on this Mac's ports 5432, 5433 and 54329.
+
+Use <kbd>↓</kbd> and <kbd>↑</kbd> to move through every row, and <kbd>↵</kbd> to open the one you're on. With no row picked, <kbd>↵</kbd> opens the sample database. <kbd>Esc</kbd> clears the pick.
+
+A window with no connection has no schema column. [Setting up a connection](/setting-up-a-connection/) covers the form and what you can paste.
+
+## When Rowkery launches
+
+Rowkery saves your windows as you work: their order, which one is shown, each window's connection and database, and its tabs with their SQL. When you launch it again, the windows come back as you left them.
+
+Only the shown window connects at launch. The others connect the first time you show them, so restored windows cost nothing until you look at them.
+
+A restored window whose connection you've deleted comes back empty, showing Connect to start.
+
+The first time you launch Rowkery with no saved connections, it opens the sample database with a **Getting started** tab whose query has already run.
+
+### Idle sessions
+
+Rowkery keeps a window's server sessions open between queries, so the next query doesn't wait for a new connection. A session unused for two minutes is closed and reopened when you next run something. When you come back to Rowkery after your Mac slept, it checks the open windows' idle sessions in the background, so the first query afterwards finds a live one.
+
+## Reload the schema
+
+When tables or columns change on the server, reload them:
+
+- **Refresh schema** <kbd>⌘R</kbd> (**Connection › Refresh Schema**), or the ↻ button on the schema column's host line, reloads tables and columns. The window keeps showing the schema it has until the new one arrives, and your query tabs keep their sessions and any open transaction. A toast says **Schema refreshed**, or **Couldn't refresh schema** with the reason.
+- **Reconnect** (**Connection › Reconnect**, the pill's menu, or **Reconnect and reload schema** in <kbd>⌘K</kbd>) connects the window again from scratch and loads the schema. It closes the window's query tab sessions, so a transaction you left open in a tab ends.
+
+With the DataGrip keymap, Refresh schema is <kbd>⌥⌘Y</kbd>.
+
+When you open a connection Rowkery has seen before, it shows the schema it saved last time at once, with a spinner, then checks the live one and updates the column if anything changed.
+
+## When a window can't connect
+
+<Shot src="/img/windows-and-switching-failed.webp" width={1016} height={480} alt="Couldn't connect, with the tilted penguin, the line billing-ro.example.com:5432 did not answer in 10 s., the raw error text, and the buttons Retry ⌘R, Edit… ⌘E and Report…." />
+
+The window shows **Couldn't connect** in place of the editor and results: one line on what went wrong, the server's own message under it, and three buttons.
+
+- **Retry** <kbd>⌘R</kbd> tries again. The message stays in place until the new attempt succeeds or fails.
+- **Edit…** <kbd>⌘E</kbd> opens the connection form with the field that failed marked, such as Host or Password.
+- **Report…** opens a report with the error in it, for you to add a note and send.
+
+The window's pill shows a warning mark until it connects. Rowkery gives a Postgres server 10 seconds to answer. [Setting up a connection](/setting-up-a-connection/#if-it-cant-connect) lists the reasons it can give.
+
+## The schema column's foot
+
+<Shot side src="/img/windows-and-switching-foot.webp" width={264} height={66} alt="The schema column's foot: the Agents button with a green dot, Appearance, Presenting and Help." />
+
+The schema column ends with a row of buttons. Hover one for its name and key.
+
+| Button | What it does |
+| --- | --- |
+| **Agents** | Opens the Agents page (<kbd>⇧⌘A</kbd>). A green dot means this connection is shared with agents. While agents' proposed changes wait for you, it shows their count and opens them |
+| **Appearance** | Cycles Auto, Light and Dark. Its icon shows the current one |
+| **Presenting** | Hides sensitive columns and the host while you share your screen. See [Sensitive columns and presenting](/sensitive-columns-and-presenting/) |
+| **Help** | Opens the shortcut sheet (<kbd>⇧⌘/</kbd>) |
+
+<div className="clear" />
+
+### Appearance
+
+Rowkery has a light and a dark look. **Auto** follows your Mac's setting and changes when it does; **Light** and **Dark** stay put. The Appearance button is the only theme control in the window. The same three choices are in **View** in the menu bar (**Match System Appearance**, **Light Appearance**, **Dark Appearance**) and in <kbd>⌘K</kbd> (search "appearance" or "dark"). Rowkery remembers your choice and opens in it next time.
+
+<Note>
+
+**Linux and Windows builds** draw their own window buttons. <kbd>⌘K</kbd> there has **Use system window controls (next launch)** to switch to the system's title bar, and back. The change applies the next time Rowkery starts. The Mac app always uses the native window.
+
+</Note>
+
+## The sample database
+
+The sample is a small SQLite database of an arcade business: kiosks, games, players, wallets, wallet transactions and kiosk sessions, plus a `daily_takings` view. It's a copy on your Mac, written beside Rowkery's settings, so it's yours to change. It has no environment and safe mode Off.
+
+| Command | Where | What it does |
+| --- | --- | --- |
+| **Open the sample database** | <kbd>⌘K</kbd>, **Connection › Open the Sample Database**, Connect to start | Shows a window already on the sample, or opens it in the shown window if that window is empty, or else in a new window. If you deleted the sample, this brings it back |
+| **Reset the sample database** | <kbd>⌘K</kbd> | Writes a fresh copy over yours, with the original rows, and every window on it reloads. A toast says **Sample database reset** |
+
+When you save a new connection from a window on the sample, the new connection opens in its own window, and the toast reminds you which <kbd>⌘</kbd> number returns to the sample.
+
+Deleting the sample works like deleting any connection, and it stays deleted until you choose Open the sample database.
