@@ -1,5 +1,5 @@
 # Rowkery report relay. Setup steps in README.md.
-name = "rowkery-report-relay"
+name = "report-relay"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
 
