@@ -1,0 +1,230 @@
+export const metadata = { title: "Other agents" };
+
+<p className="crumb">Agents</p>
+
+# Other agents
+
+<p className="lead">Rowkery's MCP server works with any client that can start a local stdio server. Connect an agent sets up Claude Code and Claude Desktop in one click; this page has the setup to paste for the others.</p>
+
+## What every client needs
+
+Every client starts the same thing: Rowkery's own app, run with `--mcp`.
+
+| Setting | Value |
+| --- | --- |
+| Transport | stdio (a local command) |
+| Command | `/Applications/Rowkery.app/Contents/MacOS/Rowkery` |
+| Arguments | `--mcp` |
+| Name | `rowkery` |
+
+- **The path assumes Rowkery is in Applications.** If you keep it somewhere else, use that copy's path, ending in `Rowkery.app/Contents/MacOS/Rowkery`. If you move the app later, update the path.
+- **Rowkery doesn't need to be open.** With `--mcp` the app opens no window: it answers the client and quits when the client disconnects.
+- **It reads your saved connections.** The server uses the same connections, keychain and sharing settings as the app, read again on every call. An agent sees only what you share on the Agents page (see [Choosing what to share](/choosing-what-to-share/)), and every call lands in its activity log.
+- **Nothing to install.** There is no npm package or separate download; the app is the server.
+
+Before you start, share at least one connection: open the Agents page with <kbd>⇧⌘A</kbd> and turn on its switch.
+
+## Check that it's connected
+
+Each client has its own place to see its servers, given below. The test that works in all of them: ask the agent "Which Rowkery connections can you see?". It calls `list_connections`, and the call shows up in the Agents page's activity log, with the client's name on its session.
+
+## Claude Code and Claude Desktop
+
+Use **Connect an agent** on the Agents page or in <kbd>⌘K</kbd>; it shows exactly what it will run first (see [Connecting to agents](/connecting-to-agents/)). To do the same by hand:
+
+### Claude Code
+
+```bash
+claude mcp add --scope user rowkery -- /Applications/Rowkery.app/Contents/MacOS/Rowkery --mcp
+```
+
+`--scope user` adds it for all your projects. Start a new Claude Code session afterwards; one that's already open won't see it. `claude mcp list` shows it.
+
+### Claude Desktop
+
+Add this to `~/Library/Application Support/Claude/claude_desktop_config.json`, keeping anything else already in the file:
+
+```json
+{
+  "mcpServers": {
+    "rowkery": {
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Quit and reopen Claude Desktop afterwards.
+
+Keep the name `rowkery` for these two: Connect an agent looks for that entry to tell you whether it's already set up, or points to another copy of Rowkery.
+
+## Cursor
+
+Edit `~/.cursor/mcp.json` for every project, or `.cursor/mcp.json` in one project's folder:
+
+```json
+{
+  "mcpServers": {
+    "rowkery": {
+      "type": "stdio",
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+**Check:** open **Customize** in Cursor's sidebar, where Rowkery is listed with a switch to turn it on or off. If it doesn't start, the Output panel (<kbd>⇧⌘U</kbd>) has its log under **MCP Logs**.
+
+## VS Code (Copilot agent mode)
+
+Run **MCP: Open User Configuration** from the Command Palette (<kbd>⇧⌘P</kbd>) for every workspace, or create `.vscode/mcp.json` in one workspace. VS Code names the top-level key `servers` where other clients use `mcpServers`:
+
+```json
+{
+  "servers": {
+    "rowkery": {
+      "type": "stdio",
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+**Check:** run **MCP: List Servers**. Pick Rowkery there to start, stop or restart it, or to see its output. Its tools are available in Copilot Chat's agent mode.
+
+## Windsurf
+
+Edit `~/.codeium/windsurf/mcp_config.json`, or open it from the Cascade section of Windsurf's settings:
+
+```json
+{
+  "mcpServers": {
+    "rowkery": {
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+**Check:** press the refresh button in Cascade's list of MCP servers after saving; Rowkery appears in the list. On an Enterprise plan, MCP has to be turned on in settings first.
+
+## Zed
+
+Run **zed: open settings file** from the command palette and add a `context_servers` entry:
+
+```json
+{
+  "context_servers": {
+    "rowkery": {
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+You can also add it in **Settings › AI › MCP Servers** with **Add Server › Add Local Server**.
+
+**Check:** in **Settings › AI › MCP Servers**, a green dot beside Rowkery, with the tooltip "Server is active", means it's running.
+
+## OpenAI Codex CLI
+
+Add it with one command:
+
+```bash
+codex mcp add rowkery -- /Applications/Rowkery.app/Contents/MacOS/Rowkery --mcp
+```
+
+Or add this to `~/.codex/config.toml` (or `.codex/config.toml` in a trusted project):
+
+```toml
+[mcp_servers.rowkery]
+command = "/Applications/Rowkery.app/Contents/MacOS/Rowkery"
+args = ["--mcp"]
+```
+
+**Check:** `codex mcp list` in a terminal, or `/mcp` inside a Codex session.
+
+## Gemini CLI
+
+Add this to `~/.gemini/settings.json` for every folder, or `.gemini/settings.json` in one project:
+
+```json
+{
+  "mcpServers": {
+    "rowkery": {
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+**Check:** `/mcp` in a Gemini session shows Rowkery as CONNECTED, with its tools; `gemini mcp list` in a terminal says Connected. In a folder you haven't trusted, Gemini shows stdio servers as disconnected until you trust it.
+
+## Cline
+
+In the Cline panel, click the **MCP Servers** icon, open the **Configure** tab and choose **Configure MCP Servers**. That opens `cline_mcp_settings.json`; add Rowkery under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "rowkery": {
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"],
+      "disabled": false
+    }
+  }
+}
+```
+
+**Check:** Rowkery appears in the MCP Servers list with its tools.
+
+## Continue
+
+Create a folder named `.continue/mcpServers` at the top of your workspace, and in it a file `rowkery.yaml`:
+
+```yaml
+name: Rowkery
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: Rowkery
+    type: stdio
+    command: /Applications/Rowkery.app/Contents/MacOS/Rowkery
+    args:
+      - --mcp
+```
+
+Continue uses MCP tools only in **agent** mode. A JSON file in the Claude Desktop shape above also works dropped into the same folder.
+
+**Check:** in agent mode, ask which Rowkery connections it can see.
+
+## Any other client
+
+Most clients take the same shape as Claude Desktop: a named entry under `mcpServers` with a `command` and an `args` list.
+
+```json
+{
+  "mcpServers": {
+    "rowkery": {
+      "command": "/Applications/Rowkery.app/Contents/MacOS/Rowkery",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+A client that asks for one command line takes `/Applications/Rowkery.app/Contents/MacOS/Rowkery --mcp`. Rowkery speaks MCP over stdio only; it doesn't serve HTTP or SSE.
+
+## If it doesn't connect
+
+- **"No such file"** or the server never starts: check the path. Run `ls /Applications/Rowkery.app/Contents/MacOS/Rowkery` in Terminal; if it isn't there, Rowkery is installed somewhere else.
+- **The agent sees no connections:** nothing is shared yet, or the time limit on a share has passed. The answer to `list_connections` says how many saved connections aren't shared.
+- **A table is missing:** it isn't ticked in Edit access. Tables created after you shared a database stay hidden until you tick them.
+- **Every call shows in the activity log**, refused ones with their reason, so the log is the first place to look when an agent says something failed.

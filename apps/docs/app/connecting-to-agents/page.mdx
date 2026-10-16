@@ -12,11 +12,11 @@ export const metadata = { title: "Connecting to agents" };
 
 Open the **Agents** page (<kbd>⇧⌘A</kbd>, or the Agents button at the foot of the schema column) and turn on the connection's switch. Choose how long: until you turn it off, for an hour, or for today.
 
-**Edit access** narrows it to the databases, then the tables, the agent may read.
+**Edit access** narrows it to the databases, then the tables, the agent may read. [Choosing what to share](/choosing-what-to-share/) covers every option.
 
 ### Connect your agent
 
-Choose **Connect an agent** on the Agents page or in <kbd>⌘K</kbd>. Rowkery shows exactly what it will run before it runs it.
+Choose **Connect an agent** on the Agents page, or **Connect Claude Code or Claude Desktop** in <kbd>⌘K</kbd>. Rowkery shows exactly what it will run before it runs it.
 
 <Shot src="/img/connect-claude-desktop.webp" width={1300} height={576} alt="Connect an agent, Claude Desktop tab: the entry Rowkery will add to claude_desktop_config.json, with Copy entry, Cancel and Run." />
 
@@ -27,7 +27,7 @@ Choose **Connect an agent** on the Agents page or in <kbd>⌘K</kbd>. Rowkery sh
 
 ### Any other MCP client
 
-Add Rowkery as a stdio server. Most clients take this shape:
+Add Rowkery as a stdio server. Most clients take this shape; [Other agents](/other-agents/) has the exact setup for Cursor, VS Code, Windsurf, Zed, Codex and more.
 
 ```json
 {
@@ -48,6 +48,8 @@ Try “Which tables are in my arcade database?” or “How many orders came in 
 
 ## What the agent can call
 
+[MCP tools](/mcp-tools/) has each tool's inputs and an example call.
+
 | Tool | What it does |
 | --- | --- |
 | `list_connections` | The connections you share |
@@ -65,28 +67,23 @@ Before anything reaches your database, Rowkery refuses:
 - Writes of any kind, and more than one statement at a time
 - Tables you haven't shared
 - Queries that would read a large table from start to end
-- Functions that could affect other sessions, files on the server or its settings
+- Functions defined in your database, and functions that could affect other sessions, files on the server or its settings
 
-The agent gets the reason back, so it can try a narrower query.
+The agent gets the reason back, so it can try a narrower query. [Choosing what to share](/choosing-what-to-share/#what-agents-can-never-do) lists every check, and [MCP tools](/mcp-tools/#refusals-and-errors) quotes each message.
 
 ## The activity log
 
 <Shot src="/img/agents-page.webp" width={1600} height={1000} alt="The Agents page: three connections on the left with their sharing switches, the activity log on the right with queries, one refused." />
 
-Every call is listed, newest first and grouped by agent session. Pick one to see what was shared at the time, the request as sent and the start of the response. Responses are kept for 24 hours; the log never stores rows.
+Every call is listed, newest first and grouped by agent session. Pick one to see what was shared at the time, the request as sent and the start of the response, which is kept for 24 hours unless you turn result samples off. [The activity log](/choosing-what-to-share/#the-activity-log) explains each part.
 
 ## When the agent proposes a change
 
-A toast tells you a change is waiting, and the Agents button shows a count. Open it to review:
-
-1. **Dry run** runs it in a transaction that's rolled back, showing old values struck through above the new ones.
-2. **Commit** <kbd>⇧⌘↵</kbd> runs it for real, only if it still changes the same rows. Or reject it.
-
-The agent learns your decision the next time it calls `check_proposal`. A proposal nobody decides on expires after a day.
+A toast tells you a change is waiting, and the Agents button shows a count. Open it to see the agent's reason and SQL, try a **Dry run**, then **Commit** <kbd>⇧⌘↵</kbd> or **Discard**. Nothing is written until you commit. [Proposed changes](/proposed-changes/) walks through the review.
 
 ## Sensitive columns
 
-Choose **Mark as sensitive** in a column header's menu and agents only ever see a stand-in for it. They can return or count it, but not filter on it. **Presenting**, at the foot of the schema column, also hides those values on your screen.
+Choose **Mark as sensitive** in a column header's menu and agents only ever get a stand-in for its values. **Presenting**, at the foot of the schema column, also hides them on your screen. [Sensitive columns and Presenting](/sensitive-columns-and-presenting/) says what agents can still do with a marked column.
 
 ## Stop sharing
 
