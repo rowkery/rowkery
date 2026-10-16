@@ -21,8 +21,6 @@ Or `make web` from the repo root (build + serve `out/` on :3000).
 
 **Deploy:** Vercel (or Cloudflare Pages), root directory `apps/web`, build command `npm run build`, output directory `out`.
 
-**Coming soon:** with `ROWKERY_COMING_SOON=1` in the build's environment, the build is only the coming-soon page (`components/ComingSoon.tsx`, `app/soon.css`): `next.config.ts` then takes `app/*.soon.tsx` as the only route files, so nothing of the real page, its copy, stylesheet or screens is in `out/`, and every address, the 404 included, shows the one page. With `ROWKERY_PREVIEW_KEY=<16 or more letters, digits, - or _>` as well, the real site is also built at `/<key>/` (`app/(site)/[key]/*.site.tsx`, which are routes only then) and `?key=<key>` on the coming-soon page goes there; a wrong key lands on the 404, the coming-soon page again, and the key itself is nowhere in the build outside its own folder (the real page's stylesheet, scripts and screens then sit under `_next/` by hash, unlisted). Set both on the host for the production deployment only; previews keep the whole site, with the coming-soon page itself at `/soon/`. Check with `ROWKERY_COMING_SOON=1 npm run build && node scripts/coming-soon-check.mjs` (nothing of the site in the build, the page at `/` and as the 404, seven window sizes, Reduce Motion, the key door), with `ROWKERY_PREVIEW_KEY` set the same way for both when checking the key.
-
 **Placeholders:** `DOWNLOAD_URL` and `RELEASE` in `lib/site.ts`. Every Download button links to `DOWNLOAD_URL`, and while it is empty they scroll to the closing section. `RELEASE` is the build named in the hero's pill and under the closing buttons.
 
 **Check** (after `npm run build`; it needs Playwright):
