@@ -57,7 +57,17 @@ export const GROUPS: DocGroup[] = [
   {
     title: "Help",
     pages: [
+      { href: "/troubleshooting/", title: "Troubleshooting", file: "troubleshooting/page.mdx" },
+      { href: "/security-and-privacy/", title: "Security and privacy", file: "security-and-privacy/page.mdx" },
       { href: "/release-notes/", title: "Release notes", file: "release-notes/page.mdx" },
+    ],
+  },
+  {
+    title: "Reference",
+    pages: [
+      { href: "/mcp-tools/", title: "MCP tools", file: "mcp-tools/page.mdx" },
+      { href: "/where-rowkery-keeps-things/", title: "Where Rowkery keeps things", file: "where-rowkery-keeps-things/page.mdx" },
+      { href: "/build-from-source/", title: "Build from source", file: "build-from-source/page.mdx" },
     ],
   },
 ];

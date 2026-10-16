@@ -1,0 +1,158 @@
+export const metadata = { title: "Build from source" };
+
+<p className="crumb">Reference</p>
+
+# Build from source
+
+<p className="lead">How to build and run Rowkery from its source code, make your own disk image, run the tests, and build these docs and the website. Rowkery is open source under the Apache License 2.0.</p>
+
+## What you need
+
+| Tool | Version |
+| --- | --- |
+| macOS | Apple Silicon or Intel |
+| Xcode command line tools | Install with `xcode-select --install` |
+| Rust | 1.98.1, pinned in `rust-toolchain.toml`. With [rustup](https://rustup.rs), the right version installs itself the first time you build |
+| Node.js | 22 |
+| Git | Any recent version |
+
+For the tests that use Postgres you also need Docker, or any Postgres 16 you can connect to.
+
+## Run it
+
+<Steps>
+
+### Get the code
+
+```bash
+git clone https://github.com/rowkery/rowkery.git
+cd rowkery
+```
+
+### Install the app's packages
+
+```bash
+cd apps/rowkery-tauri
+npm install
+```
+
+### Start it
+
+```bash
+npm run tauri dev
+```
+
+The first build compiles the Rust core and takes a few minutes; later ones are quick. The app opens with hot reload: change the interface's code and the window updates, with Vite serving it on port 1420. `npm run dev` on its own starts only Vite, without the app.
+
+</Steps>
+
+<Note>
+
+**Keep your own setup out of it.** A build from source uses the same folder and keychain as the Rowkery you installed. To keep them apart, start it with `ROWKERY_CONFIG_DIR` set to a folder of its own: `ROWKERY_CONFIG_DIR=/tmp/rowkery-dev npm run tauri dev`. Rowkery then also keeps passwords in an encrypted file in that folder instead of the keychain.
+
+</Note>
+
+A build you make yourself doesn't update itself, and its **Report an Issue** sheet can only copy a report: sending needs the address of the report service, set at build time as `VITE_ROWKERY_REPORT_URL` in `apps/rowkery-tauri/.env`.
+
+## Run a branch or a pull request
+
+From the repository's root:
+
+```bash
+make dev                  # the current branch
+make dev feat/some-thing  # that branch
+make dev 35               # pull request #35
+```
+
+`make dev` fetches the branch from GitHub, resets your local copy of it to match, runs `npm install` when the package lock changed since the last install, then starts the app with `npm run tauri dev`. It stops without changing anything if you have uncommitted changes to tracked files.
+
+## Make a disk image
+
+```bash
+make dmg            # for this Mac's chip
+make dmg universal  # one image for Apple Silicon and Intel Macs
+```
+
+The disk image ends up in `target/release/bundle/dmg/` (or `target/universal-apple-darwin/release/bundle/dmg/` for a universal one), and Finder shows it when the build is done. `make dmg universal` adds the two Rust targets it needs first.
+
+The app in it isn't signed, so on another Mac, macOS blocks it the first time. After dragging it to Applications, run this once on that Mac, or use **Open Anyway** in System Settings › Privacy & Security:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Rowkery.app
+```
+
+`make release` builds the public release (a universal disk image, the signed update and its feed). It needs the Rowkery team's update signing key, so it's only for maintainers.
+
+## Linux and Windows
+
+Rowkery builds on Linux and Windows, but those builds are unofficial and aren't tested the way the Mac app is. On both, Rowkery draws its own window controls; **Use system window controls (next launch)** in <kbd>⌘K</kbd> (Ctrl+K there) switches to the system's.
+
+On Linux, install WebKitGTK 4.1 and GTK 3 with the other [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu:
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libayatana-appindicator3-dev librsvg2-dev patchelf
+```
+
+To run the real app without a display, as in a container, use `Xvfb` and set `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+
+Without a secret service (such as GNOME Keyring) running, Rowkery keeps passwords in its encrypted fallback file. Its folder is `~/.config/rowkery` on Linux and `%APPDATA%\Rowkery` on Windows.
+
+## Run the tests
+
+Before you push a change, run the whole set from the repository's root:
+
+```bash
+cd apps/rowkery-tauri && npm run typecheck && npx vitest run
+cd ../..
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+These run on your machine only: the GitHub Actions workflows in the repository are started by hand, never by a push or a pull request.
+
+### The test Postgres
+
+The Postgres integration tests need a test database. The repository's Compose file starts one on port 54329, with user, database and password all `rowkery`:
+
+```bash
+docker compose -f docker-compose.test.yml up -d postgres
+export ROWKERY_PG_HOST=127.0.0.1 ROWKERY_PG_PORT=54329 ROWKERY_PG_PASSWORD=rowkery
+cargo test --workspace --features rowkery-core/postgres-integration,rowkery-mcp/postgres-integration
+```
+
+One test switches a window to a second database; create it once with `psql -h 127.0.0.1 -p 54329 -U rowkery -c "CREATE DATABASE orders"`.
+
+Set `ROWKERY_CONFIG_DIR` to a temporary folder when you run the tests or the app against it, so they leave your own connections and keychain alone.
+
+### Browser proofs
+
+Every change to the interface comes with a browser proof: a script in `scripts/` that serves the interface with Vite, stands in for the Rust core, drives it in headless Chromium and checks what's on screen. Each script's first lines say what it proves.
+
+```bash
+cd apps/rowkery-tauri
+npx playwright install chromium
+npx vite --port 1420 &
+cd ../..
+NODE_PATH=apps/rowkery-tauri/node_modules node scripts/toast-browser-proof.mjs
+```
+
+### Latency budgets
+
+Rowkery has a time budget for each step on the hot path, such as 16 ms to open <kbd>⌘K</kbd> and 66 ms from <kbd>⌘↵</kbd> to the first rows on screen on a local database. They're in `scripts/budgets.json`. A change to the Rust code or the results path runs `scripts/latency-browser-proof.mjs` and, on a Mac, `scripts/latency-proof.sh` against the test Postgres, which fail a run that's much slower than the reference.
+
+## The docs and the website
+
+```bash
+make docs   # builds these docs and serves them on http://localhost:3001
+make web    # builds rowkery.com and serves it on http://localhost:3000
+```
+
+Both are static sites made with Next.js, in `apps/docs` and `apps/web`. For the docs with hot reload, run `npm install` and `npm run dev` in `apps/docs`.
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](https://github.com/rowkery/rowkery/blob/main/CONTRIBUTING.md) covers how branches, commits and pull requests are shaped, the checks a change has to pass, and how to describe what you changed. The code of conduct, the design system (`DESIGN.md`) and the product spec (`docs/spec.md`) are in the same repository at [github.com/rowkery/rowkery](https://github.com/rowkery/rowkery).
+
+Questions and ideas go in [Discussions](https://github.com/rowkery/rowkery/discussions), and bugs in [Issues](https://github.com/rowkery/rowkery/issues). For a security problem, see [Report a vulnerability](/security-and-privacy/#report-a-vulnerability).

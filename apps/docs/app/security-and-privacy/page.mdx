@@ -1,0 +1,140 @@
+export const metadata = { title: "Security and privacy" };
+
+<p className="crumb">Help</p>
+
+# Security and privacy
+
+<p className="lead">What Rowkery sends over the network and what stays on your Mac, where your passwords live, how it connects to your databases, and every check between an AI agent and your data, including the limits of those checks.</p>
+
+## What stays on your Mac
+
+There's no Rowkery account, and the app has no analytics or telemetry. Your connections, queries, results and settings stay on your Mac.
+
+Rowkery only makes these network connections:
+
+| Connection | When |
+| --- | --- |
+| Your databases | When you open a connection, directly or through the SSH tunnel you set up |
+| The update check | 15 seconds after launch, then every 6 hours, and when you choose **Help › Check for Updates…**. It reads the latest release's `latest.json` from Rowkery's public GitHub repository, and downloads the update when there is one |
+| An issue report | Only when you press **Send report** in Report an issue, and only what that sheet lists |
+
+A few things happen on your Mac only:
+
+- **Found on this Mac** under Connect to start checks whether anything answers on ports 5432, 5433 and 54329 of this Mac. It opens a connection and sends nothing.
+- **Connect an agent** runs your login shell to find Claude Code, then runs `claude mcp add`, or edits Claude Desktop's config file, only after showing you exactly what it will do.
+- **The MCP server** runs on your Mac and talks to your agent's client through standard input and output. It opens no port.
+
+The app's window can't connect to the network on its own either: its content security policy only lets it talk to Rowkery's own core and, in builds with reporting, the report service.
+
+To turn update checks off, start Rowkery with `ROWKERY_UPDATES=0` set. A build you make yourself never checks.
+
+The rowkery.com website and these docs count visits with Vercel Web Analytics. The app doesn't.
+
+## Where your secrets live
+
+Passwords are never written to `config.json`. Rowkery keeps them in the macOS Keychain, one item per connection, under the service name `rowkery` with the connection's id as the account. That one item holds all of the connection's secrets:
+
+- the database password,
+- the SSH password or the SSH key's passphrase,
+- the key Rowkery uses to make stand-ins for the connection's [sensitive columns](#sensitive-columns).
+
+An SSH key file stays where it is; Rowkery saves only its path. Once read, a secret is kept in memory until Rowkery quits, so reconnecting doesn't ask the keychain again. When you delete a connection, its keychain item is removed as soon as the Undo toast has gone.
+
+When there is no keychain to use, as on a Linux machine without a secret service, or when `ROWKERY_CONFIG_DIR` points Rowkery at a folder of its own, secrets go to an encrypted file, `secrets.enc`, with its key in `secrets.key` beside it. That keeps them out of plain sight, but not away from someone who can read your files.
+
+Linux and Windows builds use the platform's own secret store in place of the macOS Keychain. Why macOS asks about the keychain after updates is on [Troubleshooting](/troubleshooting/#keychain-prompts).
+
+## Connections to your databases
+
+### TLS
+
+A new connection to another machine starts on **Verify**, which encrypts the connection and checks the server's certificate chain and that the certificate names the host, against your Mac's trusted certificates and a built-in list of public authorities, or against a CA file you choose. A connection to this Mac starts on **Prefer**. An `sslmode` in a pasted connection string wins over both.
+
+**Prefer** and **Require** encrypt without checking the certificate, as Postgres's own tools do, so self-signed servers connect. Choose them only when you can't use Verify. [Which SSL setting to pick](/troubleshooting/#which-ssl-setting-to-pick) explains each one.
+
+### SSH
+
+Rowkery remembers each SSH server's host key, as a SHA-256 fingerprint, in `ssh_known_hosts` in its folder. **Trust the host key on first connect** is on for a new tunnel, so the first key a server shows is remembered. If a server ever shows a different key, Rowkery refuses to connect and sends nothing: "The SSH host key for HOST has CHANGED. Nothing was sent." With the setting off, a server Rowkery hasn't seen is refused too, until you check its key. A tunnel whose server stops answering closes within a minute.
+
+## Your own writes
+
+Rowkery is careful with changes you make yourself, too:
+
+- **Safe mode** on each connection decides what happens to a write: Off runs it, Confirm writes shows you the exact SQL first, and Read-only refuses it and also opens the connection's sessions read-only on the server. [Environments and safe mode](/environments-and-safe-mode/) has the details.
+- **Edits to rows** are staged until you press Commit. Each changed row is matched on its whole primary key, every statement must change exactly one row or the whole transaction rolls back, edits never run inside a transaction of yours that's open, and a COMMIT whose connection dropped is never retried. See [Editing rows](/editing-rows/).
+
+## The MCP server
+
+Rowkery's MCP server is the same app, started by your agent's client with `--mcp`. It has no window and no network port: the client starts it, talks to it over standard input and output, and stops it. On every call it reads your saved connections from `config.json` and their secrets from the keychain, so it only knows what you have shared at that moment.
+
+An agent never gets a connection that can write. It reads through the checks below, and anything it wants changed goes to you as a proposal.
+
+## Every check on agent access
+
+### What's shared
+
+- **Nothing is shared until you share it.** Each connection has its own switch on the Agents page, off to start with, and turning it on never follows from its environment.
+- **For how long.** Sharing lasts until you turn it off, for 1 hour, or for today (until midnight). **Stop all sharing** turns every connection off. A change applies to the agent's next call.
+- **Which databases and tables.** Edit access picks databases, then the tables in each. A table created later stays hidden until you tick it. An unshared database or table reads to the agent as one that doesn't exist.
+- **Through views and joins.** Rowkery reads each query's plan, where Postgres has already expanded views and `WITH` queries into the tables underneath, and refuses the query if any of those tables isn't shared. On SQLite it asks SQLite which tables the statement reads. When you share only some tables, Postgres's own catalog, its statistics (which hold sample values of every column) and SQLite's `sqlite_master` count as unshared too.
+- **Hosts are masked.** The agent sees a connection's host as something like `db-***.abc.rds.amazonaws.com` or `10.0.*.*`: enough to tell servers apart, not enough to connect to one.
+
+### What a query may do
+
+- **Read only.** Every Postgres query runs on a session opened read-only, with `default_transaction_read_only` set again before every statement. SQLite files are opened with writes refused.
+- **One SELECT.** Each call is one `SELECT`, `WITH`, `VALUES` or `TABLE` statement. Writes, schema changes, `SET`, `SHOW` and a second statement are refused before anything is sent to the database.
+- **Safe functions only.** Agents can call Postgres's built-in functions that only compute on their arguments. Functions that read or write files on the server, connect to other hosts, change settings or other sessions, take locks, or run a query given as text are refused by name, as is `pg_sleep`. Functions defined in your database (SQL, PL/pgSQL, extensions) are refused entirely, because their body never shows in the plan and could read a table you didn't share. So are operators, views, domains and casts built on such functions.
+- **No other sessions' queries.** Reading `pg_stat_activity` or `pg_stat_statements` is refused, since they show other people's queries with the values typed into them. The `sessions` tool shows what's running with every value replaced by `?`, and blanks any query that reads a table you didn't share.
+
+### How much and how long
+
+- **Rows.** 200 rows unless the agent asks for more, 1,000 at most. Text over 200 characters is cut, and an answer stops at 64 KB.
+- **Time.** Each statement is stopped after 10 seconds.
+- **Big tables.** On Postgres, a query whose plan reads a table of more than 100,000 rows from start to end is refused, so an agent can't load a production server with a full scan.
+
+### Sensitive columns
+
+A column you mark as sensitive is only ever given to an agent as a stand-in, `masked:` and ten hex digits, made with a keyed hash under a random key kept in your keychain for that connection. The agent can return it or count it, but not filter, sort, group or join on it, since asking "does it start with a?" over and over would read it a letter at a time. Rowkery checks this in Postgres's own detailed plan, and refuses what it can't follow. On SQLite the rule is stricter: a query that returns a sensitive column can only return it. **Presenting** hides the same columns on your screen. See [Sensitive columns and Presenting](/sensitive-columns-and-presenting/).
+
+### Changes only by your Commit
+
+- **Proposals wait for you.** `propose_change` checks the statements and adds them to a queue on your Mac. Nothing runs until you open the proposal in Rowkery, look at its dry run (run in a transaction that's rolled back) and press **Commit**.
+- **Checked again.** The queue is a file any program running as you could write to, so Rowkery trusts nothing in it: the connection, the tables and the SQL are checked again against your current settings before the dry run and again before the commit. The commit runs only if every statement changes the same number of rows the dry run showed.
+- **Bounded.** At most 5 proposals wait on one connection, a proposal can't mention a sensitive column or a connection set to Read-only, and one nobody decides on expires after 24 hours.
+
+[Proposed changes](/proposed-changes/) shows the review screen.
+
+### The activity log
+
+Every call is written to the activity log on the Agents page: when, which tool, the arguments as sent, the connection and database, what was shared at that moment, the SQL, the row count, the time taken and the verdict. The log never holds rows. Beside it, Rowkery keeps the first 512 bytes of each answer for 24 hours, so you can see what the agent got. Turn **Keep result samples** off in a connection's form to keep none for it. **Clear log** on the Agents page empties both.
+
+## Known limits
+
+These are the gaps we know about. None of them lets an agent change your data.
+
+- **An agent with a shell is you.** An agent that can run commands, such as Claude Code, runs as your macOS user. It can read and edit anything you can, including Rowkery's `config.json` (what's shared, safe mode) and the proposal queue. Rowkery can't stop that. If you don't want an agent to change your sharing, don't give it a shell.
+- **Equal stand-ins mean equal values.** The same value always gives the same stand-in on a connection, so an agent can tell which rows share an email, and count them.
+- **Presenting goes by column name.** On a table tab Presenting knows which table each column comes from. In a query tab it hides any column whose name is marked anywhere in the database, so a column renamed with `AS` shows on screen. Copy always copies the real value.
+- **Sizes of tables you didn't share.** A few built-in catalog functions agents may call, such as `pg_total_relation_size` and `has_table_privilege`, answer for any table name the agent passes, so it can check whether a table by a given name exists and how big it is. It can't read its rows.
+- **Connections shared by older versions.** A connection shared before you could tick tables one by one shares every table except the ones you hid. On it, an agent can read Postgres's catalog, so it can learn the names of hidden tables and their columns, though not their rows. Connections shared now use a list of ticked tables and don't have this gap.
+- **Estimates decide what's big.** The full-scan check uses the planner's row estimate. On a table whose statistics are out of date, a large scan can get through; the 10-second limit still stops it. On SQLite, a full scan of a big table isn't refused, only noted, since the file is on your Mac and nobody else waits on it.
+- **Samples are on disk for a day.** The first 512 bytes of each answer stay in `mcp-samples.jsonl` for 24 hours, and can hold values from your rows (stand-ins for sensitive columns, never the real values). Turn samples off for connections where that matters.
+
+## Updates are signed
+
+Rowkery isn't signed by Apple yet, but its updates are signed by the Rowkery team. The public half of the signing key is built into the app (`plugins.updater.pubkey` in `tauri.conf.json`), and the updater downloads an update, checks its signature against that key, and refuses it if it doesn't match. An update is only installed when you choose **Restart** on the toast that offers it, or when you quit. Nothing restarts on its own.
+
+## Open source
+
+Rowkery's source is public at [github.com/rowkery/rowkery](https://github.com/rowkery/rowkery) under the Apache License 2.0. Every check on this page is in the code: the agent guard in `crates/rowkery-mcp`, keychain storage in `crates/rowkery-core/src/secrets.rs`. [Build from source](/build-from-source/) shows how to build and test it yourself.
+
+## Report a vulnerability
+
+Please report a security problem privately, not in a public issue and not through Report an issue:
+
+- on GitHub, with [private vulnerability reporting](https://github.com/rowkery/rowkery/security/advisories/new),
+- or by email to security@rowkery.com.
+
+Say what you found, how to reproduce it, and which version you ran (**Rowkery › About Rowkery**). The team aims to answer within a week and will tell you when a fix ships. Rowkery is in alpha, so fixes go into the next release.
+
+In scope: an agent running something the guard should refuse (a write, a second statement, a function that changes data, a table you didn't share, a sensitive column's value, a query past its row or time limits), a write that gets past safe mode, any change to your data you didn't commit, and a password or other secret written anywhere outside the keychain. Bugs that need someone who already controls your macOS account are out of scope.

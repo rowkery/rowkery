@@ -1,0 +1,158 @@
+export const metadata = { title: "Where Rowkery keeps things" };
+
+<p className="crumb">Reference</p>
+
+# Where Rowkery keeps things
+
+<p className="lead">Every file Rowkery writes, what's in it and whether it's safe to delete, plus its keychain items, how to back up or move to another Mac, and how to remove Rowkery completely.</p>
+
+## Rowkery's folder
+
+Everything Rowkery remembers lives in one folder:
+
+```text
+~/Library/Application Support/Rowkery/
+```
+
+To open it, choose **Go › Go to Folder…** in Finder and paste that path. The MCP server your agent starts reads and writes the same folder.
+
+| File | What it holds |
+| --- | --- |
+| `config.json` | Your connections and everything the app remembers (below) |
+| `sample.sqlite` | The sample database |
+| `catalog/` | A cached copy of each database's schema |
+| `mcp-log.jsonl` | The activity log of every agent call |
+| `mcp-samples.jsonl` | The start of each answer agents got, for 24 hours |
+| `proposals.jsonl` | Changes agents proposed |
+| `proposal-outcomes.jsonl` | What you decided about each proposal |
+| `ssh_known_hosts` | The host key of each SSH server you've connected through |
+| `secrets.enc`, `secrets.key` | Encrypted passwords, only when no keychain is used |
+
+Some files only appear once you use what they belong to: there's no `ssh_known_hosts` until your first SSH tunnel, and no MCP files until an agent first calls Rowkery.
+
+### config.json
+
+The one file that holds your setup. Rowkery writes it at most about once a second, never while you type, as a temporary file renamed over the old one, so a crash mid-write leaves the previous version whole. Your SQL is saved when the editor loses focus or you pause.
+
+- **Connections:** name, engine, host, port, database, user, SQLite file path, SSL setting and CA file, SSH tunnel (host, port, user, auth method, key file path, trust on first connect), environment, safe mode, and for agents: whether it's shared and until when, which databases and tables, sensitive columns, and whether result samples are kept. Never a password.
+- **Windows and tabs:** each window's connection and database, its tabs and their SQL, filters, sort, page size, hidden columns, and edits you staged but didn't commit.
+- **Layout:** column widths, panel widths, the editor's height, whether the schema column is hidden.
+- **What you've done:** query history, pinned connections, the words you type most (for completion), which keys you've used, tips you've seen.
+- **Settings:** appearance, keymap, Presenting, hover prefetch per connection, and on Linux and Windows whether the system draws the window's controls.
+
+### sample.sqlite
+
+The sample database with kiosks, games, players and wallets. It's built from SQL inside the app, so **Reset the sample database** in <kbd>⌘K</kbd> writes back exactly the same rows, and **Open the sample database** brings it back after you delete it.
+
+### catalog
+
+One file per connection and database, `catalog/<connection id>/<database>.json`, so a window shows its tables the moment it opens. Rowkery checks it against the server in one round trip and reloads it when the schema has changed. It's only a cache.
+
+### mcp-log.jsonl
+
+One line per agent call: the time, the tool, the agent's client, the arguments as sent (cut at 4 KB), the connection and database, what was shared at that moment, the SQL, how many rows, how long, the size of the answer and the verdict. It never holds rows. Past 8 MB it moves to `mcp-log.1.jsonl`, replacing the one before, and a new log starts. **Clear log** on the Agents page empties it.
+
+### mcp-samples.jsonl
+
+The first 512 bytes of each answer an agent got, with its full size, so the Agents page can show the response beside the request. Each sample is dropped after 24 hours, and past 2 MB the oldest half goes. Connections with **Keep result samples** off keep none. **Clear log** empties it too.
+
+### proposals.jsonl and proposal-outcomes.jsonl
+
+The queue of changes agents proposed, and what became of each one (committed, rejected or failed). A proposal nobody decides on expires after 24 hours, and lines older than a week are ignored. Past 2 MB each file moves to a `.1` copy and starts again.
+
+### ssh_known_hosts
+
+One line per SSH server, its `host:port` and the SHA-256 fingerprint of its host key. Rowkery checks every tunnel against it. To accept a server's new key after it really changed, delete that server's line ([SSH host key changed](/troubleshooting/#ssh-host-key-changed)).
+
+### secrets.enc and secrets.key
+
+Only there when Rowkery couldn't use a keychain, or when `ROWKERY_CONFIG_DIR` was set. `secrets.enc` holds the passwords, encrypted with the key in `secrets.key`. On a Mac using the keychain, neither file exists.
+
+## The keychain
+
+Passwords live in the macOS Keychain, never in a file. Each connection that has a secret has one item:
+
+| | |
+| --- | --- |
+| Kind | Generic password |
+| Service (shown as its name) | `rowkery` |
+| Account | The connection's id, as in `config.json` |
+| Holds | The database password, the SSH password or key passphrase, and the key for the connection's sensitive-column stand-ins |
+
+To see them, open **Keychain Access** and search for `rowkery`. Deleting a connection in Rowkery removes its item once the Undo toast has gone.
+
+## ROWKERY_CONFIG_DIR
+
+Set `ROWKERY_CONFIG_DIR` to a folder and Rowkery uses that folder instead of its usual one, for everything above. While it's set, Rowkery doesn't use the keychain at all: passwords go to `secrets.enc` in that folder. Tests use it, and it's the way to try a clean profile without touching your own:
+
+```bash
+ROWKERY_CONFIG_DIR="$HOME/rowkery-clean" /Applications/Rowkery.app/Contents/MacOS/Rowkery
+```
+
+It only applies to that launch. An agent's MCP server uses the usual folder unless its client sets the variable too.
+
+On Linux the usual folder is `~/.config/rowkery`, and on Windows `%APPDATA%\Rowkery`.
+
+## Logs
+
+Rowkery writes no log file of its own beyond the agent activity log above. When you start it from Terminal, any errors it prints show there. If Rowkery crashes, macOS keeps a crash report you can find in the Console app under Crash Reports.
+
+## What's safe to delete
+
+Quit Rowkery first: it rewrites `config.json` from memory while it runs.
+
+| Delete | What happens |
+| --- | --- |
+| `catalog/` | Nothing you'd notice. Each database's schema loads from the server the next time you open it |
+| `mcp-log.jsonl`, `mcp-log.1.jsonl`, `mcp-samples.jsonl` | The activity log starts empty. **Clear log** on the Agents page does the same |
+| `sample.sqlite` | The sample database is gone until you choose **Open the sample database** |
+| `proposals.jsonl`, `proposal-outcomes.jsonl` | Waiting proposals disappear, and an agent asking about one is told there's no such proposal |
+| `ssh_known_hosts` | Every SSH server is treated as new. With **Trust the host key on first connect** on, Rowkery remembers each key again; with it off, it refuses them until you turn it on |
+| `secrets.enc`, `secrets.key` | The passwords kept there are lost. Type them again in each connection's form |
+| `config.json` | Everything: connections, windows, tabs, history and sharing. Rowkery starts as on a first launch. Move it aside rather than deleting it, so you can put it back |
+
+## Back up or move to another Mac
+
+<Steps>
+
+### Quit Rowkery
+
+So `config.json` is complete and not being written.
+
+### Copy the folder
+
+Copy `~/Library/Application Support/Rowkery/` to your backup, or to the same place on the other Mac.
+
+### Type the passwords again on the new Mac
+
+Passwords stay in the old Mac's keychain, so a copied connection can't log in at first. Open each one with **Edit connection…** in <kbd>⌘K</kbd> and type its password. Rowkery also makes a new stand-in key for each connection there, so an agent sees different stand-ins for sensitive columns than it did on the old Mac.
+
+</Steps>
+
+## Uninstall completely
+
+<Steps>
+
+### Quit Rowkery and move it to the Trash
+
+Drag Rowkery from Applications to the Trash.
+
+### Remove its folder
+
+Delete `~/Library/Application Support/Rowkery/`.
+
+### Remove its keychain items
+
+In Keychain Access, search for `rowkery` and delete the items whose name is `rowkery`.
+
+### Remove it from your agents
+
+If you used **Connect an agent**, take Rowkery out of each client:
+
+- **Claude Code:** run `claude mcp remove --scope user rowkery`. Rowkery added it with `claude mcp add --scope user rowkery`, which keeps it in `~/.claude.json`.
+- **Claude Desktop:** open `~/Library/Application Support/Claude/claude_desktop_config.json`, delete the `"rowkery"` entry under `"mcpServers"`, save, and restart Claude Desktop.
+- **Any other client** you added Rowkery to by hand: remove the server that runs `Rowkery --mcp`.
+
+</Steps>
+
+macOS may also keep caches for the app's window under `~/Library/Caches/dev.rowkery.app` and `~/Library/WebKit/dev.rowkery.app`. They hold none of your settings, and you can delete them too.
