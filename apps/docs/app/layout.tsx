@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Analytics } from "@vercel/analytics/next";
 import localFont from "next/font/local";
 import { Nav } from "@/components/Nav";
 import { Pager } from "@/components/Pager";
@@ -55,6 +56,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </main>
           <Toc />
         </div>
+        <Analytics />
       </body>
     </html>
   );
