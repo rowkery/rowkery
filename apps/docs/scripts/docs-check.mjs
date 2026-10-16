@@ -1,7 +1,8 @@
 // Checks the built docs (run `npm run build` first; needs Playwright):
 //   node scripts/docs-check.mjs [outDir]
 // For every page in lib/pages.ts, at a desktop (1440×900) and a phone (390×844) window: it
-// loads with no page error, nothing scrolls sideways, every image loads, the sidebar marks
+// loads with no page error, nothing scrolls sideways, every image loads and sits in the text at its
+// own size (not sticky, not hidden), the sidebar marks
 // the page as open, and every link to another docs page (and its #heading) exists. Then ⌘K:
 // typing "ssh" finds the SSH tunnel section and ↵ lands on it; Esc closes the search; the
 // phone's Menu shows the page list and a pick closes it; Copy copies the code block. A
@@ -42,6 +43,12 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
       return imgs.filter((i) => !i.naturalWidth).map((i) => i.getAttribute("src"));
     });
     ok(broken.length === 0, `${tag}: every image loads ${broken.join(" ")}`);
+    const stray = await page.evaluate(() =>
+      [...document.querySelectorAll("main figure")]
+        .filter((f) => { const s = getComputedStyle(f); return s.position !== "static" || s.display === "none" || f.getBoundingClientRect().height > (f.querySelector("img, video")?.getBoundingClientRect().height ?? 0) + 120; })
+        .map((f) => f.querySelector("img, video")?.getAttribute("src") ?? "figure"),
+    );
+    ok(stray.length === 0, `${tag}: every screen sits in the text at its own size ${stray.join(" ")}`);
     ok((await page.locator('[data-testid="side-link"][aria-current="page"]').getAttribute("href", { timeout: 2000 }).catch(() => null)) === p.href, `${tag}: sidebar marks it open`);
     ok((await page.title()).includes(p.href === "/" ? "Rowkery Docs" : p.title), `${tag}: title names the page`);
     await page.screenshot({ path: `${OUT}/${name}${p.href === "/" ? "-introduction" : "-" + p.href.replaceAll("/", "")}.png`, fullPage: true });
