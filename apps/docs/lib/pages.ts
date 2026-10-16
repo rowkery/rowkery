@@ -25,6 +25,10 @@ export const GROUPS: DocGroup[] = [
     pages: [
       { href: "/query-tabs/", title: "Query tabs", file: "query-tabs/page.mdx" },
       { href: "/completion/", title: "Completion", file: "completion/page.mdx" },
+      { href: "/table-tabs-and-filters/", title: "Table tabs and filters", file: "table-tabs-and-filters/page.mdx" },
+      { href: "/quick-look/", title: "Quick Look", file: "quick-look/page.mdx" },
+      { href: "/editing-rows/", title: "Editing rows", file: "editing-rows/page.mdx" },
+      { href: "/exporting-and-copying/", title: "Exporting and copying", file: "exporting-and-copying/page.mdx" },
       { href: "/query-plans/", title: "Query plans", file: "query-plans/page.mdx" },
       { href: "/sessions/", title: "Sessions", file: "sessions/page.mdx" },
     ],

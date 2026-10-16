@@ -1,0 +1,147 @@
+export const metadata = { title: "Editing rows" };
+
+<p className="crumb">Working with data</p>
+
+# Editing rows
+
+<p className="lead">You can change values, add rows and delete rows right in a table tab's grid. Nothing is written as you go: your changes are staged, you can read the exact SQL, and Commit saves them all in one transaction.</p>
+
+<Clip src="/clips/editing-rows-commit.mp4" poster="/clips/editing-rows-commit.webp" width={1100} height={640} alt="Editing an order: the status cell opens a list of the enum's values and refunded is picked, the total is changed to 0.00, Review SQL shows the one UPDATE, and Commit saves it: the foot reads Updated 1 · 24 ms." />
+
+## When a table can be edited
+
+You can edit rows in a table tab when all of these are true:
+
+- The tab shows a table, not a view.
+- The table has a primary key, and every key column is shown (not hidden).
+- The connection's safe mode isn't **Read-only**.
+- The tab shows **Data**, not Structure.
+
+Query tabs show results without editing. To edit rows a query found, open the table in a table tab and filter it.
+
+When you try to edit and can't, the foot of the grid says why for a few seconds:
+
+| Message | What to do |
+| --- | --- |
+| **Read-only connection** · **Change safe mode…** | Change the connection's safe mode. See [Environments and safe mode](/environments-and-safe-mode/) |
+| **Views can't be edited** | Edit the table the view reads |
+| **No primary key · rows here can't be edited** | Rows can only be named by a primary key |
+| **Show id to edit rows** | Show the hidden key column again |
+| **This table isn't in the schema yet** | Refresh the schema; the table was created after it was read |
+| **This row's key can't name it** | The key's value can't be written as a literal |
+
+## Changing a value
+
+Select a cell and press <kbd>↵</kbd> or <kbd>F2</kbd>, or double-click it. The cell becomes an editor with its current value. Typing on a selected cell without opening the editor doesn't change it (in a table tab, typing [filters](/table-tabs-and-filters/#typing-to-filter)), so you can't overwrite a value by accident.
+
+| Key | In the editor |
+| --- | --- |
+| <kbd>↵</kbd> | Stages the value and moves down a row |
+| <kbd>⇥</kbd> / <kbd>⇧⇥</kbd> | Stages it and moves right or left |
+| <kbd>Esc</kbd> | Leaves the cell as it was |
+| <kbd>⌥⇧N</kbd> | Stages NULL. Columns that can't be NULL say **Can't be NULL** |
+| Click elsewhere | Keeps a changed, valid value |
+
+If the value you leave is the same as the one you started with, nothing is staged.
+
+To set a cell to NULL without opening it, select it and press <kbd>⌥⇧N</kbd>, or right-click and choose **Set NULL**.
+
+### Editors for each type
+
+The editor fits the column's type and refuses values the database would reject:
+
+| Column type | The editor |
+| --- | --- |
+| Text | A text field |
+| Integers | Accepts whole numbers only |
+| Numeric and floats | Accepts numbers only, and keeps every digit you type |
+| Boolean | <kbd>Space</kbd> cycles true, false and, if the column allows it, NULL |
+| Enum | A list of the type's values that narrows as you type; <kbd>↑</kbd> <kbd>↓</kbd> to choose, and when one value is left <kbd>↵</kbd> takes it |
+| Date and time | Takes `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DD`, `HH:MM:SS` or an interval such as `1 day`; type `now()` for the current time |
+| JSON | A larger editor; <kbd>⌘↵</kbd> stages it, and invalid JSON says **Not valid JSON** |
+| Foreign key | A picker: type part of a key or a name to search the table it points at (**Search customers…**); up to 8 matches, each labelled |
+
+Binary columns (`bytea`, `blob`) have no editor, and neither do cells shown only as their type.
+
+<Shot src="/img/editing-rows-enum-editor.webp" width={522} height={114} alt="The status cell of an order open as an editor with re typed, and a list under it holding the one matching value, refunded." />
+
+## Adding rows
+
+**Insert row** <kbd>⌘I</kbd>, from the cell menu or the WHERE line's … menu, adds a new row at the top of the grid. Its cells read **default**: anything you leave that way is sent as `DEFAULT`, so sequences, `now()` and other column defaults fill in. The editor opens on the first column that has no default, ready for a value. Click the row's × to remove it before you commit.
+
+**Duplicate row** <kbd>⌘D</kbd> copies the selected rows as new rows. Key columns that have a default are left as **default** so the database gives the copies their own keys. Binary values aren't copied.
+
+## Deleting rows
+
+Select whole rows by clicking or dragging their row numbers, then press <kbd>⌫</kbd>. They're marked for deletion and struck through. Press <kbd>⌫</kbd> again on marked rows to unmark them. You can also delete the row in [Quick Look](/quick-look/#deleting-a-row).
+
+## Pasting
+
+<kbd>⌘V</kbd> on a selected cell pastes tab-separated text (copied from a spreadsheet, or from Rowkery) as staged edits, starting at that cell and filling right and down. A toast says **Pasted 6 cells**, or how many fell outside the table. The text `NULL` pastes NULL, and an empty value pastes NULL in a column that isn't text.
+
+## Staged changes
+
+<Shot src="/img/editing-rows-staged.webp" width={1280} height={800} alt="The orders grid with four staged changes: a new row at the top with customer_id 3001 and the rest default, an edited status and an edited total with marks on their cells, and a row struck through for deletion. The foot reads 4 changes: 2 edited, 1 deleted, 1 new, with Review SQL, Discard and Commit." />
+
+Each change shows in the grid at once:
+
+- An edited cell carries a mark. Hover it to see the old value (**Was paid · Esc reverts**). Select it and press <kbd>Esc</kbd> to put the old value back.
+- A dot in the row's gutter marks the row: the text colour for an edited row, red for a row marked for deletion, green for a new row.
+
+Changes are tied to each row's primary key, so they stay with the right rows when you sort, filter or load more pages. They're saved with the tab: quit Rowkery with changes staged and they're still there when you come back, and reopening a closed tab with <kbd>⇧⌘T</kbd> brings its changes back too.
+
+## The edits bar
+
+<Shot src="/img/editing-rows-edits-bar.webp" width={1032} height={62} alt="The edits bar: 4 changes, 2 edited, 1 deleted, 1 new, then Review SQL ⇧⌘P, Discard, and Commit ⌘S." />
+
+While you have changes staged, a bar at the foot of the grid counts them and holds three buttons:
+
+| Button | What it does |
+| --- | --- |
+| **Review SQL** <kbd>⇧⌘P</kbd> | Shows the statements Commit will run |
+| **Discard** | Drops every staged change in the tab |
+| **Commit** <kbd>⌘S</kbd> | Runs them in one transaction |
+
+**Discard** shows a toast, **Discarded 4 edits**, with **Undo** (<kbd>⌥⌘Z</kbd>) for 10 seconds. <kbd>Esc</kbd> in the grid also discards when there's nothing else for it to close or cancel. See [Undo and Esc](/undo-and-esc/).
+
+## Reviewing the SQL
+
+**Review SQL** <kbd>⇧⌘P</kbd> opens the statements in the inspector column beside the grid, one card per statement with a summary on top, such as **orders · id 84209 · total 89.19 → 199.00**.
+
+<Shot src="/img/editing-rows-review-sql.webp" width={1280} height={800} alt="Review SQL beside the grid: 4 statements · one transaction. An INSERT INTO public.orders (customer_id) VALUES (3001), two UPDATEs that each name one order by id, and a DELETE FROM public.orders WHERE id = 84207, then a note that this review is the confirmation, Copy SQL and Commit." />
+
+- New rows come first, in the order you added them, then updates, then deletes.
+- Each UPDATE and DELETE names its row by the whole primary key.
+- Values are written as literals of the column's type.
+- A new row with nothing filled in becomes `INSERT … DEFAULT VALUES`.
+
+The note under the cards says what Commit will do on this connection: write at once (safe mode off), count this review as your confirmation (**Confirm writes**), or write nothing (**Read-only**). **Copy SQL** copies the whole transaction. **Commit** <kbd>⌘S</kbd> (or <kbd>⇧⌘↵</kbd>) runs it, and <kbd>Esc</kbd> closes the review.
+
+## Committing
+
+**Commit** <kbd>⌘S</kbd> runs every staged change as one transaction. Each UPDATE and DELETE must change exactly one row; if one changes none (someone else deleted that row) or more than one, the whole transaction is rolled back and nothing is kept.
+
+While it runs, the bar reads **Committing…**. When it's done it says what changed, such as **Updated 1 · Inserted 1 · Deleted 1 · 24 ms**, and the table reloads. If it failed, the bar says **Nothing changed** and why (for example `UPDATE public.orders WHERE id = 99 changed 0 rows`), your changes stay staged, and **Commit** becomes **Retry**.
+
+Edits you make while a commit runs stay staged afterwards for the next one.
+
+### With Confirm writes on
+
+On a connection set to **Confirm writes**, Commit from the edits bar stops first and shows the exact SQL above the grid. The edits bar says it's waiting, and Commit there is disabled until you choose.
+
+<Shot src="/img/editing-rows-confirm-writes.webp" width={1020} height={149} alt="The Confirm writes strip for storefront on prd: 4 statements on public.orders: INSERT 1, UPDATE 2, DELETE 1, the transaction's SQL, and the buttons Keep editing esc and Commit ⇧⌘↵." />
+
+**Commit** <kbd>⇧⌘↵</kbd> runs it; **Keep editing** <kbd>Esc</kbd> goes back with your changes still staged. Committing from Review SQL skips this step, because you've already read the statements there. See [Environments and safe mode](/environments-and-safe-mode/).
+
+### Where the commit runs
+
+On Postgres the commit runs on the tab's own session; on SQLite, on a fresh connection to the file. Rowkery is careful not to save something you didn't mean to:
+
+| Message | What it means |
+| --- | --- |
+| This tab has a transaction open. Commit or roll it back before saving edits. | You ran BEGIN in this tab. Your edits never join your own transaction |
+| This tab is still busy with a query; nothing was saved. | Wait for the query to end, or cancel it, then commit again |
+| Every connection this database allows Rowkery is busy; nothing was saved. | Try again once a query ends |
+| … didn't answer within 20 s, so it was stopped and nothing was saved. | Each step has 20 seconds to answer |
+| The connection dropped during COMMIT, so the changes may or may not be saved. Reload the table to check. | Rowkery never retries a COMMIT, because it can't know whether the first one landed |
+| The changes moved since you confirmed them. Review them again. | Your staged changes changed between confirming and running |
