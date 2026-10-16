@@ -40,6 +40,10 @@ export const GROUPS: DocGroup[] = [
     title: "Agents",
     pages: [
       { href: "/connecting-to-agents/", title: "Connecting to agents", file: "connecting-to-agents/page.mdx" },
+      { href: "/choosing-what-to-share/", title: "Choosing what to share", file: "choosing-what-to-share/page.mdx" },
+      { href: "/proposed-changes/", title: "Proposed changes", file: "proposed-changes/page.mdx" },
+      { href: "/sensitive-columns-and-presenting/", title: "Sensitive columns and Presenting", file: "sensitive-columns-and-presenting/page.mdx" },
+      { href: "/other-agents/", title: "Other agents", file: "other-agents/page.mdx" },
     ],
   },
 ];
