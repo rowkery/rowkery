@@ -42,7 +42,17 @@ export function Search({ index }: { index: SearchEntry[] }) {
   const hits = useMemo(() => {
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return index.filter((e) => !e.href.includes("#"));
-    return index.filter((e) => words.every((w) => `${e.title} ${e.page}`.toLowerCase().includes(w))).slice(0, 12);
+    // Titles that start with the words first, then titles holding them, then the rest; in page order within each.
+    const rank = (e: SearchEntry) => {
+      const t = e.title.toLowerCase();
+      return t.startsWith(words.join(" ")) ? 0 : words.every((w) => t.includes(w)) ? 1 : 2;
+    };
+    return index
+      .filter((e) => words.every((w) => `${e.title} ${e.page}`.toLowerCase().includes(w)))
+      .map((e, i) => ({ e, i, r: rank(e) }))
+      .sort((a, b) => a.r - b.r || a.i - b.i)
+      .slice(0, 12)
+      .map((x) => x.e);
   }, [q, index]);
 
   const go = (e?: SearchEntry) => {
