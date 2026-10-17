@@ -209,8 +209,14 @@ describe("menu bar", () => {
     expect(readFileSync(MENU_JSON, "utf8"), "run UPDATE_MENU=1 npm test").toBe(want);
   });
 
-  test("Connection, Query, View, Go, Window and Help after File", () => {
-    expect(MENU_BAR.map((m) => m.submenu)).toEqual(["File", "Connection", "Query", "View", "Go", "Window", "Help"]);
+  test("the app menu's items, then File, Connection, Query, View, Go, Window and Help", () => {
+    expect(MENU_BAR.map((m) => m.submenu)).toEqual(["Rowkery", "File", "Connection", "Query", "View", "Go", "Window", "Help"]);
+  });
+
+  test("Check for Updates… and Settings… are in the app menu, not Help", () => {
+    const ids = (sub: string) => MENU_BAR.find((m) => m.submenu === sub)!.items;
+    expect(ids("Rowkery")).toEqual(["check-updates", null, "settings"]);
+    expect(ids("Help")).not.toContain("check-updates");
   });
 
   test("File > Close Tab owns ⌘W", () => {
@@ -249,7 +255,7 @@ describe("menu bar", () => {
     for (const sub of menuSpec()) {
       for (const item of sub.items) {
         if ("separator" in item || !item.accelerator) continue;
-        expect(item.accelerator, item.id).toMatch(/^(CmdOrCtrl\+)?(Ctrl\+)?(Alt\+)?(Shift\+)?([A-Z0-9]|Enter|Left|Right|[./[\]])$/);
+        expect(item.accelerator, item.id).toMatch(/^(CmdOrCtrl\+)?(Ctrl\+)?(Alt\+)?(Shift\+)?([A-Z0-9]|Enter|Left|Right|[.,/[\]])$/);
       }
     }
   });

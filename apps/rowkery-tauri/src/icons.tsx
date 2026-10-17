@@ -333,15 +333,6 @@ export function AgentIcon(p: IconProps) {
   );
 }
 
-export function HelpIcon(p: IconProps) {
-  return (
-    <Svg {...p} viewBox="0 0 24 24" strokeWidth={1.8}>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M9.6 9.4a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.7" />
-      <path d="M12 16.9v.1" />
-    </Svg>
-  );
-}
 
 export function WarningIcon(p: IconProps) {
   return (
@@ -464,6 +455,25 @@ export function EyeOffIcon(p: IconProps) {
       <path d="M1.5 8s2.5-4 6.5-4 6.5 4 6.5 4-2.5 4-6.5 4-6.5-4-6.5-4z" />
       <circle cx="8" cy="8" r="2" />
       <path d="M3 13L13 3" />
+    </Svg>
+  );
+}
+
+/** A cog: the schema column's Settings button. */
+export function SettingsIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M12.78 6.52 L14.5 6.88 L14.5 9.12 L12.78 9.48 L12.42 10.33 L13.39 11.81 L11.81 13.39 L10.33 12.42 L9.48 12.78 L9.12 14.5 L6.88 14.5 L6.52 12.78 L5.67 12.42 L4.19 13.39 L2.61 11.81 L3.58 10.33 L3.22 9.48 L1.5 9.12 L1.5 6.88 L3.22 6.52 L3.58 5.67 L2.61 4.19 L4.19 2.61 L5.67 3.58 L6.52 3.22 L6.88 1.5 L9.12 1.5 L9.48 3.22 L10.33 3.58 L11.81 2.61 L13.39 4.19 L12.42 5.67Z" />
+      <circle cx="8" cy="8" r="2" />
+    </Svg>
+  );
+}
+
+/** An arrow into a tray: a newer Rowkery waits (the foot's update button, Settings > Updates). */
+export function DownloadIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25M3 13.5h10" />
     </Svg>
   );
 }

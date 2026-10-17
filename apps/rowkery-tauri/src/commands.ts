@@ -97,7 +97,7 @@ export interface Chord {
   other?: string;
 }
 
-export type MenuSubmenu = "File" | "Connection" | "Query" | "View" | "Go" | "Window" | "Help";
+export type MenuSubmenu = "Rowkery" | "File" | "Connection" | "Query" | "View" | "Go" | "Window" | "Help";
 
 /** The shortcut sheet's sections, in order (menu-bar order, then the zones). */
 export const SHEET_SECTIONS = [
@@ -260,7 +260,7 @@ const envCommands = (): Command[] => [
     title: "Agents",
     menuTitle: "Agents",
     chord: { mac: "Mod+Shift+A" },
-    synonyms: ["mcp", "claude", "agent", "agents", "settings", "sharing"],
+    synonyms: ["mcp", "claude", "agent", "agents", "sharing"],
     canRun: () => true,
   },
 ];
@@ -569,6 +569,14 @@ export const COMMANDS: Command[] = [
     canRun: (s) => s.hintsRetired,
   },
   {
+    id: "settings",
+    title: "Settings…",
+    menuTitle: "Settings…",
+    chord: { mac: "Mod+," },
+    synonyms: ["preferences", "settings", "updates", "options", "appearance", "keymap"],
+    canRun: always,
+  },
+  {
     id: "check-updates",
     title: "Check for updates…",
     menuTitle: "Check for Updates…",
@@ -812,6 +820,7 @@ const CODE_KEY: Record<string, string> = {
   Escape: "Escape",
   Space: "Space",
   Period: ".",
+  Comma: ",",
   Slash: "/",
   BracketLeft: "[",
   BracketRight: "]",
@@ -902,12 +911,13 @@ export function availableCommands(s: CommandState, mac: boolean): AvailableComma
 }
 
 /**
- * The macOS menu bar's app items, in order; `null` is a separator. App
- * (About, Hide, Quit), Edit and the native View / Window items are added by
- * app_menu around these. Commands whose chord is a bare key (`/`) stay out:
+ * The macOS menu bar's app items, in order; `null` is a separator. Rowkery's
+ * items sit under About in the app menu; Services, Hide, Quit, Edit and the
+ * native View / Window items are added by app_menu around these. Commands whose chord is a bare key (`/`) stay out:
  * a menu key equivalent without a modifier would eat that key in text fields.
  */
 export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
+  { submenu: "Rowkery", items: ["check-updates", null, "settings"] },
   { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "close-tab"] },
   {
     submenu: "Connection",
@@ -951,7 +961,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
     items: ["history-back", "history-forward", null, "next-tab", "prev-tab", null, "focus-editor"],
   },
   { submenu: "Window", items: ["new-window", "close-window", null, "next-window", "prev-window", null, "agents"] },
-  { submenu: "Help", items: ["keyboard-shortcuts", "show-key-hints", null, "check-updates", "report-issue", null, "third-party-notices"] },
+  { submenu: "Help", items: ["keyboard-shortcuts", "show-key-hints", null, "report-issue", null, "third-party-notices"] },
 ];
 
 /** Ids of every command in the menu bar. */
@@ -1017,6 +1027,8 @@ export function sheetSection(c: Command): SheetSection {
     case "View":
     case "Help":
       return sub;
+    case "Rowkery":
+      return "Help";
     case "Window":
       return "Windows";
     default:

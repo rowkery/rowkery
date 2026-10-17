@@ -96,7 +96,7 @@ cargo test -p rowkery-core --features postgres-integration postgres_connect_and_
 <details>
 <summary>Releasing</summary>
 
-Releases are published to this repo's GitHub Releases. The app reads the update feed (`releases/latest/download/latest.json` on this repo, which `scripts/release.sh` builds in) after launch and from **Help › Check for Updates…**.
+Releases are published to this repo's GitHub Releases. The app reads the update feed (`releases/latest/download/latest.json` on this repo, which `scripts/release.sh` builds in) after launch and from **Rowkery › Check for Updates…**.
 
 1. Once: `scripts/updater-key.sh` creates the update signing key and writes its public half into `tauri.conf.json`. Back up `~/.tauri/rowkery-updater.key` and its password outside the Mac; without them no installed copy can update again.
 2. Bump the version in `tauri.conf.json`, `package.json` (and its lockfile) and `[workspace.package]` in the root `Cargo.toml`, write `docs/releases/v<version>.md`, and push.

@@ -433,9 +433,12 @@ const foot6 = await page.$$eval('[data-testid="sb-foot-rows"] > button', (els) =
     titles: els.map((e) => e.title),
   };
 });
-// Presenting joined the foot (2026-10-15), between Appearance and Help.
-check(foot6.ids === "sb-agents,sb-appearance,sb-presenting,sb-help" && foot6.sizes === "28x28,28x28,28x28,28x28" && foot6.gaps === "4,4,4" && foot6.row && foot6.inset <= 16 && foot6.text === "", `the foot: four 28 px icon buttons in a row, 4 px apart, no labels (${JSON.stringify(foot6)})`);
-check(foot6.titles[0] === "Agents  Ctrl+Shift+A" && foot6.titles[1].startsWith("Appearance: Auto") && foot6.titles[2] === "Start presenting" && foot6.titles[3] === "Shortcuts  Ctrl+Shift+/", `tooltips carry the names and keys (${foot6.titles.join(" | ")})`);
+// Presenting joined the foot (2026-10-15); on 2026-10-17 it became Agents ·
+// Presenting on the left and Appearance · Keyboard shortcuts · Settings on
+// the right, a gap between (settings-browser-proof.mjs covers the update button).
+const gaps6 = foot6.gaps.split(",").map(Number);
+check(foot6.ids === "sb-agents,sb-presenting,sb-appearance,sb-help,sb-settings" && foot6.sizes === "28x28,28x28,28x28,28x28,28x28" && gaps6[0] === 4 && gaps6[1] > 40 && gaps6[2] === 4 && gaps6[3] === 4 && foot6.row && foot6.inset <= 16 && foot6.text === "", `the foot: five 28 px icon buttons in a row, two left and three right, no labels (${JSON.stringify(foot6)})`);
+check(foot6.titles[0] === "Agents  Ctrl+Shift+A" && foot6.titles[1] === "Start presenting" && foot6.titles[2].startsWith("Appearance: Auto") && foot6.titles[3] === "Keyboard shortcuts  Ctrl+Shift+/" && foot6.titles[4] === "Settings  Ctrl+,", `tooltips carry the names and keys (${foot6.titles.join(" | ")})`);
 check((await page.locator('[data-testid="sb-agents"] .sb-agents-dot').count()) === 1, "Agents carries the green dot while MCP is shared"); // Class on purpose: the dot.
 const cycle = [];
 for (let i = 0; i < 3; i++) {

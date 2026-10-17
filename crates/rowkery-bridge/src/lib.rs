@@ -169,6 +169,10 @@ enum Command {
     },
     /// ⌘K "Stop all queries": every run in every window, at once.
     StopAllQueries,
+    /// Whether any tab's session may hold the user's open transaction.
+    HoldsTransaction {
+        respond_to: oneshot::Sender<bool>,
+    },
     ListDatabases {
         window_id: String,
         respond_to: oneshot::Sender<Result<Vec<DatabaseInfo>, String>>,
@@ -2688,6 +2692,14 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 force_stop(&state.runtime, slot);
             }
         }
+        Command::HoldsTransaction { respond_to } => {
+            let held = state
+                .pool
+                .lock()
+                .map(|p| p.holds_user_transaction())
+                .unwrap_or(true);
+            let _ = respond_to.send(held);
+        }
         Command::Prefetch {
             window_id,
             sql,
@@ -3504,6 +3516,13 @@ impl CoreBridge {
     /// servers: the kill switch for runs stuck on a dead connection.
     pub fn stop_all_queries(&self) {
         let _ = self.command_tx.send(Command::StopAllQueries);
+    }
+
+    /// Whether any tab's Postgres session may hold the user's open
+    /// transaction (a restart would roll it back). True when unknown.
+    pub fn holds_transaction(&self) -> bool {
+        self.send_command(|respond_to| Command::HoldsTransaction { respond_to })
+            .unwrap_or(true)
     }
 
     /// Databases on the window's server; empty for SQLite.

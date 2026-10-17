@@ -53,7 +53,8 @@ import { defaultAccess } from "./mcpAccess";
 import { moveItem } from "./tabReorder";
 import { planSqliteOpen } from "./sqliteOpen";
 import { TitleBar } from "./TitleBar";
-import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate } from "./updates";
+import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall } from "./updates";
+import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
 import { Workspace, type WindowActions, type WindowSession } from "./Workspace";
@@ -212,6 +213,8 @@ function App() {
     fill?: boolean;
   } | null>(null);
   const mcpTab = agents?.section ?? null;
+  /** The Settings page in place of the main column (⌘,, the foot's gear); null while the window shows. */
+  const [settings, setSettings] = useState<SettingsSection | null>(null);
   /** Changes agents proposed, under review (the review page is open). */
   const [review, setReview] = useState(false);
   const proposals = useProposals();
@@ -299,9 +302,11 @@ function App() {
     const quiet = () => void lookForUpdate(false, runningQueries);
     const first = window.setTimeout(quiet, FIRST_CHECK_MS);
     const again = window.setInterval(quiet, RECHECK_MS);
+    const idle = watchIdleInstall(runningQueries);
     return () => {
       window.clearTimeout(first);
       window.clearInterval(again);
+      idle();
     };
   }, [loaded, runningQueries]);
 
@@ -818,6 +823,7 @@ function App() {
   const openAgents = (tab: "activity" | "access" | "connect" | "page" | "edit") => {
     setPopover(null);
     setPaletteOpen(false);
+    setSettings(null);
     setAgents((cur) => ({
       section: tab === "activity" || tab === "access" || tab === "edit" ? (tab === "edit" ? "access" : tab) : (cur?.section ?? (mcpEntries.length ? "activity" : "access")),
       connect: tab === "connect",
@@ -830,9 +836,20 @@ function App() {
     setPopover(null);
     setPaletteOpen(false);
     setAgents(null);
+    setSettings(null);
     setReview(true);
   };
   const closeReview = useCallback(() => setReview(false), []);
+
+  /** Settings, on a section (Updates by default): the page takes the window, as Agents does. */
+  const openSettings = (section: SettingsSection = "updates") => {
+    setPopover(null);
+    setPaletteOpen(false);
+    setShortcutsOpen(false);
+    setAgents(null);
+    setReview(false);
+    setSettings(section);
+  };
 
   /** An agent's SQL in a query tab on its connection: a window already on it, else a new one. */
   const openMcpSql = (connectionId: string, database: string | undefined, sql: string) => {
@@ -1044,6 +1061,7 @@ function App() {
       setNoticesOpen(true);
     },
     checkForUpdates: () => void lookForUpdate(true, runningQueries),
+    openSettings: (section) => openSettings(section),
     connectFound: (server) => void connectFound(server),
     openSample: (reset) =>
       void (async () => {
@@ -1093,6 +1111,8 @@ function App() {
   actionsRef.current = actions;
   const windowsRef = useRef(windows);
   windowsRef.current = windows;
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   const sidebarHiddenRef = useRef(sidebarHidden);
   sidebarHiddenRef.current = sidebarHidden;
 
@@ -1131,7 +1151,7 @@ function App() {
   // New connection, the Agents page) closes that first, as Esc would; the
   // query tab or window waits for the next press.
   const overlayOpen =
-    paletteOpen || popover !== null || newConnOpen || report !== null || shortcutsOpen || noticesOpen || agents !== null || review || connectOpen;
+    paletteOpen || popover !== null || newConnOpen || report !== null || shortcutsOpen || noticesOpen || agents !== null || settings !== null || review || connectOpen;
   useEffect(() => {
     if (!overlayOpen) return;
     const escape = () => {
@@ -1217,6 +1237,11 @@ function App() {
         // ⇧⌘A (Ctrl+Shift+A): the Agents page, or back from it.
         e.preventDefault();
         setAgents((cur) => (cur ? null : { section: mcpEntriesRef.current.length ? "activity" : "access", connect: false }));
+      } else if (!e.shiftKey && e.code === "Comma") {
+        // ⌘, (Ctrl+,): Settings, or back from it.
+        e.preventDefault();
+        if (settingsRef.current) setSettings(null);
+        else actionsRef.current.openSettings();
       } else if (!e.shiftKey && key === "n") {
         e.preventDefault();
         actionsRef.current.newConnection();
@@ -1328,7 +1353,7 @@ function App() {
       data-testid="app-frame"
       className={`app-frame${macOverlay ? " app-frame-mac" : ""}${sidebarHidden ? " sidebar-hidden" : ""}`}
       data-sidebar-hidden={sidebarHidden ? "" : undefined}
-      data-page={review ? "review" : agents ? "agents" : undefined}
+      data-page={review ? "review" : agents ? "agents" : settings ? "settings" : undefined}
       data-connect={newConnOpen ? "" : undefined}
       data-panel-width={panelWidth}
       style={{ ["--panel-width" as string]: `${panelWidth}px` }}
@@ -1357,6 +1382,7 @@ function App() {
           setPopover(null);
           // Picking a window is leaving the page.
           setAgents(null);
+          setSettings(null);
           setReview(false);
           switchWindow(id);
         }}
@@ -1387,7 +1413,7 @@ function App() {
           windowCount={windows.length}
           connectionForm={newConnOpen}
           keysBlocked={
-            newConnOpen || report !== null || popover !== null || shortcutsOpen || noticesOpen || agents !== null || review || connectOpen
+            newConnOpen || report !== null || popover !== null || shortcutsOpen || noticesOpen || agents !== null || settings !== null || review || connectOpen
           }
           commandsBlocked={newConnOpen || report !== null || popover !== null || shortcutsOpen || noticesOpen || connectOpen}
           paletteOpen={paletteOpen && w.id === activeWindow.id}
@@ -1396,6 +1422,8 @@ function App() {
           switchers={w.id === activeWindow.id ? switchers : null}
           titlebarTools={w.id === activeWindow.id ? titlebarTools : null}
           agentsOpen={agents !== null}
+          settingsOpen={settings !== null}
+          onCloseSettings={() => setSettings(null)}
           proposalCount={proposals.length}
           onToggleAgents={() => (agents ? setAgents(null) : openAgents("page"))}
           identity={w.id === activeWindow.id ? identity : null}
@@ -1471,6 +1499,17 @@ function App() {
             onSetMasked={setMaskedColumns}
             onOpenSql={openMcpSql}
             onClose={() => setAgents(null)}
+          />
+        )}
+      </Presence>
+      <Presence open={settings !== null}>
+        {settings !== null && (
+          <SettingsPage
+            section={settings}
+            onSection={setSettings}
+            onShortcuts={() => actionsRef.current.openShortcuts()}
+            runningQueries={runningQueries}
+            onClose={() => setSettings(null)}
           />
         )}
       </Presence>

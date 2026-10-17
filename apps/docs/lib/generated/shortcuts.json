@@ -264,6 +264,10 @@
           "keys": "⇧⌘/"
         },
         {
+          "title": "Settings…",
+          "keys": "⌘,"
+        },
+        {
           "title": "Keyboard shortcuts, from the grid or panel",
           "keys": "?"
         }
@@ -313,6 +317,19 @@
     }
   ],
   "menus": [
+    {
+      "menu": "Rowkery",
+      "items": [
+        {
+          "title": "Check for Updates…",
+          "keys": ""
+        },
+        {
+          "title": "Settings…",
+          "keys": "⌘,"
+        }
+      ]
+    },
     {
       "menu": "File",
       "items": [
@@ -515,10 +532,6 @@
           "keys": ""
         },
         {
-          "title": "Check for Updates…",
-          "keys": ""
-        },
-        {
           "title": "Report an Issue…",
           "keys": ""
         },
@@ -613,6 +626,10 @@
     {
       "title": "Show key hints",
       "keys": ""
+    },
+    {
+      "title": "Settings…",
+      "keys": "⌘,"
     },
     {
       "title": "Check for updates…",

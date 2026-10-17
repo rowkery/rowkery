@@ -981,6 +981,13 @@ fn stop_all_queries(bridge: State<'_, CoreBridge>) {
     bridge.stop_all_queries();
 }
 
+/// Whether a tab may hold the user's open transaction: an Automatic update
+/// waits rather than restart it away (updates.ts).
+#[tauri::command]
+async fn holds_open_transaction(app: AppHandle) -> Result<bool, String> {
+    on_blocking_pool(app, |bridge| bridge.holds_transaction()).await
+}
+
 #[derive(Debug, Serialize)]
 struct BrowseStartedDto {
     query_id: u64,
@@ -1486,7 +1493,8 @@ fn menu_spec_contains(spec: &[MenuSpecSubmenu], id: &str) -> bool {
         .any(|e| matches!(e, MenuSpecEntry::Item { id: i, .. } if i == id))
 }
 
-/// The macOS menu bar: the app menu, File, Edit, Connection, Query, View, Go,
+/// The macOS menu bar: the app menu (About, Check for Updates…, Settings…,
+/// Services, Hide, Quit), File, Edit, Connection, Query, View, Go,
 /// Window and Help, with every app item from `menu.json` (commands.ts). A pick
 /// reaches the page as `menu-command` with the command id. The page disables
 /// items that can't run now (`set_menu_state`). ⌘W is File > Close Tab
@@ -1523,23 +1531,42 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
             })
             .collect()
     };
-    let mut submenus = Vec::new();
-    submenus.push(Submenu::with_items(
+    fn refs(list: &[Entry]) -> Vec<&dyn IsMenuItem<Wry>> {
+        list.iter()
+            .map(|e| match e {
+                Entry::Item(i) => i as &dyn IsMenuItem<Wry>,
+                Entry::Native(i) => i as &dyn IsMenuItem<Wry>,
+            })
+            .collect()
+    }
+    let spec = menu_spec();
+    // The app menu: About, then menu.json's "Rowkery" items (Check for
+    // Updates…, Settings…), then the native Services, Hide and Quit.
+    let mut app_items = vec![Entry::Native(PredefinedMenuItem::about(
+        app,
+        None,
+        Some(about),
+    )?)];
+    if let Some(own) = spec.iter().find(|s| s.submenu == "Rowkery") {
+        app_items.push(sep()?);
+        app_items.append(&mut entries(&own.items)?);
+    }
+    app_items.extend([
+        sep()?,
+        Entry::Native(PredefinedMenuItem::services(app, None)?),
+        sep()?,
+        Entry::Native(PredefinedMenuItem::hide(app, None)?),
+        Entry::Native(PredefinedMenuItem::hide_others(app, None)?),
+        sep()?,
+        Entry::Native(PredefinedMenuItem::quit(app, None)?),
+    ]);
+    let mut submenus = vec![Submenu::with_items(
         app,
         info.name.clone(),
         true,
-        &[
-            &PredefinedMenuItem::about(app, None, Some(about))?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::services(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, None)?,
-            &PredefinedMenuItem::hide_others(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, None)?,
-        ],
-    )?);
-    for sub in menu_spec() {
+        &refs(&app_items),
+    )?];
+    for sub in spec.iter().filter(|s| s.submenu != "Rowkery") {
         let mut list = entries(&sub.items)?;
         match sub.submenu.as_str() {
             "View" => {
@@ -1557,14 +1584,7 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
             }
             _ => {}
         }
-        let refs: Vec<&dyn IsMenuItem<Wry>> = list
-            .iter()
-            .map(|e| match e {
-                Entry::Item(i) => i as &dyn IsMenuItem<Wry>,
-                Entry::Native(i) => i as &dyn IsMenuItem<Wry>,
-            })
-            .collect();
-        submenus.push(Submenu::with_items(app, &sub.submenu, true, &refs)?);
+        submenus.push(Submenu::with_items(app, &sub.submenu, true, &refs(&list))?);
         if sub.submenu == "File" {
             submenus.push(Submenu::with_items(
                 app,
@@ -1797,6 +1817,7 @@ pub fn run(mut timings: Timings) {
             forget_connection_secrets,
             open_sample,
             stop_all_queries,
+            holds_open_transaction,
             count_rows,
             cancel_count,
             probe_local_servers,
@@ -1856,6 +1877,7 @@ pub fn run(mut timings: Timings) {
             mcp_pick_tables,
             mcp_pick_close,
             updates::check_for_update,
+            updates::download_update,
             updates::restart_to_update,
         ])
         .build(context)
@@ -2118,10 +2140,23 @@ mod tests {
         assert_eq!(close, Some(Some("CmdOrCtrl+W".to_string())));
         assert!(menu_spec_contains(&spec, "report-issue"));
         assert!(!menu_spec_contains(&spec, "native:close-window"));
+        // Check for Updates… and Settings… (⌘,) sit in the app menu, under About.
+        let own = spec
+            .iter()
+            .find(|s| s.submenu == "Rowkery")
+            .expect("Rowkery");
+        assert!(menu_spec_contains(
+            std::slice::from_ref(own),
+            "check-updates"
+        ));
+        assert!(own.items.iter().any(|e| matches!(e,
+            MenuSpecEntry::Item { id, accelerator, .. }
+                if id == "settings" && accelerator.as_deref() == Some("CmdOrCtrl+,"))));
         let names: Vec<_> = spec.iter().map(|s| s.submenu.as_str()).collect();
         assert_eq!(
             names,
             [
+                "Rowkery",
                 "File",
                 "Connection",
                 "Query",

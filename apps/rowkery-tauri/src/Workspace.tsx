@@ -79,6 +79,7 @@ import { prefetchOn } from "./prefetchSwitch";
 import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
 import { Sidebar, SidebarFoot } from "./Sidebar";
+import type { SettingsSection } from "./SettingsPage";
 import { createPortal } from "react-dom";
 import { ENGINES } from "./engines";
 import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEditor";
@@ -510,8 +511,10 @@ export interface WindowActions {
   openShortcuts: () => void;
   /** Help > Third-party Notices: the notices sheet. */
   openNotices: () => void;
-  /** Help > Check for Updates…: says what it found (updates.ts). */
+  /** Rowkery > Check for Updates…: says what it found (updates.ts). */
   checkForUpdates: () => void;
+  /** ⌘,, the foot's gear or its update button: the Settings page, on a section. */
+  openSettings: (section?: SettingsSection) => void;
   /** ⌘O: the file dialog; the file becomes a connection named after it. */
   openSqliteFile: () => void;
   /** A SQLite file by path (pasted into ⌘K): a connection named after it. */
@@ -539,6 +542,7 @@ const OVER_PAGE = new Set([
   "open-sqlite-file",
   "window-controls",
   "agents",
+  "settings",
 ]);
 const opensOverPage = (id: string) =>
   OVER_PAGE.has(id) || /^(theme|safe|env|mcp):|^mcp-/.test(id);
@@ -566,6 +570,9 @@ interface WorkspaceProps {
   titlebarTools?: HTMLElement | null;
   /** The Agents page is up: the foot's Agents row is lit, and pressing it returns. */
   agentsOpen?: boolean;
+  /** The Settings page is up: menu picks that act on the window close it first, as Agents does. */
+  settingsOpen?: boolean;
+  onCloseSettings?: () => void;
   /** Changes agents proposed that wait for review. */
   proposalCount?: number;
   onToggleAgents?: () => void;
@@ -603,6 +610,8 @@ export function Workspace({
   switchers,
   titlebarTools,
   agentsOpen = false,
+  settingsOpen = false,
+  onCloseSettings,
   proposalCount = 0,
   onToggleAgents,
   identity,
@@ -1844,15 +1853,20 @@ export function Workspace({
   agentsOpenRef.current = agentsOpen;
   const onToggleAgentsRef = useRef(onToggleAgents);
   onToggleAgentsRef.current = onToggleAgents;
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
+  const onCloseSettingsRef = useRef(onCloseSettings);
+  onCloseSettingsRef.current = onCloseSettings;
   useEffect(() => {
     if (!active || commandsBlocked) return;
     const onCommand = (e: Event) => {
       const id = (e as CustomEvent<string>).detail;
       if (typeof id !== "string") return;
-      if (agentsOpenRef.current) {
+      if (agentsOpenRef.current || settingsOpenRef.current) {
         if (id === "close-tab" || id === "run" || id === "run-all") return;
         if (!opensOverPage(id)) {
-          onToggleAgentsRef.current?.();
+          if (settingsOpenRef.current) onCloseSettingsRef.current?.();
+          else onToggleAgentsRef.current?.();
           return void requestAnimationFrame(() => runCommandRef.current(id));
         }
         return runCommandRef.current(id);
@@ -3467,6 +3481,7 @@ export function Workspace({
     if (id === "keyboard-shortcuts") return actions.openShortcuts();
     if (id === "third-party-notices") return actions.openNotices();
     if (id === "check-updates") return actions.checkForUpdates();
+    if (id === "settings") return actions.openSettings();
     if (id === "show-key-hints") return showKeyHints();
     if (id === "find-results") return openFind();
     if (id === "reset-sample") return actions.openSample(true);
@@ -3792,6 +3807,8 @@ export function Workspace({
               onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
               onReview={() => runCommand("review-proposals")}
               onHelp={() => runCommand("keyboard-shortcuts")}
+              settingsOpen={settingsOpen}
+              onSettings={(section) => actions.openSettings(section)}
             />
           }
           menu={active && <ZoneMenu zone="panel" state={commandState} onRun={runCommand} />}

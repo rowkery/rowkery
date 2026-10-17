@@ -1,5 +1,23 @@
 [
   {
+    "submenu": "Rowkery",
+    "items": [
+      {
+        "id": "check-updates",
+        "title": "Check for Updates…",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "settings",
+        "title": "Settings…",
+        "accelerator": "CmdOrCtrl+,"
+      }
+    ]
+  },
+  {
     "submenu": "File",
     "items": [
       {
@@ -277,11 +295,6 @@
       },
       {
         "separator": true
-      },
-      {
-        "id": "check-updates",
-        "title": "Check for Updates…",
-        "accelerator": null
       },
       {
         "id": "report-issue",
