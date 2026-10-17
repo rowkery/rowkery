@@ -1709,8 +1709,9 @@ body,
   color: var(--acc);
 }
 
-/* The schema column's foot: Agents, Appearance, Help (2026-10-13),
-   one row of 28 px icon buttons under one glide hover; names in tooltips. */
+/* The schema column's foot: Agents, Presenting | update, Appearance,
+   Keyboard shortcuts, Settings (2026-10-17), one row of 28 px icon buttons
+   under one glide hover; names in tooltips. */
 .sb-foot-rows {
   position: relative;
   isolation: isolate;
@@ -1743,6 +1744,25 @@ body,
 }
 
 .sb-foot-btn[data-on] {
+  color: var(--acc);
+}
+
+.sb-foot-gap {
+  flex: 1 1 auto;
+}
+
+/* A newer Rowkery waits: an orange disc, the foot's one filled button, until
+   it is installed. It opens Settings > Updates. */
+.sb-update,
+.sb-update:hover {
+  border-radius: 50%;
+  background: var(--acc);
+  color: var(--onfill);
+}
+
+.sb-update[data-phase="downloading"],
+.sb-update[data-phase="downloading"]:hover {
+  background: var(--accbg);
   color: var(--acc);
 }
 

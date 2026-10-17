@@ -981,6 +981,13 @@ fn stop_all_queries(bridge: State<'_, CoreBridge>) {
     bridge.stop_all_queries();
 }
 
+/// Whether a tab may hold the user's open transaction: an Automatic update
+/// waits rather than restart it away (updates.ts).
+#[tauri::command]
+async fn holds_open_transaction(app: AppHandle) -> Result<bool, String> {
+    on_blocking_pool(app, |bridge| bridge.holds_transaction()).await
+}
+
 #[derive(Debug, Serialize)]
 struct BrowseStartedDto {
     query_id: u64,
@@ -1486,8 +1493,8 @@ fn menu_spec_contains(spec: &[MenuSpecSubmenu], id: &str) -> bool {
         .any(|e| matches!(e, MenuSpecEntry::Item { id: i, .. } if i == id))
 }
 
-/// The macOS menu bar: the app menu (About, Check for Updates…, Services,
-/// Hide, Quit), File, Edit, Connection, Query, View, Go,
+/// The macOS menu bar: the app menu (About, Check for Updates…, Settings…,
+/// Services, Hide, Quit), File, Edit, Connection, Query, View, Go,
 /// Window and Help, with every app item from `menu.json` (commands.ts). A pick
 /// reaches the page as `menu-command` with the command id. The page disables
 /// items that can't run now (`set_menu_state`). ⌘W is File > Close Tab
@@ -1534,7 +1541,7 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     }
     let spec = menu_spec();
     // The app menu: About, then menu.json's "Rowkery" items (Check for
-    // Updates…), then the native Services, Hide and Quit.
+    // Updates…, Settings…), then the native Services, Hide and Quit.
     let mut app_items = vec![Entry::Native(PredefinedMenuItem::about(
         app,
         None,
@@ -1810,6 +1817,7 @@ pub fn run(mut timings: Timings) {
             forget_connection_secrets,
             open_sample,
             stop_all_queries,
+            holds_open_transaction,
             count_rows,
             cancel_count,
             probe_local_servers,
@@ -1869,6 +1877,7 @@ pub fn run(mut timings: Timings) {
             mcp_pick_tables,
             mcp_pick_close,
             updates::check_for_update,
+            updates::download_update,
             updates::restart_to_update,
         ])
         .build(context)
@@ -2131,14 +2140,18 @@ mod tests {
         assert_eq!(close, Some(Some("CmdOrCtrl+W".to_string())));
         assert!(menu_spec_contains(&spec, "report-issue"));
         assert!(!menu_spec_contains(&spec, "native:close-window"));
-        // Check for Updates… sits in the app menu, under About.
+        // Check for Updates… and Settings… (⌘,) sit in the app menu, under About.
         let own = spec
             .iter()
             .find(|s| s.submenu == "Rowkery")
             .expect("Rowkery");
-        assert!(
-            matches!(&own.items[..], [MenuSpecEntry::Item { id, .. }] if id == "check-updates")
-        );
+        assert!(menu_spec_contains(
+            std::slice::from_ref(own),
+            "check-updates"
+        ));
+        assert!(own.items.iter().any(|e| matches!(e,
+            MenuSpecEntry::Item { id, accelerator, .. }
+                if id == "settings" && accelerator.as_deref() == Some("CmdOrCtrl+,"))));
         let names: Vec<_> = spec.iter().map(|s| s.submenu.as_str()).collect();
         assert_eq!(
             names,

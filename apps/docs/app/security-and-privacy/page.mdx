@@ -15,7 +15,7 @@ Rowkery only makes these network connections:
 | Connection | When |
 | --- | --- |
 | Your databases | When you open a connection, directly or through the SSH tunnel you set up |
-| The update check | 15 seconds after launch, then every 6 hours, and when you choose **Rowkery › Check for Updates…**. It reads the latest release's `latest.json` from Rowkery's public GitHub repository, and downloads the update when there is one |
+| The update check | 15 seconds after launch, then every 6 hours, and when you choose **Rowkery › Check for Updates…**; never on its own when **Settings › Updates** is Off. It reads the latest release's `latest.json` from Rowkery's public GitHub repository, and downloads the update when there is one, unless Settings › Updates is Notify only |
 | An issue report | Only when you press **Send report** in Report an issue, and only what that sheet lists |
 
 A few things happen on your Mac only:

@@ -216,6 +216,14 @@ fn risk_of(session: &PostgresSession) -> Option<bool> {
 }
 
 impl SessionPool {
+    /// Whether a tab's parked session may hold the user's open transaction.
+    /// A session out running a query isn't parked; the page knows those.
+    pub fn holds_user_transaction(&self) -> bool {
+        self.parked.iter().any(|((_, slot), p)| {
+            matches!(slot, Slot::Tab(_)) && !p.session.is_closed() && at_risk(&p.session)
+        })
+    }
+
     pub fn generation(&self, window_id: &str) -> u64 {
         self.generations.get(window_id).copied().unwrap_or(0)
     }

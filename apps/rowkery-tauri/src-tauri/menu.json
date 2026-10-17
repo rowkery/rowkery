@@ -6,6 +6,14 @@
         "id": "check-updates",
         "title": "Check for Updates…",
         "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "settings",
+        "title": "Settings…",
+        "accelerator": "CmdOrCtrl+,"
       }
     ]
   },

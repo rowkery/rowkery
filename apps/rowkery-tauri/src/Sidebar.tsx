@@ -11,10 +11,12 @@ import {
 import {
   AgentIcon,
   ChevronDownIcon,
+  DownloadIcon,
   EyeIcon,
   EyeOffIcon,
-  HelpIcon,
+  KeyboardIcon,
   MoonIcon,
+  SettingsIcon,
   SunIcon,
   PartitionedIcon,
   PinIcon,
@@ -40,6 +42,8 @@ import { panelRowMenu } from "./contextMenus";
 import { showToast } from "./notify";
 import { setThemeSetting, useTheme, type ThemeSetting } from "./theme";
 import { setPresenting, usePresenting } from "./presenting";
+import { updateWaiting, useUpdatePref, useUpdateState, type UpdateState } from "./updates";
+import type { SettingsSection } from "./SettingsPage";
 
 interface SidebarProps {
   connectionId: string | null;
@@ -430,14 +434,14 @@ const APPEARANCE: { value: ThemeSetting; label: string }[] = [
 ];
 
 /**
- * The schema column's foot (2026-10-13): past a rule, one row of
- * 28 px icon buttons, left-aligned, under one glide hover; the name and key
- * are in each tooltip. Agents (a green dot while this connection is shared,
- * lit while its page is up) opens the Agents page; Appearance shows the
- * current mode's icon (sun, moon, or the half disc for Auto) and cycles
- * Auto → Light → Dark; Presenting (orange while on) hides sensitive columns
- * and the host; Help opens the shortcut sheet. It is the only theme
- * control in the window (⌘K and View keep the commands).
+ * The schema column's foot (2026-10-13, reordered 2026-10-17): past a rule,
+ * one row of 28 px icon buttons under one glide hover; the name and key are
+ * in each tooltip. On the left, Agents (a green dot while this connection is
+ * shared, lit while its page is up) and Presenting (orange while on: hides
+ * sensitive columns and the host). On the right, the orange update button
+ * while a newer Rowkery waits (opens Settings > Updates), Appearance (the
+ * current mode's icon: sun, moon, or the half disc for Auto; cycles
+ * Auto → Light → Dark), Keyboard shortcuts, and Settings.
  */
 export function SidebarFoot({
   mcpOn,
@@ -446,6 +450,8 @@ export function SidebarFoot({
   onAgents,
   onReview,
   onHelp,
+  settingsOpen = false,
+  onSettings,
 }: {
   mcpOn: boolean;
   agentsOpen: boolean;
@@ -454,6 +460,8 @@ export function SidebarFoot({
   onAgents: () => void;
   onReview?: () => void;
   onHelp: () => void;
+  settingsOpen?: boolean;
+  onSettings?: (section?: SettingsSection) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useGlideHover(ref, ".sb-foot-btn");
@@ -462,6 +470,9 @@ export function SidebarFoot({
   const next = APPEARANCE[(at + 1) % APPEARANCE.length];
   const mac = isMacPlatform();
   const presenting = usePresenting();
+  const update = useUpdateState();
+  const pref = useUpdatePref();
+  const waiting = updateWaiting(update, pref);
   // Waiting proposals take the button until they're decided; ⇧⌘A still opens Agents.
   const review = proposals > 0 && !agentsOpen && !!onReview;
   return (
@@ -494,6 +505,33 @@ export function SidebarFoot({
       <button
         type="button"
         className="sb-foot-btn"
+        data-testid="sb-presenting"
+        data-hint-cmd="presenting"
+        data-on={presenting ? "" : undefined}
+        aria-pressed={presenting}
+        aria-label="Presenting"
+        title={presenting ? "Stop presenting" : "Start presenting"}
+        onClick={() => setPresenting(!presenting)}
+      >
+        {presenting ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
+      </button>
+      <span className="sb-foot-gap" />
+      {waiting && onSettings && (
+        <button
+          type="button"
+          className="sb-foot-btn sb-update"
+          data-testid="sb-update"
+          data-phase={update.phase}
+          aria-label={updateLabel(update)}
+          title={updateLabel(update)}
+          onClick={() => onSettings("updates")}
+        >
+          <DownloadIcon size={14} />
+        </button>
+      )}
+      <button
+        type="button"
+        className="sb-foot-btn"
         data-testid="sb-appearance"
         data-theme-setting={setting}
         aria-label={`Appearance: ${APPEARANCE[at].label}`}
@@ -505,29 +543,39 @@ export function SidebarFoot({
       <button
         type="button"
         className="sb-foot-btn"
-        data-testid="sb-presenting"
-        data-hint-cmd="presenting"
-        data-on={presenting ? "" : undefined}
-        aria-pressed={presenting}
-        aria-label="Presenting"
-        title={presenting ? "Stop presenting" : "Start presenting"}
-        onClick={() => setPresenting(!presenting)}
-      >
-        {presenting ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
-      </button>
-      <button
-        type="button"
-        className="sb-foot-btn"
         data-testid="sb-help"
         data-hint-cmd="keyboard-shortcuts"
-        aria-label="Shortcuts"
-        title={commandTip("keyboard-shortcuts", "Shortcuts", mac)}
+        aria-label="Keyboard shortcuts"
+        title={commandTip("keyboard-shortcuts", "Keyboard shortcuts", mac)}
         onClick={onHelp}
       >
-        <HelpIcon size={14} />
+        <KeyboardIcon size={14} />
       </button>
+      {onSettings && (
+        <button
+          type="button"
+          className="sb-foot-btn"
+          data-testid="sb-settings"
+          data-hint-cmd="settings"
+          data-on={settingsOpen ? "" : undefined}
+          aria-pressed={settingsOpen}
+          aria-label="Settings"
+          title={commandTip("settings", "Settings", mac)}
+          onClick={() => onSettings()}
+        >
+          <SettingsIcon size={14} />
+        </button>
+      )}
     </div>
   );
+}
+
+/** The update button's name: what waits, and that it opens Settings. */
+function updateLabel(s: UpdateState): string {
+  if (s.phase === "downloading") return `Downloading Rowkery ${s.version}`;
+  if (s.phase === "ready") return `Rowkery ${s.version} is ready · restart in Settings`;
+  if (s.phase === "available") return `Rowkery ${s.version} is out · download in Settings`;
+  return "Updates";
 }
 
 /** Auto appearance: a circle, half filled (follows the system). */

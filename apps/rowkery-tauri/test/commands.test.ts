@@ -213,9 +213,9 @@ describe("menu bar", () => {
     expect(MENU_BAR.map((m) => m.submenu)).toEqual(["Rowkery", "File", "Connection", "Query", "View", "Go", "Window", "Help"]);
   });
 
-  test("Check for Updates… is in the app menu, not Help", () => {
+  test("Check for Updates… and Settings… are in the app menu, not Help", () => {
     const ids = (sub: string) => MENU_BAR.find((m) => m.submenu === sub)!.items;
-    expect(ids("Rowkery")).toEqual(["check-updates"]);
+    expect(ids("Rowkery")).toEqual(["check-updates", null, "settings"]);
     expect(ids("Help")).not.toContain("check-updates");
   });
 
@@ -255,7 +255,7 @@ describe("menu bar", () => {
     for (const sub of menuSpec()) {
       for (const item of sub.items) {
         if ("separator" in item || !item.accelerator) continue;
-        expect(item.accelerator, item.id).toMatch(/^(CmdOrCtrl\+)?(Ctrl\+)?(Alt\+)?(Shift\+)?([A-Z0-9]|Enter|Left|Right|[./[\]])$/);
+        expect(item.accelerator, item.id).toMatch(/^(CmdOrCtrl\+)?(Ctrl\+)?(Alt\+)?(Shift\+)?([A-Z0-9]|Enter|Left|Right|[.,/[\]])$/);
       }
     }
   });

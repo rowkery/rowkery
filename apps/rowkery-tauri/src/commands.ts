@@ -260,7 +260,7 @@ const envCommands = (): Command[] => [
     title: "Agents",
     menuTitle: "Agents",
     chord: { mac: "Mod+Shift+A" },
-    synonyms: ["mcp", "claude", "agent", "agents", "settings", "sharing"],
+    synonyms: ["mcp", "claude", "agent", "agents", "sharing"],
     canRun: () => true,
   },
 ];
@@ -569,6 +569,14 @@ export const COMMANDS: Command[] = [
     canRun: (s) => s.hintsRetired,
   },
   {
+    id: "settings",
+    title: "Settings…",
+    menuTitle: "Settings…",
+    chord: { mac: "Mod+," },
+    synonyms: ["preferences", "settings", "updates", "options", "appearance", "keymap"],
+    canRun: always,
+  },
+  {
     id: "check-updates",
     title: "Check for updates…",
     menuTitle: "Check for Updates…",
@@ -812,6 +820,7 @@ const CODE_KEY: Record<string, string> = {
   Escape: "Escape",
   Space: "Space",
   Period: ".",
+  Comma: ",",
   Slash: "/",
   BracketLeft: "[",
   BracketRight: "]",
@@ -908,7 +917,7 @@ export function availableCommands(s: CommandState, mac: boolean): AvailableComma
  * a menu key equivalent without a modifier would eat that key in text fields.
  */
 export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
-  { submenu: "Rowkery", items: ["check-updates"] },
+  { submenu: "Rowkery", items: ["check-updates", null, "settings"] },
   { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "close-tab"] },
   {
     submenu: "Connection",
