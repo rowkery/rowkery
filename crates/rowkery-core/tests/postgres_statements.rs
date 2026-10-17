@@ -38,7 +38,13 @@ fn pg_config() -> PostgresConnection {
     }
 }
 
+/// The tests in this binary share `ROWKERY_CONFIG_DIR`; held from setting it
+/// until the session has read its password.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[allow(clippy::await_holding_lock)]
 async fn session(tag: &str) -> PostgresSession {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
     std::env::set_var(
         "ROWKERY_CONFIG_DIR",
@@ -335,6 +341,7 @@ async fn rows_in(s: &PostgresSession, count: &str) -> Value {
 /// goes alone through the extended protocol and the server refuses it:
 /// the DELETE never runs, read-only or not, paged or prefetched.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_a_cursor_never_runs_a_hidden_statement() {
     let table = format!("it_hidden_write_{}", std::process::id());
     let s = session("hidden").await;
@@ -357,7 +364,10 @@ async fn postgres_a_cursor_never_runs_a_hidden_statement() {
         } else {
             Default::default()
         };
-        let mut tab = open_session(config.id.clone(), config).await.unwrap();
+        let mut tab = {
+            let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            open_session(config.id.clone(), config).await.unwrap()
+        };
         for sql in &hidden {
             let mut got = Got::default();
             let run =

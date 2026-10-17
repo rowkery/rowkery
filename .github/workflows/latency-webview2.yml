@@ -10,8 +10,7 @@ name: Latency (WebView2)
 # not only on a regression. A remote budget of null means 1 RTT + 10 ms; the
 # RTT is the `rtt_ms` input (0 for the runner's own Postgres).
 #
-# Manual only, like ci.yml and dmg.yml: Actions > Latency (WebView2) > Run
-# workflow. Never add push or pull_request triggers (AGENTS.md).
+# Manual only, like dmg.yml: Actions > Latency (WebView2) > Run workflow.
 on:
   workflow_dispatch:
     inputs:
@@ -25,6 +24,9 @@ on:
         required: false
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   latency:
     runs-on: windows-latest
@@ -37,15 +39,17 @@ jobs:
       LATENCY_FAIL_ON_MISS: ${{ inputs.record_only && '0' || '1' }}
       LATENCY_ENFORCE: ${{ inputs.record_only && '0' || '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # rust-toolchain.toml pins the version.
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       - name: Postgres on 54329
-        uses: ikalnytskyi/action-setup-postgres@v6
+        uses: ikalnytskyi/action-setup-postgres@687404e7b78b0b3471751635e69f70d54a09d6e7 # v6
         with:
           username: rowkery
           password: rowkery
@@ -62,7 +66,7 @@ jobs:
         env:
           PGPASSWORD: rowkery
         run: scripts/latency-proof.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: latency-webview2-${{ github.sha }}

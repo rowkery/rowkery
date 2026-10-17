@@ -36,6 +36,8 @@ cargo test --workspace
 
 With the test database up, add `--features rowkery-core/postgres-integration,rowkery-mcp/postgres-integration` to `cargo test` to run the Postgres integration tests too.
 
+CI (`.github/workflows/ci.yml`) runs the same checks on every pull request, with the Postgres integration tests, the website build, a macOS build check and a dependency audit (`deny.toml` for the crates, `npm audit` for the apps). A pull request merges once it's green. CI doesn't run the browser or latency proofs, so those stay yours.
+
 A change to the app's Rust or npm dependencies regenerates `THIRD_PARTY_NOTICES.md` with `node scripts/notices.mjs` (needs `cargo install cargo-about --locked --features cli`).
 
 ## Browser proofs
