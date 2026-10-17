@@ -27,7 +27,9 @@ interface TitleBarProps {
   onReorder: (from: number, to: number) => void;
   /** + (and ⌘T): a new empty window, which shows Connect to start. */
   onNewWindow: () => void;
-  /** A pill's agent mark: the Agents page. */
+  /** The Agents page is up: the shown pill's agent mark looks pressed. */
+  agentsOpen?: boolean;
+  /** A pill's agent mark: the Agents page, or back from it. */
   onAgents: () => void;
   /** A slot in the shown pill: its window portals the safe mode shield here while it is connected. */
   toolsRef: Ref<HTMLSpanElement>;
@@ -56,6 +58,7 @@ export function TitleBar({
   onClose,
   onReorder,
   onNewWindow,
+  agentsOpen = false,
   onAgents,
   toolsRef,
   onTilePick,
@@ -161,8 +164,22 @@ export function TitleBar({
                   className="win-mcp"
                   data-no-drag
                   data-recent={agent ? "" : undefined}
-                  aria-label={agent ? "Read by an agent in the last minute. Open Agents" : "Shared with agents. Open Agents"}
-                  title={agent ? "An agent read it in the last minute · Agents" : "Shared with agents · Agents"}
+                  data-on={on && agentsOpen ? "" : undefined}
+                  aria-pressed={on ? agentsOpen : undefined}
+                  aria-label={
+                    on && agentsOpen
+                      ? "Back to the window"
+                      : agent
+                        ? "Read by an agent in the last minute. Open Agents"
+                        : "Shared with agents. Open Agents"
+                  }
+                  title={
+                    on && agentsOpen
+                      ? "Agents · back to the window"
+                      : agent
+                        ? "An agent read it in the last minute · Agents"
+                        : "Shared with agents · Agents"
+                  }
                   tabIndex={-1}
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => {

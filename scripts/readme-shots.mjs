@@ -5,8 +5,8 @@
 //    and the app window (orders filtered to paid) on the right, with an agent's SELECT answered
 //    and its DELETE refused over it;
 //  - docs/readme/k-palette-{light,dark}.webp: ⌘K finding the orders tables (760x540 at 2x);
-//  - docs/readme/log-{light,dark}.webp: the Agents page log with a refusal, a search and an
-//    opened query with its access, request and response (860x589 at 2x);
+//  - docs/readme/log-{light,dark}.webp: the Agents inbox, its log with a refusal, a search and an
+//    opened query showing its access, request and response beside it;
 //  - apps/web/assets/img/window-dark.webp: the whole window in dark (1280x800 at 2x), with the
 //    toast of an agent's refused full read.
 // The platform is pinned to macOS (⌘ labels, keys pressed with Meta). Writes PNGs to outDir
@@ -334,19 +334,19 @@ for (const scheme of ["light", "dark"]) {
     made[`k-palette-${scheme}`] = await shot(page, `k-palette-${scheme}`);
     await context.close();
   }
-  // 3. The Agents page log, the prd query opened.
+  // 3. The Agents inbox: the log, the prd query opened beside it.
   {
     const { context, page } = await openApp(scheme, 1280, 1000, { filter: false });
     await page.click('[data-testid="sb-agents"]');
-    await page.waitForSelector('[data-testid="agents-page"] [data-mcp-entry="2"]');
-    await page.click('[data-mcp-entry="2"]');
-    await page.waitForSelector('[data-mcp-entry="2"] [data-mcp-box="response"] .mcp-json'); // Class on purpose: the sample is drawn.
+    await page.waitForSelector('[data-testid="agents-page"] [data-mcp-entry]');
+    await page.click('[data-mcp-entry="0"]'); // Newest has the highest key: 0 is the prd query.
+    await page.waitForSelector('[data-testid="mcp-detail"] [data-mcp-box="response"] .mcp-json'); // Class on purpose: the sample is drawn.
     await page.waitForTimeout(300);
-    const boxes = await page.$$eval("[data-mcp-entry]", (els) => els.map((e) => e.getBoundingClientRect().toJSON()));
-    const x = Math.min(...boxes.map((b) => b.x)) - 6;
-    const y = Math.min(...boxes.map((b) => b.y)) - 6;
-    const r = Math.max(...boxes.map((b) => b.right)) + 6;
-    const bottom = Math.max(...boxes.map((b) => b.bottom)) + 6;
+    const box = await page.$eval('[data-testid="agents-page"]', (e) => e.getBoundingClientRect().toJSON());
+    const x = box.x;
+    const y = box.y;
+    const r = box.right;
+    const bottom = Math.min(box.bottom, box.y + 640); // The README shows the top of the page.
     console.log(`log clip ${Math.round(r - x)}x${Math.round(bottom - y)}`);
     made[`log-${scheme}`] = await shot(page, `log-${scheme}`, { x, y, width: Math.ceil(r - x), height: Math.ceil(bottom - y) });
     await context.close();

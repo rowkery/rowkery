@@ -3775,8 +3775,6 @@ export function Workspace({
               agentsOpen={agentsOpen}
               proposals={proposalCount}
               onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
-              onReview={() => runCommand("review-proposals")}
-              onHelp={() => runCommand("keyboard-shortcuts")}
               settingsOpen={settingsOpen}
               onSettings={(section) => actions.openSettings(section)}
             />

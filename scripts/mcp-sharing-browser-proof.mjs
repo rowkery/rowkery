@@ -196,7 +196,7 @@ await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 const lastSave = async () => (await calls("save_connection")).at(-1)?.[1]?.connection;
 
 await palette("MCP access");
-await page.waitForSelector('[data-mcp-sheet="access"]');
+await page.waitForSelector('[data-testid="agents-sharing"]');
 check(await page.isChecked('[data-mcp-allow="stg"]'), "a share with time left reads on");
 check(
   /until \d|until midnight/.test((await page.textContent('[data-mcp-conn="stg"] [data-testid="mcp-cn-sub"]')) ?? ""),
@@ -210,6 +210,11 @@ await page.waitForTimeout(300);
 let saved = await lastSave();
 const left = (saved?.mcp_until ?? 0) - before;
 check(saved?.id === "local" && left > 3_590_000 && left < 3_610_000, `1 hour saves mcp_until ${left} ms ahead`);
+// A first share opens Edit access in place of the cards; Esc returns to them.
+if (await page.$("[data-mcp-editor]")) {
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("[data-mcp-editor]", { state: "detached" });
+}
 await page.waitForSelector('[data-mcp-conn="local"] [data-mcp-duration="hour"]');
 check(
   /until \d|until midnight/.test((await page.textContent('[data-mcp-conn="local"] [data-testid="mcp-cn-sub"]')) ?? ""),

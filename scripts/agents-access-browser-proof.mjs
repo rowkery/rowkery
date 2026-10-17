@@ -2,15 +2,16 @@
 // Agents page redesign (2026-10-14) proof with a stubbed Tauri `invoke`:
 // the picked call opens Access (what was shared then), Request (the
 // arguments as sent) and Response (the first 512 B of what went back);
+// in Settings › Agents (2026-10-17, from the Agents page's Sharing),
 // clicking a shared card opens Edit access (no button for it), which takes
-// the log's place and lists the connection's databases
+// the cards' place and lists the connection's databases
 // and the picked one's tables by schema; ticking a table, a schema, All
 // tables (over the filter) and a database each save the whole access map at
 // once; ticking a database ticks every table in it (an allow list, so tables
 // made later stay hidden); there's no Only ticked | All but unticked switch
 // (removed 2026-10-14); the tick mark is white and centred;
-// the head's buttons sit flush right; ⌘F filters tables; Esc goes back
-// to the log; a connection saved before the map edits as every database
+// ⌘F filters tables; Esc goes back
+// to the cards; a connection saved before the map edits as every database
 // minus its hidden tables, and can't be ticked until those are listed (a
 // tick then would unshare the rest); Done closes the picker's sessions;
 // turning sharing on shares the own database with
@@ -195,9 +196,11 @@ check(/"paid", 1240/.test(await page.textContent('[data-mcp-box="response"] .mcp
 await page.click("[data-mcp-copy-request]");
 const copied = await page.evaluate(() => navigator.clipboard.readText());
 check(JSON.parse(copied).max_rows === 200, "Copy request copies the arguments as JSON");
-const metas = await page.$$eval('[data-testid="mcp-meta-size"]', (els) => els.map((e) => e.textContent));
-check(metas.includes("3.4 KB") && metas.includes("4 rows · 38 ms"), `every call shows its size: ${metas.join(" | ")}`);
+const metas = await page.$$eval('[data-testid="ag-call-meta"]', (els) => els.map((e) => e.textContent));
+check(metas.includes("3.4 KB") && metas.includes("4 rows"), `every call shows its size: ${metas.join(" | ")}`);
 await shot("1-log-request");
+await page.click("[data-ag-sharing]");
+await page.waitForSelector('[data-testid="settings-page"] [data-testid="mcp-map"]');
 
 // 2. Clicking a shared card opens its Edit access (there's no Edit access button).
 check(!(await page.$('[data-mcp-conn="api"] button:text-is("Edit access")')), "no Edit access button on the card");
@@ -207,8 +210,8 @@ await page.waitForTimeout(150);
 check(!(await page.$("[data-mcp-editor]")), "a duration click stays a duration click");
 await page.click('[data-mcp-edit="api"] [data-testid="mcp-cn-sub"]');
 await page.waitForSelector('[data-mcp-editor="api"] [data-ag-table="public.orders"]');
-check(!(await page.$(".mcp-list")), "the log makes way for Edit access"); // Class on purpose: the log's list.
-check((await page.getAttribute('[data-mcp-conn="api"]', "data-editing")) !== null, "the card being edited is marked");
+check(!(await page.$('[data-testid="mcp-map"]')), "the cards make way for Edit access");
+check(/Platform API/.test(await page.textContent('[data-mcp-editor="api"]')), "Edit access names its connection");
 check((await page.$$("[data-ag-db]")).length === 4, "every database of the server is listed");
 check((await page.getAttribute('[data-ag-db-tick="orders"]', "aria-checked")) === "true", "the shared database is ticked");
 check((await page.getAttribute('[data-ag-db-tick="billing"]', "aria-checked")) === "false", "the others are not");
@@ -223,13 +226,10 @@ const mark = await page.$eval('[data-ag-table="public.orders"] .ag-cb', (el) => 
 });
 check(mark.bg === "rgb(255, 255, 255)", `the tick mark is white: ${mark.bg}`);
 check(Math.abs(mark.w - mark.h) < 0.5 && mark.box - mark.w <= 2 && /50% 50%|center/.test(mark.pos), `the tick mark fills the box, centred: ${JSON.stringify(mark)}`);
-// The head: What can the agent do, Connect an agent and esc end at the right edge.
-const head = await page.evaluate(() => {
-  const h = document.querySelector(".ag-head").getBoundingClientRect(); // Class on purpose: the head under test.
-  const esc = document.querySelector("[data-ag-close]").getBoundingClientRect();
-  return h.right - esc.right;
-});
-check(head <= 20, `the head's buttons sit flush right (${Math.round(head)} px from the edge)`);
+check(
+  await page.$eval('[data-testid="settings-page"] [data-testid="page-back"]', (b) => b.parentElement.firstElementChild === b),
+  "the page's way out is first in its head",
+);
 check((await page.getAttribute('[data-ag-schema="public"]', "aria-checked")) === "mixed", "a schema with some ticked reads mixed");
 await shot("2-edit-access");
 
@@ -275,14 +275,14 @@ check(
 );
 check((await page.getAttribute('[data-ag-db="billing"]', "data-picked")) !== null, "and shows its tables");
 check((await page.textContent('[data-testid="ag-table-count"]')) === "9 of 9", "Tables: 9 of 9");
-const sub = await page.textContent('[data-mcp-conn="api"] [data-testid="mcp-cn-sub"]');
-check(/billing, orders/.test(sub), `the card names the shared databases: ${sub}`);
 await shot("4-two-databases");
 
-// 7. Esc goes back to the log, not out of the page.
+// 7. Esc goes back to the cards, not out of Settings.
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="mcp-editor"]', { state: "detached" });
-check(!!(await page.$('[data-testid="agents-page"] .mcp-list')), "Esc closes Edit access and shows the log again"); // Class on purpose.
+check(!!(await page.$('[data-testid="settings-page"] [data-testid="mcp-map"]')), "Esc closes Edit access and shows the cards again");
+const sub = await page.textContent('[data-mcp-conn="api"] [data-testid="mcp-cn-sub"]');
+check(/billing, orders/.test(sub), `the card names the shared databases: ${sub}`);
 
 // 8. A connection saved before the map: every database, minus its hidden tables.
 check(/Every database · all but 1 table/.test(await page.textContent('[data-mcp-conn="ops"] [data-testid="mcp-cn-sub"]')), "an old connection reads as every database minus its hidden table");
@@ -332,9 +332,12 @@ await page.waitForFunction(
 );
 saved = (await saves()).filter((c) => c.id === "prd").at(-1);
 check(saved.mcp_access.orders.mode === "picked" && saved.mcp_access.orders.tables.length === 9, "then every table in it is ticked");
+await page.click("[data-mcp-done]");
 await page.waitForFunction(() => /9 of 9 tables/.test(document.querySelector('[data-mcp-conn="prd"] [data-testid="mcp-cn-sub"]')?.textContent ?? ""));
 check(true, "the card says 9 of 9 tables");
 // Reopening Edit access later doesn't tick anything again.
+await page.click('[data-mcp-edit="prd"]');
+await page.waitForSelector('[data-mcp-editor="prd"] [data-ag-table="public.events"]');
 await page.click('[data-ag-table="public.events"]');
 await page.click("[data-mcp-done]");
 const kept = (await saves()).length;
@@ -350,11 +353,19 @@ await page.click('[data-mcp-edit="api"]');
 await page.waitForSelector('[data-mcp-editor="api"] [data-ag-table="public.orders"]');
 await shot("5-edit-access-dark");
 await page.keyboard.press("Escape");
-await page.waitForSelector('[data-testid="mcp-detail"]');
-await shot("6-log-dark");
+await page.waitForSelector('[data-testid="mcp-map"]');
 await page.click("[data-ag-can-do]");
 await page.waitForSelector('[data-testid="ag-can-do"]');
 await shot("7-can-do-dark");
+await page.keyboard.press("Escape");
+await page.waitForSelector('[data-testid="ag-can-do"]', { state: "detached" });
+await page.waitForFunction(() => document.activeElement?.matches('[data-testid="settings-page"]'));
+check(true, "focus comes back to the page when the sheet closes");
+await page.keyboard.press("Escape");
+await page.waitForSelector('[data-testid="settings-page"]', { state: "detached" });
+await page.keyboard.press("Control+Shift+A");
+await page.waitForSelector('[data-testid="mcp-detail"]');
+await shot("6-log-dark");
 
 await browser.close();
 if (failed) {
