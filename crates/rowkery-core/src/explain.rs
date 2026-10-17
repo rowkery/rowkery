@@ -85,7 +85,11 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
             Some("sshPassword"),
         );
     }
-    if says("rejected password") || says("password authentication failed") || has("28P01") {
+    if says("rejected password")
+        || says("password authentication failed")
+        || says("asked for a password")
+        || has("28P01")
+    {
         return e(
             "auth",
             Some(format!(

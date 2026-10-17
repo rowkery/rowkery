@@ -363,6 +363,33 @@ pub fn get_secret(connection_id: &str, kind: SecretKind) -> Result<Option<String
     Ok(value)
 }
 
+/// Drops what this run remembers of a connection's secrets, so the next read
+/// asks the keychain again. A long-lived process (the MCP server) otherwise
+/// keeps a password the app has since changed, or an item it read before
+/// the app saved one.
+pub fn forget_cached(connection_id: &str) {
+    if let Ok(mut c) = item_cache().lock() {
+        c.remove(&cache_key(connection_id));
+    }
+    if let Ok(mut c) = cache().lock() {
+        for kind in KINDS.into_iter().chain([SecretKind::MaskKey]) {
+            c.remove(&cache_key(&entry_account(connection_id, kind)));
+        }
+    }
+}
+
+/// Whether this run's read of the connection's keychain item was refused (a
+/// denied or unanswerable macOS prompt), so a missing password can be told
+/// apart from a wrong one.
+pub fn keychain_refused(connection_id: &str) -> bool {
+    keychain_enabled()
+        && item_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&cache_key(connection_id)).map(|r| r.is_err()))
+            .unwrap_or(false)
+}
+
 /// The connection's key for the stand-ins agents get in place of sensitive
 /// values (`rowkery_mcp::mask`): 32 random bytes as hex, made on first use.
 /// It lives in the connection's keychain item beside its passwords, so the
@@ -659,6 +686,35 @@ mod tests {
             None
         );
         mock_state(|k| assert_eq!(k.reads, 1));
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn forget_cached_reads_a_secret_saved_elsewhere_since() {
+        let _guard = test_guard();
+        store_secret("k6", SecretKind::DbPassword, "old").unwrap();
+        // Another process saves a new one; this run still answers from memory.
+        fallback_set(&entry_account("k6", SecretKind::DbPassword), "new").unwrap();
+        assert_eq!(
+            get_secret("k6", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("old")
+        );
+        forget_cached("k6");
+        assert_eq!(
+            get_secret("k6", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("new")
+        );
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_refused_keychain_is_told_apart() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], true);
+        assert!(!keychain_refused("k7"), "nothing read yet");
+        assert_eq!(get_secret("k7", SecretKind::DbPassword).unwrap(), None);
+        assert!(keychain_refused("k7"));
+        assert!(!keychain_refused("k8"));
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
