@@ -1736,11 +1736,15 @@ body,
   background: transparent;
   color: var(--mute);
   cursor: default;
-  transition: color 0.18s ease;
+  transition: color 0.18s ease, background-color 0.18s ease, transform 120ms ease;
 }
 
 .sb-foot-btn:hover {
   color: var(--text);
+}
+
+.sb-foot-btn:active {
+  transform: scale(0.9);
 }
 
 .sb-foot-btn[data-on] {
@@ -1758,6 +1762,11 @@ body,
   border-radius: 50%;
   background: var(--acc);
   color: var(--onfill);
+  animation: pop 0.2s var(--ease-out);
+}
+
+.sb-update:hover {
+  background: var(--acc2);
 }
 
 .sb-update[data-phase="downloading"],
@@ -3065,6 +3074,7 @@ body,
   .card-notice,
   .toast,
   .identity,
+  .sb-update,
   .presence[data-closing] * {
     animation: none !important;
   }
@@ -3078,6 +3088,7 @@ body,
   .win-tab,
   .editor-header,
   .view-switch-thumb,
+  .sb-foot-btn,
   .reordering > [data-reorder-key] {
     transition: none !important;
   }

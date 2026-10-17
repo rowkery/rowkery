@@ -10,7 +10,8 @@
 // Download, Updates gets an orange dot, and back in the window the foot shows
 // the orange round update button. That button opens Settings > Updates,
 // Download fetches the release, and the line offers Restart. Appearance and
-// Keyboard apply at once. Esc goes back. Light and dark.
+// Keyboard apply at once. Esc goes back. Light and dark. Hovers fade,
+// presses give, categories rise in; Reduce Motion stops it.
 // What a download, restart and Automatic's idle restart do on the Mac is
 // covered by `cargo test -p rowkery-tauri` and updates.test.ts, not here.
 //
@@ -250,5 +251,37 @@ check(true, "the gear opens Settings");
 await page.click(`${settings} [data-st-close]`);
 await page.waitForFunction((sel) => !document.querySelector(sel), settings);
 check(true, "esc in the head goes back");
+
+// 8. Motion: hovers fade, presses give, a picked category rises in, and the
+// foot's buttons give under a press; Reduce Motion turns all of it off.
+await page.click(`${foot} [data-testid="sb-settings"]`);
+await page.waitForSelector(settings);
+const style = (sel, prop) => page.$eval(sel, (el, p) => getComputedStyle(el)[p], prop);
+const cardSel = card("update-pref", "auto");
+check(/background-color/.test(await style(cardSel, "transitionProperty")), "a card's fill fades on hover");
+const restFill = await style(cardSel, "backgroundColor");
+await page.hover(cardSel);
+await page.waitForTimeout(300);
+check((await style(cardSel, "backgroundColor")) !== restFill, "and hover changes it");
+await page.mouse.down();
+await page.waitForTimeout(200);
+check(/matrix\(0\.98/.test(await style(cardSel, "transform")), "a pressed card shrinks a little");
+await page.mouse.up();
+check(/box-shadow/.test(await style(`${cardSel} .st-radio`, "transitionProperty")), "the radio's dot grows in");
+check(/color/.test(await style(`${settings} .st-nav-row`, "transitionProperty")), "category rows fade on hover");
+check((await style(`${settings} .st-status .mcp-btn`, "transitionProperty")).includes("transform"), "buttons give under a press");
+await page.click(`${settings} [data-st-section="appearance"]`);
+check((await style(`${settings} .st-pane`, "animationName")) === "rise", "a picked category's settings rise in");
+await page.click(`${settings} [data-st-close]`);
+await page.waitForFunction((sel) => !document.querySelector(sel), settings);
+check(/transform/.test(await style(`${foot} [data-testid="sb-settings"]`, "transitionProperty")), "foot buttons give under a press");
+await page.emulateMedia({ reducedMotion: "reduce" });
+await page.click(`${foot} [data-testid="sb-settings"]`);
+await page.waitForSelector(settings);
+check(
+  (await style(cardSel, "transitionDuration")).split(",").every((d) => parseFloat(d) === 0) &&
+    (await style(`${settings} .st-pane`, "animationName")) === "none",
+  "Reduce Motion turns it off",
+);
 
 await browser.close();

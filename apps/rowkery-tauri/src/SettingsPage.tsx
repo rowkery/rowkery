@@ -99,9 +99,11 @@ export function SettingsPage({
           ))}
         </nav>
         <div className="st-main">
-          {section === "updates" && <UpdatesSection update={update} pref={pref} runningQueries={runningQueries} />}
-          {section === "appearance" && <AppearanceSection />}
-          {section === "keyboard" && <KeyboardSection onShortcuts={onShortcuts} />}
+          <div className="st-pane" key={section}>
+            {section === "updates" && <UpdatesSection update={update} pref={pref} runningQueries={runningQueries} />}
+            {section === "appearance" && <AppearanceSection />}
+            {section === "keyboard" && <KeyboardSection onShortcuts={onShortcuts} />}
+          </div>
         </div>
       </div>
     </section>
@@ -136,7 +138,7 @@ function UpdatesSection({
     case "available":
       status = (
         <>
-          <b>Rowkery {update.version} is out</b>
+          <b key="available">Rowkery {update.version} is out</b>
           {version && <span className="st-sub">you have {version}</span>}
           <span className="mcp-grow" />
           <button type="button" className="mcp-btn ink" data-st-download onClick={() => void downloadUpdate()}>
@@ -148,7 +150,7 @@ function UpdatesSection({
     case "downloading":
       status = (
         <>
-          <b>Downloading Rowkery {update.version}…</b>
+          <b key="downloading">Downloading Rowkery {update.version}…</b>
           <span className="mcp-grow" />
         </>
       );
@@ -156,7 +158,7 @@ function UpdatesSection({
     case "ready":
       status = (
         <>
-          <b>Rowkery {update.version} is ready</b>
+          <b key="ready">Rowkery {update.version} is ready</b>
           <span className="st-sub">or it installs when you quit</span>
           <span className="mcp-grow" />
           <button type="button" className="mcp-btn ink" data-st-restart onClick={restartToUpdate}>
@@ -169,7 +171,7 @@ function UpdatesSection({
       status = (
         <>
           <b>{mine}</b>
-          <span className="st-sub">
+          <span className="st-sub" key={update.phase}>
             {update.phase === "checking"
               ? "checking…"
               : update.phase === "up-to-date"

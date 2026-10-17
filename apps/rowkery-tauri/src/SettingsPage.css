@@ -22,10 +22,21 @@
   animation: fade-out 110ms ease-in forwards;
 }
 
+/* The page's buttons give under a press, as Run does. */
+.settings-page .mcp-btn {
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, transform 120ms ease;
+}
+
+.settings-page .mcp-btn:active {
+  transform: translateY(1px);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .settings-page,
-  .presence[data-closing] .settings-page {
-    animation: none;
+  .presence[data-closing] .settings-page,
+  .settings-page * {
+    animation: none !important;
+    transition: none !important;
   }
 }
 
@@ -60,11 +71,26 @@
   font: 500 13px var(--sans);
   text-align: left;
   cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease, transform 120ms ease;
+}
+
+.st-nav-row:hover {
+  color: var(--text);
+}
+
+.st-nav-row:active,
+.st-card:active {
+  transform: scale(0.985);
 }
 
 .st-nav-row svg {
   flex-shrink: 0;
   color: var(--mute);
+  transition: color 0.18s ease;
+}
+
+.st-nav-row:hover svg {
+  color: var(--text);
 }
 
 .st-nav-row[aria-current="page"] {
@@ -88,6 +114,7 @@
   margin-left: auto;
   border-radius: 50%;
   background: var(--acc);
+  animation: pop 160ms var(--ease-out);
 }
 
 .st-main {
@@ -98,6 +125,11 @@
 
 .st-main > * {
   max-width: 560px;
+}
+
+/* A picked category's settings rise in; the old ones just go (exits are shorter). */
+.st-pane {
+  animation: rise 0.2s var(--ease-out);
 }
 
 .st-h2 {
@@ -124,6 +156,13 @@
   font: 13px var(--sans);
 }
 
+/* A new phase (checking, found, downloading, ready) fades its words in. The
+   buttons aren't remounted, so a focused one keeps focus. */
+.st-status > b,
+.st-status > .st-sub {
+  animation: fade 0.18s ease;
+}
+
 .st-status b {
   font-weight: 500;
 }
@@ -143,6 +182,7 @@
   color: var(--text2);
   font: 12px/1.5 var(--sans);
   white-space: pre-wrap;
+  animation: rise 0.2s var(--ease-out);
 }
 
 .st-group {
@@ -169,9 +209,15 @@
   font: 13px/1.4 var(--sans);
   text-align: left;
   cursor: default;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease, transform 120ms ease;
 }
 
-.st-card[aria-checked="true"] {
+.st-card:hover {
+  background: var(--line);
+}
+
+.st-card[aria-checked="true"],
+.st-card[aria-checked="true"]:hover {
   background: var(--accbg);
   box-shadow: inset 0 0 0 1px var(--acc);
 }
@@ -188,9 +234,15 @@
   border-radius: 50%;
   box-shadow: inset 0 0 0 1.5px var(--line2);
   grid-row: span 2;
+  transition: box-shadow 0.2s var(--ease-out);
 }
 
-.st-card[aria-checked="true"] .st-radio {
+.st-card:hover .st-radio {
+  box-shadow: inset 0 0 0 1.5px var(--dim);
+}
+
+.st-card[aria-checked="true"] .st-radio,
+.st-card[aria-checked="true"]:hover .st-radio {
   box-shadow: inset 0 0 0 4px var(--acc);
 }
 
