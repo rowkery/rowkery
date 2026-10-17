@@ -43,8 +43,8 @@ type Run = { state: DryState; dry: DryRun | null; error: string | null };
  * it sends the dry run's row counts and runs again only if every statement
  * changes as many rows; otherwise a fresh dry run takes their place.
  *
- * With more than one waiting (2026-10-17), every one is a card in a column on
- * the left, oldest first, and any can be opened in any order (click, or ↑↓).
+ * Every waiting one is a card in a column on the left (2026-10-17; shown
+ * for one too), oldest first, and any can be opened in any order (click, or ↑↓).
  * Each keeps its plan and its dry run while another is shown, so coming back
  * to one doesn't need a new dry run; Commit still re-checks the row counts.
  */
@@ -291,32 +291,30 @@ export function ProposalPage({
       tabIndex={-1}
       onKeyDown={onKeyDown}
     >
-      {waiting.length > 1 && (
-        <nav className="pp-list" data-testid="pp-list" aria-label="Proposed changes">
-          <header className="ag-head">
-            <h1 className="ag-title">Proposed changes</h1>
-            <span className="pp-sub" data-testid="pp-list-count">
-              {waiting.length} waiting
-            </span>
-          </header>
-          <div ref={listRef} className="pp-cards">
-            {waiting.map((p, i) => (
-              <ProposalCard
-                key={p.id}
-                p={p}
-                planned={plans[p.id]}
-                run={runs[p.id]}
-                where={places > 1 ? placeLabel(p, connections) : null}
-                current={i === at}
-                onPick={() => {
-                  setPickedId(p.id);
-                  rootRef.current?.focus();
-                }}
-              />
-            ))}
-          </div>
-        </nav>
-      )}
+      <nav className="pp-list" data-testid="pp-list" aria-label="Proposed changes">
+        <header className="ag-head">
+          <h1 className="ag-title">Proposed changes</h1>
+          <span className="pp-sub" data-testid="pp-list-count">
+            {waiting.length} waiting
+          </span>
+        </header>
+        <div ref={listRef} className="pp-cards">
+          {waiting.map((p, i) => (
+            <ProposalCard
+              key={p.id}
+              p={p}
+              planned={plans[p.id]}
+              run={runs[p.id]}
+              where={places > 1 ? placeLabel(p, connections) : null}
+              current={i === at}
+              onPick={() => {
+                setPickedId(p.id);
+                rootRef.current?.focus();
+              }}
+            />
+          ))}
+        </div>
+      </nav>
       <div className="pp-main">
         <header className="ag-head">
           <h1 className="ag-title" data-testid="pp-title">

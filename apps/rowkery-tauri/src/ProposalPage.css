@@ -361,8 +361,8 @@
   border-color: var(--acc);
 }
 
-/* More than one waiting (2026-10-17): every one is a card in a column on the
-   left, where the schema column sits, oldest first. The shown one is filled
+/* The list (2026-10-17): every waiting one is a card in a column on the
+   left, where the schema column sits, oldest first, one waiting or many. The shown one is filled
    with --line, as Settings marks its category; the glide is the hover. */
 .pp-list {
   width: 288px;

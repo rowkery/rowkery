@@ -9,10 +9,10 @@
 // the dry run", and Commit is disabled. Dry run puts the rows under each
 // statement (changed cells old over new, inserts and deletes marked), says
 // "N rows · rolled back" and enables Commit; a lock timeout shows as a plain
-// error with Dry run again. With more than one waiting (2026-10-17) a list of
-// cards on the left opens any of them in any order (click or ↑↓); each keeps
+// error with Dry run again. A list of cards on the left (2026-10-17, shown for
+// one waiting too) opens any of them in any order (click or ↑↓); each keeps
 // its dry run while another shows, its card saying "N rows · dry run" or "No
-// WHERE"; with one left the list goes. SQL the lexer can't read shows whole
+// WHERE". SQL the lexer can't read shows whole
 // with "Couldn't read the target table".
 // Commit ⇧⌘↵ sends the dry run's counts; a "moved" answer swaps in the fresh
 // dry run and saves nothing; Discard sends the note; the page closes when
@@ -319,7 +319,7 @@ const rejected = (await calls("proposal_reject")).at(-1);
 check(rejected?.id === "p_000000000002" && rejected?.note === "Keep the test orders for now.", "Discard sends the note");
 check(await page.$eval('[data-testid="pp-commit"]', (b) => !b.disabled), "back on the first, its dry run is kept and Commit is ready");
 check((await dryCalls()) === 3, "coming back ran no new dry run");
-check(!(await page.$('[data-testid="pp-list"]')), "with one left, the list goes");
+check((await page.$$('[data-testid="pp-list"] [data-testid="pp-card"]')).length === 1 && (await page.textContent('[data-testid="pp-list-count"]')) === "1 waiting", "with one left, the list stays with its one card");
 
 // 8. SQL the lexer can't read: shown whole, no trigger list, one line says so.
 await page.evaluate(() => window.__addOdd());
