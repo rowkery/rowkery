@@ -1,11 +1,21 @@
 name: CI
 
+# The quality gate on every pull request and every push to main; a pull
+# request merges only when it's green. Browser and latency proofs stay
+# local (AGENTS.md). Fork pull requests get a read-only token and no secrets.
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
-  # The pull_request and push triggers are off: workflows run manually (Actions > CI > Run workflow).
-  # pull_request:
-  # push:
-  #   branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,13 +44,13 @@ jobs:
       ROWKERY_PG_PASSWORD: rowkery
       ROWKERY_PG_DB: rowkery
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       - name: Install Linux Tauri deps
@@ -71,9 +81,31 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check -p rowkery-tauri
+
+  # Known advisories, licences and sources of every crate (deny.toml), and
+  # high or critical npm advisories in what the app, the sites and the relay
+  # ship. A new advisory turns this red on any pull request until it's fixed
+  # or ignored in deny.toml with its reason.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories licenses sources
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: npm audit
+        run: |
+          for dir in apps/rowkery-tauri apps/web apps/docs apps/relay; do
+            echo "::group::$dir"
+            (cd "$dir" && npm audit --omit=dev --audit-level=high)
+            echo "::endgroup::"
+          done
