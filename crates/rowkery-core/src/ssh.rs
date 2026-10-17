@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use russh::client::{self, Config, Handler};
-use russh::keys::decode_secret_key;
-use russh::Channel;
-use russh_keys::key::PublicKey;
-use russh_keys::PublicKeyBase64;
+use russh::keys::{
+    decode_secret_key, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg, PublicKey,
+    PublicKeyOrCertificate,
+};
+use russh::{Channel, Preferred};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -97,9 +97,15 @@ fn persist_known_host(host: &str, fingerprint: &str) -> Result<(), SshError> {
     Ok(())
 }
 
+/// SHA-256 of the key's SSH wire encoding, base64 with its padding: the
+/// form `ssh_known_hosts` has always stored, so saved hosts still match.
 fn host_key_fingerprint(key: &PublicKey) -> String {
+    use russh::keys::ssh_encoding::Encode;
     use sha2::{Digest, Sha256};
-    let bytes = key.public_key_bytes();
+    let bytes = key
+        .key_data()
+        .encode_vec()
+        .expect("encoding a public key into a Vec can't fail");
     let digest = Sha256::digest(bytes);
     format!(
         "SHA256:{}",
@@ -114,21 +120,26 @@ struct ClientHandler {
     problem: Arc<std::sync::Mutex<Option<KeyProblem>>>,
 }
 
-#[async_trait]
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let fingerprint = host_key_fingerprint(server_public_key);
-        let host_key = self.host.clone();
         let note = |p| {
             if let Ok(mut slot) = self.problem.lock() {
                 *slot = Some(p);
             }
         };
+        // Host certificates are never asked for, so one arriving anyway is
+        // refused as an unknown key.
+        let PublicKeyOrCertificate::PublicKey { key, .. } = server_key else {
+            note(KeyProblem::Unknown);
+            return Err(russh::Error::UnknownKey);
+        };
+        let fingerprint = host_key_fingerprint(key);
+        let host_key = self.host.clone();
         if let Some(expected) = self.known_hosts.get(&host_key) {
             if expected == &fingerprint {
                 return Ok(true);
@@ -181,6 +192,23 @@ pub const SSH_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// three unanswered.
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSH_KEEPALIVE_MAX: usize = 3;
+/// Host key types asked for, in the order russh 0.46 asked for them, so a
+/// bastion presents the same key it did and its saved fingerprint matches.
+const HOST_KEYS: &[Algorithm] = &[
+    Algorithm::Ed25519,
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP256,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP521,
+    },
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha256),
+    },
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha512),
+    },
+];
 
 impl SshTunnel {
     /// True while the SSH connection still carries new channels.
@@ -226,6 +254,10 @@ impl SshTunnel {
             // instead of waiting on it forever.
             keepalive_interval: Some(SSH_KEEPALIVE_INTERVAL),
             keepalive_max: SSH_KEEPALIVE_MAX,
+            preferred: Preferred {
+                key: HOST_KEYS.into(),
+                ..Preferred::DEFAULT
+            },
             ..Default::default()
         });
         let host_key = format!("{}:{}", ssh.host, ssh.port);
@@ -261,6 +293,7 @@ impl SshTunnel {
                     .authenticate_password(&ssh.username, password)
                     .await
                     .map_err(|e| SshError::Message(e.to_string()))?
+                    .success()
             }
             SshAuthMethod::KeyFile => {
                 let path = ssh
@@ -276,10 +309,20 @@ impl SshTunnel {
                 };
                 let key = decode_secret_key(&key_text, passphrase.as_deref())
                     .map_err(|e| SshError::Message(format!("Invalid SSH key: {e}")))?;
-                handle
-                    .authenticate_publickey(&ssh.username, Arc::new(key))
+                // RSA keys sign with the best hash the server takes (SHA-2).
+                let hash = handle
+                    .best_supported_rsa_hash()
                     .await
                     .map_err(|e| SshError::Message(e.to_string()))?
+                    .flatten();
+                handle
+                    .authenticate_publickey(
+                        &ssh.username,
+                        PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                    )
+                    .await
+                    .map_err(|e| SshError::Message(e.to_string()))?
+                    .success()
             }
         };
         if !auth_ok {
