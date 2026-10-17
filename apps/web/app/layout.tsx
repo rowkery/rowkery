@@ -23,10 +23,32 @@ const mono = localFont({
   display: "swap",
 });
 
+const TITLE = "Rowkery · Postgres and SQLite for the Mac";
+const DESCRIPTION =
+  "Rowkery is a Mac app for Postgres and SQLite. Use it on your own, or let your AI agent read your database through it. Nothing changes until you press Commit.";
+
+// The link preview (X, Slack, iMessage, Discord, Bluesky) comes from these tags and from
+// public/og.png (1200 × 630: the mark, the name and one line). Without them a shared
+// rowkery.com link shows as bare text.
 export const metadata: Metadata = {
-  title: "Rowkery · Postgres and SQLite for the Mac",
-  description: "Rowkery is a Mac app for Postgres and SQLite. Use it on your own, or let your AI agent read your database through it. Nothing changes until you press Commit.",
+  metadataBase: new URL("https://rowkery.com"),
+  title: TITLE,
+  description: DESCRIPTION,
   icons: { icon: "/favicon.svg" },
+  openGraph: {
+    type: "website",
+    url: "/",
+    siteName: "Rowkery",
+    title: TITLE,
+    description: DESCRIPTION,
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "Rowkery: Postgres and SQLite for the Mac, with an MCP server built in" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: TITLE,
+    description: DESCRIPTION,
+    images: ["/og.png"],
+  },
 };
 
 // Dark only (2026-10-14).
