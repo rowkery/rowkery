@@ -642,3 +642,54 @@
     transition: none;
   }
 }
+
+/* A page's way out: a bordered control (it can be pressed), first in the head. */
+.page-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 220px;
+  height: 28px;
+  padding: 0 6px 0 7px;
+  border: 1px solid var(--line2);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: 500 13px var(--sans);
+  white-space: nowrap;
+  cursor: default;
+  transition: background-color 0.15s ease, transform 120ms ease;
+}
+
+.page-back:hover {
+  background: var(--hover);
+}
+
+.page-back:active {
+  transform: scale(0.97);
+}
+
+.page-back:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.page-back svg {
+  flex-shrink: 0;
+  color: var(--mute);
+}
+
+.page-back-to {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.page-back kbd {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--kbd);
+  color: var(--mute);
+  font: 10.5px var(--mono);
+}

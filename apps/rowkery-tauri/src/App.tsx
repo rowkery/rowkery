@@ -26,8 +26,8 @@ import { DatabaseSwitcher } from "./DatabaseSwitcher";
 import { NewConnectionSheet } from "./NewConnectionSheet";
 import { ShortcutsSheet } from "./ShortcutsSheet";
 import { NoticesSheet } from "./NoticesSheet";
-import { AgentsPage, type McpTab } from "./AgentsPage";
-import { ProposalPage } from "./ProposalPage";
+import { AgentSharing } from "./AgentSharing";
+import { AgentsInbox } from "./AgentsInbox";
 import { pollProposals, proposalTable, useProposals } from "./proposals";
 import { McpConnectSheet } from "./McpConnectSheet";
 import { clientLabel, mcpShared, mcpStats, mcpTagLive, pollMcp, recentConnections, useMcpEntries, verdictOf } from "./mcpActivity";
@@ -203,20 +203,20 @@ function App() {
   );
   /** Help > Report an Issue…, with what the window knew when it was asked. */
   const [report, setReport] = useState<ReportContext | null>(null);
-  /** The Agents page in place of the main column; null while the window shows. */
-  // `edit`: the connection whose Edit access is open in the activity's place.
-  const [agents, setAgents] = useState<{
-    section: McpTab;
-    connect: boolean;
-    edit?: string | null;
-    /** Edit access opened by turning sharing on: tick the own database's tables. */
-    fill?: boolean;
-  } | null>(null);
-  const mcpTab = agents?.section ?? null;
+  /** The Agents page (proposals and the log) in place of the main column; null while the window shows. */
+  const [agents, setAgents] = useState<{ initial: "proposals" | "activity" } | null>(null);
   /** The Settings page in place of the main column (⌘,, the foot's gear); null while the window shows. */
   const [settings, setSettings] = useState<SettingsSection | null>(null);
-  /** Changes agents proposed, under review (the review page is open). */
-  const [review, setReview] = useState(false);
+  /**
+   * Settings › Agents: Connect an agent open under its head, and the
+   * connection whose Edit access is open (`fill`: opened by turning sharing
+   * on, so it ticks the own database's tables).
+   */
+  const [sharing, setSharing] = useState<{ connect: boolean; edit: string | null; fill: boolean }>({
+    connect: false,
+    edit: null,
+    fill: false,
+  });
   const proposals = useProposals();
   /** Connect an agent as a sheet, over the connection sheet (unsaved edits stay). */
   const [connectOpen, setConnectOpen] = useState(false);
@@ -665,7 +665,7 @@ function App() {
       {},
     );
     await refreshConnections();
-    if (first) setAgents({ section: "access", connect: false, edit: conn.id, fill: true });
+    if (first) openSharing({ edit: conn.id, fill: true });
     const end =
       until === null
         ? ""
@@ -743,11 +743,12 @@ function App() {
   const mcpEntriesRef = useRef(mcpEntries);
   mcpEntriesRef.current = mcpEntries;
   const mcpOpenRef = useRef(false);
-  mcpOpenRef.current = mcpTab !== null;
-  const reviewRef = useRef(false);
-  reviewRef.current = review;
+  const agentsOn = agents !== null;
+  mcpOpenRef.current = agentsOn;
+  const agentsRef = useRef(false);
+  agentsRef.current = agentsOn;
   useEffect(() => {
-    if (!anyShared && mcpTab === null) return;
+    if (!anyShared && !agentsOn) return;
     let stopped = false;
     const tick = async () => {
       if (document.visibilityState !== "visible") return;
@@ -755,11 +756,11 @@ function App() {
       if (stopped) return;
       // A proposed change: a toast whose Review opens it, unless it's open.
       const latest = proposed[proposed.length - 1];
-      if (latest && !reviewRef.current && !hasPendingUndo() && !liveOffer()) {
+      if (latest && !agentsRef.current && !hasPendingUndo() && !liveOffer()) {
         const table = proposalTable(latest.sql);
         const count = proposed.length > 1 ? `${proposed.length} changes` : table ? `a change to ${table}` : "a change";
         showOfferToast(`${clientLabel(latest.client)} proposed ${count}`, "Review", undefined, {
-          run: () => openReview(),
+          run: () => openAgents("page"),
           mouseOnly: true,
         });
         return;
@@ -785,7 +786,7 @@ function App() {
       window.clearInterval(t);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [anyShared, mcpTab]);
+  }, [anyShared, agentsOn]);
   // The window pills' MCP tag: connections read in the last minute. State changes
   // only when that set does, so the poll doesn't re-render the app. The timer
   // runs only while an entry is under a minute old: the tick that clears the
@@ -812,29 +813,25 @@ function App() {
   }, [mcpEntries]);
 
   /**
-   * The Agents page: at its log, at its switches, with Connect an agent open,
-   * or ("page") wherever it last was, the log once there is one.
+   * The Agents page at its proposals ("page": the oldest waiting, else the
+   * newest call) or at its log; the sharing ones ("access", "connect",
+   * "edit") are Settings › Agents (2026-10-17).
    */
   const openAgents = (tab: "activity" | "access" | "connect" | "page" | "edit") => {
     setPopover(null);
     setPaletteOpen(false);
+    if (tab === "access" || tab === "connect" || tab === "edit")
+      return openSharing({ connect: tab === "connect", edit: tab === "edit" ? (activeConnection?.id ?? null) : null });
     setSettings(null);
-    setAgents((cur) => ({
-      section: tab === "activity" || tab === "access" || tab === "edit" ? (tab === "edit" ? "access" : tab) : (cur?.section ?? (mcpEntries.length ? "activity" : "access")),
-      connect: tab === "connect",
-      edit: tab === "edit" ? (activeConnection?.id ?? null) : null,
-    }));
+    setAgents({ initial: tab === "activity" ? "activity" : "proposals" });
   };
+  const closeAgents = useCallback(() => setAgents(null), []);
 
-  /** The review page for agents' proposed changes, over the Agents page. */
-  const openReview = () => {
-    setPopover(null);
-    setPaletteOpen(false);
-    setAgents(null);
-    setSettings(null);
-    setReview(true);
+  /** Settings › Agents, with Connect an agent or one connection's Edit access open. */
+  const openSharing = (open: { connect?: boolean; edit?: string | null; fill?: boolean } = {}) => {
+    setSharing({ connect: !!open.connect, edit: open.edit ?? null, fill: !!open.fill });
+    openSettings("agents");
   };
-  const closeReview = useCallback(() => setReview(false), []);
 
   /** Settings, on a section (Updates by default): the page takes the window, as Agents does. */
   const openSettings = (section: SettingsSection = "updates") => {
@@ -842,7 +839,6 @@ function App() {
     setPaletteOpen(false);
     setShortcutsOpen(false);
     setAgents(null);
-    setReview(false);
     setSettings(section);
   };
 
@@ -1092,7 +1088,7 @@ function App() {
     setAllowMcp: (allow) => void setAllowMcp(allow),
     setMaskedColumns,
     openMcp: (tab) => openAgents(tab),
-    reviewProposals: () => openReview(),
+    reviewProposals: () => openAgents("page"),
     toggleSidebar,
     refreshSchema: (id, manual) => void refreshSchema(id, manual),
     reportIssue: (context) => {
@@ -1146,7 +1142,7 @@ function App() {
   // New connection, the Agents page) closes that first, as Esc would; the
   // query tab or window waits for the next press.
   const overlayOpen =
-    paletteOpen || popover !== null || newConnOpen || report !== null || shortcutsOpen || noticesOpen || agents !== null || settings !== null || review || connectOpen;
+    paletteOpen || popover !== null || newConnOpen || report !== null || shortcutsOpen || noticesOpen || agents !== null || settings !== null || connectOpen;
   useEffect(() => {
     if (!overlayOpen) return;
     const escape = () => {
@@ -1231,7 +1227,8 @@ function App() {
       } else if (e.shiftKey && key === "a") {
         // ⇧⌘A (Ctrl+Shift+A): the Agents page, or back from it.
         e.preventDefault();
-        setAgents((cur) => (cur ? null : { section: mcpEntriesRef.current.length ? "activity" : "access", connect: false }));
+        if (agentsRef.current) setAgents(null);
+        else actionsRef.current.reviewProposals();
       } else if (!e.shiftKey && e.code === "Comma") {
         // ⌘, (Ctrl+,): Settings, or back from it.
         e.preventDefault();
@@ -1339,6 +1336,8 @@ function App() {
   // its switcher moves to the tab row's left, where the chip itself is
   // hidden (App.css) and only ⇧⌘O's picker shows.
   const panelOff = !activeWindow.connectionId;
+  // Where a page's way out returns: the shown window, by its connection's name.
+  const backTo = activeConnection?.name ?? "New window";
   const switchers = panelOff ? null : renderSwitchers(!sidebarHidden, true);
   const identity = renderSwitchers(sidebarHidden || panelOff);
 
@@ -1348,7 +1347,7 @@ function App() {
       data-testid="app-frame"
       className={`app-frame${macOverlay ? " app-frame-mac" : ""}${sidebarHidden ? " sidebar-hidden" : ""}`}
       data-sidebar-hidden={sidebarHidden ? "" : undefined}
-      data-page={review ? "review" : agents ? "agents" : settings ? "settings" : undefined}
+      data-page={agents ? "agents" : settings ? "settings" : undefined}
       data-connect={newConnOpen ? "" : undefined}
       data-panel-width={panelWidth}
       style={{ ["--panel-width" as string]: `${panelWidth}px` }}
@@ -1378,13 +1377,13 @@ function App() {
           // Picking a window is leaving the page.
           setAgents(null);
           setSettings(null);
-          setReview(false);
           switchWindow(id);
         }}
         onClose={closeWindowById}
         onReorder={(from, to) => setWindows((prev) => moveItem(prev, from, to))}
         onNewWindow={() => newWindow()}
-        onAgents={() => openAgents("page")}
+        agentsOpen={agents !== null}
+        onAgents={() => (agents ? setAgents(null) : openAgents("page"))}
         toolsRef={setTitlebarTools}
         onTilePick={(windowId, id) => {
           // The tab was selected on right-click; these act on that window.
@@ -1407,7 +1406,7 @@ function App() {
           windowCount={windows.length}
           connectionForm={newConnOpen}
           keysBlocked={
-            newConnOpen || report !== null || popover !== null || shortcutsOpen || noticesOpen || agents !== null || settings !== null || review || connectOpen
+            newConnOpen || report !== null || popover !== null || shortcutsOpen || noticesOpen || agents !== null || settings !== null || connectOpen
           }
           commandsBlocked={newConnOpen || report !== null || popover !== null || shortcutsOpen || noticesOpen || connectOpen}
           paletteOpen={paletteOpen && w.id === activeWindow.id}
@@ -1452,7 +1451,7 @@ function App() {
             setNewConnOpen(false);
             // Just shared: Edit access opens and ticks its tables, as the
             // card's switch does.
-            if (firstShare) setAgents({ section: "access", connect: false, edit: id, fill: true });
+            if (firstShare) openSharing({ edit: id, fill: true });
             // From the sample, a new connection gets its own window and the
             // sample stays where it is.
             const fromSample = !editingId && activeConnection?.kind === "sqlite" && !!activeConnection.sample;
@@ -1478,21 +1477,13 @@ function App() {
       </Presence>
       <Presence open={agents !== null}>
         {agents !== null && (
-          <AgentsPage
-            section={agents.section}
-            onSection={(section) => setAgents({ section, connect: false })}
-            editing={agents.edit ?? null}
-            fillEditing={!!agents.fill}
-            onEdit={(edit) => setAgents((cur) => (cur ? { ...cur, edit, fill: false } : cur))}
-            connect={agents.connect}
-            onConnect={(connect) => setAgents((cur) => (cur ? { ...cur, connect } : cur))}
+          <AgentsInbox
             connections={connections}
-            onSetAllow={(id, allow, until) => void setAllowMcp(allow, id, until ?? null)}
-            onStopAll={() => void stopAllMcp()}
-            onSetAccess={setMcpAccess}
-            onSetMasked={setMaskedColumns}
+            initial={agents.initial}
+            backTo={backTo}
             onOpenSql={openMcpSql}
-            onClose={() => setAgents(null)}
+            onSharing={(connect) => openSharing({ connect })}
+            onClose={closeAgents}
           />
         )}
       </Presence>
@@ -1503,12 +1494,24 @@ function App() {
             onSection={setSettings}
             onShortcuts={() => actionsRef.current.openShortcuts()}
             runningQueries={runningQueries}
+            backTo={backTo}
+            sharing={
+              <AgentSharing
+                connections={connections}
+                connect={sharing.connect}
+                onConnect={(connect) => setSharing((cur) => ({ ...cur, connect }))}
+                editing={sharing.edit}
+                fillEditing={sharing.fill}
+                onEdit={(edit) => setSharing((cur) => ({ ...cur, edit, fill: false }))}
+                onSetAllow={(id, allow, until) => void setAllowMcp(allow, id, until ?? null)}
+                onStopAll={() => void stopAllMcp()}
+                onSetAccess={setMcpAccess}
+                onSetMasked={setMaskedColumns}
+              />
+            }
             onClose={() => setSettings(null)}
           />
         )}
-      </Presence>
-      <Presence open={review}>
-        {review && <ProposalPage connections={connections} onOpenSql={openMcpSql} onClose={closeReview} />}
       </Presence>
       <Presence open={connectOpen}>
         {connectOpen && (

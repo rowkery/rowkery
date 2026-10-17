@@ -14,10 +14,7 @@ import {
   DownloadIcon,
   EyeIcon,
   EyeOffIcon,
-  KeyboardIcon,
-  MoonIcon,
   SettingsIcon,
-  SunIcon,
   PartitionedIcon,
   PinIcon,
   RefreshIcon,
@@ -40,7 +37,6 @@ import { readKey, writeKey } from "./persist";
 import { GridMenu, useContextMenu } from "./GridMenu";
 import { panelRowMenu } from "./contextMenus";
 import { showToast } from "./notify";
-import { setThemeSetting, useTheme, type ThemeSetting } from "./theme";
 import { setPresenting, usePresenting } from "./presenting";
 import { updateWaiting, useUpdatePref, useUpdateState, type UpdateState } from "./updates";
 import type { SettingsSection } from "./SettingsPage";
@@ -427,54 +423,41 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
   },
 );
 
-const APPEARANCE: { value: ThemeSetting; label: string }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-];
-
 /**
  * The schema column's foot (2026-10-13, reordered 2026-10-17): past a rule,
  * one row of 28 px icon buttons under one glide hover; the name and key are
  * in each tooltip. On the left, Agents (a green dot while this connection is
- * shared, lit while its page is up) and Presenting (orange while on: hides
- * sensitive columns and the host). On the right, the orange update button
- * while a newer Rowkery waits (opens Settings > Updates), Appearance (the
- * current mode's icon: sun, moon, or the half disc for Auto; cycles
- * Auto → Light → Dark), Keyboard shortcuts, and Settings.
+ * shared, the count of proposed changes while any wait) and Presenting
+ * (orange while on: hides sensitive columns and the host). On the right, the
+ * orange update button while a newer Rowkery waits (opens Settings >
+ * Updates) and Settings. Appearance and Keyboard shortcuts left the foot
+ * (2026-10-17): both are in Settings, and nobody changes them often.
  */
 export function SidebarFoot({
   mcpOn,
   agentsOpen,
   proposals = 0,
   onAgents,
-  onReview,
-  onHelp,
   settingsOpen = false,
   onSettings,
 }: {
   mcpOn: boolean;
   agentsOpen: boolean;
-  /** Changes agents proposed that wait: a count on the button, which opens them. */
+  /** Changes agents proposed that wait: a count on the button. */
   proposals?: number;
   onAgents: () => void;
-  onReview?: () => void;
-  onHelp: () => void;
   settingsOpen?: boolean;
   onSettings?: (section?: SettingsSection) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useGlideHover(ref, ".sb-foot-btn");
-  const { setting } = useTheme();
-  const at = Math.max(0, APPEARANCE.findIndex((a) => a.value === setting));
-  const next = APPEARANCE[(at + 1) % APPEARANCE.length];
   const mac = isMacPlatform();
   const presenting = usePresenting();
   const update = useUpdateState();
   const pref = useUpdatePref();
   const waiting = updateWaiting(update, pref);
-  // Waiting proposals take the button until they're decided; ⇧⌘A still opens Agents.
-  const review = proposals > 0 && !agentsOpen && !!onReview;
+  // The Agents page opens on the oldest waiting proposal, so the count is the way in.
+  const review = proposals > 0 && !agentsOpen;
   return (
     <div data-testid="sb-foot-rows" className="sb-foot-rows" ref={ref}>
       <button
@@ -491,7 +474,7 @@ export function SidebarFoot({
             ? `Review ${proposals === 1 ? "a proposed change" : `${proposals} proposed changes`}`
             : commandTip("agents", agentsOpen ? "Back to the window" : "Agents", mac)
         }
-        onClick={review ? onReview : onAgents}
+        onClick={onAgents}
       >
         <AgentIcon size={14} />
         {review ? (
@@ -529,28 +512,6 @@ export function SidebarFoot({
           <DownloadIcon size={14} />
         </button>
       )}
-      <button
-        type="button"
-        className="sb-foot-btn"
-        data-testid="sb-appearance"
-        data-theme-setting={setting}
-        aria-label={`Appearance: ${APPEARANCE[at].label}`}
-        title={`Appearance: ${APPEARANCE[at].label} · click for ${next.label}`}
-        onClick={() => setThemeSetting(next.value)}
-      >
-        {setting === "dark" ? <MoonIcon size={14} /> : setting === "light" ? <SunIcon size={14} /> : <AutoThemeIcon size={14} />}
-      </button>
-      <button
-        type="button"
-        className="sb-foot-btn"
-        data-testid="sb-help"
-        data-hint-cmd="keyboard-shortcuts"
-        aria-label="Keyboard shortcuts"
-        title={commandTip("keyboard-shortcuts", "Keyboard shortcuts", mac)}
-        onClick={onHelp}
-      >
-        <KeyboardIcon size={14} />
-      </button>
       {onSettings && (
         <button
           type="button"
@@ -576,14 +537,4 @@ function updateLabel(s: UpdateState): string {
   if (s.phase === "ready") return `Rowkery ${s.version} is ready · restart in Settings`;
   if (s.phase === "available") return `Rowkery ${s.version} is out · download in Settings`;
   return "Updates";
-}
-
-/** Auto appearance: a circle, half filled (follows the system). */
-function AutoThemeIcon({ size }: { size: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden>
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none" />
-    </svg>
-  );
 }

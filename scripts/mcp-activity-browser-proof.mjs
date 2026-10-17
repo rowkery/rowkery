@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // MCP activity / access proof with a stubbed Tauri `invoke`: ⌘K MCP activity
-// lists what the MCP server logged (mcp_activity), grouped by agent session,
-// with a refusal's reason; ↵ opens a call's SQL in a new query tab; a new
-// refusal while you work shows a toast whose View opens the log; the window
-// pill of a connection read in the last minute carries an MCP tag; the
-// Access tab maps what an agent can reach and its switches save allow_mcp;
-// the connection sheet shows today's counts; Clear log empties it.
+// opens the Agents page on what the MCP server logged (mcp_activity), newest
+// first, a refused call showing its reason; ↵ opens a call's SQL in a new
+// query tab; a new refusal while you work shows a toast whose View opens the
+// log; the window pill of a connection read in the last minute carries an
+// MCP tag; ⌘K MCP access (Settings › Agents since 2026-10-17) maps what an
+// agent can reach and its switches save allow_mcp; the connection sheet
+// shows today's counts; Clear log (in Settings › Agents) empties it.
 // A picked call shows the start of its response, kept 24 h (mcp_sample);
 // the connection sheet's Keep result samples switch saves mcp_samples_off.
 // The log itself (mcp-log.jsonl, read by offset) is proved by
@@ -215,22 +216,27 @@ await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 await page.waitForSelector('[data-testid="win-tab"][data-on] [data-testid="win-mcp"]');
 check(true, "rail tile of a connection read in the last minute shows the MCP tag");
 
-// 2. ⌘K MCP activity: newest first, one session, the refusal with its reason.
+// 2. ⌘K MCP activity: newest first, the newest call shown beside the list,
+// the refusal with its reason. Rows are keyed by their place in the log
+// (oldest 0), so the newest of five is 4.
+const pageSel = '[data-testid="agents-page"]';
+const view = '[data-testid="ag-call-view"]';
 await palette("MCP activity");
-await page.waitForSelector('[data-mcp-sheet="activity"]');
+await page.waitForSelector(`${pageSel}[data-call="4"]`);
 const tools = await page.$$eval("[data-mcp-entry]", (els) => els.map((el) => el.getAttribute("data-tool")));
 check(
   JSON.stringify(tools) === JSON.stringify(["query", "query", "query", "describe_table", "list_connections"]),
   `entries newest first: ${tools.join(", ")}`,
 );
-check((await page.$$('[data-testid="mcp-session"]')).length === 1, "one agent session header");
-const reason = await page.textContent('[data-verdict="refused"] [data-testid="mcp-reason"]');
+check((await page.textContent('[data-testid="ag-call-title"]')) === "query", "the newest call shows beside the list");
+await page.click('[data-mcp-entry="2"]');
+const reason = await page.textContent(`${view} [data-testid="mcp-reason"]`);
 check(/wallet_transactions/.test(reason ?? ""), `refusal reason shown: ${reason}`);
 await shot("1-activity");
 
 // A picked query shows what came back; a refusal has nothing to show.
-await page.click('[data-mcp-entry="1"]');
-await page.waitForSelector('[data-mcp-entry="1"] [data-mcp-box="response"] .mcp-json');
+await page.click('[data-mcp-entry="3"]');
+await page.waitForSelector(`${pageSel}[data-call="3"] ${view} [data-mcp-box="response"] .mcp-json`);
 const sampleText = await page.textContent('[data-mcp-box="response"]');
 check(
   /queue/.test(sampleText ?? "") && /payouts/.test(sampleText ?? "") && /of 900 B/.test(sampleText ?? ""),
@@ -240,7 +246,7 @@ await shot("1b-sample");
 await page.click('[data-mcp-entry="2"]');
 await page.waitForTimeout(150);
 check(!(await page.$('[data-mcp-box="response"]')), "a refused call shows no response");
-await page.click('[data-mcp-entry="0"]');
+await page.click('[data-mcp-entry="4"]');
 await page.waitForTimeout(150);
 check(/Not kept/.test((await page.textContent('[data-mcp-box="response"]')) ?? ""), "a call with no kept response says so");
 
@@ -250,9 +256,9 @@ await page.click('[data-mcp-filter="all"]');
 
 // 3. ↵ opens the newest call's SQL in a new query tab, not run.
 const runsBefore = (await calls("run_query")).length;
-await page.focus(".mcp-list"); // Class on purpose: the list owns ↑↓ ↵.
+await page.focus(pageSel);
 await page.keyboard.press("Enter");
-await page.waitForSelector("[data-mcp-sheet]", { state: "detached" });
+await page.waitForSelector(pageSel, { state: "detached" });
 await page.waitForSelector(`${ws} [data-title="Agent query"]`);
 const editorText = await page.textContent(`${ws} [data-testid="sql-editor"]`);
 check(/from migrations order by batch/.test(editorText ?? ""), "the agent's SQL is in the new tab");
@@ -279,7 +285,7 @@ await shot("2-refusal-toast");
 await page.focus(`${ws} [data-testid="sql-editor"] textarea, ${ws} [data-testid="sql-editor"] [contenteditable]`).catch(() => {});
 await page.keyboard.press("Enter");
 await page.waitForTimeout(200);
-check(!(await page.$("[data-mcp-sheet]")), "↵ doesn't take an unasked toast");
+check(!(await page.$(pageSel)), "↵ doesn't take an unasked toast");
 // A second refusal; its View opens the log.
 await page.evaluate(() => {
   window.__MCP_NEXT__.push({
@@ -295,18 +301,17 @@ await page.evaluate(() => {
 });
 await page.waitForSelector("[data-toast-offer]", { timeout: 6000 });
 await page.click("[data-toast-offer]");
-await page.waitForSelector('[data-mcp-sheet="activity"]');
+await page.waitForSelector(`${pageSel}[data-call]`);
 check((await page.$$('[data-verdict="refused"][data-mcp-entry]')).length === 3, "View opened the log with the new refusal");
 
-// 5. Access: the map, and its switches save allow_mcp.
-// Paper (2026-10-10): side by side there is no Access | Activity segment;
-// ⌘K's "MCP access" lands on the same half.
+// 5. Access: the map, and its switches save allow_mcp. ⌘K's "MCP access"
+// lands on Settings › Agents (2026-10-17).
 await page.keyboard.press("Control+k");
 await page.waitForSelector('[data-testid="cp-row"]');
 await page.keyboard.type(">mcp access");
 await page.waitForSelector('[data-item="cmd:mcp-access"]');
 await page.click('[data-item="cmd:mcp-access"]');
-await page.waitForSelector('[data-mcp-sheet="access"] [data-testid="mcp-map"]');
+await page.waitForSelector('[data-testid="agents-sharing"] [data-testid="mcp-map"]');
 check(await page.isChecked('[data-mcp-allow="local"]'), "local is shared");
 check(!(await page.isChecked('[data-mcp-allow="prd"]')), "production is hidden");
 const reach = await page.textContent('[data-mcp-conn="local"] [data-testid="mcp-cn-sub"]');
@@ -316,13 +321,13 @@ await page.click('[data-mcp-allow="stg"]');
 await page.waitForTimeout(300);
 const saved = (await calls("save_connection")).at(-1)?.[1]?.connection;
 check(saved?.id === "stg" && saved.allow_mcp === true, `switch saved ${saved?.id} allow_mcp ${saved?.allow_mcp}`);
-await page.waitForSelector('[data-mcp-conn="stg"][data-shared]');
 await page.waitForSelector('[data-mcp-editor="stg"]');
 check(true, "a first share opens Edit access");
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-mcp-editor]', { state: "detached" });
+await page.waitForSelector('[data-mcp-conn="stg"][data-shared]');
 await page.keyboard.press("Escape");
-await page.waitForSelector("[data-mcp-sheet]", { state: "detached" });
+await page.waitForSelector('[data-testid="settings-page"]', { state: "detached" });
 
 // 6. The connection sheet: today's counts, and a way into the log.
 await palette("Edit connection");
@@ -339,14 +344,18 @@ await page.keyboard.press("Enter");
 await page.waitForFunction((n) => window.__ROWKERY_CALLS__.filter(([c]) => c === "save_connection").length > n, savesBefore, { timeout: 4000 }).catch(() => {});
 const savedOff = (await calls("save_connection")).at(-1)?.[1]?.connection;
 check(savedOff?.id === "local" && savedOff.mcp_samples_off === true, `samples switch saved mcp_samples_off ${savedOff?.mcp_samples_off}`);
-await palette("MCP activity");
-await page.waitForSelector('[data-mcp-sheet="activity"]');
-
-// 7. Clear log asks once inline, then empties it.
+// 7. Clear log (Settings › Agents) asks once inline, then empties it.
+await palette(">mcp access");
+await page.waitForSelector('[data-testid="ag-log-upkeep"]');
 await page.click("[data-mcp-clear]");
 await page.click("[data-mcp-clear-confirm]");
-await page.waitForSelector('[data-testid="mcp-empty"]');
+await page.waitForFunction(() => /0 calls/.test(document.querySelector('[data-testid="ag-log-upkeep"]')?.textContent ?? ""));
 check((await calls("mcp_clear_activity")).length === 1, "Clear log cleared the file");
+await page.keyboard.press("Escape");
+await page.waitForSelector('[data-testid="settings-page"]', { state: "detached" });
+await palette("MCP activity");
+await page.waitForSelector(`${pageSel} [data-testid="mcp-empty"]`);
+check(true, "the Agents page shows the log empty");
 await shot("5-cleared");
 
 await browser.close();

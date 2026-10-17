@@ -127,6 +127,11 @@
   max-width: 560px;
 }
 
+/* Agents' Edit access needs room for its databases and tables. */
+.st-main > .st-pane[data-wide] {
+  max-width: 880px;
+}
+
 /* A picked category's settings rise in; the old ones just go (exits are shorter). */
 .st-pane {
   animation: rise 0.2s var(--ease-out);

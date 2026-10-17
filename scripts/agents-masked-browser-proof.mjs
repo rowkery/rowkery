@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Sensitive columns on the Agents page (2026-10-15) proof with a
+// Sensitive columns in Edit access (2026-10-15; Settings › Agents since 2026-10-17) proof with a
 // stubbed Tauri `invoke`: each table row in Edit access ends in an eye
 // button that opens the table's columns beside the list (orange with a count
 // once a column is masked); a column row masks or unmasks its column and
@@ -116,8 +116,11 @@ const saves = () =>
 const waitSaves = (n) =>
   page.waitForFunction((k) => window.__ROWKERY_CALLS__.filter(([c]) => c === "save_connection").length >= k, n, { timeout: 4000 });
 
-await page.keyboard.press("Control+Shift+A");
-await page.waitForSelector('[data-testid="agents-page"]');
+// Sharing is Settings › Agents (2026-10-17): ⌘K MCP access opens it.
+await page.keyboard.press("Control+K");
+await page.keyboard.type(">mcp access");
+await page.click('[data-item="cmd:mcp-access"]');
+await page.waitForSelector('[data-testid="agents-sharing"]');
 await page.click('[data-mcp-edit="api"] [data-testid="mcp-cn-sub"]');
 await page.waitForSelector('[data-mcp-editor="api"] [data-ag-table="public.customers"]');
 

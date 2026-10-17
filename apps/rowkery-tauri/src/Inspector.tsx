@@ -1,5 +1,5 @@
-import { forwardRef, useEffect, useRef, type HTMLAttributes, type ReactNode } from "react";
-import { CloseIcon } from "./icons";
+import { forwardRef, useEffect, useRef, type HTMLAttributes, type ReactNode, type RefObject } from "react";
+import { ChevronLeftIcon, CloseIcon } from "./icons";
 import { readKey, writeKey } from "./persist";
 import "./Inspector.css";
 
@@ -157,4 +157,48 @@ export function InspectorButton({
       {children}
     </button>
   );
+}
+
+/**
+ * A full-window page's way out (Agents, Settings; 2026-10-17): first in its
+ * head, where the eye starts, naming where it goes with Esc beside it.
+ */
+export function PageBack({ to, onBack }: { to: string; onBack: () => void }) {
+  return (
+    <button type="button" className="page-back" data-testid="page-back" title={`Back to ${to}  esc`} onClick={onBack}>
+      <ChevronLeftIcon size={12} />
+      <span className="page-back-to">{to}</span>
+      <kbd>esc</kbd>
+    </button>
+  );
+}
+
+/**
+ * A full-window page keeps the keys: when the focused control goes away
+ * (a sheet closes, a confirm row turns back into its button) focus would
+ * fall to the body, where Esc reaches nothing. It comes back to the page.
+ */
+export function usePageFocus(ref: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let t = 0;
+    const onOut = () => {
+      window.clearTimeout(t);
+      t = window.setTimeout(() => {
+        if (el.isConnected && (document.activeElement === document.body || document.activeElement === null)) el.focus({ preventScroll: true });
+      });
+    };
+    // On the document, so focus dropped by an overlay over the page (the
+    // shortcut sheet) comes back too. A focused node that is removed fires
+    // no focusout, so removals inside the page are watched as well.
+    document.addEventListener("focusout", onOut);
+    const removed = new MutationObserver(onOut);
+    removed.observe(el, { childList: true, subtree: true });
+    return () => {
+      window.clearTimeout(t);
+      document.removeEventListener("focusout", onOut);
+      removed.disconnect();
+    };
+  }, [ref]);
 }

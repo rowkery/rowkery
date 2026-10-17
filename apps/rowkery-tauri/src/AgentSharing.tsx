@@ -1,7 +1,6 @@
 import {
   Fragment,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,7 +10,6 @@ import {
   type Ref,
 } from "react";
 import { showToast, toastPreview } from "./notify";
-import { highlightSqlLines } from "./sqlHighlight";
 import { isMacPlatform } from "./platform";
 import { GESTURES, gestureKeys, keysFor } from "./commands";
 import { McpConnectSheet } from "./McpConnectSheet";
@@ -19,7 +17,6 @@ import {
   MCP_LIMITS,
   bytesLabel,
   clearMcp,
-  clientLabel,
   maskHost,
   mcpSample,
   mcpShared,
@@ -53,27 +50,15 @@ import { CONNECTION_ENVS, type ConnectionRecord, type MaskedColumns, type McpAcc
 import "./AgentsPage.css";
 import { Keys } from "./Keys";
 
-/** The access column's least width, and the log's beside it (stacked below their sum). */
-const ACCESS_MIN = 320;
-const ACTIVITY_MIN = 580;
-
-/** Which half of the page a command lands on; both are always on screen. */
-export type McpTab = "activity" | "access";
-
 /**
- * The Agents page: everything about agents reading through `Rowkery --mcp`
- * on one surface in place of the editor and grid (the title bar and the schema
- * panel stay). Left, the connection cards: each one's switch, how long, and
- * what it shares. Right, the activity log: every call, newest first, grouped
- * by agent session; the picked call opens what was shared then, the request
- * as sent and the start of the response. ↑↓ pick a call, ↵ opens its SQL in
- * a query tab (not run), ⌘C copies it. Edit access takes the log's place
- * (databases, then tables to tick); What can the agent do opens a sheet over
- * the page. Esc closes the sheet, then Edit access, then the page.
+ * Settings › Agents (2026-10-17): the one-off half of agents, moved off the
+ * Agents page, which keeps the log and the proposed changes. The connection
+ * cards (each one's switch, how long, and what it shares), Connect an agent
+ * under the head, What can the agent do as a sheet, and the log's upkeep.
+ * Edit access takes the cards' place (databases, then tables to tick). Esc
+ * closes the sheet, then Edit access, then (Settings') the page.
  */
-export function AgentsPage({
-  section,
-  onSection,
+export function AgentSharing({
   connect,
   onConnect,
   connections,
@@ -84,16 +69,12 @@ export function AgentsPage({
   onStopAll,
   onSetAccess,
   onSetMasked,
-  onOpenSql,
-  onClose,
 }: {
-  section: McpTab;
-  onSection: (tab: McpTab) => void;
   /** Connect an agent is open under the head. */
   connect: boolean;
   onConnect: (open: boolean) => void;
   connections: ConnectionRecord[];
-  /** The connection whose Edit access is open, in the log's place. */
+  /** The connection whose Edit access is open, in the cards' place. */
   editing: string | null;
   /** Sharing was just turned on: Edit access ticks the own database's tables. */
   fillEditing?: boolean;
@@ -104,9 +85,6 @@ export function AgentsPage({
   onSetAccess: (connectionId: string, access: McpAccess) => void;
   /** Sensitive columns changed in Edit access: the connection's whole map. */
   onSetMasked: (connectionId: string, masked: MaskedColumns) => void;
-  /** The SQL in a new query tab on that connection and database; not run. */
-  onOpenSql: (connectionId: string, database: string | undefined, sql: string) => void;
-  onClose: () => void;
 }) {
   const entries = useMcpEntries();
   // "12 s ago" stays current while the page is up.
@@ -116,81 +94,30 @@ export function AgentsPage({
     return () => window.clearInterval(t);
   }, []);
   const byId = useMemo(() => new Map(connections.map((c) => [c.id, c])), [connections]);
-  const last = entries.length ? entries[entries.length - 1] : null;
   const shared = connections.filter((c) => mcpShared(c));
   const editConn = editing ? byId.get(editing) : undefined;
   const [canDo, setCanDo] = useState(false);
-  const rootRef = useRef<HTMLElement>(null);
-  // Need-driven, as the tab row's fold: the columns stack when the page
-  // can't hold the access column (320) beside a readable log (580). Only
-  // then does Access | Activity have anything to jump between.
-  const [stacked, setStacked] = useState(false);
-  useLayoutEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    const measure = () => setStacked(el.clientWidth < ACCESS_MIN + ACTIVITY_MIN);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  const listRef = useRef<HTMLDivElement>(null);
+  const [clearing, setClearing] = useState(false);
   const firstSwitch = useRef<HTMLInputElement>(null);
-
-  // The half a command asked for takes focus: the log for Activity, the
-  // first switch for Access. Connect an agent and Edit access take their own.
-  useEffect(() => {
-    if (connect || editing) return;
-    if (section === "activity" && listRef.current) listRef.current.focus();
-    else if (section === "access" && firstSwitch.current) firstSwitch.current.focus();
-    else rootRef.current?.focus();
-  }, [section, connect, editing]);
-
   const onKeyDown = (e: KeyboardEvent) => {
-    // Connect an agent owns Esc while it is open (it closes itself).
-    if (e.key !== "Escape" || connect) return;
+    if (e.key !== "Escape") return;
+    // Connect an agent owns Esc while it is open (it closes itself); the
+    // sheet and Edit access close before Settings does.
+    if (connect) return e.stopPropagation();
+    if (!canDo && !editing) return;
     e.preventDefault();
     e.stopPropagation();
     if (canDo) setCanDo(false);
-    else if (editing) onEdit(null);
-    else onClose();
+    else onEdit(null);
   };
 
   // The diagram's database: the first shared server, as the agent sees it.
   const host = shared.find((c) => c.kind === "postgres");
 
   return (
-    <section
-      ref={rootRef}
-      className="agents-page"
-      data-testid="agents-page"
-      data-mcp-sheet={section}
-      data-stacked={stacked || undefined}
-      aria-label="Agents"
-      tabIndex={-1}
-      onKeyDown={onKeyDown}
-    >
-      <header className="ag-head">
-        <h1 className="ag-title">Agents</h1>
-        {stacked && (
-          <div className="mcp-seg" role="tablist" aria-label="Jump to">
-            {(["access", "activity"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                role="tab"
-                data-mcp-tab={t}
-                aria-selected={section === t}
-                onClick={() => onSection(t)}
-              >
-                {t === "activity" ? "Activity" : "Access"}
-              </button>
-            ))}
-          </div>
-        )}
-        <span data-testid="mcp-live" className="mcp-live" data-on={last && now - last.ts < 60_000 ? "" : undefined}>
-          {last ? `${clientLabel(last.client)} called ${sinceLabel(last.ts, now)}` : "No agent calls yet"}
-        </span>
+    <div className="ag-sharing" data-testid="agents-sharing" onKeyDown={onKeyDown}>
+      <div className="ag-sharing-head">
+        <h2 className="st-h2">Agents</h2>
         <span className="mcp-grow" />
         <button type="button" className="mcp-btn quiet" data-ag-can-do aria-haspopup="dialog" onClick={() => setCanDo(true)}>
           What can the agent do
@@ -200,75 +127,84 @@ export function AgentsPage({
             Connect an agent
           </button>
         )}
-        {/* One esc on screen: Connect an agent shows its own while open. */}
-        {!connect && (
-          <button type="button" className="mcp-esc" data-ag-close title="Back to the window  esc" onClick={onClose}>
-            esc
-          </button>
-        )}
-      </header>
+      </div>
       {connect && (
         <div className="ag-connect" data-testid="ag-connect">
           <McpConnectSheet
             inline
             sharedCount={shared.length}
-            onOpenAccess={() => {
-              onConnect(false);
-              onSection("access");
-            }}
+            onOpenAccess={() => onConnect(false)}
             onClose={() => onConnect(false)}
           />
         </div>
       )}
-      <div className="ag-body">
-        <AccessColumn
-          connections={connections}
-          entries={entries}
-          now={now}
-          sharedCount={shared.length}
-          firstSwitch={firstSwitch}
-          editing={editing}
-          onEdit={onEdit}
-          onSetAllow={onSetAllow}
-          onStopAll={onStopAll}
+      {editConn ? (
+        <AccessEditor
+          key={editConn.id}
+          conn={editConn}
+          fillOwn={fillEditing}
+          onSetAccess={onSetAccess}
+          onSetMasked={onSetMasked}
+          onDone={() => onEdit(null)}
         />
-        {editConn ? (
-          <AccessEditor
-            key={editConn.id}
-            conn={editConn}
-            fillOwn={fillEditing}
-            onSetAccess={onSetAccess}
-            onSetMasked={onSetMasked}
-            onDone={() => onEdit(null)}
-          />
-        ) : (
-          <ActivityColumn
+      ) : (
+        <>
+          <AccessColumn
+            connections={connections}
             entries={entries}
-            byId={byId}
             now={now}
-            listRef={listRef}
-            onOpenSql={onOpenSql}
-            onConnect={() => onConnect(true)}
-            connectOpen={connect}
+            sharedCount={shared.length}
+            firstSwitch={firstSwitch}
+            editing={editing}
+            onEdit={onEdit}
+            onSetAllow={onSetAllow}
+            onStopAll={onStopAll}
           />
-        )}
-      </div>
+          <div className="ag-log-upkeep" data-testid="ag-log-upkeep">
+            <span className="mcp-muted">
+              Activity log: {entries.length.toLocaleString()} {entries.length === 1 ? "call" : "calls"} · responses kept for 24 hours
+            </span>
+            <span className="mcp-grow" />
+            {clearing ? (
+              <>
+                <button type="button" className="mcp-btn" onClick={() => setClearing(false)}>
+                  Keep
+                </button>
+                <button
+                  type="button"
+                  className="mcp-btn"
+                  data-mcp-clear-confirm
+                  onClick={() => {
+                    setClearing(false);
+                    void clearMcp()
+                      .then(() => showToast("MCP log cleared"))
+                      .catch((err) => showToast("Couldn't clear the log", String(err), "error"));
+                  }}
+                >
+                  Clear all {entries.length.toLocaleString()}
+                </button>
+              </>
+            ) : (
+              entries.length > 0 && (
+                <button type="button" className="mcp-btn" data-mcp-clear onClick={() => setClearing(true)}>
+                  Clear log
+                </button>
+              )
+            )}
+          </div>
+        </>
+      )}
       {canDo && <CanDoSheet host={host?.kind === "postgres" ? maskHost(host.host) : null} onClose={() => setCanDo(false)} />}
-    </section>
+    </div>
   );
 }
 
-type Filter = "all" | "queries" | "refused";
-
-/** Rendered at most; older calls stay in the log file. */
-const SHOWN = 300;
-
-function EnvDot({ conn }: { conn: ConnectionRecord | undefined }) {
+export function EnvDot({ conn }: { conn: ConnectionRecord | undefined }) {
   return <span className="mcp-dot" data-env={conn?.environment ?? undefined} />;
 }
 
 /** The 20% word tag, as the schema panel head prints it. */
-function EnvTag({ conn }: { conn: ConnectionRecord | undefined }) {
+export function EnvTag({ conn }: { conn: ConnectionRecord | undefined }) {
   const env = CONNECTION_ENVS.find((e) => e.value === conn?.environment);
   if (!env) return null;
   return (
@@ -278,7 +214,7 @@ function EnvTag({ conn }: { conn: ConnectionRecord | undefined }) {
   );
 }
 
-async function copyText(text: string, what: string) {
+export async function copyText(text: string, what: string) {
   try {
     await navigator.clipboard.writeText(text);
     showToast(`Copied ${what}`, toastPreview(text));
@@ -287,270 +223,11 @@ async function copyText(text: string, what: string) {
   }
 }
 
-function ActivityColumn({
-  entries,
-  byId,
-  now,
-  listRef,
-  onOpenSql,
-  onConnect,
-  connectOpen,
-}: {
-  connectOpen: boolean;
-  entries: McpEntry[];
-  byId: Map<string, ConnectionRecord>;
-  now: number;
-  listRef: Ref<HTMLDivElement>;
-  onOpenSql: (connectionId: string, database: string | undefined, sql: string) => void;
-  onConnect: () => void;
-}) {
-  const [filter, setFilter] = useState<Filter>("all");
-  const [connFilter, setConnFilter] = useState<string | null>(null);
-  const [picked, setPicked] = useState(0);
-  const [clearing, setClearing] = useState(false);
-  const listEl = useRef<HTMLDivElement | null>(null);
-
-  const newestFirst = useMemo(() => [...entries].reverse(), [entries]);
-  const counts = useMemo(() => {
-    let queries = 0;
-    let refused = 0;
-    for (const e of newestFirst) {
-      if (connFilter && e.connection !== connFilter) continue;
-      if (e.sql) queries++;
-      if (verdictOf(e) === "refused") refused++;
-    }
-    return { queries, refused };
-  }, [newestFirst, connFilter]);
-  const seenConns = useMemo(() => {
-    const ids: string[] = [];
-    for (const e of newestFirst) if (e.connection && byId.has(e.connection) && !ids.includes(e.connection)) ids.push(e.connection);
-    return ids;
-  }, [newestFirst, byId]);
-  const shown = useMemo(
-    () =>
-      newestFirst
-        .filter((e) => !connFilter || e.connection === connFilter)
-        .filter((e) => (filter === "queries" ? !!e.sql : filter === "refused" ? verdictOf(e) === "refused" : true))
-        .slice(0, SHOWN),
-    [newestFirst, filter, connFilter],
-  );
-  const total = connFilter ? newestFirst.filter((e) => e.connection === connFilter).length : newestFirst.length;
-  useEffect(() => setPicked(0), [filter, connFilter]);
-  useEffect(() => {
-    listEl.current?.querySelector(`[data-mcp-entry="${picked}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [picked]);
-
-  const canOpen = (e: McpEntry | undefined): e is McpEntry & { sql: string; connection: string } =>
-    !!e?.sql && !!e.connection && byId.has(e.connection);
-  const open = (e: McpEntry | undefined) => {
-    if (canOpen(e)) onOpenSql(e.connection, e.database, e.sql);
-  };
-
-  const onListKey = (e: KeyboardEvent) => {
-    const mod = isMacPlatform() ? e.metaKey : e.ctrlKey;
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      const d = e.key === "ArrowDown" ? 1 : -1;
-      setPicked((p) => Math.max(0, Math.min(shown.length - 1, p + d)));
-    } else if (e.key === "Enter" && !mod) {
-      e.preventDefault();
-      open(shown[picked]);
-    } else if (mod && e.key.toLowerCase() === "c" && !window.getSelection()?.toString()) {
-      e.preventDefault();
-      const sql = shown[picked]?.sql;
-      if (sql) void copyText(sql, "SQL");
-    }
-  };
-
-  const setListRef = (el: HTMLDivElement | null) => {
-    listEl.current = el;
-    if (typeof listRef === "function") listRef(el);
-    else if (listRef) (listRef as { current: HTMLDivElement | null }).current = el;
-  };
-
-  if (!entries.length) {
-    return (
-      <div className="ag-col ag-col-activity">
-        <div className="ag-col-head">
-          <h2 className="ag-h2">Activity</h2>
-        </div>
-        <div data-testid="mcp-empty" className="mcp-empty">
-          <p>No agent has called Rowkery yet.</p>
-          {/* The view's one primary action: ink (unless Connect an agent is
-              open above, whose Run is). */}
-          <button type="button" className={`mcp-btn${connectOpen ? "" : " ink"}`} data-mcp-connect onClick={onConnect}>
-            Connect an agent
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  let lastSession: number | undefined | null = null;
-  return (
-    <div className="ag-col ag-col-activity">
-      <div className="ag-col-head">
-        <h2 className="ag-h2">Activity</h2>
-        <div className="mcp-filters">
-          {(
-            [
-              ["all", "All", total],
-              ["queries", "Queries", counts.queries],
-              ["refused", "Refused", counts.refused],
-            ] as const
-          ).map(([id, label, n]) => (
-            <button
-              key={id}
-              type="button"
-              className="mcp-chip"
-              data-mcp-filter={id}
-              aria-pressed={filter === id}
-              onClick={() => setFilter(id)}
-            >
-              {label} <span className="mcp-n">{n}</span>
-            </button>
-          ))}
-          {seenConns.length > 1 || connFilter
-            ? seenConns.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="mcp-chip"
-                  data-mcp-conn-filter={id}
-                  aria-pressed={connFilter === id}
-                  onClick={() => setConnFilter((c) => (c === id ? null : id))}
-                >
-                  <EnvDot conn={byId.get(id)} />
-                  {byId.get(id)?.name ?? id}
-                </button>
-              ))
-            : null}
-        </div>
-      </div>
-      <div
-        ref={setListRef}
-        className="mcp-list"
-        tabIndex={0}
-        role="listbox"
-        aria-label="Agent calls"
-        aria-activedescendant={shown.length ? `mcp-entry-${picked}` : undefined}
-        onKeyDown={onListKey}
-      >
-        {shown.length === 0 && <p className="mcp-muted mcp-none">Nothing matches.</p>}
-        {shown.map((e, i) => {
-          const header = e.session !== lastSession;
-          lastSession = e.session;
-          const conn = e.connection ? byId.get(e.connection) : undefined;
-          const verdict = verdictOf(e);
-          const on = i === picked;
-          return (
-            <div key={`${e.ts}-${i}`} className="mcp-row">
-              {header && <SessionHeader entries={newestFirst} session={e.session} first={e} now={now} />}
-              <div
-                id={`mcp-entry-${i}`}
-                role="option"
-                aria-selected={on}
-                className="mcp-entry"
-                data-mcp-entry={i}
-                data-tool={e.tool}
-                data-verdict={verdict}
-                data-env={conn?.environment ?? undefined}
-                onMouseDown={() => setPicked(i)}
-                onDoubleClick={() => open(e)}
-              >
-                <span className="mcp-time">{clock(e.ts)}</span>
-                <div className="mcp-what">
-                  <div className="mcp-line1">
-                    <span className="mcp-tool">{e.tool}</span>
-                    {e.connection && (
-                      <span className="mcp-conn">
-                        <EnvDot conn={conn} />
-                        {conn?.name ?? e.connection}
-                        {e.database && conn?.kind === "postgres" && e.database !== conn.database ? (
-                          <span className="mcp-db"> / {e.database}</span>
-                        ) : null}
-                        <EnvTag conn={conn} />
-                      </span>
-                    )}
-                    {e.target && <span className="mcp-conn">{e.target}</span>}
-                    {e.tool === "list_connections" && e.rows !== undefined && (
-                      <span className="mcp-conn">{e.rows} shared</span>
-                    )}
-                    {e.tool === "sessions" && e.rows !== undefined && (
-                      <span className="mcp-conn">
-                        {e.rows} {e.rows === 1 ? "session" : "sessions"}
-                      </span>
-                    )}
-                  </div>
-                  {e.sql && (
-                    <pre
-                      className="mcp-sql"
-                      dangerouslySetInnerHTML={{ __html: highlightSqlLines(e.sql.trim()).join("\n") }}
-                    />
-                  )}
-                </div>
-                <div className="mcp-meta">
-                  <span className="mcp-verdict" data-verdict={verdict}>
-                    {verdict === "ok" ? "ok" : verdict === "flagged" ? "would refuse" : verdict === "refused" ? "refused" : "failed"}
-                  </span>
-                  <span data-testid="mcp-meta-size">
-                    {[
-                      e.tool === "query" && e.rows !== undefined ? `${e.rows.toLocaleString()} ${e.rows === 1 ? "row" : "rows"}` : null,
-                      e.tool !== "query" && e.bytes !== undefined ? bytesLabel(e.bytes) : null,
-                      e.ms !== undefined ? `${e.ms} ms` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
-                </div>
-                {(verdict === "refused" || verdict === "error") && e.verdict && (
-                  <div className="mcp-reason" data-testid="mcp-reason">
-                    {e.verdict.replace(/^Refused:\s*/, "")}
-                  </div>
-                )}
-                {on && <CallDetail entry={e} conn={conn} canOpen={canOpen(e)} onOpen={() => open(e)} />}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="mcp-foot">
-        <span className="mcp-muted">Responses kept for 24 hours</span>
-        <span className="mcp-grow" />
-        {clearing ? (
-          <>
-            <button type="button" className="mcp-btn" onClick={() => setClearing(false)}>
-              Keep
-            </button>
-            <button
-              type="button"
-              className="mcp-btn"
-              data-mcp-clear-confirm
-              onClick={() => {
-                setClearing(false);
-                void clearMcp()
-                  .then(() => showToast("MCP log cleared"))
-                  .catch((err) => showToast("Couldn't clear the log", String(err), "error"));
-              }}
-            >
-              Clear all {newestFirst.length.toLocaleString()}
-            </button>
-          </>
-        ) : (
-          <button type="button" className="mcp-btn" data-mcp-clear onClick={() => setClearing(true)}>
-            Clear log
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /**
  * The picked call in full: what was shared when it ran, the arguments as
  * the agent sent them, and the start of what went back.
  */
-function CallDetail({
+export function CallDetail({
   entry: e,
   conn,
   canOpen,
@@ -787,34 +464,7 @@ function JsonText({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
-function SessionHeader({
-  entries,
-  session,
-  first,
-  now,
-}: {
-  entries: McpEntry[];
-  session: number | undefined;
-  first: McpEntry;
-  now: number;
-}) {
-  const calls = session === undefined ? null : entries.filter((e) => e.session === session).length;
-  const start = session ?? first.ts;
-  const today = new Date(now).toDateString() === new Date(start).toDateString();
-  return (
-    <div className="mcp-group" data-testid="mcp-session">
-      <span>
-        {today ? "Today" : new Date(start).toLocaleDateString([], { day: "numeric", month: "short" })} · {clock(start, false)}
-      </span>
-      <em>
-        {clientLabel(first.client)}
-        {calls ? ` · ${calls} ${calls === 1 ? "call" : "calls"}` : ""}
-      </em>
-    </div>
-  );
-}
-
-function clock(ts: number, seconds = true): string {
+export function clock(ts: number, seconds = true): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",

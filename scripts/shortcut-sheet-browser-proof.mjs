@@ -203,12 +203,15 @@ await page.keyboard.press("Shift+Slash");
 await page.waitForTimeout(200);
 check(!(await page.$(sheet)) && (await page.inputValue(`${ws} [data-testid="sb-filter"] input`)) === "?", "? in the filter box types it");
 await page.keyboard.press("Escape");
-// The schema column's Help row opens the sheet.
-const helpKeys = await page.getAttribute(`${ws} [data-testid="sb-help"]`, "title");
-check(helpKeys.includes("Ctrl+Shift+/"), `the Help row's tooltip prints ${helpKeys}`);
-await page.click(`${ws} [data-testid="sb-help"]`);
+// Settings › Keyboard opens the sheet (the foot's Help row went on 2026-10-17).
+await page.keyboard.press("Control+,");
+await page.click('[data-testid="settings-page"] [data-st-section="keyboard"]');
+await page.click("[data-st-shortcuts]");
 await page.waitForSelector(sheet);
+check(true, "Settings › Keyboard opens the sheet");
 await closeSheet();
+await page.keyboard.press("Escape");
+await page.waitForSelector('[data-testid="settings-page"]', { state: "detached" });
 
 // 5 · Keymap: TablePlus.
 await openSheet();

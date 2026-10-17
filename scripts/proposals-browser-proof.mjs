@@ -13,9 +13,10 @@
 // one waiting too) opens any of them in any order (click or ↑↓); each keeps
 // its dry run while another shows, its card saying "N rows · dry run" or "No
 // WHERE". SQL the lexer can't read shows whole
-// with "Couldn't read the target table".
+// with "Couldn't read the target table". The review is the Agents page's
+// "Waiting for you" (2026-10-17), so deciding the last one leaves the page up.
 // Commit ⇧⌘↵ sends the dry run's counts; a "moved" answer swaps in the fresh
-// dry run and saves nothing; Discard sends the note; the page closes when
+// dry run and saves nothing; Discard sends the note; the page shows the log when
 // nothing waits. The plan, checks, dry run and commit themselves are proved
 // by `cargo test -p rowkery-mcp` (`--features postgres-integration` for
 // Postgres).
@@ -235,15 +236,15 @@ check((await page.textContent('[data-testid="sb-proposals"]')) === "2", "the cou
 // 3. The button opens the review page on the oldest. Nothing runs: the SQL
 // under its verb and table, the trigger above Dry run, Commit disabled.
 await page.click('[data-testid="sb-agents"]');
-await page.waitForSelector('[data-testid="proposal-page"] [data-testid="pp-trigger"]');
+await page.waitForSelector('[data-testid="agents-page"] [data-testid="pp-trigger"]');
 const dryCalls = async () => (await calls("proposal_dry_run")).length;
 check((await dryCalls()) === 0, "opening the review calls no dry run");
 check((await calls("proposal_plan"))[0]?.id === "p_000000000001", "it reads the shown one's plan first");
 check((await calls("proposal_plan")).map((a) => a.id).sort().join() === "p_000000000001,p_000000000002", "and every waiting one's, once, for its card");
-check((await page.getAttribute('[data-testid="proposal-page"]', "data-proposal")) === "p_000000000001", "the oldest proposal shows first");
+check((await page.getAttribute('[data-testid="agents-page"]', "data-proposal")) === "p_000000000001", "the oldest proposal shows first");
 check((await page.$$('[data-testid="pp-list"] [data-testid="pp-card"]')).length === 2, "two waiting: a card each in the list");
 check((await page.getAttribute('[data-testid="pp-card"][aria-current="true"]', "data-proposal-id")) === "p_000000000001", "the oldest card is the one shown");
-check((await page.textContent('[data-testid="pp-list-count"]')) === "2 waiting", "the list says 2 waiting");
+check((await page.textContent('[data-testid="pp-list-count"]')) === "2", "Waiting for you counts 2");
 // Text on purpose: the cards' heads are under test.
 check((await page.$$eval('[data-testid="pp-card-head"]', (h) => h.map((x) => x.textContent))).join(" | ") === "UPDATE customers | INSERT, DELETE orders", "cards name their verbs and tables");
 check(await page.$('[data-proposal-id="p_000000000002"] [data-testid="pp-card-warn"]'), "the DELETE with no WHERE warns on its card");
@@ -319,12 +320,12 @@ const rejected = (await calls("proposal_reject")).at(-1);
 check(rejected?.id === "p_000000000002" && rejected?.note === "Keep the test orders for now.", "Discard sends the note");
 check(await page.$eval('[data-testid="pp-commit"]', (b) => !b.disabled), "back on the first, its dry run is kept and Commit is ready");
 check((await dryCalls()) === 3, "coming back ran no new dry run");
-check((await page.$$('[data-testid="pp-list"] [data-testid="pp-card"]')).length === 1 && (await page.textContent('[data-testid="pp-list-count"]')) === "1 waiting", "with one left, the list stays with its one card");
+check((await page.$$('[data-testid="pp-list"] [data-testid="pp-card"]')).length === 1 && (await page.textContent('[data-testid="pp-list-count"]')) === "1", "with one left, the list stays with its one card");
 
 // 8. SQL the lexer can't read: shown whole, no trigger list, one line says so.
 await page.evaluate(() => window.__addOdd());
 await page.waitForSelector('[data-testid="pp-list"] [data-proposal-id="p_000000000003"]', { timeout: 6000 });
-await page.focus('[data-testid="proposal-page"]');
+await page.focus('[data-testid="agents-page"]');
 await page.keyboard.press("ArrowDown");
 await page.waitForSelector('[data-proposal="p_000000000003"] [data-testid="pp-dry-line"]');
 check(!(await page.$('[data-testid="pp-stmt-head"]')) && !(await page.$('[data-testid="pp-trigger"]')), "no heading and no triggers for it");
@@ -340,7 +341,7 @@ await page.waitForSelector('[data-proposal="p_000000000001"] [data-testid="pp-dr
 // 9. Dry run, then Commit ⇧⌘↵: the rows moved, so nothing is saved and the fresh dry run shows.
 await page.click('[data-testid="pp-dry-run"]');
 await page.waitForSelector('[data-testid="pp-dry"][data-state="done"]');
-await page.focus('[data-testid="proposal-page"]');
+await page.focus('[data-testid="agents-page"]');
 await page.keyboard.press("Control+Shift+Enter");
 await page.waitForFunction(() => document.querySelectorAll('[data-row="update"]').length === 2);
 check(JSON.stringify((await calls("proposal_commit"))[0]?.rows) === "[3]", "Commit sends the dry run's counts [3]");
@@ -348,14 +349,18 @@ check(!(await page.$('[data-testid="pp-count"] [data-match]')), "2 rows no longe
 check((await page.textContent('[data-testid="pp-dry-line"]')) === "2 rows · rolled back", "the fresh dry run's count");
 await shot("7-moved");
 
-// 10. Commit again: committed. Discard the last, and with nothing left the page closes.
+// 10. Commit again: committed. Discard the last: with nothing left the page
+// stays (it is the Agents page, 2026-10-17) and shows the log, empty here.
 await page.click('[data-testid="pp-commit"]');
 await page.waitForSelector('[data-proposal="p_000000000003"]');
 check(JSON.stringify((await calls("proposal_commit"))[1]?.rows) === "[2]", "the second commit sends [2]");
 await page.click('[data-testid="pp-reject"]');
 await page.click('[data-testid="pp-reject-send"]');
-await page.waitForSelector('[data-testid="proposal-page"]', { state: "detached" });
-check(!(await page.$('[data-testid="sb-proposals"]')), "the count goes once nothing waits");
+await page.waitForSelector('[data-testid="agents-page"] [data-testid="mcp-empty"]');
+check(!(await page.$('[data-testid="pp-list-count"]')), "Waiting for you goes once nothing waits");
+await page.keyboard.press("Escape");
+await page.waitForSelector('[data-testid="agents-page"]', { state: "detached" });
+check(!(await page.$('[data-testid="sb-proposals"]')), "back in the window, the count is gone");
 
 await browser.close();
 if (failed) {
