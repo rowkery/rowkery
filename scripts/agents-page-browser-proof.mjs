@@ -2,7 +2,8 @@
 // Agents page proof with a stubbed Tauri `invoke` (2026-10-17: the page is
 // proposals and the log; sharing is Settings › Agents). The schema column's
 // Agents button, ⌘⇧A and the shown pill's agent mark open the page in place
-// of the schema column, editor and grid, with the title bar still there; the
+// of the schema column, editor and grid, with the title bar still there and
+// holding still as the page rises in; the
 // head's first control names the window it goes back to, the pill's mark
 // reads as pressed, and each of them (and Esc) goes back. With nothing
 // waiting it lands on the newest call: the log newest first, an env dot per
@@ -207,8 +208,22 @@ check(!(await page.$('[data-testid="sb-foot"]')), "no Click a table hint under t
 // 1. The foot's Agents row opens the page; the title bar stays; the schema
 // column, editor and grid are out of sight (2026-10-14). Nothing waits, so
 // it lands on the newest call (2026-10-17: the page is proposals and the log).
+// The title bar holds still while the page rises in (2026-10-17: focusing
+// the page mid-rise used to scroll the frame and lift the bar by 8 px).
+await page.evaluate(() => {
+  window.__barTops = [];
+  const t0 = performance.now();
+  const tick = () => {
+    window.__barTops.push(document.querySelector('[data-testid="titlebar"]').getBoundingClientRect().top);
+    if (performance.now() - t0 < 600) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+});
 await page.click('[data-testid="sb-agents"]');
 await page.waitForSelector(pageSel);
+await page.waitForTimeout(650);
+const barTops = await page.evaluate(() => window.__barTops);
+check(barTops.every((t) => t === 0), `the title bar doesn't move while the page opens (${[...new Set(barTops)].join(", ")})`);
 check(await page.isVisible('[data-testid="titlebar"]'), "the title bar stays while the page is up");
 check(!(await page.isVisible('[data-testid="workspace"]:not([hidden]) [data-testid="sidebar"] [data-testid="sb-head"]')), "the schema column is hidden while the page is up");
 check((await page.$eval(pageSel, (el) => el.getBoundingClientRect().left)) === 0, "the page starts at the window's left edge");

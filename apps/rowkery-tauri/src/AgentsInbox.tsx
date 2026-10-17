@@ -127,7 +127,7 @@ export function AgentsInbox({
   const id = proposal?.id ?? null;
 
   useEffect(() => {
-    rootRef.current?.focus();
+    rootRef.current?.focus({ preventScroll: true });
   }, []);
   usePageFocus(rootRef);
 
@@ -197,7 +197,7 @@ export function AgentsInbox({
   const done = (id: string) => {
     forgetProposal(id);
     // The pressed button goes with the proposal; keep the keys on the page.
-    rootRef.current?.focus();
+    rootRef.current?.focus({ preventScroll: true });
     setRuns((m) => {
       const next = { ...m };
       delete next[id];
@@ -280,7 +280,7 @@ export function AgentsInbox({
       e.stopPropagation();
       if (rejecting) {
         setRejecting(false);
-        rootRef.current?.focus();
+        rootRef.current?.focus({ preventScroll: true });
       } else onClose();
       return;
     }
@@ -351,7 +351,7 @@ export function AgentsInbox({
                     current={i === at}
                     onPick={() => {
                       setSel({ kind: "proposal", id: p.id });
-                      rootRef.current?.focus();
+                      rootRef.current?.focus({ preventScroll: true });
                     }}
                   />
                 ))}
@@ -386,7 +386,7 @@ export function AgentsInbox({
                 current={c === call}
                 onPick={() => {
                   setSel({ kind: "call", key: c.key });
-                  rootRef.current?.focus();
+                  rootRef.current?.focus({ preventScroll: true });
                 }}
                 onOpen={() => openCall(c)}
               />

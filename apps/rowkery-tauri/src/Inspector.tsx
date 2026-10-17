@@ -186,7 +186,7 @@ export function usePageFocus(ref: RefObject<HTMLElement | null>) {
     const onOut = () => {
       window.clearTimeout(t);
       t = window.setTimeout(() => {
-        if (el.isConnected && (document.activeElement === document.body || document.activeElement === null)) el.focus();
+        if (el.isConnected && (document.activeElement === document.body || document.activeElement === null)) el.focus({ preventScroll: true });
       });
     };
     // On the document, so focus dropped by an overlay over the page (the

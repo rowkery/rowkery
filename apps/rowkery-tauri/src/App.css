@@ -229,7 +229,10 @@ body,
 .app-frame {
   position: relative;
   height: 100%;
-  overflow: hidden;
+  /* clip, not hidden: a hidden box still scrolls when focus lands on
+     something past its edge (a page rising in from 8 px below lifted the
+     title bar with it). */
+  overflow: clip;
   background: var(--bg);
   border-radius: 12px;
   transition: background-color 0.3s ease;

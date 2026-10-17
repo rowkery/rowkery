@@ -57,7 +57,7 @@ export function SettingsPage({
   const pref = useUpdatePref();
 
   useEffect(() => {
-    rootRef.current?.focus();
+    rootRef.current?.focus({ preventScroll: true });
   }, []);
   usePageFocus(rootRef);
 
