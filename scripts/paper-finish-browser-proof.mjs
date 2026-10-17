@@ -394,7 +394,6 @@ const bar6 = await page.evaluate(() => {
   const tb = document.querySelector('[data-testid="titlebar"]');
   const r = tb.getBoundingClientRect();
   const inBar = (sel) => !!tb.querySelector(sel);
-  const cap = tb.querySelector('[data-testid="search-cap"]')?.getBoundingClientRect();
   return {
     h: r.height,
     top: r.top,
@@ -404,11 +403,9 @@ const bar6 = await page.evaluate(() => {
     tabs: tb.querySelectorAll('[data-testid="win-tab"]').length,
     tabH: tb.querySelector('[data-testid="win-tab"]')?.getBoundingClientRect().height,
     add: inBar('[data-testid="win-add"]'),
-    shield: inBar("[data-shield]"),
-    mcp: inBar("[data-mcp]"),
+    shield: inBar('[data-testid="win-tab"][data-on] [data-shield]'),
+    cap: inBar('[data-testid="search-cap"]'),
     theme: inBar('[data-testid="tb-theme"]'), // Removed on 2026-10-13: the foot's Appearance is the only theme control.
-    capW: cap?.width,
-    capRight: cap ? window.innerWidth - cap.right : null,
     headTools: document.querySelectorAll('[data-testid="sb-head"] ~ * [data-shield], [data-testid="sidebar"] [data-shield], [data-testid="sidebar"] [data-mcp]').length,
     sidebarTop: document.querySelector('[data-testid="workspace"]:not([hidden]) [data-testid="sidebar"]').getBoundingClientRect().top,
   };
@@ -416,7 +413,7 @@ const bar6 = await page.evaluate(() => {
 check(bar6.h === 48 && bar6.top === 0 && bar6.w === 1280 && /inset/.test(bar6.rule), `a 48 px title bar across the window with a rule under it (${bar6.h}, ${bar6.rule})`);
 check(!bar6.rail, "no window rail");
 check(bar6.tabs === 1 && bar6.tabH === 28 && bar6.add, `one 28 px window pill and + (${bar6.tabs}, ${bar6.tabH})`);
-check(bar6.shield && bar6.mcp && !bar6.theme && bar6.capW >= 200 && bar6.capRight === 14, `Safe mode, MCP and ⌘K (${bar6.capW} px, ${bar6.capRight} px from the edge) sit in the title bar, no theme toggle`);
+check(bar6.shield && !bar6.cap && !bar6.theme, "the shown pill carries the safe mode shield; no search box or theme toggle in the title bar (2026-10-17)");
 check(bar6.headTools === 0 && bar6.sidebarTop === 48, `the schema column starts under it, without Safe mode / MCP (${bar6.sidebarTop})`);
 // The foot (2026-10-13) is one row of 28 px icon buttons,
 // left-aligned, 4 px apart; names and keys live in the tooltips.
@@ -607,9 +604,9 @@ await surface("connect-to-start", "body", [{ sel: '[data-testid="ew-card-sub"]',
 const empty6 = await page.evaluate(() => {
   const tb = document.querySelector('[data-testid="titlebar"]');
   const shown = (sel) => [...tb.querySelectorAll(sel)].filter((e) => e.getBoundingClientRect().width > 0).length;
-  return { add: shown('[data-testid="win-add"]'), cap: shown('[data-testid="search-cap"]'), conn: shown("[data-shield], [data-mcp]"), name: tb.querySelector('[data-testid="win-name"]')?.textContent };
+  return { add: shown('[data-testid="win-add"]'), conn: shown('[data-shield], [data-testid="win-mcp"]'), name: tb.querySelector('[data-testid="win-name"]')?.textContent };
 });
-check(empty6.add === 1 && empty6.cap === 1 && empty6.conn === 0, `the empty window's title bar: + and ⌘K, no Safe mode / MCP (${JSON.stringify(empty6)})`);
+check(empty6.add === 1 && empty6.conn === 0, `the empty window's title bar: +, no safe mode shield or agent mark (${JSON.stringify(empty6)})`);
 await palette("Agents");
 await page.keyboard.press("Enter");
 await page.waitForSelector('[data-testid="agents-page"]');

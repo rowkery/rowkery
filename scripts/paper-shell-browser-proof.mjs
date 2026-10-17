@@ -200,16 +200,14 @@ const tile = await page.evaluate(() => {
 check(tile.on && tile.h === 28, `the title bar's + hovers with the glide, 28 px (${JSON.stringify(tile)})`);
 await page.mouse.move(700, 400);
 
-// ---------- ⌘K from the Search button ----------
-const search = '[data-testid="search-cap"]';
-check((await page.textContent(search)).includes("Search tables, commands"), "the ⌘K button reads Search tables, commands");
-const sb = await page.locator(search).boundingBox();
-check(Math.round(sb.width) >= 200 && Math.round(sb.height) === 28, `it is a 28 px button at least 200 px wide (${Math.round(sb.width)}×${Math.round(sb.height)})`);
-await page.click(search);
+// ---------- ⌘K in the middle of the window (2026-10-17) ----------
+check(!(await page.$('[data-testid="search-cap"]')), "no Search button in the title bar");
+await page.keyboard.press("Control+k");
 await page.waitForSelector('[data-testid="cp-panel"]');
 await page.waitForTimeout(250); // its pop entry scales from .98
 const pb = await page.locator('[data-testid="cp-panel"]').boundingBox();
-check(Math.round(pb.width) === 420 && pb.y >= sb.y + sb.height && Math.abs(pb.x + pb.width - (sb.x + sb.width)) < 2, `the palette is a 420 px card under the button, right-aligned (${JSON.stringify(pb)})`);
+const vw = page.viewportSize().width;
+check(Math.round(pb.width) === 640 && Math.abs(pb.x + pb.width / 2 - vw / 2) < 2 && pb.y > 48, `the palette is a 640 px card centred in the window (${JSON.stringify(pb)})`);
 await page.keyboard.type("o");
 await page.waitForSelector('[data-testid="cp-row"]');
 const cpRows = page.locator('[data-testid="cp-row"]');
@@ -272,7 +270,7 @@ await page.mouse.move(700, 790);
 await shot("dark");
 
 await page.locator(`${ws} [data-table="arcade.public.orders"] [data-testid="sb-row-main"]`).hover();
-await page.click(search);
+await page.keyboard.press("Control+k");
 await page.waitForSelector('[data-testid="cp-panel"]');
 await page.keyboard.type("o");
 await page.mouse.move(400, 700);

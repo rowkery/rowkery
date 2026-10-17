@@ -70,9 +70,7 @@ if (wanted("search")) {
   await hideStrips(page);
   await page.keyboard.press("Meta+k");
   await page.waitForSelector(PANEL);
-  const tools = await page.locator('[data-testid="titlebar-conn"]').boundingBox();
-  const box = await page.locator(PANEL).boundingBox();
-  await shot(page, "search-empty", { clip: { x: tools.x - 12, y: 0, width: 1280 - (tools.x - 12), height: box.y + box.height + 14 } });
+  await shot(page, "search-empty");
 
   await page.keyboard.type("ord", { delay: 40 });
   await page.waitForTimeout(250);

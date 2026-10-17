@@ -232,9 +232,7 @@ await fresh();
 await page.click(`${ws} [data-saved-conn="c1"]`);
 await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 check(!(await sidebarHidden()), "the sidebar shows");
-// ⌘B has no button (the key hides the sidebar); the title bar's ⌘K
-// carries the registry's keys.
-check((await page.textContent('[data-testid="search-cap-key"]')) === "Ctrl K", "⌘K's keycap reads Ctrl K");
+// ⌘B has no button (the key hides the sidebar).
 await page.keyboard.press("Control+b");
 await page.waitForTimeout(300);
 check(await sidebarHidden(), "Ctrl+B hid the sidebar");

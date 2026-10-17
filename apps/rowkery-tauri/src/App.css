@@ -61,6 +61,8 @@
   --shade: rgba(0, 0, 0, 0.45);
   /* Behind a sheet: only catches the click away. */
   --scrim: rgba(0, 0, 0, 0.12);
+  /* Behind ⌘K: dims the blurred window under it. */
+  --veil: rgba(0, 0, 0, 0.14);
   /* Text on a solid fill (Run, the + chip, DELETE / INSERT badges, the
      window tab's warning): white on paper; ink in the dark, where the fills are
      lighter (white on dark --acc is 2.3:1, --inkfg 7.4:1). */
@@ -156,6 +158,7 @@
   --pop: 0 12px 32px -8px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line2);
   --shade: rgba(0, 0, 0, 1);
   --scrim: rgba(0, 0, 0, 0.4);
+  --veil: rgba(0, 0, 0, 0.32);
   --onfill: var(--inkfg);
   --tick: #fff;
   --tagmix: 66%;
@@ -513,6 +516,43 @@ body,
   color: var(--text);
 }
 
+/* The shown pill's safe mode shield (2026-10-17): its window portals it
+   into this slot while connected. Ink while a mode is on. */
+.win-tools {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.win-tools:empty {
+  display: none;
+}
+
+.win-shield {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.win-shield[data-shield="confirm"],
+.win-shield[data-shield="read_only"] {
+  color: var(--text);
+}
+
+.win-shield:hover,
+.win-shield[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--text);
+}
+
 .win-tabs.reordering > [data-dragging] {
   z-index: 1;
 }
@@ -533,66 +573,6 @@ body,
 
 .win-add:hover {
   color: var(--text);
-}
-
-/* Right: Safe mode and MCP (portalled by the shown window while connected)
-   and ⌘K. All bordered 28 px controls. The theme is the schema column's
-   foot (2026-10-13). */
-.titlebar-tools,
-.titlebar-conn {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-}
-
-.titlebar-conn:empty {
-  display: none;
-}
-
-.search-cap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 200px;
-  height: 28px;
-  padding: 0 6px 0 10px;
-  border: 1px solid var(--line2);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--mute);
-  font: 12px var(--sans);
-  line-height: 1;
-  cursor: default;
-  transition: border-color 0.18s ease, background-color 0.3s ease;
-}
-
-.search-cap:hover {
-  border-color: var(--dim);
-}
-
-.search-cap-label {
-  flex: 1;
-  text-align: left;
-}
-
-.search-cap-key {
-  padding: 2px 5px;
-  border-radius: 4px;
-  background: var(--kbd);
-  color: var(--mute);
-  font: 500 10.5px/1.3 var(--mono);
-}
-
-/* A narrow window folds ⌘K to its icon before the window pills squeeze. */
-@media (max-width: 1040px) {
-  .search-cap {
-    min-width: 0;
-  }
-
-  .search-cap-more {
-    display: none;
-  }
 }
 
 /* ---------- Connection chip + switcher ---------- */
@@ -1408,48 +1388,6 @@ body,
 .sb-head-sub-gap {
   flex: 1;
   align-self: stretch;
-}
-
-.sb-tool {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 8px 0 9px;
-  border: 1px solid var(--line2);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text2);
-  font: 500 12px var(--sans);
-  white-space: nowrap;
-  cursor: default;
-  transition: border-color 0.18s ease, background-color 0.3s ease;
-}
-
-.sb-tool:hover,
-.sb-tool[aria-expanded="true"] {
-  border-color: var(--dim);
-}
-
-.sb-tool-chevron {
-  color: var(--dim);
-}
-
-.sb-shield.on {
-  color: var(--text);
-}
-
-.sb-mcp-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--faint);
-  transition: background-color 0.18s ease;
-}
-
-.sb-mcp[data-mcp="shared"] .sb-mcp-dot {
-  background: var(--ok);
 }
 
 .sb-refresh {
@@ -2666,11 +2604,17 @@ body,
 
 /* ---------- Command palette (⌘K) ---------- */
 
+/* ⌘K opens in the middle of the window, Spotlight-like (2026-10-17), over
+   the window blurred and dimmed: the one backdrop-filter in the app
+   (DESIGN.md). */
 .cp-scrim {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: transparent;
+  background: var(--veil);
+  -webkit-backdrop-filter: blur(8px) saturate(0.8);
+  backdrop-filter: blur(8px) saturate(0.8);
+  animation: cp-fade 160ms var(--ease-out);
 }
 
 @keyframes cp-fade {
@@ -2681,19 +2625,21 @@ body,
 
 .cp-panel {
   position: absolute;
-  top: 40px;
-  right: 14px;
-  width: 420px;
+  top: 16vh;
+  left: 0;
+  right: 0;
+  width: 640px;
   max-width: calc(100vw - 28px);
-  max-height: min(480px, calc(100vh - 56px));
+  max-height: min(460px, calc(84vh - 28px));
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--bg);
   box-shadow: var(--pop);
   color: var(--text);
-  transform-origin: 100% 0;
+  transform-origin: 50% 0;
   animation: pop-in 160ms var(--ease-out);
   -webkit-user-select: none;
   user-select: none;
@@ -2704,8 +2650,8 @@ body,
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  height: 42px;
-  padding: 0 14px;
+  height: 48px;
+  padding: 0 16px;
   box-shadow: inset 0 -1px 0 var(--line);
   color: var(--dim);
 }
@@ -2718,7 +2664,7 @@ body,
   padding: 0;
   background: transparent;
   color: var(--text);
-  font: 13.5px var(--sans);
+  font: 15px var(--sans);
 }
 
 .cp-search input::placeholder {
@@ -2893,6 +2839,10 @@ body,
 
 .presence[data-closing] .cp-panel {
   animation: pop-out 100ms var(--ease-in) forwards;
+}
+
+.presence[data-closing] .cp-scrim {
+  animation: fade-out 100ms var(--ease-in) forwards;
 }
 
 @keyframes fade-out {

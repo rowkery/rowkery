@@ -3,15 +3,15 @@ import { ENGINES } from "./engines";
 import { PenguinMark } from "./PenguinMark";
 import { GridMenu, useContextMenu } from "./GridMenu";
 import { railTileMenu } from "./contextMenus";
-import { CloseIcon, PlusIcon, SearchIcon, WarningIcon } from "./icons";
+import { AgentIcon, CloseIcon, PlusIcon, WarningIcon } from "./icons";
 import { useGlideHover } from "./motion";
 import { isMacPlatform } from "./platform";
-import { commandTip, keysFor } from "./commands";
+import { commandTip } from "./commands";
+import { mcpShared } from "./mcpActivity";
 import { useTabReorder } from "./tabReorder";
 import { WindowControls } from "./WindowControls";
 import { CONNECTION_ENVS, type ConnectionRecord } from "./types";
 import type { WindowSession } from "./Workspace";
-import { Keys } from "./Keys";
 
 interface TitleBarProps {
   windows: WindowSession[];
@@ -27,12 +27,10 @@ interface TitleBarProps {
   onReorder: (from: number, to: number) => void;
   /** + (and ⌘T): a new empty window, which shows Connect to start. */
   onNewWindow: () => void;
-  /** A tab's MCP tag: the Agents page. */
+  /** A pill's agent mark: the Agents page. */
   onAgents: () => void;
-  /** ⌘K. */
-  onSearch: () => void;
-  /** The shown window portals its Safe mode and MCP buttons here while it is connected. */
-  toolsRef: Ref<HTMLDivElement>;
+  /** A slot in the shown pill: its window portals the safe mode shield here while it is connected. */
+  toolsRef: Ref<HTMLSpanElement>;
   /** A row of a tab's right-click menu (`railTileMenu`); the tab is selected first. */
   onTilePick: (windowId: string, id: string) => void;
 }
@@ -41,10 +39,12 @@ interface TitleBarProps {
  * The title bar (Paper, 2026-10-13): 48 px of --bar with a rule under it.
  * Left, the traffic lights and one 28 px pill per window (the engine's logo
  * or the penguin, the connection's name, its environment dot, × on hover and
- * on the shown one), then + for a new window. Right, the shown window's
- * Safe mode and MCP (only while connected) and ⌘K. The theme lives in the
- * schema column's foot (2026-10-13), not here. Drag the pills to reorder; ⌘1–9 follow the order. The bar drags the
- * window.
+ * on the shown one), then + for a new window. The shown pill also carries
+ * its window's safe mode shield (while connected) and an agent mark while
+ * the connection is shared; another pill shows the agent mark only while an
+ * agent read it in the last minute (2026-10-17). Nothing sits at the right:
+ * ⌘K opens in the middle of the window. Drag the pills to reorder; ⌘1–9
+ * follow the order. The bar drags the window.
  */
 export function TitleBar({
   windows,
@@ -57,7 +57,6 @@ export function TitleBar({
   onReorder,
   onNewWindow,
   onAgents,
-  onSearch,
   toolsRef,
   onTilePick,
 }: TitleBarProps) {
@@ -91,7 +90,10 @@ export function TitleBar({
           const envLabel = CONNECTION_ENVS.find((e) => e.value === env)?.label;
           const name = conn?.name ?? "New window";
           const engine = conn ? ENGINES[conn.kind] : null;
+          const on = w.id === activeId;
           const agent = !!conn && !!mcpRecent?.has(conn.id);
+          // The shown pill marks a shared connection; any pill marks one an agent just read.
+          const agentMark = agent || (on && !!conn && w.state === "connected" && mcpShared(conn));
           const running = busy.has(w.id);
           const title = [
             name,
@@ -107,12 +109,12 @@ export function TitleBar({
             <div
               key={w.id}
               role="tab"
-              aria-selected={w.id === activeId}
+              aria-selected={on}
               aria-label={name}
               data-testid="win-tab"
               data-hint-win={i < 9 ? i + 1 : undefined}
               className="win-tab"
-              data-on={w.id === activeId ? "" : undefined}
+              data-on={on ? "" : undefined}
               data-empty={conn ? undefined : ""}
               data-env={env}
               data-reorder-key={w.id}
@@ -151,14 +153,16 @@ export function TitleBar({
               ) : env ? (
                 <span data-testid="win-mark" data-kind="env" className="win-mark win-env" />
               ) : null}
-              {agent && (
+              {on && <span data-testid="win-tools" className="win-tools" data-no-drag ref={toolsRef} />}
+              {agentMark && (
                 <button
                   type="button"
                   data-testid="win-mcp"
                   className="win-mcp"
                   data-no-drag
-                  aria-label="Read by an agent in the last minute. Open Agents"
-                  title="An agent read it in the last minute · Agents"
+                  data-recent={agent ? "" : undefined}
+                  aria-label={agent ? "Read by an agent in the last minute. Open Agents" : "Shared with agents. Open Agents"}
+                  title={agent ? "An agent read it in the last minute · Agents" : "Shared with agents · Agents"}
                   tabIndex={-1}
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
@@ -166,7 +170,7 @@ export function TitleBar({
                     onAgents();
                   }}
                 >
-                  MCP
+                  <AgentIcon size={13} />
                 </button>
               )}
               <button
@@ -197,26 +201,6 @@ export function TitleBar({
         </button>
       </div>
       <span className="titlebar-gap" data-tauri-drag-region />
-      <div className="titlebar-tools">
-        <div data-testid="titlebar-conn" className="titlebar-conn" ref={toolsRef} />
-        <button
-          type="button"
-          data-testid="search-cap"
-          className="search-cap"
-          title={commandTip("command-palette", "Search tables, queries and commands", mac)}
-          aria-label="Search"
-          data-keys-for="command-palette"
-          onClick={onSearch}
-        >
-          <SearchIcon size={13} />
-          <span className="search-cap-label">
-            Search<span className="search-cap-more"> tables, commands</span>
-          </span>
-          <kbd data-testid="search-cap-key" className="search-cap-key">
-            <Keys text={keysFor("command-palette", mac).replace("+", " ")} />
-          </kbd>
-        </button>
-      </div>
       <GridMenu
         name="win-tab"
         label="Window"

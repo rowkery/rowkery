@@ -7,7 +7,7 @@
 //  - choosing-what-to-share-call: a picked call opened (Access, Request, Response);
 //  - choosing-what-to-share-edit-access: Edit access, databases then tables;
 //  - choosing-what-to-share-can-do: the What can the agent do sheet;
-//  - choosing-what-to-share-mcp-menu: the title bar's MCP button and menu, the pill's MCP tag;
+//  - choosing-what-to-share-agent-mark: the shown pill's agent mark, its dot for a recent read;
 //  - choosing-what-to-share-refusal-toast: the toast for a refusal that arrives while you work;
 //  - proposed-changes-arrival: the arrival toast and the count on the Agents button;
 //  - proposed-changes-review: the review before the dry run (SQL, reason, triggers);
@@ -196,12 +196,9 @@ if (wanted("choosing-what-to-share")) {
   const { context, page } = await openApp({ more: agentsMore });
   await hideKeyStrip(page);
 
-  // The title bar: the pill's MCP tag (a read 30 s ago) and the MCP menu.
-  await page.waitForSelector('[data-testid="win-mcp"]');
-  await page.click("button[data-mcp]");
-  await page.waitForSelector('[data-menu="mcp"]');
-  await shot(page, "choosing-what-to-share-mcp-menu", { clip: { x: 0, y: 0, width: 1280, height: 190 } });
-  await page.keyboard.press("Escape");
+  // The title bar: the shown pill's agent mark, with its dot for a read 30 s ago.
+  await page.waitForSelector('[data-testid="win-mcp"][data-recent]');
+  await shot(page, "choosing-what-to-share-agent-mark", { clip: { x: 0, y: 0, width: 480, height: 48 } });
 
   // A refusal arriving while you work: the toast with View.
   await page.evaluate(() => {

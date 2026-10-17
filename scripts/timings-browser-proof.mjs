@@ -132,9 +132,7 @@ const shot = async (name) => {
 
 // 1. Tooltips print the registry's chord (Linux keys here).
 check((await page.getAttribute('[data-testid="conn-chip"]', "title")) === "Switch connection  Ctrl+Shift+O", "connection chip tooltip");
-// ⌘B has no button (the key hides the sidebar); the title bar's ⌘K
-// carries the registry's keys.
-check((await page.textContent('[data-testid="search-cap-key"]')) === "Ctrl K", "⌘K's keycap reads Ctrl K");
+// ⌘B has no button (the key hides the sidebar).
 check((await page.getAttribute('[data-testid="win-add"]', "title")) === "Open a new window  Ctrl+T", "new window tooltip");
 
 await page.keyboard.press("Control+Shift+O");

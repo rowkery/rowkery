@@ -42,7 +42,6 @@ The first time you share a connection, Rowkery shares its own database and opens
 
 You can also share from:
 
-- the **MCP** button in the title bar (see [The MCP button](#the-mcp-button));
 - the connection's sheet (**Connection › Edit Connection…**): turn on **Share with agents (MCP)** and save;
 - ⌘K **Allow MCP for this connection**.
 
@@ -196,9 +195,9 @@ The log lives in `mcp-log.jsonl` beside your config. It records each call's time
 
 You don't need the Agents page open to see what agents do.
 
-<Shot src="/img/choosing-what-to-share-mcp-menu.webp" width={1280} height={190} alt="The title bar: the storefront window pill with a green MCP tag, and the MCP · shared button with its menu open: Share this connection with agents, ticked, then Agents… with its key." />
+<Shot src="/img/choosing-what-to-share-agent-mark.webp" width={480} height={48} alt="The title bar: the shown storefront pill with its safe mode shield and an agent mark with a green dot, then +." />
 
-- **The MCP tag.** A window whose connection an agent read in the last minute shows a small **MCP** tag on its pill. It goes 60 seconds after the last read. Click it to open the Agents page.
+- **The agent mark.** The shown window's pill carries a small agent icon while its connection is shared. Any pill whose connection an agent read in the last minute shows it too, with a green dot; the dot goes 60 seconds after the last read. Click the mark to open the Agents page.
 - **The refusal toast.** When an agent's query is refused, a toast says so, such as "MCP refused a full read of order_items", with **View** to open the log. It never replaces an Undo toast that is still showing, and <kbd>↵</kbd> doesn't trigger it.
 - **The Agents button** at the foot of the schema column has a green dot while the window's connection is shared.
 
@@ -206,20 +205,13 @@ You don't need the Agents page open to see what agents do.
 
 Rowkery reads the log every 3 seconds while a connection is shared or the Agents page is open, and only while the window is visible.
 
-## The MCP button
-
-While a window is connected, the title bar shows **MCP · shared** or **MCP · off** for its connection, beside Safe mode. Click it for a menu:
-
-- **Share this connection with agents**, ticked while it is shared. Choose it to turn sharing on or off.
-- **Agents…** (<kbd>⇧⌘A</kbd>) opens the Agents page.
-
 ## Stop sharing
 
 Any of these stops sharing a connection:
 
 - turn off its switch on the Agents page;
 - **Stop all sharing**, above the cards, for every shared connection at once;
-- the MCP button's menu, or ⌘K **Stop sharing this connection with MCP**;
+- ⌘K **Stop sharing this connection with MCP**;
 - **Share with agents (MCP)** in the connection's sheet, once you save it.
 
 It takes effect on the agent's next call, which then finds no such connection. Your database and table picks are kept for the next time you share it. A change that agent proposed can't be committed until the connection is shared again.

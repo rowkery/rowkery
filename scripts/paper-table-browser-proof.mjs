@@ -300,19 +300,16 @@ const wrap = await page.evaluate((sel) => {
   };
 }, line);
 check(wrap.below >= 2 && wrap.overflow <= 0 && !wrap.cut, `chips wrap at 900 px: ${wrap.below} chips on a later line, ${wrap.lines} lines, no scroll (${wrap.overflow}), none cut`);
-// The tab row at 900 px: ⌘K shrinks to "Search ⌘K" first; the switch never covers a tab.
+// The tab row at 900 px: the switch never covers a tab.
 const row900 = await page.evaluate((ws) => {
   const r = (sel) => document.querySelector(sel).getBoundingClientRect();
   const tabs = r(`${ws} [data-testid="query-tabs"]`);
   const on = r(`${ws} [data-testid="query-tab"][data-on]`);
   const sw = r(`${ws} [data-testid="editor-header"] [data-testid="view-switch"]`);
-  const cap = r('[data-testid="search-cap"]');
   const labels = [...document.querySelectorAll(`${ws} [data-testid="view-switch"] [role="tab"]`)].map((b) => b.getAttribute("aria-label"));
-  return { tabIn: on.left >= tabs.left - 0.5 && on.right <= tabs.right + 0.5, clear: sw.left >= on.right, capW: Math.round(cap.width), capClear: cap.left >= sw.right, labels };
+  return { tabIn: on.left >= tabs.left - 0.5 && on.right <= tabs.right + 0.5, clear: sw.left >= on.right, labels };
 }, ws);
-// ⌘K lives in the title bar, not in the tab row.
 check(row900.tabIn && row900.clear, `900 px: the active tab is whole and clear of the switch (${JSON.stringify(row900)})`);
-check(row900.capW <= 140, `… ⌘K has shrunk to Search ⌘K (${row900.capW} px)`);
 check(row900.labels.join("|") === "Data|Structure", "the switch's buttons keep their names (aria-label)");
 await shot("wrap-900");
 await page.setViewportSize({ width: 1280, height: 800 });
