@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { chordFor, commandById, eventMatches, keysFor } from "./commands";
-import { AgentIcon, ChevronLeftIcon, ChevronRightIcon, PlayIcon, WarningIcon } from "./icons";
-import { InspectorButton, InspectorHead } from "./Inspector";
+import { AgentIcon, PlayIcon, WarningIcon } from "./icons";
+import { InspectorHead } from "./Inspector";
 import { Keys } from "./Keys";
 import { clientLabel, sinceLabel } from "./mcpActivity";
+import { useGlideHover } from "./motion";
 import { showToast } from "./notify";
 import { isMacPlatform } from "./platform";
 import { HIDDEN_TEXT, markedNames, usePresenting } from "./presenting";
@@ -18,6 +19,7 @@ import {
   useProposals,
   type DryRun,
   type Plan,
+  type Proposal,
   type StatementPreview,
 } from "./proposals";
 import { highlightSqlLines } from "./sqlHighlight";
@@ -28,6 +30,8 @@ import "./ProposalPage.css";
 const OPENED_NOTE = "The user opened it in a query tab to change it, so this version won't run.";
 
 type DryState = "idle" | "running" | "done" | "error";
+type Planned = { plan: Plan | null; error: string | null };
+type Run = { state: DryState; dry: DryRun | null; error: string | null };
 
 /**
  * A change an agent proposed (`propose_change`), for the user to commit or
@@ -38,6 +42,11 @@ type DryState = "idle" | "running" | "done" | "error";
  * value struck through above the new one, and only then can Commit ⇧⌘↵ run:
  * it sends the dry run's row counts and runs again only if every statement
  * changes as many rows; otherwise a fresh dry run takes their place.
+ *
+ * Every waiting one is a card in a column on the left (2026-10-17; shown
+ * for one too), oldest first, and any can be opened in any order (click, or ↑↓).
+ * Each keeps its plan and its dry run while another is shown, so coming back
+ * to one doesn't need a new dry run; Commit still re-checks the row counts.
  */
 export function ProposalPage({
   connections,
@@ -49,42 +58,49 @@ export function ProposalPage({
   onClose: () => void;
 }) {
   const waiting = useProposals();
-  const [at, setAt] = useState(0);
-  const proposal = waiting[Math.min(at, waiting.length - 1)] ?? null;
-  const [planned, setPlanned] = useState<{ id: string; plan: Plan | null; error: string | null } | null>(null);
-  const [run, setRun] = useState<{ id: string; state: DryState; dry: DryRun | null; error: string | null } | null>(
-    null,
-  );
+  const [pickedId, setPickedId] = useState<string | null>(null);
+  // The picked one, or once it's decided, the one that took its place in the list.
+  const lastAt = useRef(0);
+  let at = waiting.findIndex((p) => p.id === pickedId);
+  if (at < 0) at = Math.min(lastAt.current, waiting.length - 1);
+  lastAt.current = Math.max(0, at);
+  const proposal = waiting[at] ?? null;
+  const [plans, setPlans] = useState<Record<string, Planned>>({});
+  const [runs, setRuns] = useState<Record<string, Run>>({});
+  const asked = useRef(new Set<string>());
+  const listRef = useRef<HTMLDivElement>(null);
+  useGlideHover(listRef, ".pp-card");
   const [busy, setBusy] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [note, setNote] = useState("");
   const rootRef = useRef<HTMLElement>(null);
   const noteRef = useRef<HTMLInputElement>(null);
-  const shownId = useRef<string | null>(null);
   const mac = isMacPlatform();
   const presenting = usePresenting();
   const id = proposal?.id ?? null;
-  shownId.current = id;
 
   useEffect(() => {
     rootRef.current?.focus();
   }, []);
 
-  // Each proposal shown reads its statements and their triggers; it runs nothing.
+  // Each waiting proposal reads its statements and their triggers once (the
+  // list's cards show them too); it runs nothing. The shown one goes first.
   useEffect(() => {
-    if (!id) return;
-    let live = true;
-    setPlanned({ id, plan: null, error: null });
-    setRun(null);
+    const order = proposal ? [proposal, ...waiting.filter((p) => p !== proposal)] : waiting;
+    for (const p of order) {
+      if (asked.current.has(p.id)) continue;
+      asked.current.add(p.id);
+      planProposal(p.id).then(
+        (plan) => setPlans((m) => ({ ...m, [p.id]: { plan, error: null } })),
+        (e) => setPlans((m) => ({ ...m, [p.id]: { plan: null, error: String(e) } })),
+      );
+    }
+  }, [waiting, proposal]);
+
+  // A note half typed belongs to the proposal it was for.
+  useEffect(() => {
     setRejecting(false);
     setNote("");
-    planProposal(id).then(
-      (plan) => live && setPlanned({ id, plan, error: null }),
-      (e) => live && setPlanned({ id, plan: null, error: String(e) }),
-    );
-    return () => {
-      live = false;
-    };
   }, [id]);
 
   // Nothing left to review: the page goes.
@@ -96,9 +112,10 @@ export function ProposalPage({
     if (rejecting) noteRef.current?.focus();
   }, [rejecting]);
 
-  const plan = planned?.id === id ? planned.plan : null;
-  const planError = planned?.id === id ? planned.error : null;
-  const mine = run?.id === id ? run : null;
+  const plan = id ? (plans[id]?.plan ?? null) : null;
+  const planError = id ? (plans[id]?.error ?? null) : null;
+  const mine = id ? (runs[id] ?? null) : null;
+  const setRun = (pid: string, r: Run) => setRuns((m) => ({ ...m, [pid]: r }));
   const state: DryState = mine?.state ?? "idle";
   const dry = mine?.state === "done" ? mine.dry : null;
   const conn = connections.find((c) => c.id === proposal?.connection) ?? null;
@@ -136,15 +153,27 @@ export function ProposalPage({
 
   const done = (id: string) => {
     forgetProposal(id);
-    setAt((i) => Math.max(0, Math.min(i, waiting.length - 2)));
+    setPickedId(null);
+    setRuns((m) => {
+      const next = { ...m };
+      delete next[id];
+      return next;
+    });
+  };
+
+  const pick = (to: number) => {
+    const p = waiting[Math.max(0, Math.min(to, waiting.length - 1))];
+    if (!p || p.id === id) return;
+    setPickedId(p.id);
+    listRef.current?.querySelector<HTMLElement>(`[data-proposal-id="${p.id}"]`)?.scrollIntoView({ block: "nearest" });
   };
 
   const dryRun = () => {
     if (!id || state === "running" || busy) return;
-    setRun({ id, state: "running", dry: null, error: null });
+    setRun(id, { state: "running", dry: null, error: null });
     dryRunProposal(id).then(
-      (dry) => shownId.current === id && setRun({ id, state: "done", dry, error: null }),
-      (e) => shownId.current === id && setRun({ id, state: "error", dry: null, error: String(e) }),
+      (dry) => setRun(id, { state: "done", dry, error: null }),
+      (e) => setRun(id, { state: "error", dry: null, error: String(e) }),
     );
   };
 
@@ -158,7 +187,7 @@ export function ProposalPage({
         showToast("Committed", `${rows.toLocaleString()} ${rows === 1 ? "row" : "rows"} · ${tableLabel(dry.statements[0].target)}`);
         done(proposal.id);
       } else if (out.outcome === "moved") {
-        setRun({ id: proposal.id, state: "done", dry: out.dry_run, error: null });
+        setRun(proposal.id, { state: "done", dry: out.dry_run, error: null });
         showToast("Nothing was saved", "The rows changed since the dry run. Check the new one.", "error");
       } else {
         showToast("Couldn't commit", out.error, "error");
@@ -202,6 +231,12 @@ export function ProposalPage({
       } else onClose();
       return;
     }
+    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !typing && !e.metaKey && !e.ctrlKey && !e.altKey && waiting.length > 1) {
+      e.preventDefault();
+      pick(at + (e.key === "ArrowDown" ? 1 : -1));
+      return;
+    }
     const confirm = commandById("confirm-write");
     const chord = confirm && chordFor(confirm);
     if (chord && eventMatches(e, chord, mac)) {
@@ -212,6 +247,7 @@ export function ProposalPage({
   };
 
   if (!proposal) return null;
+  const places = new Set(waiting.map((p) => `${p.connection}\u0000${p.database}`)).size;
   const expected = proposal.expect_rows;
   const first = statements[0];
   const destructive = statements.filter((s) => s.destructive && s.target);
@@ -255,6 +291,30 @@ export function ProposalPage({
       tabIndex={-1}
       onKeyDown={onKeyDown}
     >
+      <nav className="pp-list" data-testid="pp-list" aria-label="Proposed changes">
+        <header className="ag-head">
+          <h1 className="ag-title">Proposed changes</h1>
+          <span className="pp-sub" data-testid="pp-list-count">
+            {waiting.length} waiting
+          </span>
+        </header>
+        <div ref={listRef} className="pp-cards">
+          {waiting.map((p, i) => (
+            <ProposalCard
+              key={p.id}
+              p={p}
+              planned={plans[p.id]}
+              run={runs[p.id]}
+              where={places > 1 ? placeLabel(p, connections) : null}
+              current={i === at}
+              onPick={() => {
+                setPickedId(p.id);
+                rootRef.current?.focus();
+              }}
+            />
+          ))}
+        </div>
+      </nav>
       <div className="pp-main">
         <header className="ag-head">
           <h1 className="ag-title" data-testid="pp-title">
@@ -318,30 +378,8 @@ export function ProposalPage({
         </div>
       </div>
       <aside className="pp-side" data-testid="pp-side">
-        <InspectorHead
-          onClose={onClose}
-          tools={
-            waiting.length > 1 && (
-              <>
-                <InspectorButton label="Previous" ariaLabel="Previous" disabled={at === 0} onClick={() => setAt(at - 1)}>
-                  <ChevronLeftIcon size={10} />
-                </InspectorButton>
-                <InspectorButton
-                  label="Next"
-                  ariaLabel="Next"
-                  disabled={at >= waiting.length - 1}
-                  onClick={() => setAt(at + 1)}
-                >
-                  <ChevronRightIcon size={10} />
-                </InspectorButton>
-              </>
-            )
-          }
-        >
+        <InspectorHead onClose={onClose}>
           <h2 className="insp-title">Proposed change</h2>
-          <small className="insp-meta sans" data-testid="pp-position">
-            {Math.min(at, waiting.length - 1) + 1} of {waiting.length}
-          </small>
         </InspectorHead>
         <div className="pp-body">
           <div className="pp-who">
@@ -432,6 +470,86 @@ export function ProposalPage({
         </footer>
       </aside>
     </section>
+  );
+}
+
+/** "Platform API · orders": where a proposal would run, when the list spans more than one place. */
+function placeLabel(p: Proposal, connections: ConnectionRecord[]): string {
+  const conn = connections.find((c) => c.id === p.connection);
+  return conn ? (conn.kind === "postgres" ? `${conn.name} · ${p.database}` : conn.name) : "Deleted connection";
+}
+
+/** "UPDATE customers", "INSERT, DELETE orders": the verbs and tables, from the plan once read. */
+function cardHead(p: Proposal, plan: Plan | null): string {
+  const read = plan?.statements.filter((s) => s.verb && s.target) ?? [];
+  if (read.length && read.length === plan?.statements.length) {
+    const verbs = [...new Set(read.map((s) => s.verb))].join(", ");
+    const tables = [...new Set(read.map((s) => tableLabel(s.target!)))].join(", ");
+    return `${verbs} ${tables}`;
+  }
+  const verb = /^\s*(insert|update|delete)\b/i.exec(p.sql)?.[1];
+  const table = proposalTable(p.sql);
+  return verb && table ? `${verb.toUpperCase()} ${table}` : p.sql.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * One waiting proposal in the list: its verbs and tables, the agent's reason
+ * (two lines), who sent it and when; at the end, a missing WHERE, else the
+ * dry run's rows once it has run.
+ */
+function ProposalCard({
+  p,
+  planned,
+  run,
+  where,
+  current,
+  onPick,
+}: {
+  p: Proposal;
+  planned: Planned | undefined;
+  run: Run | undefined;
+  where: string | null;
+  current: boolean;
+  onPick: () => void;
+}) {
+  const plan = planned?.plan ?? null;
+  const count = plan?.statements.length ?? 0;
+  const noWhere = plan?.statements.some((s) => s.destructive && s.target);
+  const rows = run?.state === "done" && run.dry ? run.dry.statements.reduce((n, s) => n + s.rows, 0) : null;
+  return (
+    <button
+      type="button"
+      className="pp-card"
+      data-testid="pp-card"
+      data-proposal-id={p.id}
+      aria-current={current ? "true" : undefined}
+      tabIndex={-1}
+      onClick={onPick}
+    >
+      <span className="pp-card-top">
+        <span className="pp-card-head" data-testid="pp-card-head">
+          {cardHead(p, plan)}
+        </span>
+        <span className="pp-card-ago">{sinceLabel(p.ts)}</span>
+      </span>
+      <span className="pp-card-reason">{p.reason}</span>
+      <span className="pp-card-meta">
+        <AgentIcon size={12} />
+        <span className="pp-card-who">
+          {[clientLabel(p.client), where, count > 1 ? `${count} statements` : null].filter(Boolean).join(" · ")}
+        </span>
+        {noWhere ? (
+          <span className="pp-card-warn" data-testid="pp-card-warn">
+            <WarningIcon size={11} />
+            No WHERE
+          </span>
+        ) : rows !== null ? (
+          <span className="pp-card-state" data-testid="pp-card-rows">
+            {rows.toLocaleString()} {rows === 1 ? "row" : "rows"} · dry run
+          </span>
+        ) : null}
+      </span>
+    </button>
   );
 }
 
