@@ -9,8 +9,11 @@
 // the dry run", and Commit is disabled. Dry run puts the rows under each
 // statement (changed cells old over new, inserts and deletes marked), says
 // "N rows · rolled back" and enables Commit; a lock timeout shows as a plain
-// error with Dry run again; switching proposals needs a new dry run. SQL the
-// lexer can't read shows whole with "Couldn't read the target table".
+// error with Dry run again. With more than one waiting (2026-10-17) a list of
+// cards on the left opens any of them in any order (click or ↑↓); each keeps
+// its dry run while another shows, its card saying "N rows · dry run" or "No
+// WHERE"; with one left the list goes. SQL the lexer can't read shows whole
+// with "Couldn't read the target table".
 // Commit ⇧⌘↵ sends the dry run's counts; a "moved" answer swaps in the fresh
 // dry run and saves nothing; Discard sends the note; the page closes when
 // nothing waits. The plan, checks, dry run and commit themselves are proved
@@ -235,9 +238,15 @@ await page.click('[data-testid="sb-agents"]');
 await page.waitForSelector('[data-testid="proposal-page"] [data-testid="pp-trigger"]');
 const dryCalls = async () => (await calls("proposal_dry_run")).length;
 check((await dryCalls()) === 0, "opening the review calls no dry run");
-check((await calls("proposal_plan")).at(-1)?.id === "p_000000000001", "it reads the plan");
+check((await calls("proposal_plan"))[0]?.id === "p_000000000001", "it reads the shown one's plan first");
+check((await calls("proposal_plan")).map((a) => a.id).sort().join() === "p_000000000001,p_000000000002", "and every waiting one's, once, for its card");
 check((await page.getAttribute('[data-testid="proposal-page"]', "data-proposal")) === "p_000000000001", "the oldest proposal shows first");
-check((await page.textContent('[data-testid="pp-position"]')) === "1 of 2", "1 of 2");
+check((await page.$$('[data-testid="pp-list"] [data-testid="pp-card"]')).length === 2, "two waiting: a card each in the list");
+check((await page.getAttribute('[data-testid="pp-card"][aria-current="true"]', "data-proposal-id")) === "p_000000000001", "the oldest card is the one shown");
+check((await page.textContent('[data-testid="pp-list-count"]')) === "2 waiting", "the list says 2 waiting");
+// Text on purpose: the cards' heads are under test.
+check((await page.$$eval('[data-testid="pp-card-head"]', (h) => h.map((x) => x.textContent))).join(" | ") === "UPDATE customers | INSERT, DELETE orders", "cards name their verbs and tables");
+check(await page.$('[data-proposal-id="p_000000000002"] [data-testid="pp-card-warn"]'), "the DELETE with no WHERE warns on its card");
 // Text on purpose: the heading, the SQL and the lines are what's under test.
 check((await page.textContent('[data-testid="pp-stmt-head"]')) === "UPDATE customers", "the statement's heading: UPDATE customers");
 check((await page.textContent('[data-testid="pp-sql"]')).includes("WHERE id IN (12, 31, 47)"), "its exact SQL shows");
@@ -281,9 +290,11 @@ await page.evaluate(() => document.documentElement.setAttribute("data-theme", "d
 await shot("4-after-dry-run-dark");
 await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
 
-// 6. Next: two statements, an insert and a DELETE with no WHERE. Nothing runs
-// until Dry run; the no-WHERE warning shows from the plan.
-await page.click('[data-testid="pp-side"] [aria-label="Next"]');
+check((await page.textContent('[data-proposal-id="p_000000000001"] [data-testid="pp-card-rows"]')) === "3 rows · dry run", "its card says 3 rows · dry run");
+
+// 6. Its card opens the second: two statements, an insert and a DELETE with no
+// WHERE. Nothing runs until Dry run; the no-WHERE warning shows from the plan.
+await page.click('[data-proposal-id="p_000000000002"]');
 await page.waitForSelector('[data-proposal="p_000000000002"] [data-testid="pp-stmt"][data-verb="delete"]');
 check((await dryCalls()) === 2, "switching proposals runs nothing");
 check((await page.$$('[data-testid="pp-stmt"]')).length === 2, "one section per statement");
@@ -295,26 +306,35 @@ await page.waitForSelector('[data-proposal="p_000000000002"] [data-testid="pp-pr
 check((await page.$$('[data-testid="pp-preview"]')).length === 2, "one preview per statement");
 check((await page.$$('[data-row="insert"]')).length === 1 && (await page.$$('[data-row="delete"]')).length === 3, "the inserted row and the deleted rows are marked");
 await shot("5-two-statements");
+await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+await shot("5b-two-statements-dark");
+await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
 
-// 7. Discard with a note: it is sent, and the first comes back, needing a new dry run.
+// 7. Discard with a note: it is sent, and the first comes back with its dry run kept.
 await page.click('[data-testid="pp-reject"]');
 await page.fill('[data-testid="pp-note"]', "Keep the test orders for now.");
 await page.click('[data-testid="pp-reject-send"]');
-await page.waitForSelector('[data-proposal="p_000000000001"] [data-testid="pp-dry"][data-state="idle"]');
+await page.waitForSelector('[data-proposal="p_000000000001"] [data-testid="pp-dry"][data-state="done"]');
 const rejected = (await calls("proposal_reject")).at(-1);
 check(rejected?.id === "p_000000000002" && rejected?.note === "Keep the test orders for now.", "Discard sends the note");
-check(await page.$eval('[data-testid="pp-commit"]', (b) => b.disabled), "back on the first, Commit waits for a new dry run");
+check(await page.$eval('[data-testid="pp-commit"]', (b) => !b.disabled), "back on the first, its dry run is kept and Commit is ready");
+check((await dryCalls()) === 3, "coming back ran no new dry run");
+check(!(await page.$('[data-testid="pp-list"]')), "with one left, the list goes");
 
 // 8. SQL the lexer can't read: shown whole, no trigger list, one line says so.
 await page.evaluate(() => window.__addOdd());
-await page.waitForFunction(() => document.querySelector('[data-testid="pp-position"]')?.textContent === "1 of 2", null, { timeout: 6000 });
-await page.click('[data-testid="pp-side"] [aria-label="Next"]');
+await page.waitForSelector('[data-testid="pp-list"] [data-proposal-id="p_000000000003"]', { timeout: 6000 });
+await page.focus('[data-testid="proposal-page"]');
+await page.keyboard.press("ArrowDown");
 await page.waitForSelector('[data-proposal="p_000000000003"] [data-testid="pp-dry-line"]');
 check(!(await page.$('[data-testid="pp-stmt-head"]')) && !(await page.$('[data-testid="pp-trigger"]')), "no heading and no triggers for it");
 check((await page.textContent('[data-testid="pp-sql"]')).startsWith("WITH stale AS"), "the whole SQL shows");
 check((await page.textContent('[data-testid="pp-dry-line"]')) === "Couldn't read the target table", "the line says it couldn't read the target table");
+check((await page.getAttribute('[data-testid="pp-card"][aria-current="true"]', "data-proposal-id")) === "p_000000000003", "↓ moved to its card");
+// Text on purpose: a card for SQL the lexer can't read shows the SQL itself.
+check((await page.textContent('[data-proposal-id="p_000000000003"] [data-testid="pp-card-head"]')).startsWith("WITH stale AS"), "its card shows the SQL's start");
 await shot("6-unread");
-await page.click('[data-testid="pp-side"] [aria-label="Previous"]');
+await page.keyboard.press("ArrowUp");
 await page.waitForSelector('[data-proposal="p_000000000001"] [data-testid="pp-dry-run"]');
 
 // 9. Dry run, then Commit ⇧⌘↵: the rows moved, so nothing is saved and the fresh dry run shows.

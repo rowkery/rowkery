@@ -36,12 +36,19 @@ The review takes the place of the editor and grid. The main column shows the cha
 | Head | The tables it changes, the connection, the database and how many statements |
 | Each statement | Its verb and table, such as **UPDATE orders**, over its exact SQL |
 | Triggers | Each trigger the statements would fire, such as "orders_audit runs on UPDATE orders", with "Triggers fire during the dry run" |
-| Proposed change, 1 of 3 | Where you are in the queue; the arrows move between changes when more than one waits |
 | Who and where | The agent's name, the connection and database, and how long ago it arrived |
 | Reason | The agent's own words, up to 1,000 characters |
 | Warning | "No WHERE: this deletes every row in orders" (or changes) for a DELETE or UPDATE with no WHERE |
 
 Opening the review runs nothing: it only reads which triggers the tables have. **Commit** stays disabled until you run a dry run.
+
+### When several wait
+
+When more than one change waits, a list on the left shows them all, oldest first, so you can review them in any order. Click a card, or press <kbd>↑</kbd> and <kbd>↓</kbd>, to open another one.
+
+<Shot src="/img/proposed-changes-list.webp" width={1100} height={620} alt="The review with three changes waiting: a list on the left with UPDATE customers from Cursor, DELETE carts from Claude and UPDATE orders from Claude Code, each with its reason and age; the first is open beside it." />
+
+Each card shows the verbs and tables, the agent's reason, which agent sent it and when. A card says "No WHERE" in red when a statement has no WHERE, or "3 rows · dry run" once you've run one. When the changes come from more than one connection or database, the card names it too. The list goes once only one change is left.
 
 ## The dry run
 
@@ -56,7 +63,7 @@ Click **Dry run**. Rowkery runs the statements in a transaction and rolls it bac
 
 Triggers really run during the dry run, inside the same rolled-back transaction. What they write isn't counted or shown.
 
-If another session holds the rows, the dry run waits 2 seconds, then stops: "Another session is holding these rows, so the dry run stopped after 2 s. Nothing was changed." Click **Dry run again** to retry. Moving to another proposal and back needs a new dry run.
+If another session holds the rows, the dry run waits 2 seconds, then stops: "Another session is holding these rows, so the dry run stopped after 2 s. Nothing was changed." Click **Dry run again** to retry. Each change keeps its dry run while you look at another one, so you can come back and commit without running it again.
 
 ## Commit
 

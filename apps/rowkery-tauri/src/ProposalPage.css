@@ -360,3 +360,131 @@
 .pp-note-input:focus {
   border-color: var(--acc);
 }
+
+/* More than one waiting (2026-10-17): every one is a card in a column on the
+   left, where the schema column sits, oldest first. The shown one is filled
+   with --line, as Settings marks its category; the glide is the hover. */
+.pp-list {
+  width: 288px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  box-shadow: inset -1px 0 0 var(--line);
+}
+
+.pp-cards {
+  position: relative;
+  isolation: isolate;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  --glide-radius: 8px;
+}
+
+.pp-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 10px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background-color 0.18s ease, transform 120ms ease;
+}
+
+.pp-card:active {
+  transform: scale(0.985);
+}
+
+.pp-card[aria-current="true"] {
+  background: var(--line);
+}
+
+.pp-card:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: -2px;
+}
+
+.pp-card-top,
+.pp-card-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pp-card-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 12px var(--mono);
+}
+
+.pp-card-ago {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--mute);
+  font-size: 11px;
+}
+
+.pp-card-reason {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.pp-card-meta {
+  align-items: center;
+  gap: 6px;
+  color: var(--mute);
+  font-size: 11px;
+}
+
+.pp-card-meta svg {
+  flex-shrink: 0;
+}
+
+.pp-card-who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-card-state,
+.pp-card-warn {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.pp-card-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--del);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pp-card {
+    transition: none;
+  }
+
+  .pp-card:active {
+    transform: none;
+  }
+}

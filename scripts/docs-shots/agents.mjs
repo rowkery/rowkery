@@ -12,6 +12,7 @@
 //  - proposed-changes-arrival: the arrival toast and the count on the Agents button;
 //  - proposed-changes-review: the review before the dry run (SQL, reason, triggers);
 //  - proposed-changes-dry-run: after the dry run (old values over new, counts);
+//  - proposed-changes-list: three waiting, the list of cards beside the oldest;
 //  - proposed-changes-review.mp4 (clip): a proposal arrives, Review, Dry run, Commit;
 //  - sensitive-columns-and-presenting-header-menu: a header's Mark as sensitive;
 //  - sensitive-columns-and-presenting-columns: Edit access's column list with a masked column;
@@ -118,7 +119,7 @@ function agentsMore() {
       case "proposals_waiting":
         return structuredClone(window.__QUEUE__);
       case "proposal_plan":
-        return structuredClone(window.__PLAN__);
+        return structuredClone(window.__PLANS__[a.id] ?? window.__PLAN__);
       case "proposal_dry_run":
         await new Promise((r) => setTimeout(r, 450));
         return structuredClone(window.__DRY__);
@@ -148,6 +149,17 @@ function agentsMore() {
   window.__PLAN__ = {
     connection_name: "storefront",
     statements: [{ verb: "UPDATE", target: "orders", sql, destructive: false, triggers: [{ name: "orders_audit", event: "UPDATE" }] }],
+  };
+  // Two more, older, for the list: one waiting at a time never shows it.
+  const lower = "UPDATE customers SET email = lower(email) WHERE email <> lower(email)";
+  const carts = "DELETE FROM carts WHERE updated_at < now() - interval '90 days'";
+  window.__OLDER__ = [
+    { id: "p_8b21d4e09a77", ts: T(11, 30, 4), connection: "prd", database: "shop", sql: lower, reason: "Twelve customers signed up with upper-case emails, so logging in by email misses them.", expect_rows: 12, client: "cursor" },
+    { id: "p_c04e6f1d3358", ts: T(11, 38, 40), connection: "prd", database: "shop", sql: carts, reason: "Carts nobody touched in 90 days are still kept and slow the abandoned-cart job.", client: "claude-ai" },
+  ];
+  window.__PLANS__ = {
+    p_8b21d4e09a77: { connection_name: "storefront", statements: [{ verb: "UPDATE", target: "customers", sql: lower, destructive: false, triggers: [] }] },
+    p_c04e6f1d3358: { connection_name: "storefront", statements: [{ verb: "DELETE", target: "carts", sql: carts, destructive: false, triggers: [] }] },
   };
   const cols = D.ORDER_COLS.map(([n]) => n);
   const row = (id) => {
@@ -253,6 +265,20 @@ if (wanted("proposed-changes")) {
     await page.click('[data-testid="pp-dry-run"]');
     await page.waitForSelector('[data-testid="pp-dry"][data-state="done"]');
     await shot(page, "proposed-changes-dry-run");
+    await context.close();
+  }
+  // Three waiting: the list of cards, the oldest shown.
+  {
+    const { context, page } = await openApp({ w: 1100, h: 620, more: agentsMore, init: () => (window.__NO_LOG__ = true) });
+    await hideKeyStrip(page);
+    await page.waitForTimeout(400);
+    await page.evaluate(() => window.__QUEUE__.push(...window.__OLDER__, window.__PROPOSAL__));
+    await tick(page);
+    await page.waitForSelector("[data-toast-offer]");
+    await page.click("[data-toast-offer]");
+    await page.waitForSelector('[data-testid="pp-list"] [data-proposal-id="p_3f9a1c07b2e4"]');
+    await page.waitForSelector('[data-testid="proposal-page"] [data-testid="pp-sql"]');
+    await shot(page, "proposed-changes-list");
     await context.close();
   }
   // The clip: arrival, Review, Dry run, Commit.
