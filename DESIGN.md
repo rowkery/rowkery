@@ -202,9 +202,9 @@ The website's palette: white or black sheets, neutral grey rules, black or white
 
 ## Layout
 
-A fixed desktop frame on a 12 px-radius window: the 48 px title bar across the top (bar ground, a rule under it: traffic lights, one pill per window, +; then the shown window's Safe mode and MCP and the bordered ⌘K search), the schema column under it at the left (264 px, dragged between 240 and 360), then the main column on the paper. The main column stacks a 42 px tab row, the table head (QUERY row and WHERE row of chips), the grid (46 px header, 30 px rows, 44 px gutter) and, while edits wait, the 46 px edits bar at its foot. Query tabs put the editor above a Results card with its own row (count, Export, the zone menu).
+A fixed desktop frame on a 12 px-radius window: the 48 px title bar across the top (bar ground, a rule under it: traffic lights, one pill per window, +; the shown pill carries its safe mode shield and agent mark, and nothing sits at the right), the schema column under it at the left (264 px, dragged between 240 and 360), then the main column on the paper. The main column stacks a 42 px tab row, the table head (QUERY row and WHERE row of chips), the grid (46 px header, 30 px rows, 44 px gutter) and, while edits wait, the 46 px edits bar at its foot. Query tabs put the editor above a Results card with its own row (count, Export, the zone menu).
 
-The inspector column opens on the right of the main column for Quick Look (340 px; 280 under 1100 px; resizable), Review SQL (340 px) and New connection (380 px); the grid ends where it begins and keeps its column widths. With no connection, the schema column folds and the main column spans the window; the title bar keeps only + and ⌘K. There is no status bar and no footer; confirmations are toasts.
+The inspector column opens on the right of the main column for Quick Look (340 px; 280 under 1100 px; resizable), Review SQL (340 px) and New connection (380 px); the grid ends where it begins and keeps its column widths. With no connection, the schema column folds and the main column spans the window; the title bar keeps only +. ⌘K opens a card centred near the top of the window. There is no status bar and no footer; confirmations are toasts.
 
 ### Named Rules
 **The Inspector Column Rule.** A row, a review or a new connection opens in one column on the right, beside the data, never over it. One inspector at a time.
@@ -221,14 +221,14 @@ Flat by default. Depth is tonal (paper, panel, bar) and ruled (1 px lines, often
 - **Scrim** (`--scrim`, rgba(31,27,22,.12) / rgba(0,0,0,.4)): the layer behind a sheet; it only catches the click away.
 
 ### Named Rules
-**The Opaque Sheet Rule.** No backdrop-filter on anything; surfaces are opaque paper.
+**The Opaque Sheet Rule.** No backdrop-filter on anything; surfaces are opaque paper. The one exception is ⌘K's scrim, which blurs and dims the window behind it so the search stands alone (2026-10-17).
 
 ## Shapes
 
 Gently rounded: 3 px badges, 6 px controls, 8 px cards and sheets, 13 px pill chips, the 12 px window. Borders are 1 px. Rules are structure; borders are controls.
 
 ### Named Rules
-**The Borders Mean Controls Rule.** A 1 px border around something says it can be pressed (buttons, inputs, cards on Connect to start, the ⌘K search). Panels and sections are separated by rules, not boxed.
+**The Borders Mean Controls Rule.** A 1 px border around something says it can be pressed (buttons, inputs, cards on Connect to start). Panels and sections are separated by rules, not boxed.
 
 ## Components
 
@@ -253,7 +253,7 @@ Gently rounded: 3 px badges, 6 px controls, 8 px cards and sheets, 13 px pill ch
 - **Focus:** the orange focus ring.
 
 ### Navigation
-- **Title bar:** bar ground, 48px. Windows are 28px pills (engine logo or the penguin, the name, a 7px environment dot, a spinner / ⚠ when it connects, runs out of sight or failed; × on hover and on the shown one); the shown pill is raised on paper with the control shadow (2026-10-13).
+- **Title bar:** bar ground, 48px. Windows are 28px pills (engine logo or the penguin, the name, a 7px environment dot, a spinner / ⚠ when it connects, runs out of sight or failed; × on hover and on the shown one); the shown pill is raised on paper with the control shadow (2026-10-13). The shown pill also carries the safe mode shield while connected and an agent mark while its connection is shared; another pill shows the agent mark, with a green dot, only while an agent read it in the last minute (2026-10-17).
 - **Schema column foot:** past a rule, one row of 28px icon buttons 4px apart: Agents (green dot while shared, orange while its page is up), Appearance (sun, moon or half disc for Auto) and Help; names and keys in the tooltips.
 - **Tabs:** 42px row; the active tab is underlined 2px in orange.
 - **Lists:** schema, pickers, ⌘K, menus and saved connections share the glide hover.
@@ -284,7 +284,7 @@ The posture penguin (Ready / Tilted, the original hand drawing) appears only at 
 - **Do** make exits shorter than entries; keyboard-opened overlays appear at once; honour prefers-reduced-motion.
 
 ### Don't:
-- **Don't** use glass, backdrop-filter or glow; the sheet is opaque.
+- **Don't** use glass, backdrop-filter or glow; the sheet is opaque (⌘K's scrim is the one blur).
 - **Don't** colour a commit orange or red.
 - **Don't** add a status bar or a footer.
 - **Don't** float a row or a form over the data; it opens in the inspector column.
