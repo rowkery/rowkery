@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 // Settings and the reordered schema-column foot (2026-10-17) proof with a
 // stubbed Tauri `invoke`. The foot reads Agents · Presenting on the left and
-// Appearance · Keyboard shortcuts · Settings on the right. Ctrl+, (⌘, on a
+// Settings on the right (Appearance and Keyboard shortcuts left it for
+// Settings on 2026-10-17). Ctrl+, (⌘, on a
 // Mac), the gear or ⌘K "Settings" opens Settings as a page in place of the
-// window (the schema column hides, as for Agents), with Updates, Appearance
-// and Keyboard down the left. Updates: the version line, Check now, and the
+// window (the schema column hides, as for Agents), with Updates, Appearance,
+// Keyboard and Agents down the left, and a back button naming the window
+// first in its head. Updates: the version line, Check now, and the
 // four update choices as radio cards (Download only by default). With Notify
 // only, Check now finds 0.1.2 without downloading it: the line offers
 // Download, Updates gets an orange dot, and back in the window the foot shows
 // the orange round update button. That button opens Settings > Updates,
 // Download fetches the release, and the line offers Restart. Appearance and
-// Keyboard apply at once. Esc goes back. Light and dark. Hovers fade,
+// Keyboard apply at once. Esc, or the head's back button, goes back. Light and dark. Hovers fade,
 // presses give, categories rise in; Reduce Motion stops it.
 // What a download, restart and Automatic's idle restart do on the Mac is
 // covered by `cargo test -p rowkery-tauri` and updates.test.ts, not here.
@@ -151,17 +153,17 @@ await page.waitForSelector('[data-testid="conn-popover"]');
 await page.keyboard.press("Enter");
 await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 
-// 1. The foot: Agents · Presenting | Appearance · Keyboard shortcuts · Settings.
+// 1. The foot: Agents · Presenting | Settings.
 const order = await page.$$eval(`${foot} > *`, (els) => els.filter((e) => !e.hasAttribute("data-glide")).map((e) => e.getAttribute("data-testid") ?? e.className));
 check(
-  JSON.stringify(order) === JSON.stringify(["sb-agents", "sb-presenting", "sb-foot-gap", "sb-appearance", "sb-help", "sb-settings"]),
+  JSON.stringify(order) === JSON.stringify(["sb-agents", "sb-presenting", "sb-foot-gap", "sb-settings"]),
   `the foot's order (${order.join(", ")})`,
 );
-const [presentBox, themeBox, gearBox] = await Promise.all(
-  ["sb-presenting", "sb-appearance", "sb-settings"].map((id) => page.locator(`${foot} [data-testid="${id}"]`).boundingBox()),
+const [presentBox, gearBox] = await Promise.all(
+  ["sb-presenting", "sb-settings"].map((id) => page.locator(`${foot} [data-testid="${id}"]`).boundingBox()),
 );
 const footBox = await page.locator(foot).boundingBox();
-check(themeBox.x - (presentBox.x + presentBox.width) > 60, "a gap parts the left pair from the right three");
+check(gearBox.x - (presentBox.x + presentBox.width) > 60, "a gap parts the left pair from Settings");
 check(footBox.x + footBox.width - (gearBox.x + gearBox.width) <= 16, "Settings sits at the right end");
 check(!(await page.$(`${foot} [data-testid="sb-update"]`)), "no update button while nothing waits");
 await page.screenshot({ path: `${OUT}/1-foot.png`, clip: { x: footBox.x, y: footBox.y - 4, width: footBox.width, height: footBox.height + 8 } });
@@ -172,6 +174,10 @@ await page.waitForSelector(settings);
 check((await page.getAttribute('[data-testid="app-frame"]', "data-page")) === "settings", "the frame says a page is up");
 check(!(await page.locator(`${ws} .sidebar-clip`).isVisible().catch(() => false)), "the schema column hides under the page");
 check((await page.getAttribute(settings, "data-section")) === "updates", "it opens on Updates");
+const sections = await page.$$eval(`${settings} [data-st-section]`, (els) => els.map((e) => e.getAttribute("data-st-section")));
+check(JSON.stringify(sections) === JSON.stringify(["updates", "appearance", "keyboard", "agents"]), `Updates, Appearance, Keyboard and Agents down the left (${sections})`);
+// Text on purpose: the back button names the window it returns to.
+check((await page.textContent(`${settings} [data-testid="page-back"]`)).includes("shop-prd"), "the head's back button names the window");
 await page.waitForFunction(() => /Rowkery 0\.1\.1/.test(document.querySelector('[data-testid="st-update-status"]')?.textContent ?? ""));
 check(true, "the version line names this build");
 check(await checked("update-pref", "download"), "Download only is picked by default");
@@ -205,7 +211,7 @@ const btn = await page.$eval(update, (e) => {
 check(btn.bg === (await token("--acc")), `the update button is orange (${btn.bg})`);
 check(btn.radius === "50%" && Math.round(btn.w) === 28 && Math.round(btn.h) === 28, `round, the foot's 28 px (${btn.w}x${btn.h}, ${btn.radius})`);
 const order2 = await page.$$eval(`${foot} > *`, (els) => els.filter((e) => !e.hasAttribute("data-glide")).map((e) => e.getAttribute("data-testid") ?? e.className));
-check(order2.indexOf("sb-update") === order2.indexOf("sb-appearance") - 1, "it sits just left of Appearance");
+check(order2.indexOf("sb-update") === order2.indexOf("sb-settings") - 1, "it sits just left of Settings");
 await page.screenshot({ path: `${OUT}/4-update-button.png` });
 
 // 5. The button opens Updates; Download fetches it, then Restart is offered.
@@ -248,9 +254,9 @@ await page.waitForFunction(() => !document.querySelector('[data-testid="cp-scrim
 await page.click(`${foot} [data-testid="sb-settings"]`);
 await page.waitForSelector(settings);
 check(true, "the gear opens Settings");
-await page.click(`${settings} [data-st-close]`);
+await page.click(`${settings} [data-testid="page-back"]`);
 await page.waitForFunction((sel) => !document.querySelector(sel), settings);
-check(true, "esc in the head goes back");
+check(true, "the head's back button goes back");
 
 // 8. Motion: hovers fade, presses give, a picked category rises in, and the
 // foot's buttons give under a press; Reduce Motion turns all of it off.
@@ -272,7 +278,7 @@ check(/color/.test(await style(`${settings} .st-nav-row`, "transitionProperty"))
 check((await style(`${settings} .st-status .mcp-btn`, "transitionProperty")).includes("transform"), "buttons give under a press");
 await page.click(`${settings} [data-st-section="appearance"]`);
 check((await style(`${settings} .st-pane`, "animationName")) === "rise", "a picked category's settings rise in");
-await page.click(`${settings} [data-st-close]`);
+await page.click(`${settings} [data-testid="page-back"]`);
 await page.waitForFunction((sel) => !document.querySelector(sel), settings);
 check(/transform/.test(await style(`${foot} [data-testid="sb-settings"]`, "transitionProperty")), "foot buttons give under a press");
 await page.emulateMedia({ reducedMotion: "reduce" });

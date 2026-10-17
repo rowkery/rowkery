@@ -10,7 +10,7 @@ export const metadata = { title: "Windows and switching" };
 
 Every window has a pill in the title bar. Click a pill to show that window; the others keep running in the background, so a long query in a window you left carries on.
 
-<Shot src="/img/windows-and-switching-pills.webp" width={1600} height={48} alt="The title bar with five window pills: storefront with a red dot (shown), storefront with an orange dot, analytics with a blue dot, Docker Postgres with a green dot and an empty New window with the penguin, then +, Confirm writes, MCP · shared and Search tables, commands." caption="Four windows on four environments, an empty window, then the shown window's Safe mode and MCP" />
+<Shot src="/img/windows-and-switching-pills.webp" width={1600} height={48} alt="The title bar with five window pills: storefront with a red dot (shown), storefront with an orange dot, analytics with a blue dot, Docker Postgres with a green dot and an empty New window with the penguin, then +. The shown pill also carries its safe mode shield and an agent mark." caption="Four windows on four environments and an empty window; the shown one carries its safe mode and agent marks" />
 
 A pill shows:
 
@@ -19,12 +19,13 @@ A pill shows:
 - A dot in the connection's environment colour: <Env name="prd" /> <Env name="stg" /> <Env name="dev" /> <Env name="local" />. [Environments and safe mode](/environments-and-safe-mode/) explains the labels.
 - A spinner while the window connects, or while a window you aren't looking at still has queries running.
 - A warning mark when the window couldn't connect.
-- An **MCP** tag when an agent read that connection in the last minute. Click it to open the Agents page.
+- On the shown pill, while it's connected, its **safe mode** shield. Click it to change the mode ([Environments and safe mode](/environments-and-safe-mode/#change-safe-mode)).
+- An **agent mark**: on the shown pill while its connection is shared with agents, and on any pill whose connection an agent read in the last minute, with a green dot. Click it to open the Agents page.
 - **×** on the shown pill, and on any pill under the pointer, to close the window.
 
 Hover a pill for its full description: the connection, the database, the environment's full name, and its key (<kbd>⌘1</kbd> to <kbd>⌘9</kbd> for the first nine windows).
 
-On the right of the title bar, the shown window has its **Safe mode** and **MCP** buttons (only while it's connected), then **Search**, which opens <kbd>⌘K</kbd>.
+Nothing else sits in the title bar: <kbd>⌘K</kbd> opens search in the middle of the window.
 
 ## Open a new window
 

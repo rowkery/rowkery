@@ -3,12 +3,12 @@
 // /environments-and-safe-mode/), from the running app (Vite) with the docs' stubbed storefront
 // backend plus four more saved connections and five restored windows:
 //  - windows-and-switching-pills: the title bar with a window per connection (prd, stg, dev,
-//    local), an empty window's penguin pill, +, then Safe mode, MCP and Search;
+//    local), an empty window's penguin pill and +; the shown pill's safe mode shield and agent mark;
 //  - windows-and-switching-connection-switcher: ⇧⌘O with a pinned connection on top;
 //  - windows-and-switching-database-switcher: ⇧⌘D listing the server's databases;
 //  - windows-and-switching-failed: Couldn't connect, with Retry and Edit…;
 //  - windows-and-switching-foot: the schema column's foot (Agents, Appearance, Presenting, Help);
-//  - environments-and-safe-mode-menu: the Safe mode menu open in the title bar;
+//  - environments-and-safe-mode-menu: the Safe mode menu open under the shown pill's shield;
 //  - environments-and-safe-mode-held: Confirm writes holding a DELETE over the last results;
 //  - environments-and-safe-mode-destructive: an UPDATE with no WHERE, held with its warning;
 //  - environments-and-safe-mode-refused: a Read-only connection refusing an UPDATE;
@@ -161,8 +161,9 @@ const run = async (page, sql) => {
     await page.waitForSelector('[data-menu="safe-mode"]');
     const m = await page.locator('[data-menu="safe-mode"]').boundingBox();
     const s = await page.locator('[data-testid="titlebar"] [data-shield]').boundingBox();
-    const x = Math.floor(s.x - 16);
-    await shot(page, "environments-and-safe-mode-menu", { clip: { x, y: 0, width: 1280 - x, height: Math.ceil(m.y + m.height + 16) }, mouse: false });
+    const pill = await page.locator('[data-testid="win-tab"][data-on]').boundingBox();
+    const x = Math.max(0, Math.floor(Math.min(pill.x, m.x) - 16));
+    await shot(page, "environments-and-safe-mode-menu", { clip: { x, y: 0, width: Math.ceil(m.x + m.width + 16 - x), height: Math.ceil(m.y + m.height + 16) }, mouse: false });
     await page.keyboard.press("Escape");
   }
   if (wanted("environments-and-safe-mode-held") || wanted("environments-and-safe-mode-destructive")) {

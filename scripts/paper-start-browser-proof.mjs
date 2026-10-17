@@ -194,8 +194,8 @@ for (const dark of [false, true]) {
   const savedH = await page.$eval('[data-saved-conn="prd"]', (e) => e.getBoundingClientRect().height);
   const foundH = await page.$eval('[data-found="5432"]', (e) => e.getBoundingClientRect().height);
   check(Math.round(savedH) === 44 && Math.round(foundH) === 36, `${theme}: 44 px saved rows, a 36 px found row (${savedH}, ${foundH})`);
-  // The empty window has no tab row chrome: no chip, no ‹ ›, only ⌘K.
-  check(!(await visible('[data-testid="conn-chip"]')) && !(await visible(`${ws} [data-history-back]`)) && (await visible('[data-testid="search-cap"]')), `${theme}: no chip or ‹ › in the tab row, only ⌘K`);
+  // The empty window has no tab row chrome: no chip, no ‹ ›, no search box (⌘K opens mid-window).
+  check(!(await visible('[data-testid="conn-chip"]')) && !(await visible(`${ws} [data-history-back]`)) && !(await visible('[data-testid="search-cap"]')), `${theme}: no chip, ‹ › or search box in the tab row`);
   // Light contrast: the saved rows' sub-lines and Connect ↵ are --mute.
   const mute = await colorOf("--mute");
   const subs = await page.$eval('[data-saved-conn="prd"]', (e) => [getComputedStyle(e.querySelector('[data-testid="ew-saved-sub"]')).color, getComputedStyle(e.querySelector("kbd")).color]);
@@ -338,31 +338,31 @@ await page.keyboard.press("Escape");
 await page.waitForSelector("[data-shortcuts]", { state: "detached" });
 check(true, "Esc closes Shortcuts");
 
-// 6 · The Agents page, light and dark; Connect an agent inline; Esc.
+// 6 · The Agents page (proposals and the log, 2026-10-17), light and dark;
+// Settings › Agents with Connect an agent inline; Esc.
 await page.click('[data-testid="sb-agents"]');
 await page.waitForSelector('[data-testid="agents-page"] [data-mcp-entry]');
 const ag = await page.$eval('[data-testid="agents-page"]', (e) => {
   const title = e.querySelector(".ag-title"); // Class on purpose: the title.
-  const act = e.querySelector(".ag-col-activity"); // Class on purpose: the column's left rule.
-  const label = e.querySelector(".ag-h2"); // Class on purpose: the column label's case.
-  const card = e.querySelector("[data-mcp-entry]");
+  const list = e.querySelector('[data-testid="pp-list"]');
+  const label = e.querySelector(".ag-sec"); // Class on purpose: the section label's case.
+  const row = e.querySelector("[data-mcp-entry]");
   return {
     font: getComputedStyle(title).fontFamily,
     size: getComputedStyle(title).fontSize,
-    rule: getComputedStyle(act).boxShadow,
+    rule: getComputedStyle(list).boxShadow,
     upper: getComputedStyle(label).textTransform,
-    card: [getComputedStyle(card).borderTopWidth, getComputedStyle(card).borderTopLeftRadius],
-    btn: getComputedStyle(e.querySelector("[data-mcp-connect]")).borderTopWidth,
+    row: [getComputedStyle(row).borderTopWidth, getComputedStyle(row).borderTopLeftRadius],
+    back: getComputedStyle(e.querySelector('[data-testid="page-back"]')).borderTopWidth,
   };
 });
 check(/IBM Plex Sans/.test(ag.font) && ag.size === "15px", "Agents: the Plex 15 title");
-check(/1px 0px 0px 0px inset/.test(ag.rule), `a 1 px rule between the columns (${ag.rule})`);
-check(ag.upper === "none", `sentence-case column labels, no uppercase (${ag.upper})`);
-check(ag.card.join() === "1px,8px", `activity rows are 1 px cards, radius 8 (${ag.card})`);
-check(ag.btn === "1px", "Connect an agent is a bordered button");
-check((await page.$("[data-mcp-tab]")) === null, "side by side: no Access | Activity segment (both are on screen)");
-const verdicts = await page.$$eval('[data-mcp-entry] [data-verdict]', (els) => [...new Set(els.map((e) => e.dataset.verdict))].sort().join());
-check(verdicts === "ok,refused", `verdict pills: ${verdicts}`);
+check(/-1px 0px 0px 0px inset/.test(ag.rule), `a 1 px rule between the list and the picked item (${ag.rule})`);
+check(ag.upper === "none", `sentence-case section labels, no uppercase (${ag.upper})`);
+check(ag.row.join() === "0px,8px", `log rows are glide rows, radius 8, no border (${ag.row})`);
+check(ag.back === "1px", "the way out is a bordered control");
+const verdicts = await page.$$eval("[data-mcp-entry]", (els) => [...new Set(els.map((e) => e.dataset.verdict))].sort().join());
+check(verdicts === "ok,refused", `verdicts in the log: ${verdicts}`);
 await page.mouse.move(5, 790);
 await shot("agents");
 await page.emulateMedia({ colorScheme: "dark" });
@@ -370,15 +370,12 @@ await page.waitForFunction(() => document.documentElement.dataset.theme === "dar
 await shot("agents-dark");
 await page.emulateMedia({ colorScheme: "light" });
 await page.waitForFunction(() => document.documentElement.dataset.theme === "light");
-await page.setViewportSize({ width: 860, height: 800 });
-await page.waitForSelector('[data-testid="agents-page"][data-stacked] [data-mcp-tab="access"]');
-check(true, "narrow: the columns stack and the segment appears");
-await page.setViewportSize({ width: 1280, height: 800 });
-await page.waitForSelector('[data-testid="agents-page"]:not([data-stacked])');
-check((await page.$("[data-mcp-tab]")) === null, "wide again: the segment goes");
-await page.click('[data-testid="agents-page"] [data-mcp-connect]');
+await page.click("[data-ag-sharing]");
+await page.waitForSelector('[data-testid="agents-sharing"]');
+check((await page.$eval('[data-testid="agents-sharing"] [data-mcp-connect]', (b) => getComputedStyle(b).borderTopWidth)) === "1px", "Connect an agent is a bordered button");
+await page.click('[data-testid="agents-sharing"] [data-mcp-connect]');
 await page.waitForSelector('[data-testid="ag-connect"] [data-mc-term]');
-check((await page.$$eval('[data-testid="agents-page"] *', (els) => els.filter((e) => e.textContent.trim() === "esc" && e.children.length === 0 && e.offsetParent).length)) === 1, "one esc on screen while Connect an agent is open");
+check((await page.$$eval('[data-testid="settings-page"] *', (els) => els.filter((e) => e.textContent.trim() === "esc" && e.children.length === 0 && e.offsetParent && !e.closest('[data-testid="page-back"]')).length)) === 1, "one esc besides the back button while Connect an agent is open");
 check(/ · /.test(await page.textContent('[data-testid="mc-facts"]')), "its facts are one line joined by ·");
 const mc = await page.$eval('[data-testid="ag-connect"] [data-mc-term]', (e) => ({ f: getComputedStyle(e).fontFamily, r: getComputedStyle(e).borderTopLeftRadius, bg: getComputedStyle(e).backgroundColor }));
 check(/Mono/.test(mc.f) && mc.r === "6px" && mc.bg === (await colorOf("--hover")), `Connect an agent: the command in mono on --hover, radius 6 (${mc.r})`);
@@ -390,7 +387,7 @@ await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="ag-connect"]', { state: "detached" });
 check(true, "Esc closes Connect an agent first");
 await page.keyboard.press("Escape");
-await page.waitForSelector('[data-testid="agents-page"]', { state: "detached" });
+await page.waitForSelector('[data-testid="settings-page"]', { state: "detached" });
 check(true, "then the page");
 
 // 7 · Couldn't connect: the same column, the penguin Tilted in --del.

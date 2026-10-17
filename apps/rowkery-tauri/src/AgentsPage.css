@@ -796,30 +796,50 @@
 
 /* ---------- The window tabs and the connection sheet ---------- */
 
-/* A window tab's MCP tag: an agent read this connection in the last minute.
-   A click opens the Agents page. */
+/* A window pill's agent mark (2026-10-17): on the shown pill while the
+   connection is shared, on any pill while an agent read it in the last
+   minute, when it carries a green dot. A click opens the Agents page. */
 .win-mcp {
-  display: flex;
+  position: relative;
+  display: grid;
   flex-shrink: 0;
-  align-items: center;
-  gap: 3px;
-  height: 16px;
-  padding: 0 5px;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: 0;
-  border-radius: 8px;
-  background: var(--okbg);
-  color: color-mix(in srgb, var(--ok) var(--tagmix), var(--text));
-  font: 700 9px var(--sans);
-  letter-spacing: 0.02em;
-  cursor: pointer;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
 }
 
-.win-mcp::before {
+.win-mcp:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.win-mcp[data-recent]::after {
   content: "";
-  width: 4px;
-  height: 4px;
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--ok);
+  box-shadow: 0 0 0 1.5px var(--bar);
+}
+
+/* The Agents page is up: the shown pill's mark reads as pressed (a click goes back). */
+.win-mcp[data-on] {
+  background: var(--line);
+  color: var(--text);
+}
+
+.win-tab[data-on] .win-mcp[data-recent]::after {
+  box-shadow: 0 0 0 1.5px var(--bg);
 }
 
 /* The connection sheet's Allow MCP stats. */
@@ -1460,3 +1480,269 @@
   font: 11px var(--sans);
   white-space: nowrap;
 }
+
+/* ---------- The Agents page as one list (2026-10-17) ---------- */
+
+/* Proposals waiting, then the log, in one column that scrolls as a whole;
+   the picked item fills the rest of the window. */
+.ag-inbox .pp-list {
+  width: 320px;
+}
+
+.ag-inbox-head {
+  gap: 10px;
+  padding: 0 12px;
+}
+
+.ag-inbox-head .ag-title {
+  font-size: 15px;
+}
+
+.ag-inbox-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 8px;
+  --glide-radius: 8px;
+}
+
+.ag-inbox .pp-cards {
+  flex: none;
+  overflow: visible;
+  padding: 0 8px;
+}
+
+/* Section labels: sentence case, medium, muted (no tracked caps). */
+.ag-sec {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 14px 18px 6px;
+  color: var(--text2);
+  font: 600 12px var(--sans);
+}
+
+.ag-sec-n {
+  color: var(--mute);
+  font-weight: 500;
+}
+
+.ag-filter {
+  height: 20px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  font: 500 11.5px var(--sans);
+  cursor: default;
+}
+
+.ag-filter:hover {
+  color: var(--text);
+}
+
+.ag-filter[aria-pressed="true"] {
+  background: var(--line);
+  color: var(--text);
+}
+
+.ag-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.ag-calls-none {
+  margin: 4px 10px;
+}
+
+/* One call: time, tool and outcome on a line, a line of its SQL under them. */
+.ag-call {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background-color 0.18s ease, transform 120ms ease;
+}
+
+.ag-call:active {
+  transform: scale(0.985);
+}
+
+.ag-call[aria-current="true"] {
+  background: var(--line);
+}
+
+.ag-call-time {
+  padding-top: 1px;
+  color: var(--mute);
+  font: 11px var(--mono);
+}
+
+.ag-call-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font: 600 12px var(--mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ag-call-meta {
+  color: var(--mute);
+  font: 11px var(--sans);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Outcomes in the log's colours, mixed toward the text so small type stays at 4.5:1. */
+.ag-call-meta[data-verdict="refused"],
+.ag-call-meta[data-verdict="flagged"] {
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+}
+
+.ag-call-meta[data-verdict="error"] {
+  color: color-mix(in srgb, var(--del) var(--tagmix), var(--text));
+}
+
+.ag-call-what {
+  grid-column: 2 / 4;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text2);
+  font: 11.5px var(--mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The foot: who called last, and the way to the one-off settings. */
+.ag-inbox-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 0 12px 0 16px;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.ag-inbox-foot .mcp-live {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ag-sharing-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ag-sharing-btn svg {
+  color: var(--mute);
+}
+
+/* A picked call, beside the list. */
+.ag-call-view .pp-previews {
+  overflow: auto;
+}
+
+.ag-call-reason {
+  margin: 0;
+  padding: 14px 16px 0;
+  color: var(--text2);
+  font: 13px/1.5 var(--sans);
+}
+
+.ag-call-reason b {
+  margin-right: 4px;
+  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+  font-weight: 600;
+}
+
+.ag-call-reason[data-verdict="error"] b {
+  color: color-mix(in srgb, var(--del) var(--tagmix), var(--text));
+}
+
+.ag-call-view .pp-stmt-sql {
+  padding-top: 14px;
+}
+
+.ag-call-view .mcp-detail {
+  margin: 18px 16px 0;
+}
+
+.ag-call-view .mcp-acts {
+  margin: 14px 16px 0;
+}
+
+.ag-empty {
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--mute);
+  font: 13px var(--sans);
+}
+
+.ag-empty p {
+  margin: 0;
+}
+
+/* ---------- Settings › Agents ---------- */
+
+.ag-sharing-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.ag-sharing-head .st-h2 {
+  margin: 0;
+}
+
+.ag-sharing .ag-connect {
+  margin-bottom: 14px;
+  padding: 0;
+  box-shadow: none;
+}
+
+.ag-sharing .ag-col {
+  overflow: visible;
+  padding-bottom: 0;
+}
+
+.ag-sharing .ag-col-head {
+  position: static;
+  padding: 0 0 8px;
+}
+
+.ag-sharing .mcp-conns {
+  padding: 0;
+}
+
+.ag-log-upkeep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin-top: 18px;
+  padding-top: 10px;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+

@@ -185,7 +185,7 @@ const footGlide = '[data-testid="sb-foot-rows"] > [data-glide]';
 await page.hover('[data-testid="sb-agents"]');
 await page.waitForTimeout(250);
 const f1 = await page.$eval(footGlide, (g) => g.style.transform);
-await page.hover('[data-testid="sb-help"]');
+await page.hover('[data-testid="sb-settings"]');
 await page.waitForTimeout(250);
 const f2 = await page.$eval(footGlide, (g) => [g.style.transform, g.hasAttribute("data-glide-on")]);
 check(f1 !== f2[0] && f2[1], `the foot rows share one glide (${f1} → ${f2[0]})`);
@@ -200,16 +200,14 @@ const tile = await page.evaluate(() => {
 check(tile.on && tile.h === 28, `the title bar's + hovers with the glide, 28 px (${JSON.stringify(tile)})`);
 await page.mouse.move(700, 400);
 
-// ---------- ⌘K from the Search button ----------
-const search = '[data-testid="search-cap"]';
-check((await page.textContent(search)).includes("Search tables, commands"), "the ⌘K button reads Search tables, commands");
-const sb = await page.locator(search).boundingBox();
-check(Math.round(sb.width) >= 200 && Math.round(sb.height) === 28, `it is a 28 px button at least 200 px wide (${Math.round(sb.width)}×${Math.round(sb.height)})`);
-await page.click(search);
+// ---------- ⌘K in the middle of the window (2026-10-17) ----------
+check(!(await page.$('[data-testid="search-cap"]')), "no Search button in the title bar");
+await page.keyboard.press("Control+k");
 await page.waitForSelector('[data-testid="cp-panel"]');
 await page.waitForTimeout(250); // its pop entry scales from .98
 const pb = await page.locator('[data-testid="cp-panel"]').boundingBox();
-check(Math.round(pb.width) === 420 && pb.y >= sb.y + sb.height && Math.abs(pb.x + pb.width - (sb.x + sb.width)) < 2, `the palette is a 420 px card under the button, right-aligned (${JSON.stringify(pb)})`);
+const vw = page.viewportSize().width;
+check(Math.round(pb.width) === 640 && Math.abs(pb.x + pb.width / 2 - vw / 2) < 2 && pb.y > 48, `the palette is a 640 px card centred in the window (${JSON.stringify(pb)})`);
 await page.keyboard.type("o");
 await page.waitForSelector('[data-testid="cp-row"]');
 const cpRows = page.locator('[data-testid="cp-row"]');
@@ -250,18 +248,22 @@ await page.screenshot({ path: `${OUT}/toast.png` });
 console.log(`${OUT}/toast.png`);
 await page.waitForTimeout(2600);
 
-// ---------- The foot's Appearance button overrides the system, and is saved ----------
-// The only theme control (2026-10-13) is the schema column's
-// foot button; it cycles Auto → Light → Dark and shows the mode's icon.
-const btn = '[data-testid="sb-appearance"]';
-await page.click(btn); // Auto → Light
-check((await page.getAttribute(btn, "data-theme-setting")) === "light" && (await theme()) === "light", "one click pins Light");
-await page.click(btn); // Light → Dark
-check((await theme()) === "dark", "a second click turns the window dark while the system is light");
-check((await page.getAttribute(btn, "title")).startsWith("Appearance: Dark"), "its tooltip names the mode");
-check((await page.getAttribute(btn, "data-theme-setting")) === "dark", "the setting is now Dark");
+// ---------- Settings > Appearance overrides the system, and is saved ----------
+// The only theme control (2026-10-17) is Settings > Appearance; the foot
+// no longer carries a theme button.
+const settingsPage = '[data-testid="settings-page"]';
+const themeCard = (v) => `${settingsPage} [data-st-group="theme"] [data-st-option="${v}"]`;
+await page.click('[data-testid="sb-settings"]');
+await page.waitForSelector(settingsPage);
+await page.click(`${settingsPage} [data-st-section="appearance"]`);
+await page.click(themeCard("light"));
+check((await theme()) === "light", "Light pins light");
+await page.click(themeCard("dark"));
+check((await theme()) === "dark", "Dark turns the window dark while the system is light");
 check((await savedTheme()) === "dark", "core saved theme = dark to config.json (set_theme_preference, save)");
 check((await page.evaluate(() => window.__WINDOW_THEME__)) === "dark", "and gave the native window the dark appearance");
+await page.keyboard.press("Escape");
+await page.waitForSelector(settingsPage, { state: "detached" });
 await page.waitForTimeout(400); // the theme cross-fades
 const runDark = await page.$eval(`${ws} [data-testid="run-btn"]`, (e) => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor]);
 check(runDark[0] === "rgb(26, 26, 26)" && runDark[1] === "rgb(255, 138, 61)", `dark Run is ink #1a1a1a on #ff8a3d, 7.4:1 (${runDark.join(" on ")})`);
@@ -272,7 +274,7 @@ await page.mouse.move(700, 790);
 await shot("dark");
 
 await page.locator(`${ws} [data-table="arcade.public.orders"] [data-testid="sb-row-main"]`).hover();
-await page.click(search);
+await page.keyboard.press("Control+k");
 await page.waitForSelector('[data-testid="cp-panel"]');
 await page.keyboard.type("o");
 await page.mouse.move(400, 700);

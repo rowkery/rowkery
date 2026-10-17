@@ -4,6 +4,11 @@ use rowkery_core::connections::{PostgresConnection, PostgresSslMode};
 use rowkery_core::db::postgres::{open_session, session_query_stream, session_test};
 use rowkery_core::secrets::{store_secret, SecretKind};
 
+/// The tests in this binary share `ROWKERY_CONFIG_DIR` and the secrets file
+/// under it; run in parallel, one would read the file while another writes
+/// it. Each test holds this for its whole run.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn pg_config() -> PostgresConnection {
     let host = std::env::var("ROWKERY_PG_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port = std::env::var("ROWKERY_PG_PORT")
@@ -34,7 +39,9 @@ fn pg_config() -> PostgresConnection {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_connect_and_select() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
     std::env::set_var(
         "ROWKERY_CONFIG_DIR",
@@ -59,7 +66,9 @@ async fn postgres_connect_and_select() {
 
 /// Types decoded from the binary wire format must match Postgres's own text output.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_decodes_dates_uuid_numeric() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use rowkery_core::db::Value;
 
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
@@ -134,7 +143,9 @@ async fn postgres_decodes_dates_uuid_numeric() {
 /// int8 at the edges of its range reaches the webview exact: as a BigInt
 /// string past ±(2^53 − 1), a plain number inside it; numeric stays text.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_int8_extremes_travel_exact() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
     std::env::set_var(
         "ROWKERY_CONFIG_DIR",
@@ -171,7 +182,9 @@ async fn postgres_int8_extremes_travel_exact() {
 /// A refused statement keeps its SQLSTATE and position; a slow stream sends
 /// its first rows before the batch fills, and times its first row.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_errors_and_slow_streams() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use rowkery_core::db::postgres::{session_query_stream_with, StreamOptions};
     use rowkery_core::db::DriverError;
 
@@ -232,7 +245,9 @@ async fn postgres_errors_and_slow_streams() {
 /// Structure view data: defaults, primary/unique indexes, access method and foreign keys;
 /// completion data: enums, functions, search path.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_introspects_structure() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use rowkery_core::db::postgres::{session_introspect, session_table_indexes};
     use rowkery_core::db::{RowEstimate, TableKind};
 
@@ -419,7 +434,9 @@ Balances live in wallet_counts.';
 /// Read-only connections are read-only at the server: a write the text check
 /// can't see (here sent straight to the session) still fails.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_read_only_session_refuses_writes() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use rowkery_core::safety::SafeMode;
 
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
@@ -452,7 +469,9 @@ async fn postgres_read_only_session_refuses_writes() {
 
 /// Sessions through one SSH tunnel: the second reuses the first's tunnel.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_sessions_share_an_ssh_tunnel() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use rowkery_core::connections::{SshAuthMethod, SshConfig};
     use rowkery_core::db::postgres::open_session_via;
     use rowkery_core::ssh::OPEN_TUNNELS;
@@ -512,7 +531,9 @@ async fn postgres_sessions_share_an_ssh_tunnel() {
 /// numeric, uuid), NULLs and mixed directions return what one ordered query
 /// does.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_keyset_pages_match_one_ordered_query() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use rowkery_core::db::{table_browse_query, BrowseOptions, BrowseOrder, EngineKind, Value};
     use std::collections::HashMap;
 
@@ -614,7 +635,9 @@ async fn postgres_keyset_pages_match_one_ordered_query() {
 /// saved a new one: the rejected login reads it again and connects. With
 /// nothing saved at all, the error says so instead of "rejected password".
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn postgres_rereads_a_password_saved_since() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
     let base = std::env::temp_dir().join(format!("rowkery-pg-reread-{}", std::process::id()));
     let (app, mcp) = (base.join("app"), base.join("mcp"));

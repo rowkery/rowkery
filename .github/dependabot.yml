@@ -1,0 +1,10 @@
+# Keeps the commit-pinned actions in .github/workflows current. Security
+# updates for cargo and npm come from the repository's Dependabot settings.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore

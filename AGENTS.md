@@ -61,13 +61,13 @@ Paths below are under `apps/rowkery-tauri/` unless they start with `crates/`.
 
 The visual language is Paper; `DESIGN.md` has the tokens and the reasons.
 
-- **Rules are the structure, borders mean controls.** Regions are separated by 1 px `--line` rules on one opaque paper sheet; a 1 px `--line2` border says "you can press this". No glass, no `backdrop-filter`, no glow.
+- **Rules are the structure, borders mean controls.** Regions are separated by 1 px `--line` rules on one opaque paper sheet; a 1 px `--line2` border says "you can press this". No glass, no glow, and no `backdrop-filter` except ⌘K's scrim.
 - **Orange is what you ask for, ink commits.** `--acc` is only on Run, the active statement's bar, the WHERE chips, the active tab, switches that are on and the focus ring. The button that writes (Commit, Save and connect, Send) is ink (`--ink` / `--inkfg`), never orange or red. Run is a flat fill.
 - **Light and dark follow macOS** (Auto, or pinned with Appearance at the schema column's foot). Every colour is a token defined in both `:root` and `:root[data-theme="dark"]` in `src/App.css`; no hex outside them. Text on a solid fill uses `--onfill`; small text stays at 4.5:1 in both themes (`scripts/paper-finish-browser-proof.mjs` checks).
 - **The inspector column** on the right holds Quick Look, Review SQL and New connection, one at a time, beside the data, never over it.
 - **The foot edits bar** at the grid's foot counts staged edits and holds Discard / Review SQL / Commit; toasts (an ink card, its action in orange) sit above it.
 - **Glide hover** is the one list highlight (`useGlideHover`); rows inside a glide list don't paint their own `:hover`.
-- **The title bar** (48 px): traffic lights, one pill per window and +, then the shown window's Safe mode and MCP (only while connected) and ⌘K. The schema column keeps the connection's name and host, and ends with a row of icon buttons: Agents, Appearance (the only theme control), Help.
+- **The title bar** (48 px): traffic lights, one pill per window and +, nothing at the right. The shown pill carries its safe mode shield (while connected) and an agent mark (while shared); ⌘K opens centred in the window. The schema column keeps the connection's name and host, and ends with a row of icon buttons: Agents, Appearance (the only theme control), Help.
 - **Environment** is the window pill's dot plus a word tag on its own wash (prd red, stg orange, dev blue, local green).
 - **The penguin** (the Rowkery mark; Posture: Ready / Tilted) appears only at dead ends (Connect to start, Couldn't connect, the fatal error) and as an empty window's pill mark, never on a work surface or while a query runs. `brand/rowkery-mark*.svg` don't change: no redesign, only colour and size.
 - **Motion:** exits are shorter than entries; keyboard-opened overlays appear at once; `prefers-reduced-motion` turns motion off.

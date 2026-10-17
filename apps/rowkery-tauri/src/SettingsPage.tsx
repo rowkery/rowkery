@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { DownloadIcon, KeyboardIcon } from "./icons";
+import { AgentIcon, DownloadIcon, KeyboardIcon } from "./icons";
+import { PageBack, usePageFocus } from "./Inspector";
 import { KEYMAPS, KEYMAP_CHORDS, setKeymap, useKeymap } from "./keymaps";
 import { useGlideHover } from "./motion";
 import { isMacPlatform } from "./platform";
@@ -18,19 +19,23 @@ import {
 } from "./updates";
 import "./SettingsPage.css";
 
-export type SettingsSection = "updates" | "appearance" | "keyboard";
+export type SettingsSection = "updates" | "appearance" | "keyboard" | "agents";
 
 /**
  * Settings (2026-10-17): a page in place of the window, as Agents is (the
  * schema column hides under it). Categories down the left, the picked one's
  * settings on the right. Each choice is a card; picking it applies at once
- * and saves to config.json. Esc or ⌘W goes back to the window.
+ * and saves to config.json. Agents (2026-10-17) holds sharing: the switches
+ * and access a connection is set up with once. The head's first control
+ * names the window it goes back to; Esc or ⌘W does the same.
  */
 export function SettingsPage({
   section,
   onSection,
   onShortcuts,
   runningQueries,
+  sharing,
+  backTo,
   onClose,
 }: {
   section: SettingsSection;
@@ -39,6 +44,10 @@ export function SettingsPage({
   onShortcuts: () => void;
   /** Queries running in every window: Check now's Restart waits for them. */
   runningQueries: () => number;
+  /** Settings › Agents: the sharing controls, from App. */
+  sharing: ReactNode;
+  /** The window the page returns to, named on the way out. */
+  backTo: string;
   onClose: () => void;
 }) {
   const rootRef = useRef<HTMLElement>(null);
@@ -48,8 +57,9 @@ export function SettingsPage({
   const pref = useUpdatePref();
 
   useEffect(() => {
-    rootRef.current?.focus();
+    rootRef.current?.focus({ preventScroll: true });
   }, []);
+  usePageFocus(rootRef);
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key !== "Escape") return;
@@ -62,6 +72,7 @@ export function SettingsPage({
     { id: "updates", label: "Updates", icon: <DownloadIcon size={14} />, dot: updateWaiting(update, pref) },
     { id: "appearance", label: "Appearance", icon: <AutoIcon /> },
     { id: "keyboard", label: "Keyboard", icon: <KeyboardIcon size={14} /> },
+    { id: "agents", label: "Agents", icon: <AgentIcon size={14} /> },
   ];
 
   return (
@@ -75,11 +86,8 @@ export function SettingsPage({
       onKeyDown={onKeyDown}
     >
       <header className="ag-head">
+        <PageBack to={backTo} onBack={onClose} />
         <h1 className="ag-title">Settings</h1>
-        <span className="mcp-grow" />
-        <button type="button" className="mcp-esc" data-st-close title="Back to the window  esc" onClick={onClose}>
-          esc
-        </button>
       </header>
       <div className="st-body">
         <nav ref={navRef} className="st-nav" aria-label="Settings">
@@ -99,10 +107,11 @@ export function SettingsPage({
           ))}
         </nav>
         <div className="st-main">
-          <div className="st-pane" key={section}>
+          <div className="st-pane" key={section} data-wide={section === "agents" ? "" : undefined}>
             {section === "updates" && <UpdatesSection update={update} pref={pref} runningQueries={runningQueries} />}
             {section === "appearance" && <AppearanceSection />}
             {section === "keyboard" && <KeyboardSection onShortcuts={onShortcuts} />}
+            {section === "agents" && sharing}
           </div>
         </div>
       </div>
@@ -122,7 +131,7 @@ function UpdatesSection({
   const [version, setVersion] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    void loadAppInfo().then((info) => live && setVersion(info.version === "unknown" ? null : info.version));
+    void loadAppInfo().then((info) => live && setVersion(!info?.version || info.version === "unknown" ? null : info.version));
     return () => {
       live = false;
     };

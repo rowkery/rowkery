@@ -228,7 +228,7 @@ await page.waitForTimeout(300);
 
 // 1 · Quick Look slides in as the inspector column.
 const nameW0 = (await box(`${ws} [data-header="name"]`)).width;
-const cap0 = await box('[data-testid="search-cap"]');
+const pill0 = await box('[data-testid="win-tab"][data-on]');
 await page.click(cell(2, 3));
 await page.keyboard.press("Space");
 await page.waitForSelector(ql);
@@ -244,14 +244,14 @@ check(look.w === 340 && Math.round(look.right) === 0, `a 340 px column at the wi
 check(look.bg === (await tokenColor("--panel")), `on the panel's ground (${look.bg})`);
 check(Math.abs(look.gridRight - look.left) <= 1, `the grid ends where it begins (${look.gridRight} / ${look.left})`);
 check(Math.abs((await box(`${ws} [data-header="name"]`)).width - nameW0) < 1, "the grid's columns keep their widths");
-const cap1 = await box('[data-testid="search-cap"]');
-// ⌘K is in the title bar, above the column; it stays put.
-check(cap1.x === cap0.x && cap1.y + cap1.height <= 48, "⌘K stays in the title bar above the column");
+const pill1 = await box('[data-testid="win-tab"][data-on]');
+// The title bar's pills sit above the column; they stay put.
+check(pill1.x === pill0.x && pill1.y + pill1.height <= 48, "the window pill stays in the title bar above the column");
 const fold = await page.evaluate((ws) => {
   const shown = (sel) => [...document.querySelectorAll(sel)].some((e) => e.getBoundingClientRect().width > 0);
-  return { words: shown(`${ws} [data-testid="view-switch"] .view-switch-label`), search: shown(".search-cap-label") }; // Classes on purpose: the folded labels are under test.
+  return { words: shown(`${ws} [data-testid="view-switch"] .view-switch-label`) }; // Class on purpose: the folded label is under test.
 }, ws);
-check(fold.words && fold.search, `the tab row folds by need: with room, Data | Structure keeps its words and ⌘K its label (${JSON.stringify(fold)})`);
+check(fold.words, `the tab row folds by need: with room, Data | Structure keeps its words (${JSON.stringify(fold)})`);
 check((await text(`${ql} [data-testid="ql-head"]`)).startsWith("ROW kiosks · 3 of 120"), `head: ${await text(`${ql} [data-testid="ql-head"]`)}`);
 check((await text(`${ql} [data-testid="ql-title"]`)) === "Kiosk 003" && (await page.locator(`${ql} [data-testid="ql-title"] svg`).count()) === 1, "titled by the row's name, with the key icon");
 const titleFont = await page.$eval(`${ql} [data-testid="ql-title"]`, (e) => getComputedStyle(e).fontSize);
@@ -380,8 +380,7 @@ const foot = await box("[data-save]");
 check(mcpRow.y + mcpRow.height <= foot.y && foot.y + foot.height <= 800, `the MCP row and the foot fit in 800 px (MCP at ${Math.round(mcpRow.y)}, Save at ${Math.round(foot.y)})`);
 const tabsRow = await box(`${ws} [data-testid="query-tabs"]`);
 const firstTab = await box(`${ws} [data-testid="query-tab"]`);
-const capW = (await box('[data-testid="search-cap"]')).width;
-check(firstTab.x >= tabsRow.x - 0.5, `the first tab stays in view (tab at ${firstTab.x}, row at ${tabsRow.x}; ⌘K ${capW} px in the title bar)`);
+check(firstTab.x >= tabsRow.x - 0.5, `the first tab stays in view (tab at ${firstTab.x}, row at ${tabsRow.x})`);
 const mainRightNc = await page.$eval(`${ws} [data-testid="main"]`, (e) => window.innerWidth - e.getBoundingClientRect().right);
 check(Math.round(mainRightNc) === 380, `the window stays in view beside it (${mainRightNc})`);
 const saveOpacity = () => page.$eval("[data-save]", (e) => getComputedStyle(e).opacity);

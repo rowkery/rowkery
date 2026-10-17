@@ -394,7 +394,6 @@ const bar6 = await page.evaluate(() => {
   const tb = document.querySelector('[data-testid="titlebar"]');
   const r = tb.getBoundingClientRect();
   const inBar = (sel) => !!tb.querySelector(sel);
-  const cap = tb.querySelector('[data-testid="search-cap"]')?.getBoundingClientRect();
   return {
     h: r.height,
     top: r.top,
@@ -404,11 +403,9 @@ const bar6 = await page.evaluate(() => {
     tabs: tb.querySelectorAll('[data-testid="win-tab"]').length,
     tabH: tb.querySelector('[data-testid="win-tab"]')?.getBoundingClientRect().height,
     add: inBar('[data-testid="win-add"]'),
-    shield: inBar("[data-shield]"),
-    mcp: inBar("[data-mcp]"),
+    shield: inBar('[data-testid="win-tab"][data-on] [data-shield]'),
+    cap: inBar('[data-testid="search-cap"]'),
     theme: inBar('[data-testid="tb-theme"]'), // Removed on 2026-10-13: the foot's Appearance is the only theme control.
-    capW: cap?.width,
-    capRight: cap ? window.innerWidth - cap.right : null,
     headTools: document.querySelectorAll('[data-testid="sb-head"] ~ * [data-shield], [data-testid="sidebar"] [data-shield], [data-testid="sidebar"] [data-mcp]').length,
     sidebarTop: document.querySelector('[data-testid="workspace"]:not([hidden]) [data-testid="sidebar"]').getBoundingClientRect().top,
   };
@@ -416,7 +413,7 @@ const bar6 = await page.evaluate(() => {
 check(bar6.h === 48 && bar6.top === 0 && bar6.w === 1280 && /inset/.test(bar6.rule), `a 48 px title bar across the window with a rule under it (${bar6.h}, ${bar6.rule})`);
 check(!bar6.rail, "no window rail");
 check(bar6.tabs === 1 && bar6.tabH === 28 && bar6.add, `one 28 px window pill and + (${bar6.tabs}, ${bar6.tabH})`);
-check(bar6.shield && bar6.mcp && !bar6.theme && bar6.capW >= 200 && bar6.capRight === 14, `Safe mode, MCP and ⌘K (${bar6.capW} px, ${bar6.capRight} px from the edge) sit in the title bar, no theme toggle`);
+check(bar6.shield && !bar6.cap && !bar6.theme, "the shown pill carries the safe mode shield; no search box or theme toggle in the title bar (2026-10-17)");
 check(bar6.headTools === 0 && bar6.sidebarTop === 48, `the schema column starts under it, without Safe mode / MCP (${bar6.sidebarTop})`);
 // The foot (2026-10-13) is one row of 28 px icon buttons,
 // left-aligned, 4 px apart; names and keys live in the tooltips.
@@ -434,19 +431,14 @@ const foot6 = await page.$$eval('[data-testid="sb-foot-rows"] > button', (els) =
   };
 });
 // Presenting joined the foot (2026-10-15); on 2026-10-17 it became Agents ·
-// Presenting on the left and Appearance · Keyboard shortcuts · Settings on
-// the right, a gap between (settings-browser-proof.mjs covers the update button).
+// Presenting on the left and Settings on the right, a gap between: Appearance
+// and Keyboard shortcuts left it for Settings (settings-browser-proof.mjs
+// covers the update button and the theme cards).
 const gaps6 = foot6.gaps.split(",").map(Number);
-check(foot6.ids === "sb-agents,sb-presenting,sb-appearance,sb-help,sb-settings" && foot6.sizes === "28x28,28x28,28x28,28x28,28x28" && gaps6[0] === 4 && gaps6[1] > 40 && gaps6[2] === 4 && gaps6[3] === 4 && foot6.row && foot6.inset <= 16 && foot6.text === "", `the foot: five 28 px icon buttons in a row, two left and three right, no labels (${JSON.stringify(foot6)})`);
-check(foot6.titles[0] === "Agents  Ctrl+Shift+A" && foot6.titles[1] === "Start presenting" && foot6.titles[2].startsWith("Appearance: Auto") && foot6.titles[3] === "Keyboard shortcuts  Ctrl+Shift+/" && foot6.titles[4] === "Settings  Ctrl+,", `tooltips carry the names and keys (${foot6.titles.join(" | ")})`);
+check(foot6.ids === "sb-agents,sb-presenting,sb-settings" && foot6.sizes === "28x28,28x28,28x28" && gaps6[0] === 4 && gaps6[1] > 40 && foot6.row && foot6.inset <= 16 && foot6.text === "", `the foot: three 28 px icon buttons in a row, two left and one right, no labels (${JSON.stringify(foot6)})`);
+check(foot6.titles[0] === "Agents  Ctrl+Shift+A" && foot6.titles[1] === "Start presenting" && foot6.titles[2] === "Settings  Ctrl+,", `tooltips carry the names and keys (${foot6.titles.join(" | ")})`);
 check((await page.locator('[data-testid="sb-agents"] .sb-agents-dot').count()) === 1, "Agents carries the green dot while MCP is shared"); // Class on purpose: the dot.
-const cycle = [];
-for (let i = 0; i < 3; i++) {
-  await page.click('[data-testid="sb-appearance"]');
-  await page.waitForTimeout(80);
-  cycle.push(`${await page.getAttribute('[data-testid="sb-appearance"]', "data-theme-setting")}/${await page.evaluate(() => document.documentElement.dataset.theme)}`);
-}
-check(cycle.join(" ") === "light/light dark/dark auto/light", `Appearance cycles Auto → Light → Dark → Auto (${cycle.join(" ")})`);
+check(!(await page.$('[data-testid="sb-appearance"], [data-testid="sb-help"]')), "no Appearance or Keyboard shortcuts button in the foot");
 await page.mouse.move(130, 790);
 await page.waitForTimeout(200);
 await page.waitForTimeout(200);
@@ -607,18 +599,26 @@ await surface("connect-to-start", "body", [{ sel: '[data-testid="ew-card-sub"]',
 const empty6 = await page.evaluate(() => {
   const tb = document.querySelector('[data-testid="titlebar"]');
   const shown = (sel) => [...tb.querySelectorAll(sel)].filter((e) => e.getBoundingClientRect().width > 0).length;
-  return { add: shown('[data-testid="win-add"]'), cap: shown('[data-testid="search-cap"]'), conn: shown("[data-shield], [data-mcp]"), name: tb.querySelector('[data-testid="win-name"]')?.textContent };
+  return { add: shown('[data-testid="win-add"]'), conn: shown('[data-shield], [data-testid="win-mcp"]'), name: tb.querySelector('[data-testid="win-name"]')?.textContent };
 });
-check(empty6.add === 1 && empty6.cap === 1 && empty6.conn === 0, `the empty window's title bar: + and ⌘K, no Safe mode / MCP (${JSON.stringify(empty6)})`);
+check(empty6.add === 1 && empty6.conn === 0, `the empty window's title bar: +, no safe mode shield or agent mark (${JSON.stringify(empty6)})`);
 await palette("Agents");
 await page.keyboard.press("Enter");
 await page.waitForSelector('[data-testid="agents-page"]');
 await page.waitForTimeout(300);
 await surface("agents", '[data-testid="agents-page"]', [
-  { sel: ".mcp-verdict", what: "verdict pill", every: true }, // Classes on purpose: the pills' and tags' colours are under test.
-  { sel: ".mcp-tag", what: "env tag", every: true },
-  { sel: ".mcp-reason", what: "refusal line", every: true },
+  { sel: ".ag-call-meta", what: "call outcome", every: true }, // Classes on purpose: the outcomes' colours are under test.
+  { sel: ".ag-call-what", what: "call's SQL line", every: true },
 ]);
+// A refused call, picked: its reason in red beside the list.
+if (await page.$('[data-testid="ag-call"][data-verdict="refused"]')) {
+  await page.click('[data-testid="ag-call"][data-verdict="refused"]');
+  await page.waitForSelector('[data-testid="ag-call-view"] [data-testid="mcp-reason"]');
+  await surface("agents-refused", '[data-testid="agents-page"]', [{ sel: ".ag-call-reason", what: "refusal line", readable: true }]);
+}
+// Sharing is Settings › Agents (2026-10-17), from the page's foot.
+await page.click("[data-ag-sharing]");
+await page.waitForSelector('[data-testid="agents-sharing"]');
 // What can the agent do: the can't-do panel's red wash must stay readable.
 await page.click("[data-ag-can-do]");
 await page.waitForSelector('[data-testid="ag-can-do"]');
@@ -629,10 +629,10 @@ await surface("agents-can-do", '[data-testid="ag-can-do"]', [
 ]);
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="ag-can-do"]', { state: "detached" });
-await page.click('[data-testid="agents-page"] [data-mcp-connect]');
+await page.click('[data-testid="agents-sharing"] [data-mcp-connect]');
 await page.waitForSelector(".mc-inline"); // Class on purpose: Connect an agent's inline form has no other hook.
 await page.waitForTimeout(300);
-await surface("connect-agent", '[data-testid="agents-page"]', [{ sel: ".mc-inline", what: "the form's text", readable: true }]);
+await surface("connect-agent", '[data-testid="settings-page"]', [{ sel: ".mc-inline", what: "the form's text", readable: true }]);
 
 await fresh({ fail: true });
 await page.keyboard.press("Control+Shift+O");
