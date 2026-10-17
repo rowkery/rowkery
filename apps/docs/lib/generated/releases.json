@@ -1,5 +1,9 @@
 [
   {
+    "version": "v0.1.2",
+    "markdown": "## New\n\n- **Settings** (⌘,) in the Rowkery menu: updates, appearance and keyboard in one place.\n- Choose how updates arrive: Automatic, Download only (the default), Notify only, or Off.\n- A round orange button at the schema column's foot shows when an update is waiting.\n- **Check for Updates…** moved to the Rowkery menu.\n"
+  },
+  {
     "version": "v0.1.1",
     "markdown": "A fix for agents connecting through Rowkery's MCP server.\n\n## Fixed\n\n- **Agent queries no longer fail after you change a connection's password.** Rowkery's MCP server kept the password it read from the Keychain when it started. After you saved or changed the password in the app, every agent call failed with \"Postgres rejected password\" until the agent restarted. Now, when Postgres rejects the login, the MCP server reads the Keychain again and retries once. The password stays inside Rowkery and is never sent to the agent.\n- When no password reaches Postgres, the error now says why: macOS refused the Keychain read, or no password is saved for that connection.\n\n## Install\n\nRowkery 0.1.0 offers this update after launch and installs it when you restart. **Help > Check for Updates…** checks right away.\n\nFor a new install, open `Rowkery.dmg` and drag Rowkery to Applications. Rowkery isn't signed by Apple yet, so choose **Open Anyway** in System Settings > Privacy & Security on the first launch, or run this in Terminal:\n\n```\nxattr -dr com.apple.quarantine /Applications/Rowkery.app\n```\n\nBecause the app isn't signed, macOS asks again for Keychain access to each connection after the update.\n"
   },
