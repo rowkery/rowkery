@@ -3,7 +3,7 @@ import { showOfferToast, showToast } from "./notify";
 
 /**
  * In-app updates (src-tauri/src/updates.rs): a quiet check after launch and
- * every few hours, and Help > Check for Updates…. A newer release downloads
+ * every few hours, and Rowkery > Check for Updates…. A newer release downloads
  * in the background; the toast offers Restart, and quitting installs it
  * anyway. Nothing restarts on its own, and Restart waits while a query runs.
  */

@@ -1,5 +1,15 @@
 [
   {
+    "submenu": "Rowkery",
+    "items": [
+      {
+        "id": "check-updates",
+        "title": "Check for Updates…",
+        "accelerator": null
+      }
+    ]
+  },
+  {
     "submenu": "File",
     "items": [
       {
@@ -277,11 +287,6 @@
       },
       {
         "separator": true
-      },
-      {
-        "id": "check-updates",
-        "title": "Check for Updates…",
-        "accelerator": null
       },
       {
         "id": "report-issue",

@@ -314,6 +314,15 @@
   ],
   "menus": [
     {
+      "menu": "Rowkery",
+      "items": [
+        {
+          "title": "Check for Updates…",
+          "keys": ""
+        }
+      ]
+    },
+    {
       "menu": "File",
       "items": [
         {
@@ -512,10 +521,6 @@
         },
         {
           "title": "Show Key Hints",
-          "keys": ""
-        },
-        {
-          "title": "Check for Updates…",
           "keys": ""
         },
         {

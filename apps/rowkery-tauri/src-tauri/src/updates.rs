@@ -1,4 +1,4 @@
-//! In-app updates: a quiet check after launch and Help > Check for Updates….
+//! In-app updates: a quiet check after launch and Rowkery > Check for Updates….
 //!
 //! The page asks (`check_for_update`). A newer release announced by the feed
 //! is downloaded and checked against its signature, then held until the user

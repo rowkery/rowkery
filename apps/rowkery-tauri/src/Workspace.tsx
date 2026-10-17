@@ -510,7 +510,7 @@ export interface WindowActions {
   openShortcuts: () => void;
   /** Help > Third-party Notices: the notices sheet. */
   openNotices: () => void;
-  /** Help > Check for Updates…: says what it found (updates.ts). */
+  /** Rowkery > Check for Updates…: says what it found (updates.ts). */
   checkForUpdates: () => void;
   /** ⌘O: the file dialog; the file becomes a connection named after it. */
   openSqliteFile: () => void;
