@@ -614,13 +614,8 @@ function App() {
     });
   }, []);
 
-  // The title bar's slot for the shown window's Safe mode and MCP buttons (portalled).
-  const [titlebarTools, setTitlebarTools] = useState<HTMLDivElement | null>(null);
-  const openPalette = () => {
-    setPopover(null);
-    startSpan("palette-open");
-    setPaletteOpen(true);
-  };
+  // The shown pill's slot for its window's safe mode shield (portalled).
+  const [titlebarTools, setTitlebarTools] = useState<HTMLSpanElement | null>(null);
 
   /** Shows another window; `window-switch` times it to the painted frame. */
   const switchWindow = (id: string) => {
@@ -1390,7 +1385,6 @@ function App() {
         onReorder={(from, to) => setWindows((prev) => moveItem(prev, from, to))}
         onNewWindow={() => newWindow()}
         onAgents={() => openAgents("page")}
-        onSearch={openPalette}
         toolsRef={setTitlebarTools}
         onTilePick={(windowId, id) => {
           // The tab was selected on right-click; these act on that window.

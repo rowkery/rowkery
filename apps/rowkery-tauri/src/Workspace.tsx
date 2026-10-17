@@ -52,7 +52,6 @@ import {
   PlayIcon,
   PlusIcon,
   ShieldModeIcon,
-  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   TableIcon,
@@ -3669,7 +3668,7 @@ export function Workspace({
   };
 
 
-  // The safe-mode shield beside the panel head and its three-item menu
+  // The safe-mode shield in the shown window's pill and its three-item menu
   // (never a cycler: a misclick can't change the mode).
   const currentSafeMode: SafeMode = activeConnection?.safe_mode ?? "off";
   const safeLabel = SAFE_MODES.find((m) => m.value === currentSafeMode)?.label ?? "Off";
@@ -3679,7 +3678,7 @@ export function Workspace({
   // mousedown closes it, and its click must not open it again.
   const shieldWasOpen = useRef(false);
   const closeShield = useCallback(() => setShieldAt(null), []);
-  /** Opens under the shield, in the title bar. */
+  /** Opens under the shield, in the title bar's pill. */
   const openShieldMenu = () => {
     const anchor = shieldRef.current?.getBoundingClientRect();
     setShieldAt(anchor ? { x: anchor.left, y: anchor.bottom + 6 } : { x: 120, y: 56 });
@@ -3690,11 +3689,14 @@ export function Workspace({
     <button
       ref={shieldRef}
       type="button"
-      className={`sb-tool sb-shield${currentSafeMode === "off" ? "" : " on"}`}
+      className="win-shield"
       data-shield={currentSafeMode}
       title={`Safe mode: ${safeLabel} · Change…`}
       aria-label={`Safe mode: ${safeLabel}. Change…`}
       aria-haspopup="menu"
+      aria-expanded={!!shieldAt}
+      tabIndex={-1}
+      onMouseDown={(e) => e.stopPropagation()}
       onPointerDown={() => {
         shieldWasOpen.current = !!shieldAt;
       }}
@@ -3704,43 +3706,11 @@ export function Workspace({
       }}
     >
       <ShieldModeIcon mode={currentSafeMode} size={13} />
-      <span className="sb-tool-label">{currentSafeMode === "off" ? "Safe mode off" : safeLabel}</span>
-      <ChevronDownIcon size={10} className="sb-tool-chevron" />
     </button>
   );
 
-  // MCP beside it: whether agents can read this connection, and a menu to
-  // change that or open the Agents page.
+  // Whether agents can read this connection: the Agents button's dot.
   const mcpOn = !!activeConnection && mcpShared(activeConnection);
-  const mcpRef = useRef<HTMLButtonElement>(null);
-  const [mcpAt, setMcpAt] = useState<{ x: number; y: number } | null>(null);
-  const mcpWasOpen = useRef(false);
-  const closeMcpMenu = useCallback(() => setMcpAt(null), []);
-  const mcpButton = activeConnection && connState === "connected" && (
-    <button
-      ref={mcpRef}
-      type="button"
-      className="sb-tool sb-mcp"
-      data-mcp={mcpOn ? "shared" : "off"}
-      title={mcpOn ? "Shared with agents over MCP, read-only · Change…" : "Not shared with agents · Change…"}
-      aria-haspopup="menu"
-      onPointerDown={() => {
-        mcpWasOpen.current = !!mcpAt;
-      }}
-      onClick={() => {
-        if (mcpWasOpen.current) {
-          mcpWasOpen.current = false;
-          return;
-        }
-        const r = mcpRef.current?.getBoundingClientRect();
-        setMcpAt(r ? { x: r.left, y: r.bottom + 6 } : { x: 120, y: 120 });
-      }}
-    >
-      <span className="sb-mcp-dot" aria-hidden />
-      <span className="sb-tool-label">MCP · {mcpOn ? "shared" : "off"}</span>
-      <ChevronDownIcon size={10} className="sb-tool-chevron" />
-    </button>
-  );
 
   // One inspector column at the right: Review SQL, else Quick Look. The main
   // column gives it its width (App.css, --inspector-right).
@@ -3765,8 +3735,8 @@ export function Workspace({
       data-empty-pose={emptyPose ? "" : undefined}
       data-tray-up={trayUp ? "" : undefined}
     >
-      {/* Safe mode and MCP sit in the title bar (Paper, 2026-10-13), for the shown window only. */}
-      {active && titlebarTools && (shield || mcpButton) && createPortal(<>{shield}{mcpButton}</>, titlebarTools)}
+      {/* The safe mode shield sits in the shown window's pill (2026-10-17). */}
+      {active && titlebarTools && shield && createPortal(shield, titlebarTools)}
       {/* Clips the panel at the window's left edge, so ⌘B slides it out. */}
       <div className="sidebar-clip" data-close-scope="connection">
         <Sidebar
@@ -4495,20 +4465,6 @@ export function Workspace({
             if (id !== currentSafeMode) actions.setSafeMode(id as SafeMode);
           }}
           onClose={closeShield}
-        />
-      )}
-      {active && (
-        <GridMenu
-          name="mcp"
-          label="MCP"
-          at={mcpAt}
-          items={[
-            { id: mcpOn ? "mcp:off" : "mcp:on", label: "Share this connection with agents", checked: mcpOn },
-            { id: "agents", label: "Agents…", command: "agents", separated: true },
-          ]}
-          footer="Read-only: tables and rows, never passwords."
-          onPick={runCommand}
-          onClose={closeMcpMenu}
         />
       )}
       {active && (

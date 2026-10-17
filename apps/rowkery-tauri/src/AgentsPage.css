@@ -796,30 +796,44 @@
 
 /* ---------- The window tabs and the connection sheet ---------- */
 
-/* A window tab's MCP tag: an agent read this connection in the last minute.
-   A click opens the Agents page. */
+/* A window pill's agent mark (2026-10-17): on the shown pill while the
+   connection is shared, on any pill while an agent read it in the last
+   minute, when it carries a green dot. A click opens the Agents page. */
 .win-mcp {
-  display: flex;
+  position: relative;
+  display: grid;
   flex-shrink: 0;
-  align-items: center;
-  gap: 3px;
-  height: 16px;
-  padding: 0 5px;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: 0;
-  border-radius: 8px;
-  background: var(--okbg);
-  color: color-mix(in srgb, var(--ok) var(--tagmix), var(--text));
-  font: 700 9px var(--sans);
-  letter-spacing: 0.02em;
-  cursor: pointer;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
 }
 
-.win-mcp::before {
+.win-mcp:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.win-mcp[data-recent]::after {
   content: "";
-  width: 4px;
-  height: 4px;
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--ok);
+  box-shadow: 0 0 0 1.5px var(--bar);
+}
+
+.win-tab[data-on] .win-mcp[data-recent]::after {
+  box-shadow: 0 0 0 1.5px var(--bg);
 }
 
 /* The connection sheet's Allow MCP stats. */

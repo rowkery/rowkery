@@ -8,9 +8,9 @@ export const metadata = { title: "Search with ⌘K" };
 
 ## Open it
 
-Press <kbd>⌘K</kbd> anywhere in the window, or click **Search tables, commands** at the right of the title bar. The search opens under that button with its field already focused, and it always starts empty. Press <kbd>⌘K</kbd> again, <kbd>Esc</kbd> or click outside it to close it.
+Press <kbd>⌘K</kbd> anywhere in the window, or choose it from the menu bar. The search opens in the middle of the window, over the window blurred and dimmed, with its field already focused, and it always starts empty. Press <kbd>⌘K</kbd> again, <kbd>Esc</kbd> or click outside it to close it.
 
-<Shot src="/img/search-empty.webp" width={503} height={486} alt="The ⌘K search open under the title bar's search button, before anything is typed: four recent queries with their age, then commands with their keys, the first row showing ↵ Open and ⌥↵ Insert." />
+<Shot src="/img/search-empty.webp" width={1280} height={800} alt="The ⌘K search open in the middle of the window over a blurred, dimmed window, before anything is typed: four recent queries with their age, then commands with their keys, the first row showing ↵ Open and ⌥↵ Insert." />
 
 The footer shows the keys for the highlighted row and, on the right, the name of the window's connection.
 
@@ -43,7 +43,7 @@ Type any part of a name. Matching ignores case.
 
 The matched letters are highlighted in each row. Each group shows its best eight matches, and the groups are ordered by their best match, so `new tab` puts Commands first and `orders` puts Tables first. When two groups tie, Tables lead, then Commands and Connections, then Recent queries.
 
-<Shot src="/img/search-mixed.webp" width={420} height={432} alt="⌘K with “ord” typed: Tables first (public.orders and public.order_items, with row counts), then recent queries that mention orders, then commands such as Keyboard shortcuts, with the matched letters in orange." />
+<Shot src="/img/search-mixed.webp" width={640} height={438} alt="⌘K with “ord” typed: Tables first (public.orders and public.order_items, with row counts), then recent queries that mention orders, then commands such as Keyboard shortcuts, with the matched letters in orange." />
 
 ### Words commands also answer to
 
@@ -84,7 +84,7 @@ Connections have no prefix. Press <kbd>⇥</kbd> instead to step through the gro
 
 A search limited to one group shows up to 60 matches.
 
-<Shot src="/img/search-scoped.webp" width={420} height={205} alt="⌘K with “>safe” typed: only Commands, listing Change safe mode…, Safe mode: Off and Safe mode: Read-only." />
+<Shot src="/img/search-scoped.webp" width={640} height={211} alt="⌘K with “>safe” typed: only Commands, listing Change safe mode…, Safe mode: Off and Safe mode: Read-only." />
 
 ## Keys in the search
 
@@ -122,7 +122,7 @@ Paste (or type) into the search field and ⌘K recognises two kinds of text. The
 
 Quotes around the text are ignored. Text that starts with a prefix (`t:`, `q:`, `>`) is always searched as text.
 
-<Shot src="/img/search-paste.webp" width={420} height={116} alt="A postgres:// URL pasted into ⌘K: the only row is New connection from URL, db.arcade.internal/arcade, with ↵." />
+<Shot src="/img/search-paste.webp" width={640} height={122} alt="A postgres:// URL pasted into ⌘K: the only row is New connection from URL, db.arcade.internal/arcade, with ↵." />
 
 [Setting up a connection](/setting-up-a-connection/#what-you-can-paste) lists every form a connection string can take.
 

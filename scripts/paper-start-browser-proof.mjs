@@ -194,8 +194,8 @@ for (const dark of [false, true]) {
   const savedH = await page.$eval('[data-saved-conn="prd"]', (e) => e.getBoundingClientRect().height);
   const foundH = await page.$eval('[data-found="5432"]', (e) => e.getBoundingClientRect().height);
   check(Math.round(savedH) === 44 && Math.round(foundH) === 36, `${theme}: 44 px saved rows, a 36 px found row (${savedH}, ${foundH})`);
-  // The empty window has no tab row chrome: no chip, no ‹ ›, only ⌘K.
-  check(!(await visible('[data-testid="conn-chip"]')) && !(await visible(`${ws} [data-history-back]`)) && (await visible('[data-testid="search-cap"]')), `${theme}: no chip or ‹ › in the tab row, only ⌘K`);
+  // The empty window has no tab row chrome: no chip, no ‹ ›, no search box (⌘K opens mid-window).
+  check(!(await visible('[data-testid="conn-chip"]')) && !(await visible(`${ws} [data-history-back]`)) && !(await visible('[data-testid="search-cap"]')), `${theme}: no chip, ‹ › or search box in the tab row`);
   // Light contrast: the saved rows' sub-lines and Connect ↵ are --mute.
   const mute = await colorOf("--mute");
   const subs = await page.$eval('[data-saved-conn="prd"]', (e) => [getComputedStyle(e.querySelector('[data-testid="ew-saved-sub"]')).color, getComputedStyle(e.querySelector("kbd")).color]);

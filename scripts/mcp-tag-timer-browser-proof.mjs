@@ -143,7 +143,8 @@ const shot = async (name) => {
   await page.screenshot({ path: `${OUT}/${name}.png`, clip: { x: 0, y: 0, width: 640, height: 120 } });
   console.log(`${OUT}/${name}.png`);
 };
-const TAG = '[data-testid="win-tab"][data-on] [data-testid="win-mcp"]';
+// The agent mark's green dot: the shown pill keeps the mark while the connection is shared (2026-10-17).
+const TAG = '[data-testid="win-tab"][data-on] [data-testid="win-mcp"][data-recent]';
 const timers = () => page.evaluate(() => ({ started: window.__TAG_TIMERS__.started, live: window.__TAG_TIMERS__.live.size }));
 const hasTag = async () => !!(await page.$(TAG));
 // Fast-forwards the page's clock, letting the stubbed invokes settle.
