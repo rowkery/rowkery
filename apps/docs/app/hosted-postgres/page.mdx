@@ -114,7 +114,9 @@ postgresql://USER:PASSWORD@INSTANCE.ACCOUNT_ID.REGION.rds.amazonaws.com:5432/DAT
 
 ## Google Cloud SQL
 
-Open the instance's **Connections** page.
+Rowkery connects to Cloud SQL for PostgreSQL by itself, with your gcloud login or a service account key, the way the Cloud SQL Auth Proxy does: pick **Google Cloud SQL** under **Connect to** in the connection form. There's no proxy to run and no IP to allow. [Google Cloud SQL](/google-cloud-sql/) covers it.
+
+To connect by the instance's public IP instead, as with any other server, open the instance's **Connections** page.
 
 - **Allow-list:** on the **Networking** tab, under **Authorized networks**, click **Add network**, enter your Mac's public IP, then **Done** and **Save**. Google requires both the instance's address and yours to be IPv4.
 - **Host:** use the instance's public IP address.

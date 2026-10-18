@@ -15,6 +15,7 @@ Rowkery only makes these network connections:
 | Connection | When |
 | --- | --- |
 | Your databases | When you open a connection, directly or through the SSH tunnel you set up |
+| Google | For a [Google Cloud SQL](/google-cloud-sql/) connection only: signing in with your gcloud login or service account key, asking the Cloud SQL Admin API for the instance's address and a client certificate, and listing your projects and instances while you pick one |
 | The update check | 15 seconds after launch, then every 6 hours, and when you choose **Rowkery › Check for Updates…**; never on its own when **Settings › Updates** is Off. It reads the latest release's `latest.json` from Rowkery's public GitHub repository, and downloads the update when there is one, unless Settings › Updates is Notify only |
 | An issue report | Only when you press **Send report** in Report an issue, and only what that sheet lists |
 
@@ -36,9 +37,10 @@ Passwords are never written to `config.json`. Rowkery keeps them in the macOS Ke
 
 - the database password,
 - the SSH password or the SSH key's passphrase,
+- a Google Cloud SQL connection's service account key, when it uses one,
 - the key Rowkery uses to make stand-ins for the connection's [sensitive columns](#sensitive-columns).
 
-An SSH key file stays where it is; Rowkery saves only its path. Once read, a secret is kept in memory until Rowkery quits, so reconnecting doesn't ask the keychain again. When you delete a connection, its keychain item is removed as soon as the Undo toast has gone.
+An SSH key file stays where it is; Rowkery saves only its path. A gcloud login stays in gcloud's own file, which Rowkery reads when it needs a new Google token; the token is kept in memory only. Once read, a secret is kept in memory until Rowkery quits, so reconnecting doesn't ask the keychain again. When you delete a connection, its keychain item is removed as soon as the Undo toast has gone.
 
 When there is no keychain to use, as on a Linux machine without a secret service, or when `ROWKERY_CONFIG_DIR` points Rowkery at a folder of its own, secrets go to an encrypted file, `secrets.enc`, with its key in `secrets.key` beside it. That keeps them out of plain sight, but not away from someone who can read your files.
 
