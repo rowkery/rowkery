@@ -49,7 +49,7 @@ jobs:
         with:
           node-version: "22"
       - name: Postgres on 54329
-        uses: ikalnytskyi/action-setup-postgres@687404e7b78b0b3471751635e69f70d54a09d6e7 # v6
+        uses: ikalnytskyi/action-setup-postgres@c4dda34aae1c821e3a771b68b73b13af3198a7ee # v8
         with:
           username: rowkery
           password: rowkery
