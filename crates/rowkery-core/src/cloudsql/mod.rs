@@ -53,7 +53,13 @@ impl InstanceName {
         let text = text.trim();
         let (rest, name) = text.rsplit_once(':')?;
         let (project, region) = rest.rsplit_once(':')?;
-        let ok = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace) && !s.contains('/');
+        // What Google allows in each part; anything else would go into the
+        // Admin API's URL as is.
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        };
         if !(ok(project) && ok(region) && ok(name)) || project.matches(':').count() > 1 {
             return None;
         }
@@ -159,6 +165,8 @@ mod tests {
             "a:b:c:d:e",
             "p:r:i x",
             "p/x:r:i",
+            "p:r:i?x",
+            "p:r:i#x",
         ] {
             assert_eq!(InstanceName::parse(bad), None, "{bad}");
         }

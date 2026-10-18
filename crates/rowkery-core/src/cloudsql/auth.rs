@@ -17,6 +17,10 @@ use super::{endpoints, http, CloudSqlError};
 /// What a service account's token is for: the Admin API, and listing the
 /// projects it can see (for the instance picker). Nothing broader.
 const SCOPES: &str = "https://www.googleapis.com/auth/sqlservice.admin https://www.googleapis.com/auth/cloudplatformprojects.readonly";
+/// What a service account needs to act as another one (`generateAccessToken`
+/// accepts nothing narrower), asked for only when it's the source of an
+/// impersonated login.
+const IMPERSONATION_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 /// A token this close to expiry is renewed before use.
 const TOKEN_MARGIN: Duration = Duration::from_secs(120);
 
@@ -91,7 +95,9 @@ impl Credentials {
         }
     }
 
-    fn quota_project(&self) -> Option<&str> {
+    /// Sent as `x-goog-user-project` (a user login's quota project). Read
+    /// from the file each call, so `set-quota-project` applies at once.
+    pub(crate) fn quota_project(&self) -> Option<&str> {
         match self {
             Self::AuthorizedUser {
                 quota_project_id, ..
@@ -143,8 +149,6 @@ pub(crate) fn gcloud_credentials() -> Result<Option<Credentials>, CloudSqlError>
 pub(crate) struct Token {
     pub value: String,
     expires: SystemTime,
-    /// Sent as `x-goog-user-project` (a user login's quota project).
-    pub quota_project: Option<String>,
 }
 
 impl Token {
@@ -192,7 +196,7 @@ pub(crate) async fn token(creds: &Credentials) -> Result<Token, CloudSqlError> {
             return Ok(t);
         }
     }
-    let t = fetch(creds).await?;
+    let t = fetch(creds, SCOPES).await?;
     if let Ok(mut c) = cache().lock() {
         c.insert(key, t.clone());
     }
@@ -221,7 +225,12 @@ struct OAuthError {
     error_description: String,
 }
 
-fn fetch(creds: &Credentials) -> futures::future::BoxFuture<'_, Result<Token, CloudSqlError>> {
+/// A new token for `creds`; `scope` applies to service account keys (a user
+/// login's scopes were fixed when gcloud signed in).
+fn fetch<'a>(
+    creds: &'a Credentials,
+    scope: &'static str,
+) -> futures::future::BoxFuture<'a, Result<Token, CloudSqlError>> {
     Box::pin(async move {
         match creds {
             Credentials::AuthorizedUser {
@@ -237,11 +246,7 @@ fn fetch(creds: &Credentials) -> futures::future::BoxFuture<'_, Result<Token, Cl
                     ("refresh_token", refresh_token.as_str()),
                 ];
                 let uri = format!("{}/token", endpoints().token);
-                let t = token_request(&uri, &form, true).await?;
-                Ok(Token {
-                    quota_project: creds.quota_project().map(str::to_string),
-                    ..t
-                })
+                token_request(&uri, &form, true).await
             }
             Credentials::ServiceAccount {
                 client_email,
@@ -251,8 +256,13 @@ fn fetch(creds: &Credentials) -> futures::future::BoxFuture<'_, Result<Token, Cl
             } => {
                 let default_uri = format!("{}/token", endpoints().token);
                 let uri = token_uri.as_deref().unwrap_or(&default_uri);
-                let assertion =
-                    jwt_assertion(client_email, private_key, private_key_id.as_deref(), uri)?;
+                let assertion = jwt_assertion(
+                    client_email,
+                    private_key,
+                    private_key_id.as_deref(),
+                    uri,
+                    scope,
+                )?;
                 let form = [
                     ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                     ("assertion", assertion.as_str()),
@@ -263,7 +273,7 @@ fn fetch(creds: &Credentials) -> futures::future::BoxFuture<'_, Result<Token, Cl
                 service_account_impersonation_url,
                 source_credentials,
             } => {
-                let source = fetch(source_credentials).await?;
+                let source = fetch(source_credentials, IMPERSONATION_SCOPE).await?;
                 impersonate(service_account_impersonation_url, &source).await
             }
             Credentials::ExternalAccount {} => Err(CloudSqlError::Login(
@@ -312,7 +322,6 @@ async fn token_request(
     Ok(Token {
         value: t.access_token,
         expires: SystemTime::now() + Duration::from_secs(t.expires_in.unwrap_or(3600)),
-        quota_project: None,
     })
 }
 
@@ -347,7 +356,6 @@ async fn impersonate(url: &str, source: &Token) -> Result<Token, CloudSqlError> 
         value: t.access_token,
         // `expireTime` is RFC 3339; an hour is what was asked for.
         expires: SystemTime::now() + Duration::from_secs(3540),
-        quota_project: None,
     })
 }
 
@@ -357,6 +365,7 @@ fn jwt_assertion(
     private_key_pem: &str,
     key_id: Option<&str>,
     audience: &str,
+    scope: &str,
 ) -> Result<String, CloudSqlError> {
     let bad_key =
         |why: &str| CloudSqlError::Login(format!("The service account key's private key {why}"));
@@ -376,7 +385,7 @@ fn jwt_assertion(
     }
     let claims = serde_json::json!({
         "iss": email,
-        "scope": SCOPES,
+        "scope": scope,
         "aud": audience,
         "iat": now,
         "exp": now + 3600,
@@ -405,10 +414,11 @@ pub(crate) async fn token_email(token: &Token) -> Option<String> {
         #[serde(default)]
         email: Option<String>,
     }
+    // In the body, not the URL, which proxies log.
     let res = http()
         .ok()?
-        .get(format!("{}/tokeninfo", endpoints().token))
-        .query(&[("access_token", token.value.as_str())])
+        .post(format!("{}/tokeninfo", endpoints().token))
+        .form(&[("access_token", token.value.as_str())])
         .send()
         .await
         .ok()?;
@@ -495,7 +505,8 @@ mod tests {
     #[test]
     fn jwt_assertion_is_signed_with_the_key() {
         let pkcs8 = super::super::tls::test_rsa_pkcs8_pem();
-        let jwt = jwt_assertion("bot@p.iam", &pkcs8, Some("kid1"), "https://t/token").unwrap();
+        let jwt =
+            jwt_assertion("bot@p.iam", &pkcs8, Some("kid1"), "https://t/token", SCOPES).unwrap();
         let parts: Vec<&str> = jwt.split('.').collect();
         assert_eq!(parts.len(), 3);
         let claims: serde_json::Value =

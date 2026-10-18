@@ -1,7 +1,9 @@
 //! One dialer per connection: it keeps the instance's address and a client
-//! certificate (renewed when a dial finds it near expiry) and hands each
-//! session a fresh TLS stream to the instance. Sessions already open don't
-//! need the certificate again, so nothing runs in the background.
+//! certificate and hands each session a fresh TLS stream to the instance.
+//! A dial that finds the certificate near expiry renews it, in the
+//! background while the old one still works, so no dial (a cancel request
+//! least of all) waits on the Admin API for a certificate it doesn't need.
+//! Sessions already open don't need the certificate again.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -20,8 +22,11 @@ use super::{admin, endpoints, tls, CloudSqlError, InstanceName};
 /// A session's stream to the instance: Postgres runs inside it with SSL off.
 pub type CloudSqlStream = tokio_rustls::client::TlsStream<TcpStream>;
 
-/// A certificate this close to expiry is renewed before a dial.
+/// A certificate this close to expiry is renewed.
 const CERT_MARGIN: Duration = Duration::from_secs(4 * 60);
+/// A certificate with more than this left still serves a dial while it's
+/// being renewed.
+const CERT_USABLE: Duration = Duration::from_secs(30);
 /// How long reaching the instance (TCP and TLS) may take.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -36,7 +41,11 @@ pub struct CloudSqlDialer {
     instance: InstanceName,
     ip_type: CloudSqlIpType,
     login: Login,
-    ready: tokio::sync::Mutex<Option<Ready>>,
+    /// The address and TLS setup dials use.
+    ready: Mutex<Option<Arc<Ready>>>,
+    /// Held while one renewal talks to the Admin API, so the others wait for
+    /// it instead of asking for certificates of their own.
+    renewing: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for CloudSqlDialer {
@@ -51,7 +60,8 @@ impl CloudSqlDialer {
             instance,
             ip_type,
             login,
-            ready: tokio::sync::Mutex::new(None),
+            ready: Mutex::new(None),
+            renewing: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -59,17 +69,42 @@ impl CloudSqlDialer {
         &self.instance
     }
 
-    /// The address and TLS setup, fetched again when the certificate is
-    /// near expiry (or a dial with it failed).
-    async fn ready(
-        &self,
-    ) -> Result<(String, ServerName<'static>, Arc<ClientConfig>), CloudSqlError> {
-        let mut slot = self.ready.lock().await;
-        if let Some(r) = slot.as_ref() {
-            if SystemTime::now() + CERT_MARGIN < r.expires {
-                return Ok((r.host.clone(), r.server_name.clone(), r.tls.clone()));
-            }
+    /// The setup in use, when its certificate has more than `margin` left.
+    fn cached(&self, margin: Duration) -> Option<Arc<Ready>> {
+        let slot = self.ready.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref()
+            .filter(|r| SystemTime::now() + margin < r.expires)
+            .cloned()
+    }
+
+    /// The setup for a dial, and whether it was fetched for this one.
+    async fn ready(self: &Arc<Self>) -> Result<(Arc<Ready>, bool), CloudSqlError> {
+        if let Some(r) = self.cached(CERT_MARGIN) {
+            return Ok((r, false));
         }
+        if let Some(r) = self.cached(CERT_USABLE) {
+            // Near expiry but still good: renew it behind this dial, once.
+            if self.renewing.try_lock().is_ok() {
+                let me = self.clone();
+                tokio::spawn(async move {
+                    let _renewing = me.renewing.lock().await;
+                    if me.cached(CERT_MARGIN).is_none() {
+                        let _ = me.renew().await;
+                    }
+                });
+            }
+            return Ok((r, false));
+        }
+        let _renewing = self.renewing.lock().await;
+        // Another dial may have renewed it while this one waited.
+        if let Some(r) = self.cached(CERT_MARGIN) {
+            return Ok((r, false));
+        }
+        Ok((self.renew().await?, true))
+    }
+
+    /// Asks the Admin API for the address and a new certificate.
+    async fn renew(&self) -> Result<Arc<Ready>, CloudSqlError> {
         // The key is made while the Admin API answers.
         let (key, target) = tokio::try_join!(
             tls::client_key(),
@@ -86,43 +121,43 @@ impl CloudSqlDialer {
                 CloudSqlError::Instance(format!("Bad address for the instance: {}", target.host))
             })?;
         let config = tls::client_config(&key, &cert, &target.ca_pem, target.dns_names)?;
-        let r = Ready {
+        let r = Arc::new(Ready {
             host: target.host,
             server_name,
             tls: Arc::new(config),
             expires,
-        };
-        let out = (r.host.clone(), r.server_name.clone(), r.tls.clone());
-        *slot = Some(r);
-        Ok(out)
+        });
+        *self.ready.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.clone());
+        Ok(r)
     }
 
     /// A TLS stream to the instance for one session (or one cancel request).
-    pub async fn dial(&self) -> Result<CloudSqlStream, CloudSqlError> {
-        let (host, name, config) = self.ready().await?;
-        match self.dial_with(&host, name, config).await {
-            Err(Dial::Tls(_)) => {
+    pub async fn dial(self: &Arc<Self>) -> Result<CloudSqlStream, CloudSqlError> {
+        let (r, fresh) = self.ready().await?;
+        match self.dial_with(&r).await {
+            Err(Dial::Tls(_)) if !fresh => {
                 // The instance's CA rotated, or the certificate was refused:
-                // fetch both again and try once more.
-                *self.ready.lock().await = None;
-                let (host, name, config) = self.ready().await?;
-                self.dial_with(&host, name, config)
+                // fetch both again and try once more. (Just-fetched ones
+                // would only fail the same way.)
+                {
+                    let mut slot = self.ready.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, &r)) {
+                        *slot = None;
+                    }
+                }
+                let (r, _) = self.ready().await?;
+                self.dial_with(&r)
                     .await
-                    .map_err(|e| e.into_error(self, &host))
+                    .map_err(|e| e.into_error(self, &r.host))
             }
-            other => other.map_err(|e| e.into_error(self, &host)),
+            other => other.map_err(|e| e.into_error(self, &r.host)),
         }
     }
 
-    async fn dial_with(
-        &self,
-        host: &str,
-        name: ServerName<'static>,
-        config: Arc<ClientConfig>,
-    ) -> Result<CloudSqlStream, Dial> {
+    async fn dial_with(&self, r: &Ready) -> Result<CloudSqlStream, Dial> {
         let tcp = tokio::time::timeout(
             DIAL_TIMEOUT,
-            TcpStream::connect((host, endpoints().server_port)),
+            TcpStream::connect((r.host.as_str(), endpoints().server_port)),
         )
         .await
         .map_err(|_| Dial::Timeout)?
@@ -134,7 +169,8 @@ impl CloudSqlDialer {
             .with_time(Duration::from_secs(30))
             .with_interval(Duration::from_secs(10));
         let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
-        tokio::time::timeout(DIAL_TIMEOUT, TlsConnector::from(config).connect(name, tcp))
+        let connector = TlsConnector::from(r.tls.clone());
+        tokio::time::timeout(DIAL_TIMEOUT, connector.connect(r.server_name.clone(), tcp))
             .await
             .map_err(|_| Dial::Timeout)?
             .map_err(Dial::Tls)
@@ -258,6 +294,49 @@ mod tests {
         let mut key = c.clone();
         key.credentials = CloudSqlCredentials::Key;
         assert!(!d.serves(&key));
+    }
+
+    /// A dialer holding a certificate with `left` to go.
+    fn holding(left: Duration) -> (Arc<CloudSqlDialer>, Arc<Ready>) {
+        let tls =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth();
+        let r = Arc::new(Ready {
+            host: "127.0.0.1".into(),
+            server_name: ServerName::try_from("db.example").unwrap(),
+            tls: Arc::new(tls),
+            expires: SystemTime::now() + left,
+        });
+        let d = Arc::new(CloudSqlDialer::new(
+            InstanceName::parse("p:r:i").unwrap(),
+            CloudSqlIpType::Public,
+            Login::Gcloud,
+        ));
+        *d.ready.lock().unwrap() = Some(r.clone());
+        (d, r)
+    }
+
+    #[tokio::test]
+    async fn a_renewal_doesnt_hold_up_a_dial_whose_certificate_still_works() {
+        // Near expiry, while another dial renews: the old one serves at once.
+        let (d, r) = holding(Duration::from_secs(60));
+        let renewing = d.renewing.lock().await;
+        let (got, fresh) = tokio::time::timeout(Duration::from_millis(200), d.ready())
+            .await
+            .expect("waited on the renewal")
+            .unwrap();
+        assert!(Arc::ptr_eq(&got, &r) && !fresh);
+
+        // Nearly gone: it waits for the renewal rather than fail mid-handshake.
+        let (d, _) = holding(Duration::from_secs(10));
+        let _renewing = d.renewing.lock().await;
+        assert!(tokio::time::timeout(Duration::from_millis(200), d.ready())
+            .await
+            .is_err());
+        drop(renewing);
     }
 
     #[test]

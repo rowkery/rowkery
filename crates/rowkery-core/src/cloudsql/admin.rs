@@ -38,7 +38,7 @@ async fn call<T: serde::de::DeserializeOwned>(
     for attempt in 0..2 {
         let token = auth::token(&creds).await?;
         let mut req = build(http()?).bearer_auth(&token.value);
-        if let Some(q) = &token.quota_project {
+        if let Some(q) = creds.quota_project() {
             req = req.header("x-goog-user-project", q);
         }
         let res = req.send().await.map_err(|e| {

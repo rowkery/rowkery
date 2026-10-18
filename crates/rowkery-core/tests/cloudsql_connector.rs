@@ -51,7 +51,7 @@ fn json(status: u16, body: serde_json::Value) -> (u16, String) {
 
 impl Google {
     fn route(&self, method: &str, path: &str, headers: &str, body: &str) -> (u16, String) {
-        let path = path.split('?').next().unwrap_or(path);
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
         if path == "/token" {
             assert!(body.contains("grant_type=refresh_token"), "{body}");
             return json(
@@ -60,6 +60,9 @@ impl Google {
             );
         }
         if path == "/tokeninfo" {
+            // The token goes in the body, never the URL (proxies log URLs).
+            assert_eq!((method, query), ("POST", ""));
+            assert!(body.contains("access_token=tok-1"), "{body}");
             return json(200, serde_json::json!({ "email": "dev@example.com" }));
         }
         assert!(
@@ -270,7 +273,7 @@ async fn greeting(name: &str) -> Result<String, CloudSqlError> {
     read_greeting(&dialer).await
 }
 
-async fn read_greeting(dialer: &cloudsql::CloudSqlDialer) -> Result<String, CloudSqlError> {
+async fn read_greeting(dialer: &Arc<cloudsql::CloudSqlDialer>) -> Result<String, CloudSqlError> {
     let mut stream = dialer.dial().await?;
     let mut out = String::new();
     let _ = stream.read_to_string(&mut out).await;
@@ -346,9 +349,12 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
     assert_eq!(greeting("orders-cas").await.unwrap(), "hello from orders");
     let err = greeting("orders-wrong-name").await.unwrap_err().to_string();
     assert!(err.contains("secure connection"), "{err}");
-    // A server signed by any other CA isn't the instance.
+    // A server signed by any other CA isn't the instance. A certificate
+    // fetched for this dial isn't fetched again to fail the same way.
+    let issued = google.certs_issued.load(Ordering::SeqCst);
     let err = greeting("imposter").await.unwrap_err().to_string();
     assert!(err.contains("secure connection"), "{err}");
+    assert_eq!(google.certs_issued.load(Ordering::SeqCst), issued + 1);
 
     let err = greeting("denied").await.unwrap_err();
     assert!(
@@ -378,6 +384,19 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         ]
     );
     assert_eq!(list.skipped, vec!["locked".to_string()]);
+
+    // `gcloud auth application-default set-quota-project` keeps the refresh
+    // token, so the cached token stays; the new quota project applies at once.
+    std::fs::write(
+        &adc,
+        r#"{"type":"authorized_user","client_id":"id","client_secret":"s","refresh_token":"r","quota_project_id":"acme-other"}"#,
+    )
+    .unwrap();
+    cloudsql::instances(None).await.unwrap();
+    assert_eq!(
+        google.quota_project.lock().unwrap().as_deref(),
+        Some("acme-other")
+    );
 
     // No gcloud login: the form says so rather than failing.
     std::env::set_var(
