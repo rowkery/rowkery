@@ -2,6 +2,7 @@
 # make dev feat/some-thing  check out that branch as on origin, then run it
 # make dev 35               check out pull request #35, then run it
 #                           (b=feat/some-thing works too)
+#                           (runs as Rowkery Dev: its own data, never Rowkery's connections)
 # make dmg                  build a release DMG for this Mac's chip
 # make dmg universal        one DMG for Apple Silicon and Intel Macs
 # make dmg-dev              Rowkery Dev: beside Rowkery, own data, no auto-update (dmg-dev universal too)
