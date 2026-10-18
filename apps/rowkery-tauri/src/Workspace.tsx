@@ -4352,7 +4352,10 @@ export function Workspace({
                         </button>
                       )}
                     </>
-                  ) : undefined
+                  ) : busy ? undefined : (
+                    // A finished run with no rows says so, so it doesn't read as still loading.
+                    <span data-empty-rows>No records</span>
+                  )
                 }
               />
             </RenderErrorBoundary>

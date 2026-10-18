@@ -106,10 +106,12 @@ export function useUpdatePref(): UpdatePref {
 /** Whether a found release downloads without asking. */
 const downloads = (pref: UpdatePref) => pref === "auto" || pref === "download";
 
-/** The foot's orange button: a newer release waits for the user. Automatic installs on its own. */
-export function updateWaiting(s: UpdateState, pref: UpdatePref): boolean {
-  if (s.phase === "available" || s.phase === "downloading") return true;
-  return s.phase === "ready" && pref !== "auto";
+/**
+ * The foot's orange button: a newer release is found, downloading or ready.
+ * Under Automatic too, so what Settings > Updates says always shows in the foot.
+ */
+export function updateWaiting(s: UpdateState, _pref?: UpdatePref): boolean {
+  return s.phase === "available" || s.phase === "downloading" || s.phase === "ready";
 }
 
 export type UpdateToast =
