@@ -65,6 +65,14 @@ pub enum ConfigError {
     Message(String),
 }
 
+/// True in a Rowkery Dev build (`ROWKERY_CHANNEL=dev` at compile time,
+/// `make dmg dev`): it keeps its own config folder, keychain items and agent
+/// entry, so it can sit beside the release app without touching its data.
+pub const DEV_BUILD: bool = match option_env!("ROWKERY_CHANNEL") {
+    Some(c) => matches!(c.as_bytes(), b"dev"),
+    None => false,
+};
+
 /// Directory for Rowkery app data (`ROWKERY_CONFIG_DIR` overrides for tests).
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ROWKERY_CONFIG_DIR") {
@@ -73,19 +81,27 @@ pub fn config_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = home_dir() {
-            return home.join("Library/Application Support/Rowkery");
+            return home.join(if DEV_BUILD {
+                "Library/Application Support/Rowkery Dev"
+            } else {
+                "Library/Application Support/Rowkery"
+            });
         }
     }
     #[cfg(target_os = "linux")]
     {
         if let Some(home) = home_dir() {
-            return home.join(".config/rowkery");
+            return home.join(if DEV_BUILD {
+                ".config/rowkery-dev"
+            } else {
+                ".config/rowkery"
+            });
         }
     }
     #[cfg(target_os = "windows")]
     {
         if let Some(app_data) = std::env::var_os("APPDATA") {
-            return PathBuf::from(app_data).join("Rowkery");
+            return PathBuf::from(app_data).join(if DEV_BUILD { "Rowkery Dev" } else { "Rowkery" });
         }
     }
     PathBuf::from(".rowkery")

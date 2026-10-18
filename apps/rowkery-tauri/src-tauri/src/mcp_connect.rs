@@ -22,7 +22,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The server's name in each client's config.
-const NAME: &str = "rowkery";
+const NAME: &str = if rowkery_core::config::DEV_BUILD {
+    "rowkery-dev"
+} else {
+    "rowkery"
+};
 /// Prints the login shell's PATH after this marker, so rc-file noise is skipped.
 const PATH_MARKER: &str = "__ROWKERY_PATH__";
 

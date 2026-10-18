@@ -1,0 +1,9 @@
+{
+  "productName": "Rowkery Dev",
+  "identifier": "dev.rowkery.app.dev",
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}
