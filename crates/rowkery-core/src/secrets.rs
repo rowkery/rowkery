@@ -12,7 +12,11 @@ use thiserror::Error;
 
 use crate::config::config_dir;
 
-const SERVICE: &str = "rowkery";
+const SERVICE: &str = if crate::config::DEV_BUILD {
+    "rowkery-dev"
+} else {
+    "rowkery"
+};
 const FALLBACK_FILE: &str = "secrets.enc";
 const FALLBACK_KEY_FILE: &str = "secrets.key";
 

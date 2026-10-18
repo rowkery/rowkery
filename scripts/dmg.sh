@@ -3,6 +3,11 @@
 #
 #   scripts/dmg.sh            # for this Mac's chip
 #   scripts/dmg.sh universal  # one DMG for Apple Silicon and Intel
+#   scripts/dmg.sh dev        # Rowkery Dev (also: dev universal; make dmg-dev)
+#
+# Rowkery Dev is the build for testing a branch: its own name, bundle id
+# (tauri.dev.conf.json), config folder, keychain items and agent entry, and no
+# updater feed, so it installs beside Rowkery and never touches its data.
 #
 # The app is unsigned: on another Mac, drag it to Applications, then run
 #   xattr -dr com.apple.quarantine /Applications/Rowkery.app
@@ -26,16 +31,22 @@ background="$app/brand/dmg-background.png"
 
 args=(--bundles dmg)
 out="$root/target/release/bundle/dmg"
-case "${1:-}" in
-  "") ;;
-  universal)
-    say "adding the Apple Silicon and Intel Rust targets"
-    rustup target add aarch64-apple-darwin x86_64-apple-darwin
-    args+=(--target universal-apple-darwin)
-    out="$root/target/universal-apple-darwin/release/bundle/dmg"
-    ;;
-  *) die "unknown option '$1'; use 'make dmg' or 'make dmg universal'" ;;
-esac
+for opt in "$@"; do
+  case "$opt" in
+    universal)
+      say "adding the Apple Silicon and Intel Rust targets"
+      rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      args+=(--target universal-apple-darwin)
+      out="$root/target/universal-apple-darwin/release/bundle/dmg"
+      ;;
+    dev)
+      say "building Rowkery Dev"
+      export ROWKERY_CHANNEL=dev
+      args+=(--config src-tauri/tauri.dev.conf.json)
+      ;;
+    *) die "unknown option '$opt'; use 'make dmg', 'make dmg universal' or 'make dmg-dev'" ;;
+  esac
+done
 
 cd "$app"
 say "npm install"

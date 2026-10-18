@@ -4,16 +4,17 @@
 #                           (b=feat/some-thing works too)
 # make dmg                  build a release DMG for this Mac's chip
 # make dmg universal        one DMG for Apple Silicon and Intel Macs
+# make dmg-dev              Rowkery Dev: beside Rowkery, own data, no auto-update (dmg-dev universal too)
 # make release              build a public release: universal DMG, signed update, latest.json
 # make release publish      ...then a draft GitHub release on the releases repository
 # make web                  build the new Next.js website (apps/web) and serve it on http://localhost:3000
 # make docs                 build the docs site (apps/docs) and serve it on http://localhost:3001
 # See scripts/dev.sh, scripts/dmg.sh and scripts/release.sh.
 
-.PHONY: dev dmg release web docs
+.PHONY: dev dmg dmg-dev release web docs
 
 # Words after `dev` / `dmg` on the command line are arguments, not more targets.
-ifneq (,$(filter dev dmg release,$(firstword $(MAKECMDGOALS))))
+ifneq (,$(filter dev dmg dmg-dev release,$(firstword $(MAKECMDGOALS))))
   extra := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
   ifneq (,$(extra))
     b ?= $(firstword $(extra))
@@ -26,6 +27,9 @@ dev:
 
 dmg:
 	@scripts/dmg.sh $(b)
+
+dmg-dev:
+	@scripts/dmg.sh dev $(b)
 
 release:
 	@scripts/release.sh $(b)
