@@ -7,7 +7,9 @@
 #
 # The local branch is reset to origin, since agent threads force-push their
 # branches after rebases. It stops instead if you have uncommitted changes.
-# Usually run through `make dev`.
+# It runs as Rowkery Dev (the same settings as `make dmg-dev`): its own config
+# folder, keychain items and agent setup, so a branch never sees the
+# connections saved in Rowkery. Usually run through `make dev`.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,5 +54,6 @@ if [[ ! -f node_modules/.package-lock.json || package-lock.json -nt node_modules
   npm install
 fi
 
-say "Starting the app (Ctrl+C to stop)"
-exec npm run tauri dev
+say "Starting Rowkery Dev (Ctrl+C to stop)"
+export ROWKERY_CHANNEL=dev
+exec npm run tauri dev -- --config src-tauri/tauri.dev.conf.json

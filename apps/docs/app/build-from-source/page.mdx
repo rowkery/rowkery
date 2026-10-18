@@ -64,7 +64,7 @@ make dev feat/some-thing  # that branch
 make dev 35               # pull request #35
 ```
 
-`make dev` fetches the branch from GitHub, resets your local copy of it to match, runs `npm install` when the package lock changed since the last install, then starts the app with `npm run tauri dev`. It stops without changing anything if you have uncommitted changes to tracked files.
+`make dev` fetches the branch from GitHub, resets your local copy of it to match, runs `npm install` when the package lock changed since the last install, then starts the app with `npm run tauri dev`. It runs as Rowkery Dev, which keeps its own settings, saved connections and keychain items, so a branch you try never sees the connections in your installed Rowkery. It stops without changing anything if you have uncommitted changes to tracked files.
 
 ## Make a disk image
 
