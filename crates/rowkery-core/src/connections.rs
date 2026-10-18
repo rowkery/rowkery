@@ -137,6 +137,41 @@ pub struct SshConfig {
     pub trust_host: bool,
 }
 
+/// Which of a Cloud SQL instance's addresses to dial.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudSqlIpType {
+    #[default]
+    Public,
+    Private,
+    /// Private Service Connect: the instance's PSC DNS name.
+    Psc,
+}
+
+/// Where the Google token for a Cloud SQL connection comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudSqlCredentials {
+    /// The gcloud login on this machine (Application Default Credentials),
+    /// read from gcloud's own file and never copied.
+    #[default]
+    Gcloud,
+    /// A service account key file, kept in the keychain (`SecretKind::GcpKey`).
+    Key,
+}
+
+/// A Postgres instance on Google Cloud SQL, reached through its connector
+/// protocol (`cloudsql`): no proxy process and no local port.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSqlConfig {
+    /// `project:region:instance`, as the console's "Connection name".
+    pub instance: String,
+    #[serde(default)]
+    pub ip_type: CloudSqlIpType,
+    #[serde(default)]
+    pub credentials: CloudSqlCredentials,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostgresConnection {
     pub id: String,

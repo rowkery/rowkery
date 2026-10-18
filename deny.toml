@@ -15,7 +15,7 @@ yanked = "warn"
 # Each ignore says why it can't reach a user, or why there's nothing to take
 # yet. Remove it when a fixed release lands.
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "rsa via russh: timing attack on RSA decryption; no fixed release exists and the SSH client only signs" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa via russh and the Cloud SQL connector: timing attack on RSA decryption; no fixed release exists, the SSH client only signs, and the connector only makes its key with it (ring signs)" },
     { id = "RUSTSEC-2026-0367", reason = "zip via tauri-plugin-updater, Windows only: unpacks an update only after its signature checks; no updater release uses zip >= 9 yet" },
     { id = "RUSTSEC-2026-0368", reason = "zip via tauri-plugin-updater, as RUSTSEC-2026-0367" },
     { id = "RUSTSEC-2026-0369", reason = "zip via tauri-plugin-updater, as RUSTSEC-2026-0367" },
