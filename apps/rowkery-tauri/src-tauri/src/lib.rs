@@ -506,6 +506,94 @@ struct ProbeDto {
     elapsed_ms: u64,
 }
 
+/// The service account key a Cloud SQL form uses: typed in the form (read
+/// from its file), else the one saved for `connection_id`.
+async fn cloudsql_key(
+    key_json: Option<String>,
+    connection_id: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(json) = key_json.filter(|k| !k.trim().is_empty()) {
+        return Ok(Some(json));
+    }
+    let Some(id) = connection_id else {
+        return Ok(None);
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        rowkery_core::secrets::get_secret(&id, rowkery_core::SecretKind::GcpKey)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// The Google account a Cloud SQL connection signs in with: the service
+/// account key (`credentials` "key"), else the gcloud login (null when this
+/// computer has none).
+#[tauri::command]
+async fn cloudsql_account(
+    credentials: String,
+    key_json: Option<String>,
+    connection_id: Option<String>,
+) -> Result<Option<rowkery_core::cloudsql::CloudSqlAccount>, String> {
+    let key = if credentials == "key" {
+        match cloudsql_key(key_json, connection_id).await? {
+            Some(key) => Some(key),
+            None => return Ok(None),
+        }
+    } else {
+        None
+    };
+    rowkery_core::cloudsql::account(key.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Every Cloud SQL instance the account can see, for the instance picker.
+#[tauri::command]
+async fn cloudsql_instances(
+    credentials: String,
+    key_json: Option<String>,
+    connection_id: Option<String>,
+) -> Result<rowkery_core::cloudsql::InstanceList, String> {
+    let key = if credentials == "key" {
+        cloudsql_key(key_json, connection_id)
+            .await?
+            .ok_or("No service account key yet")?
+    } else {
+        String::new()
+    };
+    rowkery_core::cloudsql::instances(Some(key.as_str()).filter(|k| !k.is_empty()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Reads a service account key file the user picked, for the form to keep
+/// until Save puts it in the keychain. Refuses anything that isn't one.
+#[tauri::command]
+async fn cloudsql_key_file(path: String) -> Result<CloudSqlKeyFile, String> {
+    let json = tauri::async_runtime::spawn_blocking(move || {
+        let path = rowkery_core::connections::expand_home(&path);
+        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        if meta.len() > 64 * 1024 {
+            return Err("That file is too big to be a service account key".to_string());
+        }
+        std::fs::read_to_string(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let account = rowkery_core::cloudsql::account(Some(&json))
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Not a service account key")?;
+    Ok(CloudSqlKeyFile { json, account })
+}
+
+#[derive(serde::Serialize)]
+struct CloudSqlKeyFile {
+    json: String,
+    account: rowkery_core::cloudsql::CloudSqlAccount,
+}
+
 /// Tests a connection from the New Connection sheet without saving it.
 #[tauri::command]
 async fn probe_connection(
@@ -722,6 +810,7 @@ async fn choose_file(app: AppHandle, kind: String) -> Result<Option<String>, Str
         let dialog = match kind.as_str() {
             "sqlite" => dialog.add_filter("SQLite database", &["sqlite", "db", "sqlite3"]),
             "pem" => dialog.add_filter("Certificate", &["pem", "crt", "cer"]),
+            "json" => dialog.add_filter("Service account key", &["json"]),
             _ => dialog,
         };
         dialog.blocking_pick_file()
@@ -1834,6 +1923,9 @@ pub fn run(mut timings: Timings) {
             stop_session,
             reload_window_schema,
             probe_connection,
+            cloudsql_account,
+            cloudsql_instances,
+            cloudsql_key_file,
             run_query,
             explain_statement,
             cancel_query,
