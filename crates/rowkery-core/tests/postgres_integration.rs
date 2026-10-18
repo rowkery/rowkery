@@ -27,6 +27,7 @@ fn pg_config() -> PostgresConnection {
         ssl_mode: PostgresSslMode::Disable,
         ssl_root_cert: None,
         ssh: None,
+        cloud_sql: None,
         environment: None,
         safe_mode: Default::default(),
         allow_mcp: false,
@@ -510,7 +511,7 @@ async fn postgres_sessions_share_an_ssh_tunnel() {
     .expect("first session");
     let b = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        open_session_via(config.id.clone(), config.clone(), None, a.tunnel()),
+        open_session_via(config.id.clone(), config.clone(), None, a.route()),
     )
     .await
     .expect("second session in time")

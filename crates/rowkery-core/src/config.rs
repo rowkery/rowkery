@@ -226,6 +226,7 @@ mod tests {
             ssl_mode: Default::default(),
             ssl_root_cert: None,
             ssh: None,
+            cloud_sql: None,
         }));
         config.save().unwrap();
         let raw = fs::read_to_string(dir.join(CONFIG_FILE)).unwrap();

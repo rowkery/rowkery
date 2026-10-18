@@ -19,7 +19,8 @@ use tokio_postgres::{AsyncMessage, CancelToken, Client, NoTls, Row, Statement};
 pub use tokio_postgres_rustls::MakeRustlsConnect;
 use webpki_roots::TLS_SERVER_ROOTS;
 
-use crate::connections::{expand_home, PostgresConnection, PostgresSslMode};
+use crate::cloudsql::{dialer_for, CloudSqlDialer};
+use crate::connections::{expand_home, CloudSqlCredentials, PostgresConnection, PostgresSslMode};
 use crate::secrets::{forget_cached, get_secret, keychain_refused, ConnectionSecrets, SecretKind};
 use crate::ssh::{humanize_ssh_error, SshTunnel};
 
@@ -55,17 +56,54 @@ fn new_tag() -> String {
     format!("{:08x}", (mixed >> 32) as u32)
 }
 
+/// How a session reaches a server that isn't simply at `host:port`.
+#[derive(Clone)]
+pub enum Route {
+    /// Through an SSH tunnel, shared with the window's other sessions (one
+    /// SSH connection per window).
+    Ssh(Arc<SshTunnel>),
+    /// Through the Cloud SQL connector; one dialer per connection.
+    CloudSql(Arc<CloudSqlDialer>),
+}
+
+impl Route {
+    /// Still usable for a new session (a tunnel can drop; a dialer renews
+    /// its certificate itself).
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::Ssh(t) => t.is_alive(),
+            Self::CloudSql(_) => true,
+        }
+    }
+
+    /// The route is the one `config` asks for.
+    fn fits(&self, config: &PostgresConnection) -> bool {
+        match self {
+            Self::Ssh(_) => config.ssh.is_some(),
+            Self::CloudSql(d) => config.cloud_sql.as_ref().is_some_and(|c| d.serves(c)),
+        }
+    }
+}
+
+/// Where a cancel request goes: Postgres takes it on a new connection, made
+/// the way the session's was.
+#[derive(Clone)]
+pub enum CancelVia {
+    Plain,
+    Tls(MakeRustlsConnect),
+    CloudSql(Arc<CloudSqlDialer>),
+}
+
 pub struct PostgresSession {
     config: PostgresConnection,
     connection_id: String,
-    /// Shared with the window's other sessions (one SSH connection per window).
-    tunnel: Option<Arc<SshTunnel>>,
+    route: Option<Route>,
     client: Client,
     #[allow(dead_code)]
     connection_task: tokio::task::JoinHandle<()>,
     pub cancel_token: CancelToken,
-    /// The session's TLS setup, reused to send a cancel request; `None` when SSL is off.
-    pub tls: Option<MakeRustlsConnect>,
+    /// How to send this session a cancel request.
+    pub cancel_via: CancelVia,
     /// `BEGIN` warnings (SQLSTATE 25001) seen so far: one after ours means
     /// the user's own transaction was already open.
     txn_warnings: Arc<AtomicU64>,
@@ -168,27 +206,47 @@ pub async fn open_session_with_secrets(
 /// How long connecting to Postgres may take (TCP, TLS, auth).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Opens a session, through `tunnel` when the connection uses SSH and the
-/// tunnel is still alive (else a new one, which `session.tunnel()` returns
-/// for the next session to share).
+/// Opens a session, through `route` when it is the one the connection uses
+/// and still alive (else a new one, which `session.route()` returns for the
+/// next session to share).
 pub async fn open_session_via(
     connection_id: String,
     config: PostgresConnection,
     secrets: Option<&ConnectionSecrets>,
-    tunnel: Option<Arc<SshTunnel>>,
+    route: Option<Route>,
 ) -> Result<PostgresSession, DriverError> {
     let mut port = config.port;
-    let mut tunnel = tunnel.filter(|t| config.ssh.is_some() && t.is_alive());
+    let mut route = route.filter(|r| r.fits(&config) && r.is_alive());
 
+    let mut tunneled = false;
     if let Some(ssh) = config.ssh.clone() {
-        if tunnel.is_none() {
-            let opened =
+        let tunnel = match route.take() {
+            Some(Route::Ssh(t)) => t,
+            _ => Arc::new(
                 SshTunnel::open_with_timeout(&ssh, &connection_id, &config.host, port, secrets)
                     .await
-                    .map_err(|e| DriverError::Message(humanize_ssh_error(&e, &ssh.host)))?;
-            tunnel = Some(Arc::new(opened));
-        }
-        port = tunnel.as_ref().map(|t| t.local_port).unwrap_or(port);
+                    .map_err(|e| DriverError::Message(humanize_ssh_error(&e, &ssh.host)))?,
+            ),
+        };
+        port = tunnel.local_port;
+        tunneled = true;
+        route = Some(Route::Ssh(tunnel));
+    }
+    let mut dialer = None;
+    if let Some(cloud) = config.cloud_sql.clone() {
+        let d = match route.take() {
+            Some(Route::CloudSql(d)) => d,
+            _ => {
+                let key = match cloud.credentials {
+                    CloudSqlCredentials::Key => gcp_key(&connection_id, secrets).await?,
+                    CloudSqlCredentials::Gcloud => None,
+                };
+                dialer_for(&connection_id, &cloud, key.as_deref())
+                    .map_err(|e| DriverError::Message(e.to_string()))?
+            }
+        };
+        dialer = Some(d.clone());
+        route = Some(Route::CloudSql(d));
     }
 
     let password = if let Some(secrets) = secrets {
@@ -202,7 +260,7 @@ pub async fn open_session_via(
     // Through a tunnel the socket goes to the local end, but the certificate
     // is still checked against the real host name.
     pg_config.host(&config.host);
-    if tunnel.is_some() {
+    if tunneled {
         pg_config.hostaddr(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     pg_config
@@ -220,12 +278,16 @@ pub async fn open_session_via(
         .keepalives_interval(Duration::from_secs(10))
         .keepalives_retries(3)
         .ssl_mode(match config.ssl_mode {
+            // The connector's TLS (checked against the instance's own CA)
+            // carries the session; Postgres itself sees a local client.
+            _ if dialer.is_some() => SslMode::Disable,
             PostgresSslMode::Disable => SslMode::Disable,
             PostgresSslMode::Prefer => SslMode::Prefer,
             PostgresSslMode::Require | PostgresSslMode::Verify => SslMode::Require,
         });
 
     let tls = match config.ssl_mode {
+        _ if dialer.is_some() => None,
         PostgresSslMode::Disable => None,
         mode => Some(make_tls_connector(mode, config.ssl_root_cert.as_deref())?),
     };
@@ -233,20 +295,43 @@ pub async fn open_session_via(
         DriverError::Message(humanize_postgres_error(&e, &config.username))
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
+    // The outer error is the Cloud SQL connector's (no Postgres error to
+    // retry on); the inner one is Postgres's.
     let connect = |pg_config: tokio_postgres::Config| {
         let tls = tls.clone();
+        let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
         async move {
-            if let Some(tls) = tls {
-                let (client, connection) = pg_config.connect(tls).await?;
-                Ok((client, drive_connection(connection, txn_warnings)))
-            } else {
-                let (client, connection) = pg_config.connect(NoTls).await?;
-                Ok::<_, tokio_postgres::Error>((client, drive_connection(connection, txn_warnings)))
+            if let Some(dialer) = dialer {
+                let stream = dialer
+                    .dial()
+                    .await
+                    .map_err(|e| DriverError::Message(e.to_string()))?;
+                let silent = format!(
+                    "Cloud SQL: {} took the connection but Postgres did not answer in {} s",
+                    dialer.instance().name,
+                    CONNECT_TIMEOUT.as_secs()
+                );
+                let started =
+                    tokio::time::timeout(CONNECT_TIMEOUT, pg_config.connect_raw(stream, NoTls))
+                        .await
+                        .map_err(|_| DriverError::Message(silent))?;
+                return Ok(started.map(|(client, connection)| {
+                    (client, drive_connection(connection, txn_warnings))
+                }));
             }
+            Ok::<_, DriverError>(if let Some(tls) = tls {
+                pg_config.connect(tls).await.map(|(client, connection)| {
+                    (client, drive_connection(connection, txn_warnings))
+                })
+            } else {
+                pg_config.connect(NoTls).await.map(|(client, connection)| {
+                    (client, drive_connection(connection, txn_warnings))
+                })
+            })
         }
     };
-    let (client, connection_task) = match connect(pg_config.clone()).await {
+    let (client, connection_task) = match connect(pg_config.clone()).await? {
         Ok(connected) => connected,
         // A long-lived process (the MCP server) remembers the password it
         // read first; the app may have saved a new one since. Read it again
@@ -257,7 +342,7 @@ pub async fn open_session_via(
             let fresh = stored_password(&connection_id).await?;
             let result = if fresh != password {
                 pg_config.password(&fresh);
-                connect(pg_config).await
+                connect(pg_config).await?
             } else {
                 Err(err)
             };
@@ -285,15 +370,20 @@ pub async fn open_session_via(
     }
 
     let cancel_token = client.cancel_token();
+    let cancel_via = match (dialer, tls) {
+        (Some(d), _) => CancelVia::CloudSql(d),
+        (None, Some(tls)) => CancelVia::Tls(tls),
+        (None, None) => CancelVia::Plain,
+    };
 
     Ok(PostgresSession {
         config,
         connection_id,
-        tunnel,
+        route,
         client,
         connection_task,
         cancel_token,
-        tls,
+        cancel_via,
         txn_warnings,
         cursor: None,
         txn: TxnState::None,
@@ -334,10 +424,29 @@ where
 }
 
 impl PostgresSession {
-    /// The SSH tunnel this session goes through, to share with the next one.
-    pub fn tunnel(&self) -> Option<Arc<SshTunnel>> {
-        self.tunnel.clone()
+    /// The tunnel or connector this session goes through, to share with the
+    /// next one.
+    pub fn route(&self) -> Option<Route> {
+        self.route.clone()
     }
+}
+
+/// The connection's service account key: typed in the form, else saved.
+async fn gcp_key(
+    connection_id: &str,
+    secrets: Option<&ConnectionSecrets>,
+) -> Result<Option<String>, DriverError> {
+    if let Some(key) = secrets
+        .and_then(|s| s.gcp_key.clone())
+        .filter(|k| !k.is_empty())
+    {
+        return Ok(Some(key));
+    }
+    let id = connection_id.to_string();
+    tokio::task::spawn_blocking(move || get_secret(&id, SecretKind::GcpKey))
+        .await
+        .map_err(|e| DriverError::Message(e.to_string()))?
+        .map_err(|e| DriverError::Message(e.to_string()))
 }
 
 pub async fn session_test(session: &mut PostgresSession) -> Result<(), DriverError> {
@@ -961,7 +1070,7 @@ async fn abandon_apply(session: &mut PostgresSession, limit: Duration) {
     let limit = limit.min(Duration::from_secs(5));
     let _ = tokio::time::timeout(
         limit,
-        cancel_with_token(session.cancel_token.clone(), session.tls.clone()),
+        cancel_with_token(session.cancel_token.clone(), session.cancel_via.clone()),
     )
     .await;
     let rolled = tokio::time::timeout(limit, session.client.batch_execute("ROLLBACK")).await;
@@ -1004,13 +1113,17 @@ async fn finish_fetch(
     }
 }
 
-pub async fn cancel_with_token(
-    token: CancelToken,
-    tls: Option<MakeRustlsConnect>,
-) -> Result<(), DriverError> {
-    match tls {
-        None => token.cancel_query(NoTls).await,
-        Some(tls) => token.cancel_query(tls).await,
+pub async fn cancel_with_token(token: CancelToken, via: CancelVia) -> Result<(), DriverError> {
+    match via {
+        CancelVia::Plain => token.cancel_query(NoTls).await,
+        CancelVia::Tls(tls) => token.cancel_query(tls).await,
+        CancelVia::CloudSql(dialer) => {
+            let stream = dialer
+                .dial()
+                .await
+                .map_err(|e| DriverError::Message(e.to_string()))?;
+            token.cancel_query_raw(stream, NoTls).await
+        }
     }
     .map_err(|e| DriverError::Message(e.to_string()))
 }

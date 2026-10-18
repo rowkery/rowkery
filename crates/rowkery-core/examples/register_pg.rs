@@ -35,6 +35,7 @@ fn main() {
         ssl_mode: PostgresSslMode::Disable,
         ssl_root_cert: None,
         ssh: None,
+        cloud_sql: None,
     };
 
     let mut config = AppConfig::load().unwrap_or_default();

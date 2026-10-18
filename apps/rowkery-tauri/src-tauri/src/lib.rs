@@ -951,6 +951,7 @@ fn explain_connect_error(
     port: u16,
     username: String,
     ssh_host: Option<String>,
+    cloud_sql: Option<String>,
 ) -> rowkery_core::explain::ConnectExplanation {
     rowkery_core::explain::explain_connect_error(
         &error,
@@ -959,6 +960,7 @@ fn explain_connect_error(
             port,
             username: &username,
             ssh_host: ssh_host.as_deref(),
+            cloud_sql: cloud_sql.as_deref(),
         },
     )
 }

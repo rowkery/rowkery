@@ -40,6 +40,8 @@ pub enum SecretKind {
     /// The key that turns a sensitive column's values into the stand-ins
     /// agents get (`mask_key`).
     MaskKey,
+    /// A Google service account key (JSON) a Cloud SQL connection signs in with.
+    GcpKey,
 }
 
 impl SecretKind {
@@ -49,6 +51,7 @@ impl SecretKind {
             Self::SshPassword => "ssh-password",
             Self::SshKeyPassphrase => "ssh-key-passphrase",
             Self::MaskKey => "mask-key",
+            Self::GcpKey => "gcp-key",
         }
     }
 }
@@ -213,6 +216,9 @@ const KINDS: [SecretKind; 3] = [
     SecretKind::SshKeyPassphrase,
 ];
 
+/// Secrets added after the one item per connection: never items of their own.
+const NEWER_KINDS: [SecretKind; 2] = [SecretKind::MaskKey, SecretKind::GcpKey];
+
 /// A connection's secrets, by kind label: the JSON held in its one keychain
 /// item. One item per connection means macOS asks once per connection (after
 /// each unsigned build), and the MCP server only ever reads the items of the
@@ -376,7 +382,7 @@ pub fn forget_cached(connection_id: &str) {
         c.remove(&cache_key(connection_id));
     }
     if let Ok(mut c) = cache().lock() {
-        for kind in KINDS.into_iter().chain([SecretKind::MaskKey]) {
+        for kind in KINDS.into_iter().chain(NEWER_KINDS) {
             c.remove(&cache_key(&entry_account(connection_id, kind)));
         }
     }
@@ -428,9 +434,11 @@ pub fn delete_secrets_for_connection(connection_id: &str) -> Result<(), SecretEr
         }
         let _ = fallback_remove_if_present(&account);
     }
-    let account = entry_account(connection_id, SecretKind::MaskKey);
-    cache_put(&account, None);
-    let _ = fallback_remove_if_present(&account);
+    for kind in NEWER_KINDS {
+        let account = entry_account(connection_id, kind);
+        cache_put(&account, None);
+        let _ = fallback_remove_if_present(&account);
+    }
     Ok(())
 }
 
@@ -440,6 +448,9 @@ pub struct ConnectionSecrets {
     pub db_password: Option<String>,
     pub ssh_password: Option<String>,
     pub ssh_key_passphrase: Option<String>,
+    /// A Cloud SQL connection's service account key file (JSON).
+    #[serde(default)]
+    pub gcp_key: Option<String>,
 }
 
 impl ConnectionSecrets {
@@ -455,6 +466,7 @@ impl ConnectionSecrets {
             db_password: fill(self.db_password, SecretKind::DbPassword),
             ssh_password: fill(self.ssh_password, SecretKind::SshPassword),
             ssh_key_passphrase: fill(self.ssh_key_passphrase, SecretKind::SshKeyPassphrase),
+            gcp_key: fill(self.gcp_key, SecretKind::GcpKey),
         }
     }
 
@@ -463,6 +475,7 @@ impl ConnectionSecrets {
             (SecretKind::DbPassword, &self.db_password),
             (SecretKind::SshPassword, &self.ssh_password),
             (SecretKind::SshKeyPassphrase, &self.ssh_key_passphrase),
+            (SecretKind::GcpKey, &self.gcp_key),
         ]
         .into_iter()
         .filter_map(|(kind, v)| v.as_deref().filter(|v| !v.is_empty()).map(|v| (kind, v)))
@@ -561,15 +574,21 @@ mod tests {
         let _guard = test_guard();
         store_secret("c2", SecretKind::DbPassword, "stored").expect("store");
         store_secret("c2", SecretKind::SshPassword, "ssh-stored").expect("store");
+        store_secret("c2", SecretKind::GcpKey, "{\"type\":\"service_account\"}").expect("store");
         let secrets = ConnectionSecrets {
             db_password: Some(String::new()),
             ssh_password: Some("typed".into()),
             ssh_key_passphrase: None,
+            gcp_key: None,
         }
         .or_stored("c2");
         assert_eq!(secrets.db_password.as_deref(), Some("stored"));
         assert_eq!(secrets.ssh_password.as_deref(), Some("typed"));
         assert_eq!(secrets.ssh_key_passphrase, None);
+        assert_eq!(
+            secrets.gcp_key.as_deref(),
+            Some("{\"type\":\"service_account\"}")
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
@@ -623,6 +642,7 @@ mod tests {
             db_password: Some("db".into()),
             ssh_password: Some("ssh".into()),
             ssh_key_passphrase: None,
+            gcp_key: None,
         }
         .persist("k1")
         .expect("persist");

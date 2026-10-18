@@ -343,9 +343,11 @@ impl Store {
                     Err(_) => {
                         // The server's own timeout should have fired first;
                         // cancel and drop a session that stopped answering.
-                        let _ =
-                            cancel_with_token(session.cancel_token.clone(), session.tls.clone())
-                                .await;
+                        let _ = cancel_with_token(
+                            session.cancel_token.clone(),
+                            session.cancel_via.clone(),
+                        )
+                        .await;
                         self.sessions.remove(&key);
                         return Err("Timed out waiting for the server.".into());
                     }

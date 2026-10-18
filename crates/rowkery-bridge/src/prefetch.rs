@@ -32,10 +32,9 @@ use std::time::{Duration, Instant, SystemTime};
 use rowkery_core::connections::PostgresConnection;
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session_via, session_declare_cursor, session_execute,
-    session_query_stream_with, MakeRustlsConnect, PostgresSession, StreamOptions,
+    session_query_stream_with, CancelVia, PostgresSession, Route, StreamOptions,
 };
 use rowkery_core::db::{DriverError, RowBatch};
-use rowkery_core::ssh::SshTunnel;
 use tokio_postgres::CancelToken;
 
 /// Rows a prefetch reads: the first `FETCH` of the cursor.
@@ -105,7 +104,7 @@ struct Held {
 struct InFlight {
     seq: u64,
     token: CancelToken,
-    tls: Option<MakeRustlsConnect>,
+    tls: CancelVia,
 }
 
 /// One window's prefetch session and its first pages.
@@ -254,7 +253,7 @@ impl Prefetcher {
         sql: String,
         connection_id: String,
         config: PostgresConnection,
-        tunnel: Option<Arc<SshTunnel>>,
+        tunnel: Option<Route>,
     ) -> Result<bool, DriverError> {
         if self.closed.load(Ordering::SeqCst) {
             return Ok(false);
@@ -283,7 +282,7 @@ impl Prefetcher {
         else {
             return Ok(false);
         };
-        let (token, tls) = (session.cancel_token.clone(), session.tls.clone());
+        let (token, tls) = (session.cancel_token.clone(), session.cancel_via.clone());
         if let Ok(mut f) = self.inflight.lock() {
             *f = Some(InFlight {
                 seq,
@@ -388,7 +387,7 @@ impl Prefetcher {
         &self,
         sql: &str,
         mut on_batch: impl FnMut(RowBatch, bool),
-        arm: impl FnOnce(CancelToken, Option<MakeRustlsConnect>) -> bool,
+        arm: impl FnOnce(CancelToken, CancelVia) -> bool,
     ) -> Option<Served> {
         let entry = {
             let mut entries = self.entries.lock().ok()?;
@@ -417,7 +416,7 @@ impl Prefetcher {
         }
         held.last_used = Some(SystemTime::now());
         let session = held.session.as_ref().expect("usable");
-        if !arm(session.cancel_token.clone(), session.tls.clone()) {
+        if !arm(session.cancel_token.clone(), session.cancel_via.clone()) {
             close_cursors(session, &[entry.cursor]).await;
             self.end_if_no_cursor(&mut held).await;
             return Some(Err(DriverError::Cancelled));
@@ -544,7 +543,7 @@ impl Prefetcher {
         held: &mut Held,
         connection_id: String,
         config: PostgresConnection,
-        tunnel: Option<Arc<SshTunnel>>,
+        tunnel: Option<Route>,
     ) -> Result<bool, DriverError> {
         self.roll_back_if_invalidated(held).await;
         self.end_if_old(held).await;

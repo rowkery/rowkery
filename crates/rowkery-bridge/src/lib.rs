@@ -15,8 +15,8 @@ use rowkery_core::db::postgres::{
     session_catalog_fingerprint, session_close_cursor, session_execute, session_fetch_more,
     session_introspect, session_list_databases, session_note_statement, session_plan_facts,
     session_probe_txn, session_query_cursor, session_query_stream_with, session_server_version,
-    session_table_indexes, session_test, DatabaseInfo, MakeRustlsConnect, PostgresSession,
-    StreamOptions, StreamStats, TxnState,
+    session_table_indexes, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
+    StreamStats, TxnState,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount};
 use rowkery_core::db::{
@@ -230,10 +230,7 @@ pub enum Event {
 #[allow(clippy::large_enum_variant)]
 enum CancelHandle {
     Sqlite(rowkery_core::db::sqlite::SqliteInterruptHandle),
-    Postgres {
-        token: CancelToken,
-        tls: Option<MakeRustlsConnect>,
-    },
+    Postgres { token: CancelToken, tls: CancelVia },
 }
 
 /// Events for one caller only, so concurrent window queries don't drain each
@@ -1238,7 +1235,7 @@ fn run_postgres_query_on_runtime(
             // Cancel targets the backend of the session this run is on.
             let handle = CancelHandle::Postgres {
                 token: session.cancel_token.clone(),
-                tls: session.tls.clone(),
+                tls: session.cancel_via.clone(),
             };
             if !arm_cancel(&interrupt_slot, handle) {
                 finish_query_worker(
@@ -2190,7 +2187,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             pool::give_back(&pool, &window_id, Slot::QuickLook, generation, session);
                             return Ok(lookups.iter().map(|_| None).collect());
                         }
-                        let (token, tls) = (session.cancel_token.clone(), session.tls.clone());
+                        let (token, tls) = (session.cancel_token.clone(), session.cancel_via.clone());
                         // Counts are bounded on the server (an unindexed column
                         // of a big table); one that runs out reads as unknown.
                         // Pipelined ahead of the lookups, so it costs no round trip.
@@ -3805,6 +3802,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets::default(),
         )
@@ -3847,6 +3845,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some("hunter2".into()),
@@ -3893,6 +3892,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets::default(),
         )
@@ -3936,6 +3936,7 @@ mod tests {
                     private_key_path: None,
                     trust_host: false,
                 }),
+                cloud_sql: None,
             }),
             ConnectionSecrets::default(),
         )
@@ -4350,6 +4351,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -4424,6 +4426,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -4808,6 +4811,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -4815,6 +4819,7 @@ mod tests {
                 ),
                 ssh_password: None,
                 ssh_key_passphrase: None,
+                gcp_key: None,
             },
         )
         .expect("seed");
@@ -4888,6 +4893,7 @@ mod tests {
             ssl_mode: PostgresSslMode::Disable,
             ssl_root_cert: None,
             ssh: None,
+            cloud_sql: None,
         };
         let good = probe_connection_blocking(
             ConnectionRecord::Postgres(pg.clone()),
@@ -4950,6 +4956,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -5045,11 +5052,13 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(password),
                 ssh_password: None,
                 ssh_key_passphrase: None,
+                gcp_key: None,
             },
         )
         .expect("save");
@@ -5239,6 +5248,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -5246,6 +5256,7 @@ mod tests {
                 ),
                 ssh_password: None,
                 ssh_key_passphrase: None,
+                gcp_key: None,
             },
         )
         .expect("save");
@@ -5360,6 +5371,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -5534,6 +5546,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -5681,6 +5694,7 @@ mod tests {
                     ssl_mode: PostgresSslMode::Disable,
                     ssl_root_cert: None,
                     ssh: None,
+                    cloud_sql: None,
                 }),
                 ConnectionSecrets {
                     db_password: Some(
@@ -5901,6 +5915,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -6098,6 +6113,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -6352,6 +6368,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -6463,6 +6480,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -6598,6 +6616,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -6703,6 +6722,7 @@ mod tests {
                     private_key_path: None,
                     trust_host: true,
                 }),
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -6784,6 +6804,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             })
         };
         let port = std::env::var("ROWKERY_PG_PORT")
@@ -6894,6 +6915,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -7022,6 +7044,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(
@@ -7336,6 +7359,7 @@ mod tests {
                     ssl_mode: PostgresSslMode::Disable,
                     ssl_root_cert: None,
                     ssh: None,
+                    cloud_sql: None,
                 }),
                 ConnectionSecrets {
                     db_password: Some(
@@ -7618,6 +7642,7 @@ mod tests {
                 ssl_mode: PostgresSslMode::Disable,
                 ssl_root_cert: None,
                 ssh: None,
+                cloud_sql: None,
             }),
             ConnectionSecrets {
                 db_password: Some(

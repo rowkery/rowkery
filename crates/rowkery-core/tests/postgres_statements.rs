@@ -27,6 +27,7 @@ fn pg_config() -> PostgresConnection {
         ssl_mode: PostgresSslMode::Disable,
         ssl_root_cert: None,
         ssh: None,
+        cloud_sql: None,
         environment: None,
         safe_mode: Default::default(),
         allow_mcp: false,

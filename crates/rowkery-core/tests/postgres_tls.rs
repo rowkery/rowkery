@@ -44,6 +44,7 @@ async fn open(
         ssl_mode: mode,
         ssl_root_cert: root_cert,
         ssh: None,
+        cloud_sql: None,
         environment: None,
         safe_mode: Default::default(),
         allow_mcp: false,
