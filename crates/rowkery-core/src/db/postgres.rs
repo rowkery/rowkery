@@ -1749,7 +1749,14 @@ async fn stored_password(connection_id: &str) -> Result<String, DriverError> {
 fn is_bad_password(err: &tokio_postgres::Error) -> bool {
     err.as_db_error()
         .is_some_and(|db| db.code().code() == "28P01")
-        || error_chain(err).contains("password authentication failed")
+        || says_bad_password(&error_chain(err))
+}
+
+/// A wrong password in the words of Postgres, or of a pooler in front of it
+/// (PgBouncer, which Cloud SQL's managed pooling and Supabase run, says
+/// "SASL authentication failed" with no 28P01).
+fn says_bad_password(text: &str) -> bool {
+    text.contains("password authentication failed") || text.contains("SASL authentication failed")
 }
 
 /// Why no password reached Postgres, when none did: the keychain refused the
@@ -1770,13 +1777,13 @@ fn no_password_message(connection_id: &str, username: &str, empty: bool) -> Opti
 
 pub fn humanize_postgres_error(err: &tokio_postgres::Error, username: &str) -> String {
     if let Some(db) = err.as_db_error() {
-        if db.code().code() == "28P01" {
+        if db.code().code() == "28P01" || says_bad_password(db.message()) {
             return format!("Postgres rejected password for '{username}'");
         }
         return db.message().to_string();
     }
     let text = error_chain(err);
-    if text.contains("password authentication failed") {
+    if says_bad_password(&text) {
         return format!("Postgres rejected password for '{username}'");
     }
     if text.contains("server does not support TLS") {

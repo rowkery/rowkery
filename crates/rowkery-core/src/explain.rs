@@ -98,6 +98,7 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
     }
     if says("rejected password")
         || says("password authentication failed")
+        || says("sasl authentication failed")
         || says("asked for a password")
         || has("28P01")
     {
@@ -385,6 +386,11 @@ mod tests {
         );
         // A Postgres refusal behind a working tunnel is still Postgres's.
         assert_eq!(class("Postgres rejected password for 'app'", &S).0, "auth");
+        // PgBouncer (Cloud SQL managed pooling, Supabase) words it its own way.
+        assert_eq!(
+            class("db error: FATAL: SASL authentication failed", &S).0,
+            "auth"
+        );
     }
 
     #[test]
