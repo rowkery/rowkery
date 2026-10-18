@@ -2,8 +2,9 @@ name: Claude
 
 # Mention @claude in a pull request or issue comment (for example
 # "@claude review") and Claude Code answers there. Only people with write
-# access can trigger it (the action checks), so the API key never runs for a
-# stranger's comment. Billed per token to the ANTHROPIC_API_KEY secret.
+# access can trigger it (the action checks), so the token never runs for a
+# stranger's comment. Runs on the owner's Claude subscription through the
+# CLAUDE_CODE_OAUTH_TOKEN secret (`claude setup-token`; it lasts a year).
 #
 # It uses the workflow's own token, so the job's permissions below are all it
 # has: it can read the code and comment, but it can't push.
@@ -41,7 +42,7 @@ jobs:
       - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
         id: claude
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: |
             --model claude-opus-5-5
