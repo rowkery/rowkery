@@ -39,9 +39,25 @@ jobs:
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        id: claude
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: |
             --model claude-opus-5-5
             --append-system-prompt "Follow the project rules in AGENTS.md. When asked to review, report correctness and security bugs first, with file and line, and skip style nits."
+
+      # The action hides Claude's output (it can hold file contents), so a
+      # failed run says only "is_error". Print just the error, such as an
+      # invalid key or a low credit balance.
+      - name: Why Claude failed
+        if: failure() && steps.claude.outcome == 'failure'
+        run: |
+          log="$RUNNER_TEMP/claude-execution-output.json"
+          [ -f "$log" ] || { echo "no output log"; exit 0; }
+          jq -r 'if type == "array" then .[] else . end
+            | select((.type == "assistant" and .error != null) or (.type == "result" and .is_error == true))
+            | if .type == "assistant"
+              then "API error (\(.error)): \([.message.content[]? | .text? // empty] | join(" "))"
+              else "Result: \(.result // .subtype)"
+              end' "$log"
