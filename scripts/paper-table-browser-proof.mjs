@@ -120,7 +120,7 @@ function stubTauri() {
           const t = rest.table;
           const filter = rest.filter?.trim() ?? "";
           // A filter naming "nowhere" matches nothing; any other keeps 312 rows.
-          const total = /nowhere/.test(filter) ? 0 : filter ? 312 : t === "owners" ? 40 : 36152;
+          const total = /nowhere/.test(filter) || window.__proofEmpty ? 0 : filter ? 312 : t === "owners" ? 40 : 36152;
           const from = rest.key?.length && rest.after ? rest.after.id.Int : (rest.offset ?? 0);
           const n = Math.max(0, Math.min(rest.limit === 0 ? Infinity : rest.limit, total - from));
           const queryId = ++nextId;
@@ -480,6 +480,16 @@ await shot("empty-filter");
 await setTheme("dark");
 await shot("empty-filter-dark");
 await setTheme("light");
+// 8. An empty table (no filter): "No records", not a grid that looks like it's still loading.
+await page.evaluate(() => (window.__proofEmpty = true));
+await page.click(`${ws} [data-clear-filters]`);
+await page.waitForSelector(`${ws} [data-empty-rows]`);
+check((await page.textContent(`${ws} [data-empty-rows]`)) === "No records", "an empty table says No records");
+check(!(await page.$(`${ws} [data-clear-filters]`)), "… with no Clear filters, as nothing is filtered");
+await shot("empty-table");
+await page.evaluate(() => (window.__proofEmpty = false));
+await addChip("name = 'nowhere'");
+await page.waitForSelector(`${ws} [data-clear-filters]`);
 await page.click(`${ws} [data-clear-filters]`);
 await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "1000", ws);
 check((await page.locator(`${line} [data-chip]`).count()) === 0, "Clear filters removes every chip and the rows come back");

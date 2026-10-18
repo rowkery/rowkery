@@ -60,12 +60,12 @@ test("Automatic restarts on its own, so a quiet ready says nothing", () => {
   assert.deepEqual(updateToast(ready, true, "auto"), { kind: "offer", version: "0.1.2" });
 });
 
-test("the foot's button shows while a release waits for the user", () => {
+test("the foot's button shows whenever a release waits, Automatic included", () => {
   const v = { version: "0.1.2", notes: null };
   assert.equal(updateWaiting({ phase: "available", ...v }, "notify"), true);
   assert.equal(updateWaiting({ phase: "downloading", ...v }, "notify"), true);
   assert.equal(updateWaiting({ phase: "ready", ...v }, "download"), true);
-  assert.equal(updateWaiting({ phase: "ready", ...v }, "auto"), false);
+  assert.equal(updateWaiting({ phase: "ready", ...v }, "auto"), true);
   assert.equal(updateWaiting({ phase: "up-to-date", version: "0.1.1" }, "download"), false);
   assert.equal(updateWaiting({ phase: "idle" }, "notify"), false);
 });
