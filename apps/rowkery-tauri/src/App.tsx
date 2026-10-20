@@ -494,10 +494,16 @@ function App() {
 
   /** A new window, shown; with no connection it shows Connect to start (+, ⌘T). */
   const newWindow = (connectionId?: string | null, database?: string | null) => {
-    const id = `w${nextWindowNo.current++}`;
-    setWindows((prev) => [...prev, blankWindow(id)]);
     setPopover(null);
     setPaletteOpen(false);
+    // The window takes over from the Agents or Settings page, as picking one does.
+    setAgents(null);
+    setSettings(null);
+    // One empty window is enough: + goes back to it instead of adding another.
+    const empty = connectionId ? undefined : windowsRef.current.find((w) => !w.connectionId);
+    if (empty) return switchWindow(empty.id);
+    const id = `w${nextWindowNo.current++}`;
+    setWindows((prev) => [...prev, blankWindow(id)]);
     setActiveWindowId(id);
     if (connectionId) void connectWindow(id, connectionId, database);
   };
