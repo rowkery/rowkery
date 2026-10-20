@@ -1,5 +1,6 @@
 //! Why a connection failed, in one sentence: the error class read from the
-//! raw text (Postgres, the OS or the SSH tunnel), the cause the panel shows
+//! raw text (Postgres, the OS, the SSH tunnel or the Cloud SQL connector),
+//! the cause the panel shows
 //! above the raw text, and which field of the connection sheet to mark.
 
 use serde::Serialize;
@@ -7,12 +8,16 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectExplanation {
     /// `refused`, `timeout`, `dns`, `tls`, `auth`, `database`, `role`,
-    /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth` or `unknown`.
+    /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`, a Cloud SQL
+    /// class (`cloudsql_login`, `cloudsql_role`, `cloudsql_instance`,
+    /// `cloudsql_api`, `cloudsql_ip`, `cloudsql_google`, `cloudsql_unreachable`,
+    /// `cloudsql_tls`, `cloudsql`) or `unknown`.
     pub class: &'static str,
     /// The one-line cause; none for `unknown` (the raw text stands alone).
     pub cause: Option<String>,
     /// The sheet field to focus and mark: `host`, `database`, `username`,
-    /// `password`, `ssl`, `sshHost`, `sshPassword`.
+    /// `password`, `ssl`, `sshHost`, `sshPassword`, `account`, `instance`,
+    /// `ipType`.
     pub field: Option<&'static str>,
 }
 
@@ -22,6 +27,9 @@ pub struct Target<'a> {
     pub port: u16,
     pub username: &'a str,
     pub ssh_host: Option<&'a str>,
+    /// The Cloud SQL instance (`project:region:instance`), when the
+    /// connection goes through the connector.
+    pub cloud_sql: Option<&'a str>,
 }
 
 /// A certificate Verify couldn't check, in one line that points at the setting.
@@ -50,6 +58,9 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
         field,
     };
 
+    if let Some(x) = explain_cloud_sql(raw, t) {
+        return x;
+    }
     if has("has CHANGED") {
         return e(
             "ssh_changed",
@@ -87,6 +98,7 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
     }
     if says("rejected password")
         || says("password authentication failed")
+        || says("sasl authentication failed")
         || says("asked for a password")
         || has("28P01")
     {
@@ -168,6 +180,95 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
     e("unknown", None, None)
 }
 
+/// The connector's own failures (`cloudsql::CloudSqlError`); Postgres's,
+/// once the connector got through, fall to the classes above.
+fn explain_cloud_sql(raw: &str, t: &Target) -> Option<ConnectExplanation> {
+    let e = |class, cause: String, field| {
+        Some(ConnectExplanation {
+            class,
+            cause: Some(cause),
+            field,
+        })
+    };
+    let name = t.cloud_sql.and_then(crate::cloudsql::InstanceName::parse);
+    let inst = name.as_ref().map_or("the instance", |n| n.name.as_str());
+    let project = name.as_ref().map_or("its project", |n| n.project.as_str());
+    let lower = raw.to_ascii_lowercase();
+    // Google itself, not the instance: no field of the form is wrong.
+    if lower.contains("couldn't reach the cloud sql admin api")
+        || lower.contains("couldn't reach google")
+    {
+        return e(
+            "cloudsql_google",
+            "Couldn't reach Google. Check the network, and any proxy or firewall in front of googleapis.com.".into(),
+            None,
+        );
+    }
+    if let Some(rest) = raw.split_once("Google login: ").map(|(_, r)| r) {
+        return e("cloudsql_login", sentence(rest), Some("account"));
+    }
+    if let Some(rest) = raw.split_once("Cloud SQL Admin API: ").map(|(_, r)| r) {
+        if lower.contains("service_disabled")
+            || lower.contains("has not been used in project")
+            || lower.contains("it is disabled")
+        {
+            return e(
+                "cloudsql_api",
+                format!("The Cloud SQL Admin API is off in {project}. Turn it on in the Google Cloud console, then try again."),
+                Some("instance"),
+            );
+        }
+        if rest.starts_with("403") {
+            return e(
+                "cloudsql_role",
+                format!("This Google account can't connect to {inst}. It needs the Cloud SQL Client role on {project}."),
+                Some("instance"),
+            );
+        }
+        if rest.starts_with("404") {
+            return e(
+                "cloudsql_instance",
+                format!("{project} has no Cloud SQL instance named {inst}."),
+                Some("instance"),
+            );
+        }
+        return e("cloudsql_api", sentence(raw), Some("instance"));
+    }
+    let rest = raw.split_once("Cloud SQL: ").map(|(_, r)| r)?;
+    if rest.contains(" has no ") {
+        return e("cloudsql_ip", sentence(rest), Some("ipType"));
+    }
+    if rest.contains("did not answer") && !rest.contains("Postgres")
+        || lower.contains("couldn't reach")
+        || rest.contains("couldn't be reached")
+    {
+        return e(
+            "cloudsql_unreachable",
+            format!("{inst} didn't answer on port {}. A private or PSC address only answers inside its network.", crate::cloudsql::SERVER_PORT),
+            Some("ipType"),
+        );
+    }
+    if rest.contains("secure connection to") {
+        return e(
+            "cloudsql_tls",
+            format!("The secure connection to {inst} failed, so nothing was sent."),
+            None,
+        );
+    }
+    e("cloudsql", sentence(rest), Some("instance"))
+}
+
+/// `text` as a sentence: capitalised, with a full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim().trim_end_matches('.');
+    let mut chars = text.chars();
+    let first = chars
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+    format!("{first}{}.", chars.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,12 +278,21 @@ mod tests {
         port: 5432,
         username: "app",
         ssh_host: None,
+        cloud_sql: None,
     };
     const S: Target = Target {
         host: "10.0.0.5",
         port: 5432,
         username: "app",
         ssh_host: Some("bastion.internal"),
+        cloud_sql: None,
+    };
+    const C: Target = Target {
+        host: "acme-prod:asia-southeast1:orders-prd",
+        port: 5432,
+        username: "app_rw",
+        ssh_host: None,
+        cloud_sql: Some("acme-prod:asia-southeast1:orders-prd"),
     };
 
     fn class(raw: &str, t: &Target) -> (&'static str, Option<String>, Option<&'static str>) {
@@ -287,5 +397,85 @@ mod tests {
         );
         // A Postgres refusal behind a working tunnel is still Postgres's.
         assert_eq!(class("Postgres rejected password for 'app'", &S).0, "auth");
+        // PgBouncer (Cloud SQL managed pooling, Supabase) words it its own way.
+        assert_eq!(
+            class("db error: FATAL: SASL authentication failed", &S).0,
+            "auth"
+        );
+    }
+
+    #[test]
+    fn cloud_sql_causes_name_the_instance() {
+        assert_eq!(
+            class("Cloud SQL Admin API: 403 The client is not authorized to make this request.", &C),
+            (
+                "cloudsql_role",
+                Some("This Google account can't connect to orders-prd. It needs the Cloud SQL Client role on acme-prod.".into()),
+                Some("instance")
+            )
+        );
+        assert_eq!(
+            class(
+                "Cloud SQL Admin API: 404 The Cloud SQL instance does not exist.",
+                &C
+            )
+            .0,
+            "cloudsql_instance"
+        );
+        assert_eq!(
+            class("Cloud SQL Admin API: 403 Cloud SQL Admin API has not been used in project 123 before or it is disabled.", &C).0,
+            "cloudsql_api"
+        );
+        assert_eq!(
+            class("Google login: No gcloud login on this computer. Run `gcloud auth application-default login`, then try again", &C),
+            (
+                "cloudsql_login",
+                Some("No gcloud login on this computer. Run `gcloud auth application-default login`, then try again.".into()),
+                Some("account")
+            )
+        );
+        assert_eq!(
+            class("Cloud SQL: orders-prd at 10.0.0.3:3307 did not answer in 10 s", &C),
+            (
+                "cloudsql_unreachable",
+                Some("orders-prd didn't answer on port 3307. A private or PSC address only answers inside its network.".into()),
+                Some("ipType")
+            )
+        );
+        assert_eq!(
+            class(
+                "Cloud SQL: orders-prd has no public IP. Pick Private or PSC under Advanced",
+                &C
+            )
+            .2,
+            Some("ipType")
+        );
+        for offline in [
+            "Cloud SQL: Couldn't reach the Cloud SQL Admin API: error sending request",
+            "Cloud SQL: Couldn't reach Google to sign in: dns error",
+        ] {
+            assert_eq!(
+                (class(offline, &C).0, class(offline, &C).2),
+                ("cloudsql_google", None),
+                "{offline}"
+            );
+        }
+        assert_eq!(
+            class("Cloud SQL: orders-prd couldn't be reached in 30 s", &C).0,
+            "cloudsql_unreachable"
+        );
+        // Through the connector, Postgres's own refusals keep their classes.
+        assert_eq!(
+            class("Postgres rejected password for 'app_rw'", &C).0,
+            "auth"
+        );
+        assert_eq!(
+            class(
+                "Cloud SQL: orders-prd took the connection but Postgres did not answer in 10 s",
+                &C
+            )
+            .0,
+            "cloudsql"
+        );
     }
 }

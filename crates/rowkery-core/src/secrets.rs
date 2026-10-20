@@ -40,6 +40,8 @@ pub enum SecretKind {
     /// The key that turns a sensitive column's values into the stand-ins
     /// agents get (`mask_key`).
     MaskKey,
+    /// A Google service account key (JSON) a Cloud SQL connection signs in with.
+    GcpKey,
 }
 
 impl SecretKind {
@@ -49,6 +51,7 @@ impl SecretKind {
             Self::SshPassword => "ssh-password",
             Self::SshKeyPassphrase => "ssh-key-passphrase",
             Self::MaskKey => "mask-key",
+            Self::GcpKey => "gcp-key",
         }
     }
 }
@@ -213,6 +216,9 @@ const KINDS: [SecretKind; 3] = [
     SecretKind::SshKeyPassphrase,
 ];
 
+/// Secrets added after the one item per connection: never items of their own.
+const NEWER_KINDS: [SecretKind; 2] = [SecretKind::MaskKey, SecretKind::GcpKey];
+
 /// A connection's secrets, by kind label: the JSON held in its one keychain
 /// item. One item per connection means macOS asks once per connection (after
 /// each unsigned build), and the MCP server only ever reads the items of the
@@ -327,12 +333,41 @@ fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<
                 }
                 return Ok(());
             }
+            // Too big for the keychain (Windows' Credential Manager holds
+            // about 1,250 characters, less than a service account key): the
+            // file takes them, and the item drops its older copies, which
+            // reads would otherwise find first. The small ones move back
+            // into the item on their next read.
+            if let Ok(mut item) = keychain_item(connection_id) {
+                let before = item.len();
+                for (kind, _) in secrets {
+                    item.remove(kind.label());
+                }
+                if item.len() != before {
+                    let _ = item_save(connection_id, &item);
+                }
+            }
         }
     }
     for (kind, secret) in secrets {
         fallback_set(&entry_account(connection_id, *kind), secret)?;
     }
     Ok(())
+}
+
+/// Removes one of a connection's secrets (a service account key the
+/// connection no longer signs in with).
+pub fn delete_secret(connection_id: &str, kind: SecretKind) -> Result<(), SecretError> {
+    let account = entry_account(connection_id, kind);
+    cache_put(&account, None);
+    if keychain_enabled() {
+        if let Ok(mut item) = keychain_item(connection_id) {
+            if item.remove(kind.label()).is_some() {
+                item_save(connection_id, &item)?;
+            }
+        }
+    }
+    fallback_remove_if_present(&account)
 }
 
 /// Read a connection secret. A secret still in the fallback file is moved into
@@ -376,7 +411,7 @@ pub fn forget_cached(connection_id: &str) {
         c.remove(&cache_key(connection_id));
     }
     if let Ok(mut c) = cache().lock() {
-        for kind in KINDS.into_iter().chain([SecretKind::MaskKey]) {
+        for kind in KINDS.into_iter().chain(NEWER_KINDS) {
             c.remove(&cache_key(&entry_account(connection_id, kind)));
         }
     }
@@ -428,9 +463,11 @@ pub fn delete_secrets_for_connection(connection_id: &str) -> Result<(), SecretEr
         }
         let _ = fallback_remove_if_present(&account);
     }
-    let account = entry_account(connection_id, SecretKind::MaskKey);
-    cache_put(&account, None);
-    let _ = fallback_remove_if_present(&account);
+    for kind in NEWER_KINDS {
+        let account = entry_account(connection_id, kind);
+        cache_put(&account, None);
+        let _ = fallback_remove_if_present(&account);
+    }
     Ok(())
 }
 
@@ -440,6 +477,9 @@ pub struct ConnectionSecrets {
     pub db_password: Option<String>,
     pub ssh_password: Option<String>,
     pub ssh_key_passphrase: Option<String>,
+    /// A Cloud SQL connection's service account key file (JSON).
+    #[serde(default)]
+    pub gcp_key: Option<String>,
 }
 
 impl ConnectionSecrets {
@@ -455,6 +495,7 @@ impl ConnectionSecrets {
             db_password: fill(self.db_password, SecretKind::DbPassword),
             ssh_password: fill(self.ssh_password, SecretKind::SshPassword),
             ssh_key_passphrase: fill(self.ssh_key_passphrase, SecretKind::SshKeyPassphrase),
+            gcp_key: fill(self.gcp_key, SecretKind::GcpKey),
         }
     }
 
@@ -463,6 +504,7 @@ impl ConnectionSecrets {
             (SecretKind::DbPassword, &self.db_password),
             (SecretKind::SshPassword, &self.ssh_password),
             (SecretKind::SshKeyPassphrase, &self.ssh_key_passphrase),
+            (SecretKind::GcpKey, &self.gcp_key),
         ]
         .into_iter()
         .filter_map(|(kind, v)| v.as_deref().filter(|v| !v.is_empty()).map(|v| (kind, v)))
@@ -489,6 +531,8 @@ mod mock {
         pub deny: bool,
         pub reads: usize,
         pub writes: usize,
+        /// Longer values are refused, as Windows' Credential Manager does.
+        pub max_len: Option<usize>,
     }
 
     pub static KEYCHAIN: Mutex<Option<Keychain>> = Mutex::new(None);
@@ -519,6 +563,9 @@ mod mock {
     pub fn set(account: &str, secret: &str) -> Option<Result<(), SecretError>> {
         with(|k| {
             k.writes += 1;
+            if k.max_len.is_some_and(|max| secret.len() > max) {
+                return Err(SecretError::Keyring("too big".into()));
+            }
             k.items.insert(account.to_string(), secret.to_string());
             Ok(())
         })
@@ -561,15 +608,21 @@ mod tests {
         let _guard = test_guard();
         store_secret("c2", SecretKind::DbPassword, "stored").expect("store");
         store_secret("c2", SecretKind::SshPassword, "ssh-stored").expect("store");
+        store_secret("c2", SecretKind::GcpKey, "{\"type\":\"service_account\"}").expect("store");
         let secrets = ConnectionSecrets {
             db_password: Some(String::new()),
             ssh_password: Some("typed".into()),
             ssh_key_passphrase: None,
+            gcp_key: None,
         }
         .or_stored("c2");
         assert_eq!(secrets.db_password.as_deref(), Some("stored"));
         assert_eq!(secrets.ssh_password.as_deref(), Some("typed"));
         assert_eq!(secrets.ssh_key_passphrase, None);
+        assert_eq!(
+            secrets.gcp_key.as_deref(),
+            Some("{\"type\":\"service_account\"}")
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
@@ -623,6 +676,7 @@ mod tests {
             db_password: Some("db".into()),
             ssh_password: Some("ssh".into()),
             ssh_key_passphrase: None,
+            gcp_key: None,
         }
         .persist("k1")
         .expect("persist");
@@ -672,6 +726,44 @@ mod tests {
             // The item, then the three old accounts, once for the whole run.
             assert_eq!(k.reads, 4);
         });
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_secret_too_big_for_the_keychain_never_leaves_an_older_one_in_front() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        store_secret("k5", SecretKind::DbPassword, "old").expect("store");
+        mock::KEYCHAIN.lock().unwrap().as_mut().unwrap().max_len = Some(200);
+        let key = format!("{{\"private_key\":\"{}\"}}", "k".repeat(300));
+        ConnectionSecrets {
+            db_password: Some("new".into()),
+            gcp_key: Some(key.clone()),
+            ..Default::default()
+        }
+        .persist("k5")
+        .expect("persist");
+        forget_cached("k5");
+        assert_eq!(
+            get_secret("k5", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("new")
+        );
+        assert_eq!(get_secret("k5", SecretKind::GcpKey).unwrap(), Some(key));
+        mock_state(|k| {
+            // The password moved back into the item on its read; the key
+            // stays in the file.
+            let item: Item = serde_json::from_str(&k.items["k5"]).unwrap();
+            assert_eq!(item.get("db-password").map(String::as_str), Some("new"));
+            assert!(!item.contains_key("gcp-key"));
+        });
+
+        delete_secret("k5", SecretKind::GcpKey).expect("delete");
+        forget_cached("k5");
+        assert_eq!(get_secret("k5", SecretKind::GcpKey).unwrap(), None);
+        assert_eq!(
+            get_secret("k5", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("new")
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 

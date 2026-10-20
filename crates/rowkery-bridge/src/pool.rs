@@ -51,12 +51,10 @@ use std::time::{Duration, Instant};
 
 use rowkery_core::connections::PostgresConnection;
 use rowkery_core::db::postgres::{
-    open_session_via, session_has_cursor, session_ping, session_probe_txn, PostgresSession,
+    open_session_via, session_has_cursor, session_ping, session_probe_txn, PostgresSession, Route,
     TxnState,
 };
 use rowkery_core::db::DriverError;
-use rowkery_core::ssh::SshTunnel;
-
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::prefetch::Prefetcher;
@@ -129,9 +127,10 @@ pub(crate) struct SessionPool {
     /// Bumped whenever a window is re-pointed or closed, so a session that
     /// was out running a query for the old target is dropped, not parked.
     generations: HashMap<String, u64>,
-    /// Each window's SSH tunnel, shared by its sessions; dropped with the
-    /// window, or once it has no parked sessions (sessions in use keep theirs).
-    tunnels: HashMap<String, (u64, Arc<SshTunnel>)>,
+    /// Each window's route (SSH tunnel or Cloud SQL dialer), shared by its
+    /// sessions; dropped with the window, or once it has no parked sessions
+    /// (sessions in use keep theirs).
+    tunnels: HashMap<String, (u64, Route)>,
     /// Each window's prefetch session and first pages, for its generation.
     prefetchers: HashMap<String, (u64, Arc<Prefetcher>)>,
     /// Slots whose own session is out (leased or being pinged), by checkout.
@@ -374,8 +373,8 @@ impl SessionPool {
             .map(|(_, p)| p.clone())
     }
 
-    /// The window's live SSH tunnel, for a session opened outside the pool.
-    pub fn window_tunnel(&self, window_id: &str, generation: u64) -> Option<Arc<SshTunnel>> {
+    /// The window's live route, for a session opened outside the pool.
+    pub fn window_tunnel(&self, window_id: &str, generation: u64) -> Option<Route> {
         self.tunnel(window_id, generation)
     }
 
@@ -426,7 +425,7 @@ impl SessionPool {
         }
         // The first SSH session parked (often the schema load's) lends the
         // window its tunnel.
-        if let Some(t) = session.tunnel() {
+        if let Some(t) = session.route() {
             if self.tunnel(window_id, generation).is_none() {
                 self.keep_tunnel(window_id, generation, t);
             }
@@ -483,14 +482,14 @@ impl SessionPool {
     }
 
     /// The window's live tunnel for this generation, if it has one.
-    fn tunnel(&self, window_id: &str, generation: u64) -> Option<Arc<SshTunnel>> {
+    fn tunnel(&self, window_id: &str, generation: u64) -> Option<Route> {
         self.tunnels
             .get(window_id)
             .filter(|(g, t)| *g == generation && t.is_alive())
             .map(|(_, t)| t.clone())
     }
 
-    fn keep_tunnel(&mut self, window_id: &str, generation: u64, tunnel: Arc<SshTunnel>) {
+    fn keep_tunnel(&mut self, window_id: &str, generation: u64, tunnel: Route) {
         if self.generation(window_id) == generation {
             self.tunnels
                 .insert(window_id.to_string(), (generation, tunnel));
@@ -569,7 +568,7 @@ enum Found {
     Busy,
     /// The tab's transaction went with its session.
     Lost(bool),
-    Ready(Option<Parked>, Option<Arc<SshTunnel>>, Checkout),
+    Ready(Option<Parked>, Option<Route>, Checkout),
 }
 
 /// Takes the slot's warm session (or the window's spare), checking it is
@@ -672,7 +671,7 @@ pub(crate) async fn lease_or_wait(
     if let Some(place) = place {
         session.hold(Box::new(place));
     }
-    if let (Some(t), Ok(mut p)) = (session.tunnel(), pool.lock()) {
+    if let (Some(t), Ok(mut p)) = (session.route(), pool.lock()) {
         p.keep_tunnel(window_id, generation, t);
     }
     Ok(Lease {
@@ -801,7 +800,7 @@ pub(crate) async fn ping_idle(
                 Ok(fresh) => {
                     replaced += 1;
                     pool.lock().ok().and_then(|mut p| {
-                        if let Some(t) = fresh.tunnel() {
+                        if let Some(t) = fresh.route() {
                             p.keep_tunnel(window_id, generation, t);
                         }
                         p.restore(
@@ -911,6 +910,7 @@ mod tests {
             ssl_mode: PostgresSslMode::Disable,
             ssl_root_cert: None,
             ssh: None,
+            cloud_sql: None,
         })
     }
 
@@ -1060,6 +1060,7 @@ mod tests {
             ssl_mode: PostgresSslMode::Disable,
             ssl_root_cert: None,
             ssh: None,
+            cloud_sql: None,
         }
     }
 

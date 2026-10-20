@@ -1,6 +1,8 @@
 //! The Cloud SQL connector against a fake Google: an Admin API on a local
 //! HTTP port, and an "instance" that, like Cloud SQL's server-side proxy,
-//! takes TLS only from a client certificate the API issued.
+//! takes TLS only from a client certificate the API issued. With
+//! `postgres-integration` the instance forwards to the test Postgres, so a
+//! whole session (query, cancel) runs through the connector.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,6 +50,9 @@ struct Google {
     moving_calls: AtomicUsize,
     /// `x-goog-user-project` on the last Admin API call.
     quota_project: Mutex<Option<String>>,
+    /// The instance closes the next connection right after the handshake,
+    /// as it does when it refuses a client certificate under TLS 1.3.
+    refuse_next: std::sync::atomic::AtomicBool,
 }
 
 fn json(status: u16, body: serde_json::Value) -> (u16, String) {
@@ -220,7 +225,7 @@ async fn serve_http(google: Arc<Google>) -> SocketAddr {
 type Upstream = Arc<Mutex<Option<SocketAddr>>>;
 
 /// The instance's port: TLS with a client certificate from `client_ca`.
-async fn serve_instance(google: &Google, upstream: Upstream) -> u16 {
+async fn serve_instance(google: Arc<Google>, upstream: Upstream) -> u16 {
     let key = KeyPair::generate().unwrap();
     let mut p = CertificateParams::new(vec![SERVER_DNS.to_string()]).unwrap();
     p.distinguished_name.push(DnType::CommonName, "acme:orders");
@@ -251,10 +256,14 @@ async fn serve_instance(google: &Google, upstream: Upstream) -> u16 {
             let (sock, _) = listener.accept().await.unwrap();
             let acceptor = acceptor.clone();
             let upstream = *upstream.lock().unwrap();
+            let refuse = google.refuse_next.swap(false, Ordering::SeqCst);
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(sock).await else {
                     return;
                 };
+                if refuse {
+                    return;
+                }
                 match upstream {
                     Some(addr) => {
                         let mut pg = TcpStream::connect(addr).await.unwrap();
@@ -312,6 +321,7 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         denied_calls: AtomicUsize::new(0),
         moving_calls: AtomicUsize::new(0),
         quota_project: Mutex::new(None),
+        refuse_next: Default::default(),
     });
     let ca_pem = google.server_ca.pem();
     let imposter_pem = ca("Someone else").pem();
@@ -342,8 +352,13 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         );
     }
     let http = serve_http(google.clone()).await;
+    let upstream = cfg!(feature = "postgres-integration").then(|| {
+        let host = std::env::var("ROWKERY_PG_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+        let port = std::env::var("ROWKERY_PG_PORT").unwrap_or_else(|_| "5432".into());
+        format!("{host}:{port}").parse().unwrap()
+    });
     let upstream_at = Upstream::default();
-    let instance_port = serve_instance(&google, upstream_at.clone()).await;
+    let instance_port = serve_instance(google.clone(), upstream_at.clone()).await;
     std::env::set_var("ROWKERY_CLOUDSQL_TEST_ADMIN", format!("http://{http}"));
     std::env::set_var("ROWKERY_CLOUDSQL_TEST_PROJECTS", format!("http://{http}"));
     std::env::set_var("ROWKERY_CLOUDSQL_TEST_TOKEN", format!("http://{http}"));
@@ -440,4 +455,85 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
     );
     assert_eq!(cloudsql::account(None).await.unwrap(), None);
     std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &adc);
+
+    if let Some(upstream) = upstream {
+        *upstream_at.lock().unwrap() = Some(upstream);
+        postgres_through_the_connector(&google).await;
+    }
+}
+
+#[cfg(not(feature = "postgres-integration"))]
+async fn postgres_through_the_connector(_: &Google) {}
+
+/// A session, a query and a cancel, all through the connector.
+#[cfg(feature = "postgres-integration")]
+async fn postgres_through_the_connector(google: &Google) {
+    use rowkery_core::connections::{PostgresConnection, PostgresSslMode};
+    use rowkery_core::db::postgres::{
+        cancel_with_token, open_session_via, session_query_stream, Route,
+    };
+    use rowkery_core::ConnectionSecrets;
+
+    let pg = PostgresConnection {
+        id: "cloudsql-pg".into(),
+        name: "orders".into(),
+        host: "acme:asia-southeast1:orders".into(),
+        port: 5432,
+        database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+        username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+        ssl_mode: PostgresSslMode::Verify,
+        ssl_root_cert: None,
+        ssh: None,
+        cloud_sql: Some(config("orders")),
+        environment: None,
+        safe_mode: Default::default(),
+        allow_mcp: false,
+        mcp_hidden_tables: Vec::new(),
+        mcp_until: None,
+        mcp_samples_off: false,
+        mcp_access: None,
+        masked_columns: Default::default(),
+    };
+    let secrets = ConnectionSecrets {
+        db_password: Some(
+            std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+        ),
+        ..Default::default()
+    };
+    let a = open_session_via(pg.id.clone(), pg.clone(), Some(&secrets), None)
+        .await
+        .expect("session through the connector");
+    let Some(Route::CloudSql(_)) = a.route() else {
+        panic!("not routed through the connector");
+    };
+    let n = session_query_stream(&a, "SELECT 1", |_, _| Ok(()))
+        .await
+        .expect("query");
+    assert_eq!(n, 1);
+    // A second session shares the dialer (no new certificate).
+    let issued = google.certs_issued.load(Ordering::SeqCst);
+    let b = open_session_via(pg.id.clone(), pg.clone(), Some(&secrets), a.route())
+        .await
+        .expect("second session");
+    assert_eq!(google.certs_issued.load(Ordering::SeqCst), issued);
+    // The instance refuses the certificate after the handshake: the session
+    // gets a new one and connects.
+    google.refuse_next.store(true, Ordering::SeqCst);
+    let c = open_session_via(pg.id.clone(), pg.clone(), Some(&secrets), a.route())
+        .await
+        .expect("session after a refused certificate");
+    assert_eq!(google.certs_issued.load(Ordering::SeqCst), issued + 1);
+    drop(c);
+    // Cancel reaches the server through a fresh connector stream.
+    let (token, via) = (b.cancel_token.clone(), b.cancel_via.clone());
+    let sleeper = tokio::spawn(async move {
+        session_query_stream(&b, "SELECT pg_sleep(30)", |_, _| Ok(())).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    cancel_with_token(token, via).await.expect("cancel");
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), sleeper)
+        .await
+        .expect("cancel landed")
+        .unwrap();
+    assert!(res.is_err(), "the sleep was cancelled");
 }

@@ -188,6 +188,10 @@ pub struct PostgresConnection {
     pub ssl_root_cert: Option<String>,
     #[serde(default)]
     pub ssh: Option<SshConfig>,
+    /// Set for a Cloud SQL instance: the session goes through the connector
+    /// instead of `host:port` (which then only names it on screen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_sql: Option<CloudSqlConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<ConnectionEnvironment>,
     /// Whether writes run, wait for confirmation, or are refused. Separate
@@ -333,6 +337,7 @@ pub struct PostgresFieldErrors {
     pub ssh_user: Option<String>,
     pub ssh_key_path: Option<String>,
     pub ssh_password: Option<String>,
+    pub instance: Option<String>,
 }
 
 impl PostgresFieldErrors {
@@ -346,6 +351,7 @@ impl PostgresFieldErrors {
             || self.ssh_user.is_some()
             || self.ssh_key_path.is_some()
             || self.ssh_password.is_some()
+            || self.instance.is_some()
     }
 
     pub fn first_message(&self) -> Option<String> {
@@ -359,6 +365,7 @@ impl PostgresFieldErrors {
             &self.ssh_user,
             &self.ssh_key_path,
             &self.ssh_password,
+            &self.instance,
         ]
         .into_iter()
         .find_map(|m| m.clone())
@@ -373,11 +380,20 @@ pub fn validate_postgres_fields(
     if pg.name.trim().is_empty() {
         errors.name = Some("Name is required".into());
     }
-    if pg.host.trim().is_empty() {
-        errors.host = Some("Host is required".into());
-    }
-    if pg.port == 0 {
-        errors.port = Some("Port is required".into());
+    if let Some(cloud) = &pg.cloud_sql {
+        if crate::cloudsql::InstanceName::parse(&cloud.instance).is_none() {
+            errors.instance = Some("Instance is required, as project:region:instance".into());
+        }
+        if pg.ssh.is_some() {
+            errors.instance = Some("A Cloud SQL connection can't also use an SSH tunnel".into());
+        }
+    } else {
+        if pg.host.trim().is_empty() {
+            errors.host = Some("Host is required".into());
+        }
+        if pg.port == 0 {
+            errors.port = Some("Port is required".into());
+        }
     }
     if pg.database.trim().is_empty() {
         errors.database = Some("Database is required".into());
@@ -477,6 +493,7 @@ mod validate_tests {
                 private_key_path: None,
                 trust_host: false,
             }),
+            cloud_sql: None,
             environment: None,
             safe_mode: Default::default(),
         };
@@ -554,6 +571,7 @@ mod validate_tests {
             ssl_mode: PostgresSslMode::Prefer,
             ssl_root_cert: None,
             ssh: None,
+            cloud_sql: None,
         };
         let err =
             validate_postgres_connect(&pg, &ConnectionSecrets::default()).expect_err("should fail");
@@ -587,6 +605,7 @@ mod validate_tests {
                 private_key_path: None,
                 trust_host: false,
             }),
+            cloud_sql: None,
         };
         let err =
             validate_postgres_connect(&pg, &ConnectionSecrets::default()).expect_err("should fail");
