@@ -70,6 +70,8 @@ When a connection fails, the window shows **Couldn't connect** in place of the e
 | `The SSH host HOST did not answer.` | The SSH server didn't answer within 15 seconds, or refused the connection. Check the SSH host and port |
 | `The SSH host HOST refused the key or password.` | The SSH user, key file or password is wrong |
 
+A Google Cloud SQL connection has causes of its own, such as a missing gcloud login or the Cloud SQL Client role. [When it can't connect](/google-cloud-sql/#when-it-cant-connect) lists them.
+
 When no cause fits, the raw error stands alone. A few you may meet there:
 
 | Raw error | What to do |

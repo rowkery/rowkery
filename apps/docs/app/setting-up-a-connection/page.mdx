@@ -57,6 +57,10 @@ Under **Advanced**. A new connection to a host off your Mac starts on Verify; on
 
 Also under Advanced. Give the SSH host, user, and a password or key file. Rowkery remembers each server's host key and tells you if it changes.
 
+## Google Cloud SQL
+
+For a Postgres instance on Google Cloud SQL, pick **Google Cloud SQL** under **Connect to** at the top of the form. In place of Host and Port, you pick your Google account and the instance, and Rowkery opens the secure link to it itself, with no Cloud SQL Auth Proxy to run. [Google Cloud SQL](/google-cloud-sql/) covers every step.
+
 ## Environment
 
 A label that colours the window so you always know where you are: <Env name="prd" /> <Env name="stg" /> <Env name="dev" /> <Env name="local" />. For Postgres, Rowkery suggests one from the name, database and host. It changes nothing about what the connection can do; that's what safe mode is for. [Environments and safe mode](/environments-and-safe-mode/) covers both.

@@ -77,7 +77,7 @@ Passwords live in the macOS Keychain, never in a file. Each connection that has 
 | Kind | Generic password |
 | Service (shown as its name) | `rowkery` |
 | Account | The connection's id, as in `config.json` |
-| Holds | The database password, the SSH password or key passphrase, and the key for the connection's sensitive-column stand-ins |
+| Holds | The database password, the SSH password or key passphrase, a Google Cloud SQL connection's service account key, and the key for the connection's sensitive-column stand-ins |
 
 To see them, open **Keychain Access** and search for `rowkery`. Deleting a connection in Rowkery removes its item once the Undo toast has gone.
 
