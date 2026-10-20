@@ -71,3 +71,21 @@ test("plain-text report carries only what was included", () => {
   const text = r.reportText({ description: "Broken", app: "Rowkery 0.1.0", error: "boom" });
   assert.equal(text, "Broken\n\nRowkery 0.1.0\n\nError:\nboom");
 });
+
+test("masks a Cloud SQL instance's project and name, and Google project numbers", () => {
+  const cloud = {
+    ...pg,
+    host: "acme-prod:asia-southeast1:orders-prd",
+    ssh: null,
+    cloud_sql: { instance: "acme-prod:asia-southeast1:orders-prd", ip_type: "public", credentials: "gcloud" },
+  };
+  assert.equal(
+    r.maskSensitive("Cloud SQL: orders-prd is in asia-southeast1, not us-central1. Check the instance name", cloud),
+    "Cloud SQL: ‹host› is in asia-southeast1, not us-central1. Check the instance name",
+  );
+  assert.equal(
+    r.maskSensitive("Cloud SQL Admin API: 403 Cloud SQL Admin API has not been used in project 123456789 before", cloud),
+    "Cloud SQL Admin API: 403 Cloud SQL Admin API has not been used in project ‹project› before",
+  );
+  assert.equal(r.maskSensitive("It needs the Cloud SQL Client role on acme-prod.", cloud), "It needs the Cloud SQL Client role on ‹project›.");
+});

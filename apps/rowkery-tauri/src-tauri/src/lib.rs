@@ -326,6 +326,7 @@ async fn save_connection(
     connection: ConnectionRecord,
     secrets: ConnectionSecrets,
 ) -> Result<(), String> {
+    let secrets = with_staged_key(secrets)?;
     on_blocking_pool(app, move |bridge| {
         bridge
             .upsert_connection(connection, secrets)
@@ -506,14 +507,39 @@ struct ProbeDto {
     elapsed_ms: u64,
 }
 
-/// The service account key a Cloud SQL form uses: typed in the form (read
-/// from its file), else the one saved for `connection_id`.
+/// Service account keys picked in the form, by the id the webview holds in
+/// their place: the key itself never goes to the webview, and Save takes it
+/// from here into the keychain.
+fn staged_keys() -> &'static Mutex<HashMap<String, String>> {
+    static KEYS: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(Default::default)
+}
+
+fn staged_key(id: &str) -> Result<String, String> {
+    staged_keys()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .cloned()
+        .ok_or_else(|| "Choose the service account key file again".to_string())
+}
+
+/// `secrets` with a picked key's id swapped for the key.
+fn with_staged_key(mut secrets: ConnectionSecrets) -> Result<ConnectionSecrets, String> {
+    if let Some(id) = secrets.gcp_key.take().filter(|k| !k.is_empty()) {
+        secrets.gcp_key = Some(staged_key(&id)?);
+    }
+    Ok(secrets)
+}
+
+/// The service account key a Cloud SQL form uses: the one picked in the
+/// form (`key`, a staged id), else the one saved for `connection_id`.
 async fn cloudsql_key(
-    key_json: Option<String>,
+    key: Option<String>,
     connection_id: Option<String>,
 ) -> Result<Option<String>, String> {
-    if let Some(json) = key_json.filter(|k| !k.trim().is_empty()) {
-        return Ok(Some(json));
+    if let Some(id) = key.filter(|k| !k.trim().is_empty()) {
+        return staged_key(&id).map(Some);
     }
     let Some(id) = connection_id else {
         return Ok(None);
@@ -532,11 +558,11 @@ async fn cloudsql_key(
 #[tauri::command]
 async fn cloudsql_account(
     credentials: String,
-    key_json: Option<String>,
+    key: Option<String>,
     connection_id: Option<String>,
 ) -> Result<Option<rowkery_core::cloudsql::CloudSqlAccount>, String> {
     let key = if credentials == "key" {
-        match cloudsql_key(key_json, connection_id).await? {
+        match cloudsql_key(key, connection_id).await? {
             Some(key) => Some(key),
             None => return Ok(None),
         }
@@ -552,11 +578,11 @@ async fn cloudsql_account(
 #[tauri::command]
 async fn cloudsql_instances(
     credentials: String,
-    key_json: Option<String>,
+    key: Option<String>,
     connection_id: Option<String>,
 ) -> Result<rowkery_core::cloudsql::InstanceList, String> {
     let key = if credentials == "key" {
-        cloudsql_key(key_json, connection_id)
+        cloudsql_key(key, connection_id)
             .await?
             .ok_or("No service account key yet")?
     } else {
@@ -567,30 +593,54 @@ async fn cloudsql_instances(
         .map_err(|e| e.to_string())
 }
 
-/// Reads a service account key file the user picked, for the form to keep
-/// until Save puts it in the keychain. Refuses anything that isn't one.
+/// Asks for a service account key file (the native dialog: only a file the
+/// user picked is read) and keeps it until Save puts it in the keychain.
+/// Refuses anything that isn't a service account key. `None` when the
+/// dialog was dismissed.
 #[tauri::command]
-async fn cloudsql_key_file(path: String) -> Result<CloudSqlKeyFile, String> {
+async fn cloudsql_key_file(app: AppHandle) -> Result<Option<CloudSqlKeyFile>, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tauri_plugin_dialog::DialogExt;
     let json = tauri::async_runtime::spawn_blocking(move || {
-        let path = rowkery_core::connections::expand_home(&path);
+        let Some(path) = app
+            .dialog()
+            .file()
+            .add_filter("Service account key", &["json"])
+            .blocking_pick_file()
+            .and_then(|p| p.into_path().ok())
+        else {
+            return Ok(None);
+        };
         let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
         if meta.len() > 64 * 1024 {
             return Err("That file is too big to be a service account key".to_string());
         }
-        std::fs::read_to_string(&path).map_err(|e| e.to_string())
+        std::fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;
+    let Some(json) = json else {
+        return Ok(None);
+    };
     let account = rowkery_core::cloudsql::account(Some(&json))
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Not a service account key")?;
-    Ok(CloudSqlKeyFile { json, account })
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let key = format!("picked-key-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    staged_keys()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.clone(), json);
+    Ok(Some(CloudSqlKeyFile { key, account }))
 }
 
 #[derive(serde::Serialize)]
 struct CloudSqlKeyFile {
-    json: String,
+    /// Stands for the key in the form, and in its Save.
+    key: String,
     account: rowkery_core::cloudsql::CloudSqlAccount,
 }
 
@@ -601,6 +651,7 @@ async fn probe_connection(
     connection: ConnectionRecord,
     secrets: ConnectionSecrets,
 ) -> Result<ProbeDto, String> {
+    let secrets = with_staged_key(secrets)?;
     on_blocking_pool(app, move |_| {
         let outcome = rowkery_bridge::probe_connection_blocking(connection, secrets);
         ProbeDto {
@@ -810,7 +861,6 @@ async fn choose_file(app: AppHandle, kind: String) -> Result<Option<String>, Str
         let dialog = match kind.as_str() {
             "sqlite" => dialog.add_filter("SQLite database", &["sqlite", "db", "sqlite3"]),
             "pem" => dialog.add_filter("Certificate", &["pem", "crt", "cer"]),
-            "json" => dialog.add_filter("Service account key", &["json"]),
             _ => dialog,
         };
         dialog.blocking_pick_file()

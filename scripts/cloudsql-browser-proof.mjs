@@ -2,12 +2,14 @@
 // Google Cloud SQL in the New Connection sheet (stubbed `invoke`): Connect
 // to switches the identity rows to the Google account and the instance
 // picker; the picker lists Postgres instances by project (MySQL counted in
-// its foot, a project it couldn't list named), filters, takes a typed
-// connection name, and keeps Esc to itself. The probe and Save send
-// `cloud_sql` (instance, IP type from Advanced, gcloud or key) with no SSH,
-// a refused probe lands under Instance, and with no gcloud login the row
-// offers the command and a key file, whose JSON goes to the keychain on
-// Save. The connected window's sub-line names the instance.
+// its foot, a project it couldn't list named, a cap on projects searched),
+// filters, takes a typed connection name, and keeps Esc to itself. The probe
+// and Save send `cloud_sql` (instance, IP type from Advanced, gcloud or key)
+// with no SSH, a refused probe lands under Instance, an address the instance
+// lacks under IP (with its cause), and with no gcloud login the picker still
+// takes a typed name and the row offers the command and a key file, which
+// stays in Rust: the probe and Save send only its id. The connected window's
+// sub-line names the instance.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/cloudsql-browser-proof.mjs [outDir]
@@ -54,9 +56,10 @@ function stubTauri(scn) {
           return { database: "orders", catalog: { databases: [{ name: "orders", schemas: [{ name: "public", tables }] }] }, elapsed_ms: 2, cached: false, open_seq: 1 };
         case "cloudsql_account":
           await new Promise((r) => setTimeout(r, 30));
-          if (args.credentials === "key") return args.keyJson ? { kind: "key", email: "reader@acme-prod.iam.gserviceaccount.com" } : null;
+          if (args.credentials === "key") return args.key ? { kind: "key", email: "reader@acme-prod.iam.gserviceaccount.com" } : null;
           return scn.gcloud ? { kind: "gcloud", email: "dev@acme.dev" } : null;
         case "cloudsql_instances":
+          if (args.credentials === "gcloud" && !scn.gcloud) throw "Google login: No gcloud login on this computer";
           return {
             instances: [
               inst("acme-prod", "analytics-prd", "asia-southeast1", "Postgres 15"),
@@ -66,20 +69,23 @@ function stubTauri(scn) {
               inst("acme-staging", "orders-stg", "asia-southeast1", "Postgres 16"),
             ],
             skipped: ["acme-sandbox"],
+            more_projects: true,
           };
-        case "choose_file":
-          return args.kind === "json" ? "/Users/me/keys/reader.json" : null;
         case "cloudsql_key_file":
-          return { json: '{"type":"service_account","client_email":"reader@acme-prod.iam.gserviceaccount.com"}', account: { kind: "key", email: "reader@acme-prod.iam.gserviceaccount.com" } };
+          return { key: "picked-key-1", account: { kind: "key", email: "reader@acme-prod.iam.gserviceaccount.com" } };
         case "probe_connection": {
           const { connection: c, secrets } = args;
           window.__PROBES__.push({ connection: c, secrets });
           await new Promise((r) => setTimeout(r, 40));
           if (c.cloud_sql?.instance.endsWith(":denied")) return { ok: false, message: "Cloud SQL Admin API: 403 The client is not authorized to make this request.", elapsed_ms: 0 };
+          if (c.cloud_sql?.instance.endsWith(":internal-only") && c.cloud_sql.ip_type === "public")
+            return { ok: false, message: "Cloud SQL: internal-only has no public IP. Pick Private or PSC under Advanced", elapsed_ms: 0 };
           return { ok: true, message: "PostgreSQL 16.4", elapsed_ms: 412 };
         }
         case "explain_connect_error":
           window.__EXPLAINED__.push(args);
+          if (args.error.includes("has no public IP"))
+            return { class: "cloudsql_ip", cause: "Internal-only has no public IP. Pick Private or PSC under Advanced.", field: "ipType" };
           return { class: "cloudsql_role", cause: "This Google account can't connect to denied. It needs the Cloud SQL Client role on acme-prod.", field: "instance" };
         case "save_connection":
           window.__SAVED__.push(args.connection);
@@ -132,6 +138,7 @@ await page.click('[data-testid="csql-instance"]');
 await page.waitForSelector('[data-csql-option="orders-prd"]');
 check((await page.locator('[data-csql-option="legacy-crm"]').count()) === 0, "MySQL instances aren't offered");
 check((await page.locator("[data-csql-foot]").count()) === 1, "the foot counts MySQL and names a project it couldn't list");
+check((await page.textContent("[data-csql-foot]")).includes("Only the first 500 projects searched"), "and says when only some projects were searched");
 check((await page.getAttribute('[data-csql-option="load-test"]', "data-state")) === "stopped", "a stopped instance is marked");
 await shot(page, "2-instance-picker");
 
@@ -180,6 +187,18 @@ check(explained?.cloudSql === "acme-prod:asia-southeast1:denied", "a refused pro
 check((await page.locator('[data-field="instance"][data-invalid]').count()) === 1, "and marked under Instance");
 await shot(page, "5-no-access");
 
+// An address the instance doesn't have: the cause shows under IP.
+await page.click('[data-ip-choice="public"]');
+await page.click('[data-testid="csql-instance"]');
+await page.fill("[data-csql-filter]", "acme-prod:asia-southeast1:internal-only");
+await page.waitForSelector('[data-csql-option="typed"]');
+await page.keyboard.press("Enter");
+await page.waitForSelector('[data-testid="csql-ip-error"]', { timeout: 5000 });
+check((await page.textContent('[data-testid="csql-ip-error"]')).includes("has no public IP"), "a missing address's cause shows under IP");
+check((await page.locator('[data-field="ipType"][data-invalid]').count()) === 1, "and marks the IP row");
+await page.evaluate(() => document.querySelector('[data-field="ipType"]')?.scrollIntoView({ block: "center" }));
+await shot(page, "5b-no-public-ip");
+
 await page.close();
 
 // Save.
@@ -205,6 +224,14 @@ page = await sheet({ gcloud: false });
 check((await page.getAttribute('[data-testid="csql-account"]', "data-state")) === "none", "no gcloud login reads as none");
 check((await page.locator("[data-csql-copy]").count()) === 1, "with the gcloud command to copy");
 await shot(page, "7-no-gcloud-login");
+// The picker still takes a typed name with no login to list instances.
+await page.click('[data-testid="csql-instance"]');
+await page.fill("[data-csql-filter]", "acme-prod:asia-southeast1:orders-new");
+await page.waitForSelector('[data-csql-option="typed"]');
+check((await page.locator("[data-csql-list-error]").count()) === 1, "with no login, the picker can't list instances");
+check(true, "but still takes a typed connection name");
+await page.fill("[data-csql-filter]", "");
+await page.keyboard.press("Escape");
 await page.click("[data-csql-key]");
 await page.waitForSelector('[data-testid="csql-account"][data-state="key"]', { timeout: 5000 });
 check(true, "a key file signs in as its service account");
@@ -216,11 +243,11 @@ await page.fill('[data-field="username"] input', "app_rw");
 await page.fill('[data-field="password"] input', "secret");
 await page.waitForSelector('.nc-probe[data-probe="ok"]', { timeout: 5000 });
 probe = await lastProbe(page);
-check(probe.connection.cloud_sql?.credentials === "key" && probe.secrets.gcp_key?.includes("service_account"), "the probe sends the key with the key login");
+check(probe.connection.cloud_sql?.credentials === "key" && probe.secrets.gcp_key === "picked-key-1", "the probe sends the picked key's id, never the key, with the key login");
 await page.keyboard.press("Control+Enter");
 await page.waitForSelector('[data-testid="nc-sheet"]', { state: "detached", timeout: 5000 });
 const secrets = await page.evaluate(() => window.__SECRETS__);
-check(secrets?.gcp_key?.includes("service_account"), "Save hands the key to the keychain with the password");
+check(secrets?.gcp_key === "picked-key-1", "Save hands the picked key's id over with the password");
 await page.close();
 
 // 3. Dark.

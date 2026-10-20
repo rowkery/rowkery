@@ -93,7 +93,7 @@ export interface PgForm {
   csqlInstance: string;
   csqlIp: CloudSqlIpType;
   csqlCreds: "gcloud" | "key";
-  /** A service account key file's JSON, picked in this sheet (blank keeps the stored one). */
+  /** The id of a service account key picked in this sheet; the key itself stays in Rust (blank keeps the stored one). */
   csqlKey: string;
 }
 
@@ -279,7 +279,7 @@ export function NewConnectionSheet({
   const cloud = engine === "postgres" && pg.via === "cloudsql";
   const csqlLogin: CloudSqlLogin = {
     credentials: pg.csqlCreds,
-    keyJson: pg.csqlCreds === "key" && pg.csqlKey ? pg.csqlKey : null,
+    key: pg.csqlCreds === "key" && pg.csqlKey ? pg.csqlKey : null,
     connectionId: editing?.id ?? null,
   };
   const [csqlAccount, setCsqlAccount] = useState<{ key: string; account?: CloudSqlAccount | null; error?: string } | null>(null);
@@ -295,14 +295,13 @@ export function NewConnectionSheet({
   }, [cloud, csqlLoginKey]);
   const account = csqlAccount?.key === csqlLoginKey ? csqlAccount : null;
   const pickKeyFile = async () => {
-    const path = await chooseFile("json").catch(() => null);
-    if (!path) return;
     try {
-      const { json, account: picked } = await cloudsqlKeyFile(path);
+      const picked = await cloudsqlKeyFile();
+      if (!picked) return;
       setField("csqlCreds", "key");
-      setField("csqlKey", json);
-      const key = JSON.stringify([{ ...csqlLogin, credentials: "key", keyJson: json }, recheck]);
-      setCsqlAccount({ key, account: picked });
+      setField("csqlKey", picked.key);
+      const loginKey = JSON.stringify([{ ...csqlLogin, credentials: "key", key: picked.key }, recheck]);
+      setCsqlAccount({ key: loginKey, account: picked.account });
     } catch (e) {
       setSaveError(String(e));
     }
@@ -960,7 +959,6 @@ export function NewConnectionSheet({
                     <CloudSqlInstanceField
                       value={pg.csqlInstance}
                       login={csqlLogin}
-                      disabled={!account?.account}
                       error={err("instance")}
                       onPick={(name) => setField("csqlInstance", name)}
                     />
@@ -1043,7 +1041,7 @@ export function NewConnectionSheet({
                   <div data-testid="nc-advanced-body" className="nc-advanced-body">
                     {cloud ? (
                       <>
-                        <div className={`nc-row${err("ipType") ? " invalid" : ""}`} data-field="ipType">
+                        <div className={`nc-row${err("ipType") ? " invalid" : ""}`} data-field="ipType" data-invalid={err("ipType") ? "" : undefined}>
                           <span data-testid="nc-label" className="nc-label">IP</span>
                           <div className="nc-segment wide" role="radiogroup" aria-label="IP">
                             {([["public", "Public"], ["private", "Private"], ["psc", "PSC"]] as const).map(([v, l]) => (
@@ -1053,6 +1051,11 @@ export function NewConnectionSheet({
                             ))}
                           </div>
                         </div>
+                        {err("ipType") && (
+                          <p className="nc-hint indent" data-invalid="" data-testid="csql-ip-error">
+                            {err("ipType")}
+                          </p>
+                        )}
                         <div className="nc-row" data-field="ssl">
                           <span data-testid="nc-label" className="nc-label">SSL</span>
                           <span className="csql-fixed">Always on · server checked against the instance's CA</span>

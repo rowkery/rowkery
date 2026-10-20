@@ -74,12 +74,14 @@ export interface CloudSqlInstanceList {
   instances: CloudSqlInstance[];
   /** Projects whose instances couldn't be listed. */
   skipped: string[];
+  /** The account sees more projects than were searched. */
+  more_projects?: boolean;
 }
 
-/** Which login a Cloud SQL call uses: the key typed in the form, else the one saved for `connectionId`. */
+/** Which login a Cloud SQL call uses: the key picked in the form (its id; the key stays in Rust), else the one saved for `connectionId`. */
 export interface CloudSqlLogin {
   credentials: "gcloud" | "key";
-  keyJson?: string | null;
+  key?: string | null;
   connectionId?: string | null;
 }
 
@@ -93,9 +95,13 @@ export async function cloudsqlInstances(login: CloudSqlLogin): Promise<CloudSqlI
   return invoke("cloudsql_instances", { ...login });
 }
 
-/** Reads a service account key file the user picked; refuses anything else. */
-export async function cloudsqlKeyFile(path: string): Promise<{ json: string; account: CloudSqlAccount }> {
-  return invoke("cloudsql_key_file", { path });
+/**
+ * Asks for a service account key file (the native dialog) and keeps it in
+ * Rust until Save; `key` stands for it in the form. Refuses anything else;
+ * null when the dialog was dismissed.
+ */
+export async function cloudsqlKeyFile(): Promise<{ key: string; account: CloudSqlAccount } | null> {
+  return invoke("cloudsql_key_file");
 }
 
 /** Test a connection without saving it. */
@@ -132,7 +138,7 @@ export async function readClipboardText(): Promise<string> {
 }
 
 /** Choose file… : the native open dialog; null when dismissed. */
-export async function chooseFile(kind: "sqlite" | "pem" | "key" | "json"): Promise<string | null> {
+export async function chooseFile(kind: "sqlite" | "pem" | "key"): Promise<string | null> {
   return invoke("choose_file", { kind });
 }
 

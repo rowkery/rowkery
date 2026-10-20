@@ -15,10 +15,21 @@ import { useGlideHover } from "./motion";
 /** The command that makes a gcloud login Rowkery can use (`cloudsql::GCLOUD_LOGIN`). */
 export const GCLOUD_LOGIN = "gcloud auth application-default login";
 
-/** `project:region:instance` (a Workspace project has a colon of its own). */
+/** One part of a name: letters, digits and hyphens, starting and ending with a letter or digit. */
+const NAME_PART = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+
+/**
+ * `project:region:instance`, by the same rule as `cloudsql::InstanceName`
+ * (a Workspace project has a domain and a colon of its own:
+ * `example.com:project:region:instance`).
+ */
 export function isConnectionName(text: string): boolean {
   const parts = text.trim().split(":");
-  return (parts.length === 3 || parts.length === 4) && parts.every((p) => p.length > 0 && !/[\s/]/.test(p));
+  if (parts.length === 4) {
+    const [domain, ...rest] = parts;
+    return domain.split(".").every((p) => NAME_PART.test(p)) && rest.every((p) => NAME_PART.test(p));
+  }
+  return parts.length === 3 && parts.every((p) => NAME_PART.test(p));
 }
 
 /** The instance's own name, the last part of its connection name. */
@@ -125,14 +136,12 @@ type Row = { kind: "instance"; instance: CloudSqlInstance } | { kind: "typed"; n
 export function CloudSqlInstanceField({
   value,
   login,
-  disabled,
   error,
   onPick,
 }: {
   /** The connection name, `project:region:instance`. */
   value: string;
   login: CloudSqlLogin;
-  disabled: boolean;
   error?: string;
   onPick: (connectionName: string) => void;
 }) {
@@ -251,7 +260,6 @@ export function CloudSqlInstanceField({
         type="button"
         data-testid="csql-instance"
         className={`nc-input mono csql-instance-btn${value ? "" : " empty"}`}
-        disabled={disabled}
         aria-expanded={open}
         onClick={() => {
           setOpen((v) => !v);
@@ -302,11 +310,12 @@ export function CloudSqlInstanceField({
               ))
             )}
           </ul>
-          {list && (others > 0 || list.skipped.length > 0) && (
+          {list && (others > 0 || list.skipped.length > 0 || list.more_projects) && (
             <div className="db-foot csql-foot" data-csql-foot>
               {[
                 others > 0 ? `${others} MySQL / SQL Server ${others === 1 ? "instance" : "instances"} not shown` : "",
                 list.skipped.length > 0 ? `${list.skipped.length} ${list.skipped.length === 1 ? "project" : "projects"} couldn't be listed` : "",
+                list.more_projects ? "Only the first 500 projects searched" : "",
               ]
                 .filter(Boolean)
                 .join(" · ")}
