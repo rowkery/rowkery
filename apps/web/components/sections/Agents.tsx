@@ -18,12 +18,13 @@ const STEPS: { title: string; text: string; prop: PgProp }[] = [
   { title: "Sensitive columns stay hidden", text: "The agent gets a stand-in, never the value.", prop: "shades" },
   { title: "Changes wait for you", text: "See every row before and after, then press Commit.", prop: "sign" },
 ];
-const CHECKS: [what: string, value: string, ok: boolean][] = [
-  ["Table is shared", "orders", true],
-  ["One read-only statement", "SELECT", true],
-  ["Row limit", "1,000", true],
-  ["Time limit", "10 s", true],
-  ["Joins a table you didn’t share", "payments", false],
+// The query's own checks, ending with the sensitive column it asked for (step 3's stand-ins).
+const CHECKS: [what: string, value: string, says: string][] = [
+  ["Table is shared", "orders", "✓ yes"],
+  ["One read-only statement", "SELECT", "✓ yes"],
+  ["Row limit", "1,000", "✓ yes"],
+  ["Time limit", "10 s", "✓ yes"],
+  ["Sensitive column", "card_number", "stand-in"],
 ];
 
 export function Agents() {
@@ -98,12 +99,12 @@ export function Agents() {
                     <span>read-only</span>
                   </div>
                   <div className="sql">
-                    <span className="k">SELECT</span> email, total{"\n"}
+                    <span className="k">SELECT</span> email, card_number, total{"\n"}
                     <span className="k">FROM</span> orders{"\n"}
                     <span className="k">WHERE</span> <span className="typing">created_at &gt; now() - interval &apos;7 days&apos;</span>
                     <span className="caret" />
                   </div>
-                  <p className="why">“Which customers spent the most this week?”</p>
+                  <p className="why">“Who ordered something this week?”</p>
                 </div>
                 <div className={`panel${on(1)}`}>
                   <div className="panel-cap">
@@ -111,10 +112,10 @@ export function Agents() {
                     <span>before it runs</span>
                   </div>
                   <div className="checks">
-                    {CHECKS.map(([what, value, ok]) => (
+                    {CHECKS.map(([what, value, says]) => (
                       <div className="check" key={what}>
                         {what} <code>{value}</code>
-                        <span className={`ok${ok ? "" : " no"}`}>{ok ? "✓ yes" : "✕ blocked"}</span>
+                        <span className={`ok${says.startsWith("✓") ? "" : " swap"}`}>{says}</span>
                       </div>
                     ))}
                   </div>
@@ -162,8 +163,8 @@ export function Agents() {
                   </div>
                   <p className="why">“Customer asked for a refund on order 4120.”</p>
                   <div className="act">
-                    <span className="btn ink sm">Commit</span>
                     <span className="btn soft sm">Discard</span>
+                    <span className="btn ink sm">Commit</span>
                   </div>
                 </div>
               </div>

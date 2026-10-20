@@ -23,7 +23,7 @@ export function Hero() {
             View on GitHub →
           </a>
         </div>
-        <p className="trust">Apache 2.0 · Apple silicon and Intel · No account</p>
+        <p className="trust">Apache 2.0 · Apple silicon and Intel · No&nbsp;account</p>
       </div>
       <ConnectCard />
     </section>

@@ -67,7 +67,7 @@ export function Keys() {
             On your own
           </span>
           <h2 className="h2">Built for the keyboard</h2>
-          <p className="lead">No agent needed. Every action has a shortcut.</p>
+          <p className="lead">Every action has a shortcut, with or without an agent.</p>
         </div>
         <div className="art keyscene" aria-hidden="true">
           <div className={`bigkey${pressed ? " press" : ""}`}>{CHORDS[cap][0]}</div>
@@ -127,7 +127,7 @@ export function Keys() {
                   Connect an agent<span>command</span>
                 </div>
                 <div className="r">
-                  Open orders in a new tab<span>⌘T</span>
+                  Open it in its own tab<span>⌘-click</span>
                 </div>
               </div>
             </View>

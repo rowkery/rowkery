@@ -20,7 +20,7 @@ const CLIENTS = [
   { id: "desktop", name: "Claude Desktop", prompt: false, ...entry("claude_desktop_config.json › mcpServers") },
   { id: "cursor", name: "Cursor", prompt: false, ...entry("~/.cursor/mcp.json › mcpServers") },
 ];
-const LINES = ["SELECT * FROM fish;", "I only read what you share", "Nothing changes until you press Commit", "⌘K, then anything", "No account. Just me."];
+const LINES = ["SELECT * FROM fish;", "I only read what you share", "Nothing changes until you press Commit", "⌘K, then anything", "You don't need an account"];
 // The bubble's cycle (globals.css, .bubble and .hops): the first line after the peek, then one
 // every LINE_MS. CSS runs it, so nothing on the page lays out while it sits still.
 const FIRST_MS = 2100;
@@ -63,11 +63,13 @@ export function ConnectCard() {
             </button>
           ))}
         </div>
-        <div className="code" role="tabpanel" aria-label={client.name}>
+        <div className="code-box">
           <CopyButton text={client.text} />
-          {client.prompt && <span className="p">$ </span>}
-          {client.label && <span className="c">{`${client.label}\n`}</span>}
-          {client.text}
+          <div className="code" role="tabpanel" aria-label={client.name}>
+            {client.prompt && <span className="p">$ </span>}
+            {client.label && <span className="c">{`${client.label}\n`}</span>}
+            {client.text}
+          </div>
         </div>
         <p className="connect-note">
           Or press <kbd>⌘K</kbd> › Connect an agent in the app.
