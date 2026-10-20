@@ -127,7 +127,7 @@ export function Keys() {
                   Connect an agent<span>command</span>
                 </div>
                 <div className="r">
-                  Open it in its own tab<span>⌘-click</span>
+                  Open its structure<span>⌘↵</span>
                 </div>
               </div>
             </View>
