@@ -7,7 +7,8 @@
 //     Desktop's and Cursor's config entry) and Copy puts it on the clipboard; tapping the
 //     penguin gives its bubble a new line;
 //  4. the agent scene: scrolling each step to the middle of the screen shows its panel (the
-//     query, the checks with one refusal, masked stand-ins, the change waiting for Commit);
+//     query typed in full, the checks ending on a sensitive column, masked stand-ins, the change waiting for
+//     Commit);
 //  5. the keyboard: clicking a chord shows its view and the keycap takes its label; left alone,
 //     the next chord plays by itself;
 //  6. the close: the unquarantine command copies; typing "rookery" sends a parade across.
@@ -79,15 +80,17 @@ for (const [w, h] of [[1440, 900], [390, 844]]) {
   await shot("2-connect");
 
   // 4. The agent scene, step by step.
-  const PANELS = ["SELECT", "blocked", "masked:", "Commit"];
+  const PANELS = ["SELECT", "stand-in", "masked:", "Commit"];
   for (let i = 0; i < 4; i++) {
     await page.evaluate((i) => {
       const s = document.querySelector(`.step[data-step="${i}"]`);
       const r = s.getBoundingClientRect();
       scrollTo({ top: r.top + scrollY + r.height / 2 - innerHeight / 2, behavior: "instant" });
     }, i);
-    await page.waitForTimeout(1600);
+    await page.waitForTimeout(2200);
     const on = await page.locator(".panel.on").innerText();
+    // The agent's SQL types out in full.
+    if (i === 0 && (await page.locator(".typing").evaluate((e) => e.scrollWidth > e.clientWidth + 1))) bad("the agent's SQL stops typing before its end");
     if (!on.includes(PANELS[i])) bad(`step ${i + 1} doesn't show its panel (${on.slice(0, 40)})`);
     if ((await page.locator(".step.on").getAttribute("data-step")) !== String(i)) bad(`step ${i + 1} isn't the lit one`);
     await shot(`3-agents-step${i + 1}`);

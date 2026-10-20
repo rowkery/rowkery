@@ -27,9 +27,9 @@ export function Get() {
             </div>
             <p className="meta">Apple silicon and Intel · {BUILD}</p>
             <p>Not signed yet, so run this before the first launch:</p>
-            <div className="code">
+            <div className="code-box">
               <CopyButton text={UNQUARANTINE} />
-              {UNQUARANTINE}
+              <div className="code">{UNQUARANTINE}</div>
             </div>
             <div className="row">
               <DownloadButton />
@@ -43,12 +43,14 @@ export function Get() {
               <h3>From source</h3>
             </div>
             <p className="meta">Needs Rust, Node and Xcode’s command line tools</p>
-            <div className="code">
+            <div className="code-box">
               <CopyButton text={FROM_SOURCE.join("\n")} />
-              <span className="c"># get the code{"\n"}</span>
-              {`${FROM_SOURCE[0]}\n${FROM_SOURCE[1]}\n\n`}
-              <span className="c"># run it with hot reload{"\n"}</span>
-              {`${FROM_SOURCE[2]}\n${FROM_SOURCE[3]}`}
+              <div className="code">
+                <span className="c"># get the code{"\n"}</span>
+                {`${FROM_SOURCE[0]}\n${FROM_SOURCE[1]}\n\n`}
+                <span className="c"># run it with hot reload{"\n"}</span>
+                {`${FROM_SOURCE[2]}\n${FROM_SOURCE[3]}`}
+              </div>
             </div>
             <div className="row">
               <a className="btn soft" href={BUILD_FROM_SOURCE_URL}>
