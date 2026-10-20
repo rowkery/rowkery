@@ -146,25 +146,32 @@ export function CloudSqlInstanceField({
   onPick: (connectionName: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // Listed once per login (and project named) while the sheet is open.
-  const [listed, setListed] = useState<{ key: string; list?: CloudSqlInstanceList; error?: string } | null>(null);
+  // Listed once per login while the sheet is open, and again only when the
+  // project the form names has nothing in that list (it may not be among
+  // the projects Google listed).
+  const [listed, setListed] = useState<{ key: string; project: string | null; list?: CloudSqlInstanceList; error?: string } | null>(null);
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   useGlideHover(listRef, ".csql-option");
-  // The project already named is searched too if Google won't list the account's.
+  const loginKey = JSON.stringify(login);
   const project = isConnectionName(value) ? value.trim().split(":").slice(0, -2).join(":") : null;
-  const loginKey = JSON.stringify([login, project]);
 
   useEffect(() => {
-    if (!open || listed?.key === loginKey) return;
-    setListed({ key: loginKey });
+    if (!open) return;
+    if (listed?.key === loginKey) {
+      const settled = listed.list || listed.error;
+      const covered = !project || listed.project === project || listed.list?.instances.some((i) => i.project === project);
+      if (!settled || covered) return;
+    }
+    const mine = { key: loginKey, project };
+    setListed(mine);
     cloudsqlInstances(login, project).then(
-      (list) => setListed((cur) => (cur?.key === loginKey ? { key: loginKey, list } : cur)),
-      (e) => setListed((cur) => (cur?.key === loginKey ? { key: loginKey, error: String(e) } : cur)),
+      (list) => setListed((cur) => (cur?.key === mine.key && cur.project === mine.project ? { ...mine, list } : cur)),
+      (e) => setListed((cur) => (cur?.key === mine.key && cur.project === mine.project ? { ...mine, error: String(e) } : cur)),
     );
-  }, [open, loginKey]);
+  }, [open, loginKey, project]);
 
   // A click outside closes it.
   useEffect(() => {
@@ -298,7 +305,7 @@ export function CloudSqlInstanceField({
             {list === undefined && !listError ? (
               <li className="conn-empty">Loading instances…</li>
             ) : listError ? (
-              <li className="conn-empty csql-list-error" data-csql-list-error title={listError}>
+              <li className="conn-empty" data-csql-list-error title={listError}>
                 Couldn't list instances. Type the connection name instead.
                 <span className="csql-list-why">{listError}</span>
               </li>

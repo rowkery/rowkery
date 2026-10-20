@@ -364,24 +364,34 @@ pub async fn instances(
     project: Option<&str>,
 ) -> Result<InstanceList, CloudSqlError> {
     let login = login_for(key_json)?;
-    let (projects, more_projects, projects_error) = match projects(&login).await {
+    // Only a real project id: it goes into the Admin API's URL path.
+    let project = project
+        .map(str::trim)
+        .filter(|p| InstanceName::parse(&format!("{p}:r:i")).is_some());
+    let (mut projects, more_projects, projects_error) = match projects(&login).await {
         Ok((p, more)) => (p, more, None),
         Err(e) => {
-            let creds = login.credentials().await?;
-            let mut known: Vec<String> = creds
+            let quota = login
+                .credentials()
+                .await?
                 .quota_project()
-                .into_iter()
-                .chain(project)
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
-            known.dedup();
-            if known.is_empty() {
-                return Err(e);
-            }
+                .map(str::to_string);
+            let known: Vec<String> = quota.into_iter().collect();
             (known, false, Some(e))
         }
     };
+    // The project the form names is searched even when the listing leaves
+    // it out (an account with access to the instance, not the project).
+    if let Some(p) = project {
+        if !projects.iter().any(|x| x == p) {
+            projects.push(p.to_string());
+        }
+    }
+    if projects.is_empty() {
+        if let Some(e) = projects_error {
+            return Err(e);
+        }
+    }
     let lists: Vec<_> = futures::stream::iter(projects)
         .map(|p| {
             let login = login.clone();
@@ -397,6 +407,7 @@ pub async fn instances(
         more_projects,
         ..Default::default()
     };
+    let searched = lists.len();
     for (project, listed) in lists {
         match listed {
             Ok(list) => out.instances.extend(list),
@@ -404,8 +415,9 @@ pub async fn instances(
         }
     }
     if let Some(e) = projects_error {
-        // Nothing found the other way either: the first failure says why.
-        if out.instances.is_empty() && !out.skipped.is_empty() {
+        // No project could be searched the other way either: the listing's
+        // own failure says why.
+        if out.skipped.len() == searched {
             return Err(e);
         }
         out.projects_error = Some(match e {
@@ -441,7 +453,7 @@ async fn projects(login: &Login) -> Result<(Vec<String>, bool), CloudSqlError> {
     // Resource Manager API on (Cloud SQL's own API is on wherever the
     // instances are). gcloud's own `projects list` sends none, so after a
     // 403 the listing goes without it, as gcloud does.
-    let mut quota = true;
+    let mut quota = login.credentials().await?.quota_project().is_some();
     for _ in 0..10 {
         let request = |c: &reqwest::Client| {
             let mut q = vec![("filter", "lifecycleState:ACTIVE"), ("pageSize", "500")];
@@ -451,9 +463,7 @@ async fn projects(login: &Login) -> Result<(Vec<String>, bool), CloudSqlError> {
             c.get(&url).query(&q)
         };
         let page: Page = match call_billed(login, quota, request).await {
-            Err(CloudSqlError::Api { status: 403, .. })
-                if quota && login.credentials().await?.quota_project().is_some() =>
-            {
+            Err(CloudSqlError::Api { status: 403, .. }) if quota => {
                 quota = false;
                 call_billed(login, false, request).await?
             }

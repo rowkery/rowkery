@@ -493,6 +493,13 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
     assert!(err.contains("Projects are off limits"), "{err}");
     google.projects_mode.store(0, Ordering::SeqCst);
 
+    // A project the listing leaves out is searched when the form names it;
+    // anything that isn't a project id stays out of the URL.
+    let list = cloudsql::instances(None, Some("hidden")).await.unwrap();
+    assert!(list.skipped.contains(&"hidden".to_string()));
+    let list = cloudsql::instances(None, Some("x/../y")).await.unwrap();
+    assert_eq!(list.skipped, vec!["locked".to_string()]);
+
     // No gcloud login: the form says so rather than failing.
     std::env::set_var(
         "GOOGLE_APPLICATION_CREDENTIALS",

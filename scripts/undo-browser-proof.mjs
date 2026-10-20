@@ -167,6 +167,7 @@ await page.locator('[data-testid="nc-sheet"]').screenshot({ path: `${OUT}/delete
 await page.keyboard.press("Escape");
 await page.waitForSelector("[data-delete]");
 check((await page.locator('[data-testid="nc-sheet"]').count()) === 1, "Esc backs out of the delete question, the sheet stays");
+check(await page.evaluate(() => document.activeElement?.hasAttribute("data-delete")), "focus goes back to Delete…");
 await page.click("[data-delete]");
 await page.click("[data-delete-keep]");
 check((await calls("delete_connection")).length === 0, "Keep deletes nothing");

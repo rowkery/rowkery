@@ -692,14 +692,3 @@ p.nc-hint[data-invalid] {
   color: var(--text);
 }
 
-.nc-delete-go {
-  border-color: transparent;
-  background: var(--del);
-  color: #fff;
-  font-weight: 600;
-}
-
-.nc-delete-go:hover:not(:disabled) {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--del) 88%, #000);
-}
