@@ -116,7 +116,7 @@ for (const [w, h] of SIZES) {
         if (shown(e) && lines(e) > 1) out.push(`breaks onto two lines: "${label(e)}"`);
       // A penguin peeking over a card sits clear of the heading above it.
       for (const pg of document.querySelectorAll(".get .peek2, .follow .peek2"))
-        for (const t of document.querySelectorAll("#get .h2, .get h3, .get p, .follow h3, .follow p")) if (overlap(R(pg), textBox(t))) out.push(`a get-started penguin covers "${label(t)}"`);
+        for (const t of document.querySelectorAll("#get .h2, .get h3, .get p, .follow h3, .follow p")) if (overlap(R(pg), textBox(t))) out.push(`a penguin over a card covers "${label(t)}"`);
       return out;
     })
   ).forEach(bad);

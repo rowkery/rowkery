@@ -16,13 +16,15 @@ export function Follow() {
 
   async function subscribe(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    const form = e.currentTarget;
     setState("sending");
     try {
-      const res = await fetch(KIT_FORM_URL, { method: "POST", body: new FormData(e.currentTarget), headers: { Accept: "application/json" } });
+      const res = await fetch(KIT_FORM_URL, { method: "POST", body: new FormData(form), headers: { Accept: "application/json" } });
       const body = await res.json().catch(() => ({}));
       setState(res.ok && body.status !== "failed" ? "sent" : "failed");
     } catch {
-      setState("failed");
+      // Kit never answered (a blocker, or offline): post the plain form and let Kit's page say.
+      form.submit();
     }
   }
 
@@ -33,16 +35,16 @@ export function Follow() {
         <div className="card follow-card">
           <div>
             <h3>Not ready to try it yet?</h3>
-            <p>Leave your email and I’ll write when something new ships. No spam, unsubscribe in one click.</p>
+            <p>Leave your email and I’ll write when something new ships. No spam, and you can unsubscribe in one click.</p>
           </div>
           {state === "sent" ? (
             <p className="follow-sent" role="status" data-follow-state="sent">
               Almost there. Check your inbox and tap the link to confirm.
             </p>
           ) : (
-            <div>
+            <div className="follow-field">
               <form className="follow-form" action={KIT_FORM_URL} method="post" onSubmit={subscribe}>
-                <input type="email" name="email_address" required placeholder="you@example.com" aria-label="Email address" autoComplete="email" />
+                <input type="email" name="email_address" onInput={() => state === "failed" && setState("idle")} required placeholder="you@example.com" aria-label="Email address" autoComplete="email" />
                 <button className="btn ink" type="submit" disabled={state === "sending"}>
                   Subscribe
                 </button>

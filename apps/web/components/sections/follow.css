@@ -11,8 +11,13 @@
 .follow-form input::placeholder { color: var(--grey2); }
 .follow-form .btn:disabled { opacity: 0.6; cursor: default; }
 .follow-card .follow-sent { margin: 0; color: var(--ok); }
-.follow-card .follow-failed { margin: 10px 0 0 16px; font-size: 14px; color: var(--no); }
+.follow-field { position: relative; }
+/* Under the field; beside the copy it hangs below so the centred field doesn't move. */
+.follow-card .follow-failed { margin: 8px 0 0 16px; font-size: 14px; color: var(--no); }
 
+@media (min-width: 861px) {
+  .follow-card .follow-failed { position: absolute; top: 100%; left: 16px; right: 0; }
+}
 @media (max-width: 860px) {
   .follow-card { grid-template-columns: minmax(0, 1fr); gap: 20px; }
 }
