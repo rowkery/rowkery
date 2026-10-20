@@ -51,13 +51,14 @@ export function describeDatabase(
   return `${[engine, serverVersion].filter(Boolean).join(" ")}${via}`;
 }
 
-export const MASKS = { host: "‹host›", user: "‹user›", database: "‹database›", path: "‹path›" };
+export const MASKS = { host: "‹host›", user: "‹user›", database: "‹database›", path: "‹path›", project: "‹project›" };
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Hides where the database lives in error text: the connection's host, SSH
- * host, user, database and file path, then any IP address or dotted host name
+ * host, user, database and file path, a Cloud SQL instance's project and name
+ * (and any Google project number), then any IP address or dotted host name
  * left (three or more labels, so `schema.table` stays readable).
  */
 export function maskSensitive(text: string, connection: ConnectionRecord | null): string {
@@ -70,6 +71,11 @@ export function maskSensitive(text: string, connection: ConnectionRecord | null)
       [connection.ssh?.username, MASKS.user],
       [connection.database, MASKS.database],
     );
+    const instance = connection.cloud_sql?.instance.trim().split(":") ?? [];
+    if (instance.length >= 3) {
+      const project = instance.slice(0, -2);
+      known.push([project.join(":"), MASKS.project], [project[project.length - 1], MASKS.project], [instance[instance.length - 1], MASKS.host]);
+    }
   } else if (connection?.kind === "sqlite") {
     known.push([connection.path, MASKS.path]);
   }
@@ -81,6 +87,7 @@ export function maskSensitive(text: string, connection: ConnectionRecord | null)
     out = out.replace(new RegExp(`(?<![\\w.-])${escapeRe(value)}(?![\\w-])`, "g"), mask);
   }
   return out
+    .replace(/\b(projects?[ /])\d{6,}\b/g, `$1${MASKS.project}`)
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, MASKS.host)
     .replace(/[0-9a-f:]{4,}/gi, (m) => (isIpv6(m) ? MASKS.host : m))
     .replace(/\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){2,}[a-z][a-z0-9-]*[a-z0-9]\b/gi, MASKS.host)

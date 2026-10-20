@@ -8,6 +8,10 @@ import {
 } from "react";
 import {
   chooseFile,
+  cloudsqlAccount,
+  cloudsqlKeyFile,
+  type CloudSqlAccount,
+  type CloudSqlLogin,
   deleteConnection,
   explainConnectError,
   probeConnection,
@@ -28,12 +32,14 @@ import {
   type ConnectionSecrets,
   type SafeMode,
   type SslMode,
+  type CloudSqlIpType,
 } from "./types";
 import { Inspector, InspectorHead } from "./Inspector";
 import "./NewConnectionSheet.css";
 import { defaultAccess } from "./mcpAccess";
 import { mcpShared, sinceLabel, type McpStats } from "./mcpActivity";
 import { Keys } from "./Keys";
+import { CloudSqlAccountRow, CloudSqlInstanceField, instanceShortName, isConnectionName } from "./CloudSqlFields";
 
 interface NewConnectionSheetProps {
   /** Edit this saved connection instead of creating one. */
@@ -82,6 +88,13 @@ export interface PgForm {
   sshKeyPath: string;
   sshSecret: string;
   sshTrust: boolean;
+  /** Connect to: host and port, or a Cloud SQL instance through the connector. */
+  via: "host" | "cloudsql";
+  csqlInstance: string;
+  csqlIp: CloudSqlIpType;
+  csqlCreds: "gcloud" | "key";
+  /** The id of a service account key picked in this sheet; the key itself stays in Rust (blank keeps the stored one). */
+  csqlKey: string;
 }
 
 const EMPTY_PG: PgForm = {
@@ -101,6 +114,11 @@ const EMPTY_PG: PgForm = {
   sshKeyPath: "~/.ssh/id_ed25519",
   sshSecret: "",
   sshTrust: true,
+  via: "host",
+  csqlInstance: "",
+  csqlIp: "public",
+  csqlCreds: "gcloud",
+  csqlKey: "",
 };
 
 const SSL_MODES: { value: SslMode; label: string }[] = [
@@ -145,6 +163,10 @@ function pgFormFor(c: ConnectionRecord): PgForm {
     sshAuth: c.ssh?.auth_method ?? "keyfile",
     sshKeyPath: c.ssh?.private_key_path ?? EMPTY_PG.sshKeyPath,
     sshTrust: c.ssh?.trust_host ?? true,
+    via: c.cloud_sql ? "cloudsql" : "host",
+    csqlInstance: c.cloud_sql?.instance ?? "",
+    csqlIp: c.cloud_sql?.ip_type ?? "public",
+    csqlCreds: c.cloud_sql?.credentials ?? "gcloud",
   };
 }
 
@@ -196,7 +218,7 @@ const ENV_WORDS: { value: ConnectionEnv | null; label: string; title: string }[]
     title: CONNECTION_ENVS.find((e) => e.value === value)?.label ?? value,
   })),
 ];
-const ADVANCED_FIELDS = new Set(["ssl", "sshHost", "sshPort", "sshUser", "sshKeyPath", "sshSecret", "sslRootCert"]);
+const ADVANCED_FIELDS = new Set(["ssl", "sshHost", "sshPort", "sshUser", "sshKeyPath", "sshSecret", "sslRootCert", "ipType"]);
 
 export function NewConnectionSheet({
   editing,
@@ -245,10 +267,45 @@ export function NewConnectionSheet({
   const [dirty, setDirty] = useState(() => !!prefilled && !!prefill?.url && !markField);
   const [advanced, setAdvanced] = useState(
     () =>
-      (editing?.kind === "postgres" && (!!editing.ssh || (editing.ssl_mode ?? "prefer") !== "prefer")) ||
+      (editing?.kind === "postgres" &&
+        (editing.cloud_sql
+          ? (editing.cloud_sql.ip_type ?? "public") !== "public"
+          : !!editing.ssh || (editing.ssl_mode ?? "prefer") !== "prefer")) ||
       ADVANCED_FIELDS.has(markField?.field ?? ""),
   );
   const [dragging, setDragging] = useState(false);
+  // Cloud SQL: the account the connection signs in with, looked up again
+  // when the login changes or on Check again.
+  const cloud = engine === "postgres" && pg.via === "cloudsql";
+  const csqlLogin: CloudSqlLogin = {
+    credentials: pg.csqlCreds,
+    key: pg.csqlCreds === "key" && pg.csqlKey ? pg.csqlKey : null,
+    connectionId: editing?.id ?? null,
+  };
+  const [csqlAccount, setCsqlAccount] = useState<{ key: string; account?: CloudSqlAccount | null; error?: string } | null>(null);
+  const [recheck, setRecheck] = useState(0);
+  const csqlLoginKey = JSON.stringify([csqlLogin, recheck]);
+  useEffect(() => {
+    if (!cloud || csqlAccount?.key === csqlLoginKey) return;
+    setCsqlAccount({ key: csqlLoginKey });
+    cloudsqlAccount(csqlLogin).then(
+      (account) => setCsqlAccount((cur) => (cur?.key === csqlLoginKey ? { key: csqlLoginKey, account } : cur)),
+      (e) => setCsqlAccount((cur) => (cur?.key === csqlLoginKey ? { key: csqlLoginKey, error: String(e) } : cur)),
+    );
+  }, [cloud, csqlLoginKey]);
+  const account = csqlAccount?.key === csqlLoginKey ? csqlAccount : null;
+  const pickKeyFile = async () => {
+    try {
+      const picked = await cloudsqlKeyFile();
+      if (!picked) return;
+      setField("csqlCreds", "key");
+      setField("csqlKey", picked.key);
+      const loginKey = JSON.stringify([{ ...csqlLogin, credentials: "key", key: picked.key }, recheck]);
+      setCsqlAccount({ key: loginKey, account: picked.account });
+    } catch (e) {
+      setSaveError(String(e));
+    }
+  };
   // undefined until the user picks one; until then we suggest from the name/host.
   // An edited connection keeps its environment unless changed.
   const [envPicked, setEnvPicked] = useState<ConnectionEnv | null | undefined>(
@@ -350,17 +407,26 @@ export function NewConnectionSheet({
     else setField(kind === "pem" ? "sslRootCert" : "sshKeyPath", path);
   };
 
-  const pgName = pg.name.trim() || pg.database.trim() || pg.host.trim();
+  const pgName = pg.name.trim() || (cloud ? instanceShortName(pg.csqlInstance) : "") || pg.database.trim() || pg.host.trim();
   const liteName = sqliteName.trim() || basename(sqlitePath.trim());
 
   const guess =
     engine === "postgres"
-      ? guessEnvironment([pg.name, pg.database, pg.host], pg.host)
+      ? cloud
+        ? guessEnvironment([pg.name, pg.database, pg.csqlInstance], pg.csqlInstance)
+        : guessEnvironment([pg.name, pg.database, pg.host], pg.host)
       : null;
   const env: ConnectionEnv | null = envPicked !== undefined ? envPicked : guess;
 
   const errors: Record<string, string> = {};
-  if (engine === "postgres") {
+  if (engine === "postgres" && cloud) {
+    if (!isConnectionName(pg.csqlInstance)) errors.instance = "Required, as project:region:instance";
+    if (!pg.database.trim()) errors.database = "Required";
+    if (!pg.username.trim()) errors.username = "Required";
+    // Blank keeps the stored key when the saved record already used one.
+    const storedKey = editing?.kind === "postgres" && editing.cloud_sql?.credentials === "key";
+    if (pg.csqlCreds === "key" && !pg.csqlKey && !storedKey) errors.account = "Choose a key file";
+  } else if (engine === "postgres") {
     if (!pg.host.trim()) errors.host = "Required";
     if (!validPort(pg.port)) errors.port = "1–65535";
     if (!pg.database.trim()) errors.database = "Required";
@@ -423,6 +489,32 @@ export function NewConnectionSheet({
           ...mcpKeep,
         },
         {},
+      ];
+    }
+    if (cloud) {
+      return [
+        {
+          kind: "postgres",
+          id,
+          name: pgName,
+          // Names the instance on screen; the connector finds its address.
+          host: pg.csqlInstance.trim(),
+          port: 5432,
+          database: pg.database.trim(),
+          username: pg.username.trim(),
+          ssl_mode: pg.ssl,
+          ssl_root_cert: null,
+          ssh: null,
+          cloud_sql: { instance: pg.csqlInstance.trim(), ip_type: pg.csqlIp, credentials: pg.csqlCreds },
+          environment: env,
+          safe_mode: safeMode,
+          allow_mcp: allowMcp,
+          ...mcpKeep,
+        },
+        {
+          db_password: pg.password || null,
+          gcp_key: pg.csqlCreds === "key" && pg.csqlKey ? pg.csqlKey : null,
+        },
       ];
     }
     const ssh = pg.sshOn
@@ -495,7 +587,8 @@ export function NewConnectionSheet({
               host: pg.host.trim(),
               port: Number(pg.port),
               username: pg.username.trim(),
-              sshHost: pg.sshOn ? pg.sshHost.trim() : null,
+              sshHost: pg.sshOn && !cloud ? pg.sshHost.trim() : null,
+              cloudSql: cloud ? pg.csqlInstance.trim() : null,
             }).catch(() => null)
           : null;
       if (seq !== probeSeq.current) return null;
@@ -612,7 +705,7 @@ export function NewConnectionSheet({
       ) : probe.state === "idle" ? (
         <span className="nc-status idle">
           <span className="conn-dot idle" />
-          {engine === "sqlite" ? "Type or drop a file" : "Probes once Host, Database and User are set"}
+          {engine === "sqlite" ? "Type or drop a file" : cloud ? "Probes once Instance, Database and User are set" : "Probes once Host, Database and User are set"}
         </span>
       ) : probe.state === "done" ? (
         probe.ok ? (
@@ -805,6 +898,25 @@ export function NewConnectionSheet({
         >
           {engine === "postgres" ? (
             <>
+              <div className="nc-row" data-field="via">
+                <span data-testid="nc-label" className="nc-label">Connect to</span>
+                <div className="nc-segment wide" role="radiogroup" aria-label="Connect to">
+                  {(["host", "cloudsql"] as const).map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      role="radio"
+                      data-via-choice={v}
+                      aria-checked={pg.via === v}
+                      aria-selected={pg.via === v}
+                      onClick={() => pg.via !== v && setField("via", v)}
+                    >
+                      {v === "host" ? "Host and port" : "Google Cloud SQL"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {!cloud && (
               <Field label="Paste a connection URL" name="url">
                 <input
                   autoFocus={!editing}
@@ -817,6 +929,7 @@ export function NewConnectionSheet({
                   onChange={(e) => onUrl(e.target.value)}
                 />
               </Field>
+              )}
 
               <section className="nc-section" data-section="identity">
                 <Field label="Name" name="name">
@@ -825,11 +938,32 @@ export function NewConnectionSheet({
                     data-testid="nc-input"
                     className="nc-input"
                     value={pg.name}
-                    placeholder={pg.database.trim() || pg.host.trim() || "My database"}
+                    placeholder={cloud ? instanceShortName(pg.csqlInstance) || "My database" : pg.database.trim() || pg.host.trim() || "My database"}
                     spellCheck={false}
                     onChange={(e) => setField("name", e.target.value)}
                   />
                 </Field>
+                {cloud ? (
+                  <>
+                    <CloudSqlAccountRow
+                      account={account?.account}
+                      credentials={pg.csqlCreds}
+                      error={account?.error ?? err("account")}
+                      onUseKey={() => void pickKeyFile()}
+                      onUseGcloud={() => {
+                        setField("csqlCreds", "gcloud");
+                        setField("csqlKey", "");
+                      }}
+                      onRecheck={() => setRecheck((n) => n + 1)}
+                    />
+                    <CloudSqlInstanceField
+                      value={pg.csqlInstance}
+                      login={csqlLogin}
+                      error={err("instance")}
+                      onPick={(name) => setField("csqlInstance", name)}
+                    />
+                  </>
+                ) : (
                 <div className="nc-grid cols-4">
                   <Field label="Host" name="host" error={err("host")} className="span-3">
                     <input
@@ -851,6 +985,7 @@ export function NewConnectionSheet({
                     />
                   </Field>
                 </div>
+                )}
                 <div className="nc-grid cols-2">
                   <Field label="Database *" name="database" error={err("database")}>
                     <input
@@ -904,6 +1039,29 @@ export function NewConnectionSheet({
                 </button>
                 {advanced && (
                   <div data-testid="nc-advanced-body" className="nc-advanced-body">
+                    {cloud ? (
+                      <>
+                        <div className={`nc-row${err("ipType") ? " invalid" : ""}`} data-field="ipType" data-invalid={err("ipType") ? "" : undefined}>
+                          <span data-testid="nc-label" className="nc-label">IP</span>
+                          <div className="nc-segment wide" role="radiogroup" aria-label="IP">
+                            {([["public", "Public"], ["private", "Private"], ["psc", "PSC"]] as const).map(([v, l]) => (
+                              <button key={v} type="button" role="radio" data-ip-choice={v} aria-checked={pg.csqlIp === v} aria-selected={pg.csqlIp === v} onClick={() => setField("csqlIp", v)}>
+                                {l}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {err("ipType") && (
+                          <p className="nc-hint indent" data-invalid="" data-testid="csql-ip-error">
+                            {err("ipType")}
+                          </p>
+                        )}
+                        <div className="nc-row" data-field="ssl">
+                          <span data-testid="nc-label" className="nc-label">SSL</span>
+                          <span className="csql-fixed">Always on · server checked against the instance's CA</span>
+                        </div>
+                      </>
+                    ) : (<>
                     <div className="nc-row" data-field="ssl">
                       <span data-testid="nc-label" className="nc-label">SSL</span>
                       <div className="nc-segment wide" role="radiogroup" aria-label="SSL mode">
@@ -1072,6 +1230,7 @@ export function NewConnectionSheet({
                         </div>
                       )}
                     </div>
+                    </>)}
 
                     <div className="nc-group">
                       <label className="nc-toggle-row">

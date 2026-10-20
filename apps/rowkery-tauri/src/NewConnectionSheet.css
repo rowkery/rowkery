@@ -522,3 +522,148 @@ p.nc-hint[data-invalid] {
     transition: none;
   }
 }
+
+/* Cloud SQL: the Google account row and the instance picker (CloudSqlFields.tsx). */
+.csql-account-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 8px 6px 12px;
+}
+.csql-avatar {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--hover);
+  color: var(--mute);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.csql-account-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.csql-account-email {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.csql-account-sub {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.csql-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 8px 12px;
+}
+.csql-command code {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--hover);
+  color: var(--text);
+  font: 12px var(--mono);
+  line-height: 1.45;
+}
+.csql-account-acts {
+  display: flex;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+.csql-instance {
+  position: relative;
+}
+.csql-instance-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--mute);
+}
+.csql-instance-btn:not(.empty) {
+  color: var(--text);
+}
+.csql-instance-btn.empty {
+  font-family: var(--sans);
+  font-size: 13px;
+}
+.csql-instance-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.csql-instance-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.csql-error {
+  margin: 2px 0 0;
+}
+.conn-popover.csql-popover {
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+  z-index: 20;
+}
+.csql-list > li > ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.csql-project-name {
+  display: block;
+  padding: 8px 10px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.csql-option {
+  height: 44px;
+}
+.csql-option-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+.csql-option-name {
+  font-size: 13px;
+}
+.csql-option[data-state="stopped"] .csql-option-name {
+  color: var(--mute);
+}
+.csql-option-state {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.csql-foot {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.csql-fixed {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--mute);
+}

@@ -50,6 +50,60 @@ export interface ProbeResult {
   elapsed_ms: number;
 }
 
+/** The Google account a Cloud SQL connection signs in with (`cloudsql::account`). */
+export interface CloudSqlAccount {
+  kind: "gcloud" | "key";
+  /** Unknown when Google won't say. */
+  email: string | null;
+}
+
+export interface CloudSqlInstance {
+  project: string;
+  name: string;
+  region: string;
+  /** `project:region:name`. */
+  connection_name: string;
+  /** "Postgres 16", "MySQL 8.0". */
+  engine: string;
+  postgres: boolean;
+  /** "running", "stopped", or Google's state in lower case. */
+  state: string;
+}
+
+export interface CloudSqlInstanceList {
+  instances: CloudSqlInstance[];
+  /** Projects whose instances couldn't be listed. */
+  skipped: string[];
+  /** The account sees more projects than were searched. */
+  more_projects?: boolean;
+}
+
+/** Which login a Cloud SQL call uses: the key picked in the form (its id; the key stays in Rust), else the one saved for `connectionId`. */
+export interface CloudSqlLogin {
+  credentials: "gcloud" | "key";
+  key?: string | null;
+  connectionId?: string | null;
+}
+
+/** The account the form shows; null when there is no gcloud login (or no key yet). */
+export async function cloudsqlAccount(login: CloudSqlLogin): Promise<CloudSqlAccount | null> {
+  return invoke("cloudsql_account", { ...login });
+}
+
+/** Every Cloud SQL instance the account can see. */
+export async function cloudsqlInstances(login: CloudSqlLogin): Promise<CloudSqlInstanceList> {
+  return invoke("cloudsql_instances", { ...login });
+}
+
+/**
+ * Asks for a service account key file (the native dialog) and keeps it in
+ * Rust until Save; `key` stands for it in the form. Refuses anything else;
+ * null when the dialog was dismissed.
+ */
+export async function cloudsqlKeyFile(): Promise<{ key: string; account: CloudSqlAccount } | null> {
+  return invoke("cloudsql_key_file");
+}
+
 /** Test a connection without saving it. */
 export async function probeConnection(
   connection: ConnectionRecord,
@@ -124,7 +178,7 @@ export interface ConnectExplanation {
 
 export async function explainConnectError(
   error: string,
-  target: { host: string; port: number; username: string; sshHost: string | null },
+  target: { host: string; port: number; username: string; sshHost: string | null; cloudSql?: string | null },
 ): Promise<ConnectExplanation> {
   return invoke("explain_connect_error", { error, ...target });
 }

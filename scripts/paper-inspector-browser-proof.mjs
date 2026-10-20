@@ -375,9 +375,14 @@ await page.waitForSelector('[data-testid="nc-sheet"]');
 await page.waitForTimeout(300);
 const nc = await page.$eval('[data-testid="nc-sheet"]', (e) => ({ w: e.getBoundingClientRect().width, right: window.innerWidth - e.getBoundingClientRect().right }));
 check(nc.w === 380 && Math.round(nc.right) === 0, `a 380 px column at the right (${nc.w})`);
-const mcpRow = await box("[data-mcp-switch]");
+// Since Postgres gained its Connect to row, the MCP row may sit just below the fold
+// at 800 px: the foot stays in view, and the form scrolls the row above it.
 const foot = await box("[data-save]");
-check(mcpRow.y + mcpRow.height <= foot.y && foot.y + foot.height <= 800, `the MCP row and the foot fit in 800 px (MCP at ${Math.round(mcpRow.y)}, Save at ${Math.round(foot.y)})`);
+check(foot.y + foot.height <= 800, `the foot fits in 800 px (Save at ${Math.round(foot.y)})`);
+await page.$eval("[data-mcp-switch]", (e) => e.scrollIntoView({ block: "nearest" }));
+const mcpRow = await box("[data-mcp-switch]");
+check(mcpRow.y + mcpRow.height <= (await box("[data-save]")).y, `the MCP row scrolls into view above the foot (MCP at ${Math.round(mcpRow.y)})`);
+await page.$eval('[data-testid="nc-sheet"]', (e) => e.querySelectorAll("*").forEach((n) => n.scrollTop && (n.scrollTop = 0)));
 const tabsRow = await box(`${ws} [data-testid="query-tabs"]`);
 const firstTab = await box(`${ws} [data-testid="query-tab"]`);
 check(firstTab.x >= tabsRow.x - 0.5, `the first tab stays in view (tab at ${firstTab.x}, row at ${tabsRow.x})`);

@@ -246,6 +246,8 @@ export type ConnectionRecord =
       /** CA file for `verify` against a private CA; the system store when unset. */
       ssl_root_cert?: string | null;
       ssh?: SshConfig | null;
+      /** A Cloud SQL instance, reached through the built-in connector; `host` then only names it. */
+      cloud_sql?: CloudSqlConfig | null;
       environment?: ConnectionEnv | null;
       safe_mode?: SafeMode;
       /** Readable by the MCP server (`Rowkery --mcp`). Off by default. */
@@ -286,10 +288,22 @@ export interface SshConfig {
   trust_host?: boolean;
 }
 
+export interface CloudSqlConfig {
+  /** `project:region:instance`, the console's Connection name. */
+  instance: string;
+  ip_type?: CloudSqlIpType;
+  /** The gcloud login on this computer, or a service account key in the keychain. */
+  credentials?: "gcloud" | "key";
+}
+
+export type CloudSqlIpType = "public" | "private" | "psc";
+
 export interface ConnectionSecrets {
   db_password?: string | null;
   ssh_password?: string | null;
   ssh_key_passphrase?: string | null;
+  /** A Cloud SQL connection's service account key (the file's JSON). */
+  gcp_key?: string | null;
 }
 
 export interface ConnectionListDto {
@@ -332,6 +346,7 @@ export function safeFormatCell(value: unknown): string {
 
 export function connectionSubtitle(record: ConnectionRecord): string {
   if (record.kind === "sqlite") return record.path;
+  if (record.cloud_sql) return `${record.cloud_sql.instance}/${record.database} · Cloud SQL`;
   const base = `${record.host}:${record.port}/${record.database}`;
   return record.ssh ? `${base} · ssh` : base;
 }

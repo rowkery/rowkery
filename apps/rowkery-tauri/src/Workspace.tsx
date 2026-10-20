@@ -150,6 +150,7 @@ import {
 } from "./types";
 import { Keys } from "./Keys";
 import { StatementList, type StatementResult } from "./StatementList";
+import { instanceShortName } from "./CloudSqlFields";
 import { SessionDetail, SessionsBar, SessionsGrid, useSessions } from "./SessionsView";
 
 type ResultsView = "data" | "structure";
@@ -1147,6 +1148,7 @@ export function Workspace({
       port: pg?.port ?? 0,
       username: pg?.username ?? "",
       sshHost: pg?.ssh?.host ?? null,
+      cloudSql: pg?.cloud_sql?.instance ?? null,
     })
       .then((x) => live && setExplained(x))
       .catch(() => {});
@@ -3791,7 +3793,9 @@ export function Workspace({
               ) : (
                 // Where it points; the database is the head's name (2026-10-13).
                 <span className="sb-sub" data-sb-sub title={connectionSubtitle({ ...activeConnection, database: session.database ?? activeConnection.database })}>
-                  {`${activeConnection.host}:${activeConnection.port}${activeConnection.ssh ? " · ssh" : ""}`}
+                  {activeConnection.cloud_sql
+                    ? instanceShortName(activeConnection.cloud_sql.instance)
+                    : `${activeConnection.host}:${activeConnection.port}${activeConnection.ssh ? " · ssh" : ""}`}
                 </span>
               )
             ) : null
