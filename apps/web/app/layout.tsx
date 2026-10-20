@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import localFont from "next/font/local";
-import { DOWNLOAD_URL, MAKER_URL, RELEASE, REPO_URL, SPONSOR_URL } from "@/lib/site";
+import { DOWNLOAD_URL, MAKER_URL, RELEASE } from "@/lib/site";
 import "./globals.css";
 
 // IBM Plex Sans for text, IBM Plex Mono for SQL, keys and numbers, Gabarito for headings, and
@@ -40,7 +40,7 @@ const hand = localFont({
 // Search results show the title and description; Google cuts the description near 155 characters.
 const TITLE = "Rowkery · Free Postgres and SQLite client for the Mac";
 const DESCRIPTION =
-  "Rowkery is a free, open-source Postgres and SQLite client for the Mac. Work from the keyboard on your own, or let Claude, Cursor and other AI agents read your database.";
+  "Rowkery is a free, open-source Postgres and SQLite client for the Mac. Use it from the keyboard, or let Claude, Cursor or another AI agent read your database.";
 
 // The link preview (X, Slack, iMessage, Discord, Bluesky) comes from these tags and from
 // public/og.png (1200 × 630: the mark, the name and one line). Without them a shared
@@ -87,7 +87,7 @@ const STRUCTURED_DATA = {
       name: "Rowkery",
       url: "https://rowkery.com/",
       logo: "https://rowkery.com/icon-512.png",
-      sameAs: [REPO_URL, SPONSOR_URL],
+      sameAs: ["https://github.com/rowkery"],
     },
     {
       "@type": "SoftwareApplication",
