@@ -77,7 +77,7 @@
           }),
         );
       }
-      const channel = cmd === "run_query" ? args?.onFrame : undefined;
+      const channel = cmd === "run_query" || cmd === "fetch_more" ? args?.onFrame : undefined;
       const res = await call(cmd, args);
       if (!channel || !res || typeof res !== "object") return res;
       const queryId = ++nextId;

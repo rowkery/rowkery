@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { useGlideHover } from "./motion";
 import { formatMs, type QueryResultDto } from "./types";
 import "./StatementList.css";
 
@@ -10,7 +11,6 @@ export interface StatementResult {
   hasMore: boolean;
   paged?: boolean;
   ranSql?: string;
-  errorMark?: { start: number; end: number; suggestion: string | null } | null;
   runNo?: number;
 }
 
@@ -44,6 +44,7 @@ export function StatementList({
   onPick: (index: number) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  useGlideHover(listRef, "[data-statement]");
   const pick = (i: number) => {
     if (i < 0 || i >= statements.length) return;
     onPick(i);
@@ -71,7 +72,6 @@ export function StatementList({
             key={i}
             type="button"
             role="tab"
-            data-testid="statement-row"
             data-statement={i}
             data-state={failed ? "error" : undefined}
             aria-selected={i === at}
@@ -84,7 +84,7 @@ export function StatementList({
               <span className="statement-no">{i + 1}</span>
               {s.ranSql?.replace(/\s+/g, " ")}
             </span>
-            <span className="statement-meta">
+            <span className="statement-meta" data-testid="statement-outcome">
               {statementOutcome(s)}
               {s.result && !failed && !s.result.cancelled && <span>{formatMs(s.result.elapsed_ms)}</span>}
             </span>

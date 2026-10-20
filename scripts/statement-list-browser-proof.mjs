@@ -61,6 +61,10 @@ function stubTauri() {
           if (/^select/i.test(sql)) return { ...done, columns: [col("id", "int8"), col("status", "text")], rows: [[I(42), T("shipped")]], row_count: 1 };
           return done;
         }
+        case "fetch_more": {
+          const rows = Array.from({ length: 50 }, (_, n) => [I(n + 201), T(`u${n + 201}@example.com`)]);
+          return { ...done, columns: [col("id", "int8"), col("email", "text")], rows, row_count: 50, paged: true, more: false };
+        }
         default:
           return null;
       }
@@ -100,7 +104,8 @@ const idle = () => page.waitForFunction((ws) => !document.querySelector(`${ws} [
 const gridRows = () => page.getAttribute(`${ws} [data-row-count]`, "data-row-count").then(Number).catch(() => null);
 const meta = () => page.textContent(`${ws} [data-testid="card-meta"]`).catch(() => null);
 const selected = () => page.getAttribute(`${list} [aria-selected="true"]`, "data-statement");
-const rowMeta = (i) => page.textContent(`${row(i)} .statement-meta`); // Class on purpose: the row's outcome line is what's under test.
+// Text on purpose: the outcome line is what's under test.
+const rowMeta = (i) => page.textContent(`${row(i)} [data-testid="statement-outcome"]`);
 
 // Run All (Ctrl+Alt+↵) on four statements.
 const script = `SELECT id, email FROM users ORDER BY id;
@@ -116,7 +121,7 @@ await page.keyboard.press("Control+Alt+Enter");
 await page.waitForFunction(() => window.__RUNS__.length === 4);
 await idle();
 await page.waitForSelector(row(3));
-check((await page.$$(`${list} [data-testid="statement-row"]`)).length === 4, "four statements listed");
+check((await page.$$(`${list} [data-statement]`)).length === 4, "four statements listed");
 check((await selected()) === "3" && (await gridRows()) === 1, "the last statement shows, as before");
 check(/^4\s*SELECT/.test((await page.textContent(row(3)))?.trim() ?? ""), "rows are numbered");
 check(/1 row changed/.test(await rowMeta(2)), `the UPDATE says what it changed (${await rowMeta(2)})`);
@@ -154,7 +159,13 @@ await page.click(row(0));
 await page.waitForFunction(() => !document.querySelector('[data-testid="workspace"]:not([hidden]) [data-load-more]'));
 await page.click(row(1));
 await page.waitForSelector(`${ws} [data-load-more]`);
-check(true, "and still can after showing another statement");
+// Load more grows the shown statement, and its row in the list says so.
+await page.click(`${ws} [data-load-more]`);
+await page.waitForFunction((sel) => /250 rows/.test(document.querySelector(sel)?.textContent ?? ""), `${row(1)} [data-testid="statement-outcome"]`);
+await page.click(row(0));
+await page.click(row(1));
+await page.waitForFunction(() => document.querySelector('[data-testid="workspace"]:not([hidden]) [data-row-count]')?.getAttribute("data-row-count") === "250");
+check(true, "still loads more after showing another statement, and keeps the rows it loaded");
 
 // A failing statement stops the run; its row says Error and its error shows.
 await page.evaluate(() => (window.__RUNS__ = []));
@@ -165,7 +176,7 @@ await page.keyboard.press("Control+Alt+Enter");
 await page.waitForSelector(`${ws} [data-query-error="42703"]`);
 await idle();
 check((await page.evaluate(() => window.__RUNS__.length)) === 2, "the run stops at the failing statement");
-check((await page.$$(`${list} [data-testid="statement-row"]`)).length === 2, "the list holds what ran");
+check((await page.$$(`${list} [data-statement]`)).length === 2, "the list holds what ran");
 check((await page.getAttribute(row(1), "data-state")) === "error" && (await selected()) === "1", "the failed one is marked and shown");
 await page.screenshot({ path: `${OUT}/3-stops-at-error.png` });
 await page.click(row(0));

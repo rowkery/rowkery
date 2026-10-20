@@ -37,7 +37,7 @@ When a statement creates, alters or drops a table, view, schema, type, function,
 
 Run all, or a selection holding several statements, runs them one at a time on the tab's session, so `BEGIN … COMMIT` works as one transaction. The run stops at the first statement that fails, is cancelled, or is held by safe mode. Each statement keeps its own result: a list beside the grid shows every statement that ran with how it ended (rows, rows changed, or Error), and the results show the last one. Click a statement, or use <kbd>↑</kbd> / <kbd>↓</kbd> in the list, to see its result. Only the last statement can load more rows; an earlier one with rows left shows its count with a +. If one fails, its error is marked in the editor where it happened.
 
-A statement that returns no rows, such as an `UPDATE` or a `SET`, shows **Query finished with no result set**.
+A statement that returns no rows shows how many it changed, such as **1 row changed** for an `UPDATE`. One that changes no rows, such as a `SET`, shows **Query finished with no result set**.
 
 ## Cancel a query
 

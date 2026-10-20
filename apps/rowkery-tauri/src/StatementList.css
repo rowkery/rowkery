@@ -25,6 +25,7 @@
 
 .statement-list {
   flex: 0 0 clamp(160px, 22%, 240px);
+  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -44,13 +45,7 @@
   text-align: left;
   user-select: none;
   cursor: default;
-  transition:
-    background-color 120ms var(--ease-out),
-    transform 90ms var(--ease-out);
-}
-
-.statement-list button:hover:not(:disabled) {
-  background: var(--hover);
+  transition: transform 90ms var(--ease-out);
 }
 
 .statement-list button:active:not(:disabled) {
@@ -80,7 +75,7 @@
 
 .statement-no {
   margin-right: 6px;
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .statement-meta {
@@ -91,7 +86,7 @@
 }
 
 .statement-meta span {
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .statement-list button[data-state="error"] .statement-meta {

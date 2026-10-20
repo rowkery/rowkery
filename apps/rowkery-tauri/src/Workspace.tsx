@@ -331,10 +331,18 @@ interface TabRun {
   statementAt?: number;
 }
 
+/** The run's statements with the one shown as it is now. */
+function keepShownStatement(run: TabRun): Pick<TabRun, "statements"> {
+  if (!run.statements || run.statementAt === undefined) return {};
+  const statements = run.statements.slice();
+  statements[run.statementAt] = shownStatement(run);
+  return { statements };
+}
+
 /** The statement a tab shows, to keep while it shows another. */
 function shownStatement(run: TabRun): StatementResult {
-  const { result, tableKey, paged, ranSql, errorMark, runNo } = run;
-  return { result, tableKey, hasMore: run.hasMore || !!run.cut, paged, ranSql, errorMark, runNo };
+  const { result, tableKey, paged, ranSql, runNo } = run;
+  return { result, tableKey, hasMore: run.hasMore || !!run.cut, paged, ranSql, runNo };
 }
 
 const IDLE_RUN: TabRun = {
@@ -2003,8 +2011,9 @@ export function Workspace({
       runNo: paging?.append ? prev.runNo : (prev.runNo ?? 0) + 1,
       errorMark: paging?.append ? prev.errorMark : null,
       cut: false,
-      // A run of its own ends the last run's statement list.
-      ...(part || paging?.append ? {} : { statements: null, statementAt: undefined }),
+      // A run of its own ends the last run's statement list; the next of a
+      // run keeps the one shown until now as it is (rows Load more added).
+      ...(paging?.append ? {} : part ? keepShownStatement(prev) : { statements: null, statementAt: undefined }),
     }));
     setNotice(null);
     if (remember && !confirmed) {
@@ -2239,8 +2248,7 @@ export function Workspace({
     patchRun(tabId, (prev) => {
       const list = prev.statements;
       if (!list?.[index] || prev.startedAt != null || index === prev.statementAt) return {};
-      const statements = list.slice();
-      statements[prev.statementAt ?? list.length - 1] = shownStatement(prev);
+      const statements = keepShownStatement(prev).statements ?? list;
       const next = statements[index];
       const last = index === statements.length - 1;
       return { ...next, hasMore: last && next.hasMore, cut: !last && next.hasMore, statements, statementAt: index };
@@ -3190,7 +3198,10 @@ export function Workspace({
   // ⌘E's plan shows in place of the results on a query tab.
   const shownPlan = !isTableTab && resultsView !== "structure" ? (activeRun.plan ?? null) : null;
   // A plan stands in for the results, so the statements they came from go too.
-  const statementList = !isTableTab && !shownPlan && (activeRun.statements?.length ?? 0) > 1 ? activeRun.statements! : null;
+  const statementList =
+    !isTableTab && !shownPlan && (activeRun.statements?.length ?? 0) > 1
+      ? (keepShownStatement(activeRun).statements ?? activeRun.statements!)
+      : null;
   const runningMeta = (
               <span data-testid="card-meta" className="card-meta running" data-state="running">
                 <span className="spinner" aria-hidden />
@@ -3311,7 +3322,7 @@ export function Workspace({
       resultsView,
       failed: connState === "error",
       loadedRows: result?.row_count ?? 0,
-      moreRows: !!activeRun.hasMore,
+      moreRows: !!(activeRun.hasMore || activeRun.cut),
       closedTabs: closedCount,
       historyBack: navHistory.index > 0,
       historyForward: navHistory.index < navHistory.entries.length - 1,
