@@ -7,13 +7,16 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use tokio::sync::OnceCell;
 
 use super::CloudSqlError;
 
-/// The DER bodies of `pem`'s blocks labelled `label` (`CERTIFICATE`, …).
+/// The DER bodies of `pem`'s blocks labelled `label`, for tests (the code
+/// reads PEM with rustls' `PemObject`).
+#[cfg(test)]
 pub(crate) fn pem_blocks(pem: &str, label: &str) -> Vec<Vec<u8>> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
@@ -99,17 +102,11 @@ pub(crate) fn client_config(
     dns_names: Vec<String>,
 ) -> Result<ClientConfig, CloudSqlError> {
     let bad = |what: &str| CloudSqlError::Instance(format!("The Admin API sent {what}"));
-    let certs: Vec<CertificateDer<'static>> = pem_blocks(cert_pem, "CERTIFICATE")
-        .into_iter()
-        .map(CertificateDer::from)
-        .collect();
+    let certs = certificates(cert_pem);
     if certs.is_empty() {
         return Err(bad("no client certificate"));
     }
-    let cas: Vec<CertificateDer<'static>> = pem_blocks(ca_pem, "CERTIFICATE")
-        .into_iter()
-        .map(CertificateDer::from)
-        .collect();
+    let cas = certificates(ca_pem);
     if cas.is_empty() {
         return Err(bad("no server CA"));
     }
@@ -126,6 +123,12 @@ pub(crate) fn client_config(
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_client_auth_cert(certs, key.private_der())
         .map_err(|e| CloudSqlError::Instance(format!("Couldn't use the client certificate: {e}")))
+}
+
+fn certificates(pem: &str) -> Vec<CertificateDer<'static>> {
+    CertificateDer::pem_slice_iter(pem.as_bytes())
+        .filter_map(Result::ok)
+        .collect()
 }
 
 #[derive(Debug)]

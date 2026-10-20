@@ -3,11 +3,13 @@
 //! A dial that finds the certificate near expiry renews it, in the
 //! background while the old one still works, so no dial (a cancel request
 //! least of all) waits on the Admin API for a certificate it doesn't need.
-//! Sessions already open don't need the certificate again.
+//! A dial that fails with a cached address and certificate fetches both
+//! again and tries once more. Sessions already open don't need the
+//! certificate again.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
@@ -29,6 +31,9 @@ const CERT_MARGIN: Duration = Duration::from_secs(4 * 60);
 const CERT_USABLE: Duration = Duration::from_secs(30);
 /// How long reaching the instance (TCP and TLS) may take.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a whole dial may take: a renewal's Admin API calls, then TCP and
+/// TLS, and the one retry.
+const DIAL_DEADLINE: Duration = Duration::from_secs(30);
 
 struct Ready {
     host: String,
@@ -46,6 +51,9 @@ pub struct CloudSqlDialer {
     /// Held while one renewal talks to the Admin API, so the others wait for
     /// it instead of asking for certificates of their own.
     renewing: tokio::sync::Mutex<()>,
+    /// The last renewal that failed, and when: the answer for the dials that
+    /// were waiting on it.
+    failed: Mutex<Option<(Instant, CloudSqlError)>>,
 }
 
 impl std::fmt::Debug for CloudSqlDialer {
@@ -62,6 +70,7 @@ impl CloudSqlDialer {
             login,
             ready: Mutex::new(None),
             renewing: tokio::sync::Mutex::new(()),
+            failed: Mutex::new(None),
         }
     }
 
@@ -77,8 +86,24 @@ impl CloudSqlDialer {
             .cloned()
     }
 
+    /// Drops the cached setup when it is still `r`, so the next dial fetches
+    /// the address and a certificate again.
+    fn forget(&self, r: &Arc<Ready>) {
+        let mut slot = self.ready.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, r)) {
+            *slot = None;
+        }
+    }
+
+    /// Drops the cached setup: the instance refused a session made with it
+    /// (its certificate, after the TLS handshake).
+    pub fn forget_certificate(&self) {
+        *self.ready.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// The setup for a dial, and whether it was fetched for this one.
     async fn ready(self: &Arc<Self>) -> Result<(Arc<Ready>, bool), CloudSqlError> {
+        let asked = Instant::now();
         if let Some(r) = self.cached(CERT_MARGIN) {
             return Ok((r, false));
         }
@@ -96,22 +121,41 @@ impl CloudSqlDialer {
             return Ok((r, false));
         }
         let _renewing = self.renewing.lock().await;
-        // Another dial may have renewed it while this one waited.
+        // Another dial may have renewed it while this one waited, or failed
+        // to: that failure is this dial's answer too, not another try.
         if let Some(r) = self.cached(CERT_MARGIN) {
             return Ok((r, false));
+        }
+        if let Some((at, e)) = &*self.failed.lock().unwrap_or_else(|e| e.into_inner()) {
+            if *at >= asked {
+                return Err(e.clone());
+            }
         }
         Ok((self.renew().await?, true))
     }
 
     /// Asks the Admin API for the address and a new certificate.
     async fn renew(&self) -> Result<Arc<Ready>, CloudSqlError> {
-        // The key is made while the Admin API answers.
-        let (key, target) = tokio::try_join!(
-            tls::client_key(),
+        let renewed = self.fetch().await;
+        if let Err(e) = &renewed {
+            *self.failed.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((Instant::now(), e.clone()));
+        }
+        renewed
+    }
+
+    async fn fetch(&self) -> Result<Arc<Ready>, CloudSqlError> {
+        // The address and the certificate are asked for at once (the key,
+        // made once per run, goes into the certificate request).
+        let cert = async {
+            let key = tls::client_key().await?;
+            let cert = admin::ephemeral_cert(&self.login, &self.instance, &key.public_pem).await?;
+            Ok::<_, CloudSqlError>((key, cert))
+        };
+        let ((key, (cert, expires)), target) = tokio::try_join!(
+            cert,
             admin::connect_target(&self.login, &self.instance, self.ip_type)
         )?;
-        let (cert, expires) =
-            admin::ephemeral_cert(&self.login, &self.instance, &key.public_pem).await?;
         let server_name = target
             .dns_names
             .first()
@@ -133,18 +177,25 @@ impl CloudSqlDialer {
 
     /// A TLS stream to the instance for one session (or one cancel request).
     pub async fn dial(self: &Arc<Self>) -> Result<CloudSqlStream, CloudSqlError> {
+        tokio::time::timeout(DIAL_DEADLINE, self.dial_once())
+            .await
+            .unwrap_or_else(|_| {
+                Err(CloudSqlError::Network(format!(
+                    "{} couldn't be reached in {} s",
+                    self.instance.name,
+                    DIAL_DEADLINE.as_secs()
+                )))
+            })
+    }
+
+    async fn dial_once(self: &Arc<Self>) -> Result<CloudSqlStream, CloudSqlError> {
         let (r, fresh) = self.ready().await?;
         match self.dial_with(&r).await {
-            Err(Dial::Tls(_)) if !fresh => {
-                // The instance's CA rotated, or the certificate was refused:
-                // fetch both again and try once more. (Just-fetched ones
-                // would only fail the same way.)
-                {
-                    let mut slot = self.ready.lock().unwrap_or_else(|e| e.into_inner());
-                    if slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, &r)) {
-                        *slot = None;
-                    }
-                }
+            Err(_) if !fresh => {
+                // The address moved, the CA rotated or the certificate was
+                // refused: fetch both again and try once more. (Just-fetched
+                // ones would only fail the same way.)
+                self.forget(&r);
                 let (r, _) = self.ready().await?;
                 self.dial_with(&r)
                     .await
@@ -174,19 +225,6 @@ impl CloudSqlDialer {
             .await
             .map_err(|_| Dial::Timeout)?
             .map_err(Dial::Tls)
-    }
-
-    /// Whether this dialer is what `config` asks for (a changed key file is
-    /// caught by [`dialer_for`], which reads it).
-    pub fn serves(&self, config: &CloudSqlConfig) -> bool {
-        let login_matches = matches!(
-            (&self.login, config.credentials),
-            (Login::Gcloud, CloudSqlCredentials::Gcloud)
-                | (Login::Key(_), CloudSqlCredentials::Key)
-        );
-        login_matches
-            && self.ip_type == config.ip_type
-            && InstanceName::parse(&config.instance).is_some_and(|n| n == self.instance)
     }
 
     fn matches(&self, instance: &InstanceName, ip_type: CloudSqlIpType, login: &Login) -> bool {
@@ -242,7 +280,7 @@ pub fn dialer_for(
                     "No service account key is saved for this connection. Add it under Google account".into(),
                 )
             })?;
-            Login::Key(Arc::new(Credentials::parse(json)?))
+            Login::Key(Arc::new(Credentials::parse_key(json)?))
         }
     };
     let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
@@ -282,18 +320,6 @@ mod tests {
         // Once no session holds it, a dialer is gone (and its certificate).
         let d = dialer_for("reg-1", &cfg("p:r:i", CloudSqlIpType::Private), None).unwrap();
         assert_eq!(Arc::strong_count(&d), 1);
-    }
-
-    #[test]
-    fn a_dialer_serves_only_its_own_settings() {
-        let c = cfg("p:r:i", CloudSqlIpType::Public);
-        let d = dialer_for("reg-4", &c, None).unwrap();
-        assert!(d.serves(&c));
-        assert!(!d.serves(&cfg("p:r:other", CloudSqlIpType::Public)));
-        assert!(!d.serves(&cfg("p:r:i", CloudSqlIpType::Psc)));
-        let mut key = c.clone();
-        key.credentials = CloudSqlCredentials::Key;
-        assert!(!d.serves(&key));
     }
 
     /// A dialer holding a certificate with `left` to go.

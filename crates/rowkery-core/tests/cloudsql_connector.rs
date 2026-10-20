@@ -41,6 +41,11 @@ struct Google {
     client_ca: CertifiedIssuer<'static, KeyPair>,
     instances: Mutex<HashMap<String, Instance>>,
     certs_issued: AtomicUsize,
+    /// Admin API calls about the instance this account may not see.
+    denied_calls: AtomicUsize,
+    /// `connectSettings` calls for `moving`, which answers with an address
+    /// nothing listens on the first time.
+    moving_calls: AtomicUsize,
     /// `x-goog-user-project` on the last Admin API call.
     quota_project: Mutex<Option<String>>,
 }
@@ -106,6 +111,9 @@ impl Google {
             .split_once('/')
             .or_else(|| rest.split_once(':'))
             .unwrap_or((rest, ""));
+        if name == "denied" {
+            self.denied_calls.fetch_add(1, Ordering::SeqCst);
+        }
         let Some(inst) = self.instances.lock().unwrap().get(name).cloned() else {
             return json(
                 if name == "denied" { 403 } else { 404 },
@@ -114,9 +122,12 @@ impl Google {
         };
         match (method, action) {
             ("GET", "connectSettings") => {
+                let moved_away =
+                    name == "moving" && self.moving_calls.fetch_add(1, Ordering::SeqCst) == 0;
+                let ip = if moved_away { "127.0.0.2" } else { "127.0.0.1" };
                 let mut s = serde_json::json!({
                     "serverCaCert": { "cert": inst.ca_pem },
-                    "ipAddresses": [{ "type": "PRIMARY", "ipAddress": "127.0.0.1" }],
+                    "ipAddresses": [{ "type": "PRIMARY", "ipAddress": ip }],
                     "region": "asia-southeast1",
                     "databaseVersion": inst.version,
                     "backendType": "SECOND_GEN",
@@ -298,6 +309,8 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         client_ca: ca("Google Cloud SQL Signing CA"),
         instances: Mutex::new(HashMap::new()),
         certs_issued: AtomicUsize::new(0),
+        denied_calls: AtomicUsize::new(0),
+        moving_calls: AtomicUsize::new(0),
         quota_project: Mutex::new(None),
     });
     let ca_pem = google.server_ca.pem();
@@ -319,6 +332,7 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
             inst(&ca_pem, Some(vec!["other.asia-southeast1.sql.goog".into()])),
         );
         i.insert("imposter".into(), inst(&imposter_pem, None));
+        i.insert("moving".into(), inst(&ca_pem, None));
         i.insert(
             "crm".into(),
             Instance {
@@ -356,11 +370,32 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
     assert!(err.contains("secure connection"), "{err}");
     assert_eq!(google.certs_issued.load(Ordering::SeqCst), issued + 1);
 
-    let err = greeting("denied").await.unwrap_err();
-    assert!(
-        matches!(err, CloudSqlError::Api { status: 403, .. }),
-        "{err}"
+    // Dials waiting on a renewal that fails get its error, not one more
+    // round of Admin API calls each.
+    let denied = cloudsql::dialer_for("test-denied", &config("denied"), None).unwrap();
+    let (a, b, c) = tokio::join!(
+        read_greeting(&denied),
+        read_greeting(&denied),
+        read_greeting(&denied)
     );
+    for err in [a, b, c] {
+        let err = err.unwrap_err();
+        assert!(
+            matches!(err, CloudSqlError::Api { status: 403, .. }),
+            "{err}"
+        );
+    }
+    assert!(google.denied_calls.load(Ordering::SeqCst) <= 2);
+
+    // The instance's address changed since the certificate was fetched (on
+    // Linux, nothing listens on 127.0.0.2): the next dial fetches both again.
+    if cfg!(target_os = "linux") {
+        let moving = cloudsql::dialer_for("test-moving", &config("moving"), None).unwrap();
+        let err = read_greeting(&moving).await.unwrap_err().to_string();
+        assert!(err.contains("127.0.0.2"), "{err}");
+        assert_eq!(read_greeting(&moving).await.unwrap(), "hello from orders");
+        assert_eq!(google.moving_calls.load(Ordering::SeqCst), 2);
+    }
     let err = greeting("crm").await.unwrap_err().to_string();
     assert!(err.contains("runs MySQL 8.0"), "{err}");
 

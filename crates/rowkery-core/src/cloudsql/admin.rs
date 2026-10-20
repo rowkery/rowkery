@@ -188,7 +188,10 @@ fn target_from(
     if ca_pem.trim().is_empty() {
         return bad(format!("The Admin API sent no CA for {inst}"));
     }
-    let shared_ca = s.server_ca_mode.ends_with("_CAS_CA");
+    // Only an instance's own CA (Google's internal one; older instances
+    // don't name a mode) identifies it alone. Any other mode, CAS or one
+    // added later, may be shared between instances: check the name too.
+    let shared_ca = !matches!(s.server_ca_mode.as_str(), "" | "GOOGLE_MANAGED_INTERNAL_CA");
     let dns_names = if shared_ca {
         let mut names: Vec<String> = s
             .dns_names
@@ -243,14 +246,7 @@ fn parse_rfc3339(text: &str) -> Option<SystemTime> {
     let time = time.split('.').next()?;
     let mut t = time.splitn(3, ':').map(|p| p.parse::<u64>().ok());
     let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
-    // Days from the civil date (Howard Hinnant's algorithm).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = u64::try_from(era * 146_097 + doe - 719_468).ok()?;
+    let days = u64::try_from(crate::profile::days_from_civil(y, m, day)).ok()?;
     Some(UNIX_EPOCH + Duration::from_secs(days * 86_400 + hh * 3600 + mm * 60 + ss))
 }
 
@@ -289,7 +285,7 @@ pub struct CloudSqlAccount {
 
 fn login_for(key_json: Option<&str>) -> Result<Login, CloudSqlError> {
     match key_json.map(str::trim).filter(|k| !k.is_empty()) {
-        Some(json) => Ok(Login::Key(Arc::new(Credentials::parse(json)?))),
+        Some(json) => Ok(Login::Key(Arc::new(Credentials::parse_key(json)?))),
         None => Ok(Login::Gcloud),
     }
 }
@@ -340,12 +336,18 @@ pub struct InstanceList {
     /// Projects whose instances couldn't be listed (no permission, or the
     /// Admin API is off there), so the picker can say some are missing.
     pub skipped: Vec<String>,
+    /// The account sees more than [`PROJECT_CAP`] projects; only those
+    /// were searched.
+    pub more_projects: bool,
 }
+
+/// How many projects the picker searches (one Admin API call each).
+pub const PROJECT_CAP: usize = 500;
 
 /// Every Cloud SQL instance in the projects the account can see.
 pub async fn instances(key_json: Option<&str>) -> Result<InstanceList, CloudSqlError> {
     let login = login_for(key_json)?;
-    let projects = projects(&login).await?;
+    let (projects, more_projects) = projects(&login).await?;
     let lists: Vec<_> = futures::stream::iter(projects)
         .map(|p| {
             let login = login.clone();
@@ -354,10 +356,13 @@ pub async fn instances(key_json: Option<&str>) -> Result<InstanceList, CloudSqlE
                 (p, r)
             }
         })
-        .buffer_unordered(8)
+        .buffer_unordered(16)
         .collect()
         .await;
-    let mut out = InstanceList::default();
+    let mut out = InstanceList {
+        more_projects,
+        ..Default::default()
+    };
     for (project, listed) in lists {
         match listed {
             Ok(list) => out.instances.extend(list),
@@ -370,7 +375,9 @@ pub async fn instances(key_json: Option<&str>) -> Result<InstanceList, CloudSqlE
     Ok(out)
 }
 
-async fn projects(login: &Login) -> Result<Vec<String>, CloudSqlError> {
+/// The account's active projects, up to [`PROJECT_CAP`], and whether it has
+/// more.
+async fn projects(login: &Login) -> Result<(Vec<String>, bool), CloudSqlError> {
     #[derive(Deserialize, Default)]
     #[serde(rename_all = "camelCase", default)]
     struct Page {
@@ -385,7 +392,7 @@ async fn projects(login: &Login) -> Result<Vec<String>, CloudSqlError> {
     let url = format!("{}/v1/projects", endpoints().projects);
     let mut out = Vec::new();
     let mut page_token = String::new();
-    // A cap, so an account in thousands of projects still gets a list.
+    // Pages can come back short, so the number of calls is capped too.
     for _ in 0..10 {
         let page: Page = call(login, |c| {
             let mut q = vec![("filter", "lifecycleState:ACTIVE"), ("pageSize", "500")];
@@ -396,12 +403,17 @@ async fn projects(login: &Login) -> Result<Vec<String>, CloudSqlError> {
         })
         .await?;
         out.extend(page.projects.into_iter().map(|p| p.project_id));
+        if out.len() >= PROJECT_CAP {
+            let more = out.len() > PROJECT_CAP || !page.next_page_token.is_empty();
+            out.truncate(PROJECT_CAP);
+            return Ok((out, more));
+        }
         if page.next_page_token.is_empty() {
-            break;
+            return Ok((out, false));
         }
         page_token = page.next_page_token;
     }
-    Ok(out)
+    Ok((out, true))
 }
 
 async fn project_instances(
@@ -532,6 +544,19 @@ mod tests {
         );
         j["dnsNames"] = serde_json::json!([]);
         assert!(target_from(settings(j), &name(), CloudSqlIpType::Public).is_err());
+
+        // A mode Google adds later is treated as shared: the name is checked.
+        let mut j = base();
+        j["serverCaMode"] = "SOME_NEW_CA".into();
+        assert!(target_from(settings(j.clone()), &name(), CloudSqlIpType::Public).is_err());
+        j["dnsName"] = "xyz.asia-southeast1.sql.goog.".into();
+        let t = target_from(settings(j), &name(), CloudSqlIpType::Public).unwrap();
+        assert_eq!(t.dns_names, vec!["xyz.asia-southeast1.sql.goog"]);
+        // Older instances name no mode: their CA is their own.
+        let mut j = base();
+        j["serverCaMode"] = "".into();
+        let t = target_from(settings(j), &name(), CloudSqlIpType::Public).unwrap();
+        assert!(t.dns_names.is_empty());
     }
 
     #[test]

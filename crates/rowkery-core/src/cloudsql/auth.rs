@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::PrivatePkcs8KeyDer;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -45,8 +47,6 @@ pub(crate) enum Credentials {
         private_key: String,
         #[serde(default)]
         private_key_id: Option<String>,
-        #[serde(default)]
-        token_uri: Option<String>,
     },
     /// `gcloud auth application-default login --impersonate-service-account`.
     ImpersonatedServiceAccount {
@@ -60,13 +60,7 @@ pub(crate) enum Credentials {
 impl std::fmt::Debug for Credentials {
     // Never print a refresh token or a private key.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = match self {
-            Self::AuthorizedUser { .. } => "authorized_user",
-            Self::ServiceAccount { .. } => "service_account",
-            Self::ImpersonatedServiceAccount { .. } => "impersonated_service_account",
-            Self::ExternalAccount {} => "external_account",
-        };
-        write!(f, "Credentials({kind})")
+        write!(f, "Credentials({})", self.kind())
     }
 }
 
@@ -81,6 +75,28 @@ impl Credentials {
             ));
         }
         Ok(creds)
+    }
+
+    /// A service account key, and only that: another kind of file (a
+    /// gcloud login's own) would put someone's personal login in the
+    /// connection's keychain item.
+    pub(crate) fn parse_key(json: &str) -> Result<Self, CloudSqlError> {
+        match Self::parse(json)? {
+            key @ Self::ServiceAccount { .. } => Ok(key),
+            other => Err(CloudSqlError::Login(format!(
+                "That file is a {} login, not a service account key. Download a key under IAM › Service accounts › Keys",
+                other.kind().replace('_', " ")
+            ))),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::AuthorizedUser { .. } => "authorized_user",
+            Self::ServiceAccount { .. } => "service_account",
+            Self::ImpersonatedServiceAccount { .. } => "impersonated_service_account",
+            Self::ExternalAccount {} => "external_account",
+        }
     }
 
     /// The account's email when the file names it (service accounts).
@@ -105,6 +121,17 @@ impl Credentials {
             _ => None,
         }
     }
+}
+
+/// An `https://…googleapis.com` URL.
+fn is_google_api(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.host_str()
+                .is_some_and(|h| h == "googleapis.com" || h.ends_with(".googleapis.com"))
+    })
 }
 
 /// `…/serviceAccounts/name@project.iam.gserviceaccount.com:generateAccessToken`.
@@ -252,27 +279,34 @@ fn fetch<'a>(
                 client_email,
                 private_key,
                 private_key_id,
-                token_uri,
             } => {
-                let default_uri = format!("{}/token", endpoints().token);
-                let uri = token_uri.as_deref().unwrap_or(&default_uri);
+                // Always Google's own endpoint, never the file's `token_uri`:
+                // the signed assertion goes nowhere else.
+                let uri = format!("{}/token", endpoints().token);
                 let assertion = jwt_assertion(
                     client_email,
                     private_key,
                     private_key_id.as_deref(),
-                    uri,
+                    &uri,
                     scope,
                 )?;
                 let form = [
                     ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                     ("assertion", assertion.as_str()),
                 ];
-                token_request(uri, &form, false).await
+                token_request(&uri, &form, false).await
             }
             Credentials::ImpersonatedServiceAccount {
                 service_account_impersonation_url,
                 source_credentials,
             } => {
+                // The source token can act for the user anywhere in Google
+                // Cloud: it goes only to a Google API over HTTPS.
+                if !is_google_api(service_account_impersonation_url) {
+                    return Err(CloudSqlError::Login(format!(
+                        "The gcloud login impersonates through {service_account_impersonation_url}, which isn't a Google API"
+                    )));
+                }
                 let source = fetch(source_credentials, IMPERSONATION_SCOPE).await?;
                 impersonate(service_account_impersonation_url, &source).await
             }
@@ -369,12 +403,10 @@ fn jwt_assertion(
 ) -> Result<String, CloudSqlError> {
     let bad_key =
         |why: &str| CloudSqlError::Login(format!("The service account key's private key {why}"));
-    let der = super::tls::pem_blocks(private_key_pem, "PRIVATE KEY")
-        .into_iter()
-        .next()
-        .ok_or_else(|| bad_key("is missing"))?;
-    let key =
-        ring::signature::RsaKeyPair::from_pkcs8(&der).map_err(|_| bad_key("isn't an RSA key"))?;
+    let der = PrivatePkcs8KeyDer::from_pem_slice(private_key_pem.as_bytes())
+        .map_err(|_| bad_key("is missing"))?;
+    let key = ring::signature::RsaKeyPair::from_pkcs8(der.secret_pkcs8_der())
+        .map_err(|_| bad_key("isn't an RSA key"))?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -531,6 +563,32 @@ mod tests {
         public
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig)
             .unwrap();
+    }
+
+    #[test]
+    fn a_key_file_must_be_a_service_account_key() {
+        let key = r#"{"type":"service_account","client_email":"bot@p.iam.gserviceaccount.com","private_key":"k"}"#;
+        assert!(Credentials::parse_key(key).is_ok());
+        let user = r#"{"type":"authorized_user","client_id":"id","client_secret":"s","refresh_token":"r"}"#;
+        let err = Credentials::parse_key(user).unwrap_err().to_string();
+        assert!(err.contains("authorized user login"), "{err}");
+    }
+
+    #[test]
+    fn impersonation_goes_only_to_google() {
+        assert!(is_google_api(
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/a@b:generateAccessToken"
+        ));
+        for bad in [
+            "http://iamcredentials.googleapis.com/v1/x",
+            "https://evil.example/v1/x",
+            "https://googleapis.com.evil.example/x",
+            "https://iamcredentials.googleapis.com@evil.example/x",
+            "https://user@iamcredentials.googleapis.com/x",
+            "not a url",
+        ] {
+            assert!(!is_google_api(bad), "{bad}");
+        }
     }
 
     #[test]

@@ -53,14 +53,19 @@ impl InstanceName {
         let text = text.trim();
         let (rest, name) = text.rsplit_once(':')?;
         let (project, region) = rest.rsplit_once(':')?;
-        // What Google allows in each part; anything else would go into the
-        // Admin API's URL as is.
-        let ok = |s: &str| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        // What Google allows in each part (lower-case letters, digits and
+        // hyphens; dots too in a Workspace domain); anything else would go
+        // into the Admin API's URL as is.
+        let id = |s: &str| {
+            s.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && s.ends_with(|c: char| c.is_ascii_alphanumeric())
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         };
-        if !(ok(project) && ok(region) && ok(name)) || project.matches(':').count() > 1 {
+        let project_ok = match project.split_once(':') {
+            Some((domain, id_part)) => domain.split('.').all(id) && id(id_part),
+            None => id(project),
+        };
+        if !(project_ok && id(region) && id(name)) {
             return None;
         }
         Some(Self {
@@ -167,6 +172,12 @@ mod tests {
             "p/x:r:i",
             "p:r:i?x",
             "p:r:i#x",
+            "acme:r:..",
+            "..:r:i",
+            "p:r:-i",
+            "p:r:i_x",
+            "a..b:p:r:i",
+            ".example.com:p:r:i",
         ] {
             assert_eq!(InstanceName::parse(bad), None, "{bad}");
         }
