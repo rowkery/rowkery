@@ -150,6 +150,7 @@ import {
   safeFormatCell,
 } from "./types";
 import { Keys } from "./Keys";
+import { StatementList, type StatementResult } from "./StatementList";
 import { SessionDetail, SessionsBar, SessionsGrid, useSessions } from "./SessionsView";
 
 type ResultsView = "data" | "structure";
@@ -274,6 +275,11 @@ interface TabRun {
    * tab's cursor has rows left. Load more (or scrolling to the end) gets them.
    */
   hasMore: boolean;
+  /**
+   * Rows remain, but a later statement of the run closed the cursor: the
+   * count says so ("1,000+ rows") and there is no Load more.
+   */
+  cut?: boolean;
   /** The last run was a query tab's cursor page (its page size applies). */
   paged?: boolean;
   /** The statement the last run ran (a query tab's), for Export and Copy all. */
@@ -303,13 +309,32 @@ interface TabRun {
    * Safe mode stopped the last run; `sql` is exactly what would run.
    * `explain`: it was a timed plan of a write (⌘E, Run with timings).
    */
-  held: { sql: string; hold: SafetyHold; tableKey: string | null; explain?: boolean } | null;
+  held: {
+    sql: string;
+    hold: SafetyHold;
+    tableKey: string | null;
+    explain?: boolean;
+    /** A statement of a run of several: confirmed, it joins that run's list. */
+    statement?: { at: number | null };
+  } | null;
   /** ⌘E's plan of `sql`, shown in place of the results until the next run. */
   plan?: { plan: QueryPlan; sql: string; elapsedMs: number } | null;
   /** The running query's rows are arriving; `result` holds them so far. */
   streaming: boolean;
   /** Counts runs (not appended pages): a new one scrolls the grid to the top. */
   runNo?: number;
+  /**
+   * A run of several statements (Run All, or a selection of several): each
+   * one's result, in order. The fields above show `statements[statementAt]`.
+   */
+  statements?: StatementResult[] | null;
+  statementAt?: number;
+}
+
+/** The statement a tab shows, to keep while it shows another. */
+function shownStatement(run: TabRun): StatementResult {
+  const { result, tableKey, paged, ranSql, errorMark, runNo } = run;
+  return { result, tableKey, hasMore: run.hasMore || !!run.cut, paged, ranSql, errorMark, runNo };
 }
 
 const IDLE_RUN: TabRun = {
@@ -1977,6 +2002,9 @@ export function Workspace({
       appending: !!paging?.append,
       runNo: paging?.append ? prev.runNo : (prev.runNo ?? 0) + 1,
       errorMark: paging?.append ? prev.errorMark : null,
+      cut: false,
+      // A run of its own ends the last run's statement list.
+      ...(part || paging?.append ? {} : { statements: null, statementAt: undefined }),
     }));
     setNotice(null);
     if (remember && !confirmed) {
@@ -2043,7 +2071,7 @@ export function Workspace({
       if (res.hold) {
         // Nothing ran: keep the last results (faded) under the bar.
         patchRun(tabId, {
-          held: { sql: text, hold: res.hold, tableKey: tableKey ?? null },
+          held: { sql: text, hold: res.hold, tableKey: tableKey ?? null, statement: part ?? undefined },
           startedAt: null,
           outcome: null,
           elapsedMs: null,
@@ -2107,7 +2135,13 @@ export function Workspace({
           patch.errorMark = { ...token, suggestion: suggestName(res.error, res.sqlstate ?? null, text) };
           if (tabId === activeTabIdRef.current) requestAnimationFrame(() => sqlEditorRef.current?.jumpTo(at));
         }
-        patchRun(tabId, patch);
+        if (part) {
+          // A statement of a run of several joins its list, and shows.
+          patchRun(tabId, (prev) => {
+            const statements = [...(prev.statements ?? []), shownStatement({ ...prev, ...patch })];
+            return { ...patch, statements, statementAt: statements.length - 1 };
+          });
+        } else patchRun(tabId, patch);
       }
     } catch (e) {
       outcome = "error";
@@ -2141,10 +2175,13 @@ export function Workspace({
    * Each of `ranges` (statements of `text`) in turn on the tab's session, as
    * ⌘↵ on each would (a server runs one statement per query, so the whole
    * text can't go as one). Stops at the first that fails, is cancelled or is
-   * held by safe mode; the results show the last that ran. `at` is where
-   * `text` starts in the editor, so an error marks its statement.
+   * held by safe mode. Each keeps its result, listed beside the grid, and the
+   * results show the last that ran. `at` is where `text` starts in the
+   * editor, so an error marks its statement.
    */
   const runStatements = async (text: string, ranges: CharRange[], at: number | null, tabId: typeof activeTabId) => {
+    if (runsRef.current[tabId]?.startedAt != null) return "skipped";
+    patchRun(tabId, { statements: [], statementAt: undefined });
     let end: RunEnd = "skipped";
     for (const range of ranges) {
       nextStatement.current = { at: at === null ? null : at + range.start };
@@ -2192,6 +2229,22 @@ export function Workspace({
       });
     }
   };
+
+  /**
+   * Shows statement `index` of the tab's last run of several. The one shown
+   * until now keeps what it has (rows Load more added). Only the run's last
+   * statement still has its cursor, so only it can load more.
+   */
+  const showStatement = (tabId: typeof activeTabId, index: number) =>
+    patchRun(tabId, (prev) => {
+      const list = prev.statements;
+      if (!list?.[index] || prev.startedAt != null || index === prev.statementAt) return {};
+      const statements = list.slice();
+      statements[prev.statementAt ?? list.length - 1] = shownStatement(prev);
+      const next = statements[index];
+      const last = index === statements.length - 1;
+      return { ...next, hasMore: last && next.hasMore, cut: !last && next.hasMore, statements, statementAt: index };
+    });
 
   /** Run All Statements: every statement of the editor. */
   const runAll = async () => {
@@ -2292,7 +2345,10 @@ export function Workspace({
   const confirmHeld = () => {
     if (!held || held.hold.action !== "confirm") return;
     if (held.explain) void onExplain(true, held.sql, true);
-    else void onRun(held.sql, true, held.tableKey ?? undefined, activeTabId, true);
+    else {
+      if (held.statement) nextStatement.current = held.statement;
+      void onRun(held.sql, true, held.tableKey ?? undefined, activeTabId, true);
+    }
     sqlEditorRef.current?.focus();
   };
   dropHeldRef.current = () => {
@@ -3133,6 +3189,8 @@ export function Workspace({
   // results header on a query tab, at the SQL line's end on a table tab.
   // ⌘E's plan shows in place of the results on a query tab.
   const shownPlan = !isTableTab && resultsView !== "structure" ? (activeRun.plan ?? null) : null;
+  // A plan stands in for the results, so the statements they came from go too.
+  const statementList = !isTableTab && !shownPlan && (activeRun.statements?.length ?? 0) > 1 ? activeRun.statements! : null;
   const runningMeta = (
               <span data-testid="card-meta" className="card-meta running" data-state="running">
                 <span className="spinner" aria-hidden />
@@ -4189,7 +4247,7 @@ export function Workspace({
                   >
                     {isTableTab && activeTable?.rows != null && activeRun.hasMore && !activeTab?.filter?.trim()
                       ? `${result.row_count.toLocaleString()} of ≈${activeTable.rows.toLocaleString()}`
-                      : !isTableTab && activeRun.hasMore
+                      : !isTableTab && (activeRun.hasMore || activeRun.cut)
                         ? `${result.row_count.toLocaleString()}+ rows`
                         : `${result.row_count.toLocaleString()} ${result.row_count === 1 ? "row" : "rows"}`}
                   </b>
@@ -4258,108 +4316,121 @@ export function Workspace({
               onCancel={dropHeldEdit}
             />
           )}
-          {resultsView === "structure" && activeTable ? (
-            <TableStructure
-              key={activeTable.key}
-              table={activeTable}
-              schemas={schemaTree}
-              onOpenTable={openTableByKey}
-              loadIndexes={loadIndexes}
-            />
-          ) : held?.hold.action === "refuse" ? (
-            <SafetyRefusal
-              hold={held.hold}
-              onChangeMode={() => openShieldMenuRef.current()}
-            />
-          ) : renderError ? (
-            <div className="results-error">{renderError}</div>
-          ) : shownPlan ? (
-            <PlanView key={`${activeTabId}:${shownPlan.sql}:${shownPlan.plan.timed}`} plan={shownPlan.plan} />
-          ) : result?.error && !result.cancelled && !isTableTab ? (
-            <QueryErrorView
-              message={result.error}
-              sqlstate={result.sqlstate ?? null}
-              sql={activeRun.ranSql ?? null}
-              position={result.error_position ?? null}
-              suggestion={activeRun.errorMark?.suggestion ?? null}
-              onReplace={applySuggestion}
-              onReport={() => reportIssue(true)}
-            />
-          ) : (
-            <RenderErrorBoundary
-              fallback={(err) => (
-                <div className="results-error">
-                  {err.message || String(err)}
-                </div>
-              )}
-            >
-              <ResultsGrid
-                result={shownResult}
-                editing={rowEdits.editing}
-                columnWidths={columnWidths}
-                onColumnWidthsChange={setColumnWidths}
-                keyColumns={keyColumns}
-                columnComments={commentsByColumn}
-                sort={isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? [])}
-                sortMode={isTableTab ? "server" : "client"}
-                onSort={sortBy}
-                onSortColumn={sortColumn}
-                onHideColumn={isTableTab ? hideColumn : undefined}
-                hiddenGrips={activeGrips}
-                onShowColumn={showColumn}
-                onOpenAsTable={!isTableTab && resultTable ? openResultAsTable : undefined}
-                onSelectionStats={isTableTab ? setSelStats : undefined}
-                onFilter={isTableTab ? gridFilter : undefined}
-                onTypeKey={isTableTab ? typeToFilter : undefined}
-                find={!isTableTab && find?.tabId === activeTabId ? find : null}
-                onFindCount={setFindCount}
-                commandState={commandState}
-                onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
-                onStructure={activeTable ? () => setActiveView("structure") : undefined}
-                markedColumns={markedSet}
-                hiddenColumns={hiddenSet}
-                onMarkColumn={markTable ? markColumn : undefined}
-                tableName={resultTable?.name}
-                quickLookLinks={quickLookLinks}
-                quickLookAsk={quickLookAsk}
-                onQuickLook={setQlView}
-                onCellSelect={onCellSelect}
-                onNearEnd={activeRun.hasMore ? onNearEnd : undefined}
-                scrollKey={`${activeTabId}:${activeRun.runNo ?? 0}`}
-                emptyNote={
-                  isTableTab && activeTab?.filter?.trim() ? (
-                    <>
-                      No rows match.{" "}
-                      <button
-                        type="button"
-                        className="rg-empty-link"
-                        data-clear-filters
-                        onClick={() => activeTab.kind === "table" && setChips(activeTab, [], false)}
-                      >
-                        Clear filters
-                      </button>
-                      {/* No paging here, so a new row has its place under the note. */}
-                      {rowEdits.rowsEditable && (
-                        <button
-                          type="button"
-                          className="rg-add-row"
-                          data-add-row
-                          title={commandTip("insert-row", "Add a row")}
-                          onClick={() => runCommand("insert-row")}
-                        >
-                          <PlusIcon size={11} />
-                          Add row
-                        </button>
-                      )}
-                    </>
-                  ) : busy ? undefined : (
-                    // A finished run with no rows says so, so it doesn't read as still loading.
-                    <span data-empty-rows>No records</span>
-                  )
-                }
+          {/* After a run of several statements, the list of them sits beside the grid. */}
+          <div className="results-body" data-statements={statementList ? "" : undefined}>
+            {statementList && (
+              <StatementList
+                statements={statementList}
+                at={activeRun.statementAt ?? statementList.length - 1}
+                disabled={busy}
+                onPick={(index) => showStatement(activeTabId, index)}
               />
-            </RenderErrorBoundary>
-          )}
+            )}
+            <div className="results-main">
+              {resultsView === "structure" && activeTable ? (
+                <TableStructure
+                  key={activeTable.key}
+                  table={activeTable}
+                  schemas={schemaTree}
+                  onOpenTable={openTableByKey}
+                  loadIndexes={loadIndexes}
+                />
+              ) : held?.hold.action === "refuse" ? (
+                <SafetyRefusal
+                  hold={held.hold}
+                  onChangeMode={() => openShieldMenuRef.current()}
+                />
+              ) : renderError ? (
+                <div className="results-error">{renderError}</div>
+              ) : shownPlan ? (
+                <PlanView key={`${activeTabId}:${shownPlan.sql}:${shownPlan.plan.timed}`} plan={shownPlan.plan} />
+              ) : result?.error && !result.cancelled && !isTableTab ? (
+                <QueryErrorView
+                  message={result.error}
+                  sqlstate={result.sqlstate ?? null}
+                  sql={activeRun.ranSql ?? null}
+                  position={result.error_position ?? null}
+                  suggestion={activeRun.errorMark?.suggestion ?? null}
+                  onReplace={applySuggestion}
+                  onReport={() => reportIssue(true)}
+                />
+              ) : (
+                <RenderErrorBoundary
+                  fallback={(err) => (
+                    <div className="results-error">
+                      {err.message || String(err)}
+                    </div>
+                  )}
+                >
+                  <ResultsGrid
+                    result={shownResult}
+                    editing={rowEdits.editing}
+                    columnWidths={columnWidths}
+                    onColumnWidthsChange={setColumnWidths}
+                    keyColumns={keyColumns}
+                    columnComments={commentsByColumn}
+                    sort={isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? [])}
+                    sortMode={isTableTab ? "server" : "client"}
+                    onSort={sortBy}
+                    onSortColumn={sortColumn}
+                    onHideColumn={isTableTab ? hideColumn : undefined}
+                    hiddenGrips={activeGrips}
+                    onShowColumn={showColumn}
+                    onOpenAsTable={!isTableTab && resultTable ? openResultAsTable : undefined}
+                    onSelectionStats={isTableTab ? setSelStats : undefined}
+                    onFilter={isTableTab ? gridFilter : undefined}
+                    onTypeKey={isTableTab ? typeToFilter : undefined}
+                    find={!isTableTab && find?.tabId === activeTabId ? find : null}
+                    onFindCount={setFindCount}
+                    commandState={commandState}
+                    onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
+                    onStructure={activeTable ? () => setActiveView("structure") : undefined}
+                    markedColumns={markedSet}
+                    hiddenColumns={hiddenSet}
+                    onMarkColumn={markTable ? markColumn : undefined}
+                    tableName={resultTable?.name}
+                    quickLookLinks={quickLookLinks}
+                    quickLookAsk={quickLookAsk}
+                    onQuickLook={setQlView}
+                    onCellSelect={onCellSelect}
+                    onNearEnd={activeRun.hasMore ? onNearEnd : undefined}
+                    scrollKey={`${activeTabId}:${activeRun.runNo ?? 0}`}
+                    emptyNote={
+                      isTableTab && activeTab?.filter?.trim() ? (
+                        <>
+                          No rows match.{" "}
+                          <button
+                            type="button"
+                            className="rg-empty-link"
+                            data-clear-filters
+                            onClick={() => activeTab.kind === "table" && setChips(activeTab, [], false)}
+                          >
+                            Clear filters
+                          </button>
+                          {/* No paging here, so a new row has its place under the note. */}
+                          {rowEdits.rowsEditable && (
+                            <button
+                              type="button"
+                              className="rg-add-row"
+                              data-add-row
+                              title={commandTip("insert-row", "Add a row")}
+                              onClick={() => runCommand("insert-row")}
+                            >
+                              <PlusIcon size={11} />
+                              Add row
+                            </button>
+                          )}
+                        </>
+                      ) : busy ? undefined : (
+                        // A finished run with no rows says so, so it doesn't read as still loading.
+                        <span data-empty-rows>No records</span>
+                      )
+                    }
+                  />
+                </RenderErrorBoundary>
+              )}
+            </div>
+          </div>
           </>
           )}
           {/* The edits bar sits at the grid's foot, where the strip would; it prints its own keys. */}

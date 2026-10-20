@@ -1585,7 +1585,14 @@ function ResultsGridView({
   }
 
   if (columns.length === 0 && rowCount === 0) {
-    return <div className="results-empty">Query finished with no result set</div>;
+    const changed = result.affected_rows ?? 0;
+    return (
+      <div className="results-empty">
+        {changed > 0
+          ? `${changed.toLocaleString()} ${changed === 1 ? "row" : "rows"} changed`
+          : "Query finished with no result set"}
+      </div>
+    );
   }
 
   return (

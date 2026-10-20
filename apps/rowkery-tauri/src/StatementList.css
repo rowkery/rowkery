@@ -1,0 +1,105 @@
+/* ---------- Statement list (reports#7) ----------
+   Beside the grid after Run All or a selection of several statements: one
+   row per statement, the shown one on a soft fill. */
+
+.results-body {
+  display: contents;
+}
+
+.results-body[data-statements] {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+}
+
+.results-main {
+  display: contents;
+}
+
+.results-body[data-statements] > .results-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.statement-list {
+  flex: 0 0 clamp(160px, 22%, 240px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.statement-list button {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  user-select: none;
+  cursor: default;
+  transition:
+    background-color 120ms var(--ease-out),
+    transform 90ms var(--ease-out);
+}
+
+.statement-list button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.statement-list button:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.statement-list button[aria-selected="true"] {
+  background: var(--hover);
+}
+
+.statement-list button:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: -2px;
+}
+
+.statement-list button:disabled {
+  opacity: 0.6;
+}
+
+.statement-sql {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px var(--mono);
+  color: var(--text);
+}
+
+.statement-no {
+  margin-right: 6px;
+  color: var(--dim);
+}
+
+.statement-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.statement-meta span {
+  color: var(--dim);
+}
+
+.statement-list button[data-state="error"] .statement-meta {
+  color: var(--del);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statement-list button {
+    transition: none;
+  }
+}

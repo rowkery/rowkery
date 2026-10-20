@@ -41,6 +41,8 @@
       sqlstate: res.sqlstate ?? null,
       error_position: res.error_position ?? null,
       hold: null,
+      paged: res.paged ?? false,
+      more: res.more ?? false,
     });
     return out;
   };
