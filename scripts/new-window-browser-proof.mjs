@@ -43,20 +43,6 @@ function stubTauri(opts) {
         case "open_sample":
           if (!window.__CONNS__.some((c) => c.id === "sample")) window.__CONNS__ = [sample, ...window.__CONNS__];
           return sample;
-        case "save_connection":
-          window.__CONNS__ = [...window.__CONNS__.filter((c) => c.id !== args.connection.id), args.connection];
-          return null;
-        case "choose_file":
-          return "/Users/me/data/shop.db";
-        case "read_clipboard_text":
-          return "postgres://app@db.internal:5433/wallet";
-        case "probe_local_servers":
-          return [{ port: 5432, user: "alice" }, { port: 54329, user: "alice" }];
-        case "probe_connection":
-          if (args.connection.port === 5432) return { ok: false, message: 'password authentication failed for user "alice"', elapsed_ms: 0 };
-          return { ok: true, message: "PostgreSQL 16.4", elapsed_ms: 3 };
-        case "explain_connect_error":
-          return { class: "auth", cause: `The server rejected the password for ${args.username}.`, field: "password" };
         case "run_query":
           return { columns: [{ name: "n", type_name: "int4" }], rows: [[{ Int: 1 }]], row_count: 1, elapsed_ms: 1, error: null, cancelled: false };
         default:
@@ -99,7 +85,10 @@ await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 await page.click('[data-testid="win-add"]');
 await page.waitForSelector(`${ws} [data-empty-window]`);
 check((await pills()) === 2 && (await shownEmpty()), "+ went back to the empty window instead of adding a second");
+await page.click('[data-testid="win-tab"]:not([data-empty])');
+await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 await page.keyboard.press("Control+t");
+await page.waitForSelector(`${ws} [data-empty-window]`);
 check((await pills()) === 2 && (await shownEmpty()), "Ctrl+T did the same");
 
 // 3 · From the Agents page, + leaves the page for the window (#4).
@@ -117,7 +106,7 @@ await page.screenshot({ path: `${OUT}/2-after-plus.png` });
 await page.keyboard.press("Control+Comma");
 await page.waitForSelector('[data-testid="settings-page"]');
 await page.keyboard.press("Control+t");
-await page.waitForFunction(() => !document.querySelector('[data-testid="settings-page"]'), null, { timeout: 2000 }).catch(() => {});
+await page.waitForFunction(() => !document.querySelector('[data-testid="settings-page"]'));
 check(!(await page.isVisible('[data-testid="settings-page"]').catch(() => false)) && (await shownEmpty()), "Ctrl+T on Settings showed the empty window");
 
 await browser.close();
