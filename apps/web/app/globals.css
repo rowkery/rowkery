@@ -1,855 +1,243 @@
-/* ── Tokens ─────────────────────────────────────────────────────
-   Dark only (2026-10-14): one black sheet, white type, grey
-   copy, the app's own screens in rounded panels; the penguin is the only picture.
-   The values are the approved page's (docs: apps/web/README.md). */
+/* rowkery.com, 2026-10-20 redesign (the omlx.ai / deno.com mock): one dark sheet with no side
+   rails, roomy bands, Gabarito headings over IBM Plex, and the penguin doing small jobs around
+   the page. Dark only. Each section's own rules live beside it (components/sections/*.css);
+   this file holds the tokens, the shared pieces and the top of the page.
+
+   Every looping animation moves only transform or opacity, so the compositor plays it and a
+   page sitting still never lays out or paints (scripts/scroll-profile.mjs checks). Distances
+   that depend on a box's width use container units (cqw) rather than a size set from script. */
 :root {
   --bg: #0a0a0a;
-  --card: #161616;
-  --card2: #1e1e1e;
+  --card: #141414;
+  --card2: #1c1c1d;
+  --line: #232427;
+  --line2: #34363a;
   --fg: #ffffff;
-  --grey: #8b9097;
+  --grey: #9a9fa6;
   --grey2: #5f656c;
+  --acc: #ff8a3d;
+  --onacc: #0a0a0a;
+  --ink: #ffffff;
+  --inkfg: #0a0a0a;
   --ok: #4cc38a;
   --no: #ff6b6b;
-  --orange: #ff8a3d;
+  --wash: rgba(255, 255, 255, 0.06);
   --sans: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: var(--font-mono), ui-monospace, Menlo, monospace;
+  --display: var(--font-display), var(--sans);
+  --hand: var(--font-hand), "Bradley Hand", cursive;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --gutter: 56px;
   color-scheme: dark;
 }
 
-/* ── Base ── */
-html, body { margin: 0; background: var(--bg); color: var(--fg); }
-body {
-  font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  overflow-x: hidden;
-}
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
 a { color: inherit; }
-::selection { background: rgba(255, 255, 255, 0.22); }
-:focus-visible { outline: 2px solid #fff; outline-offset: 3px; border-radius: 999px; }
-img { display: block; max-width: 100%; height: auto; }
 code, kbd, pre { font-family: var(--mono); }
-.wrap { max-width: 1232px; margin: 0 auto; padding: 0 24px; }
-/* Off screen until a keyboard reaches it. */
-.skip { position: absolute; left: -9999px; top: 12px; z-index: 30; }
+p { margin: 0; }
+:focus-visible { outline: 2px solid var(--acc); outline-offset: 3px; border-radius: 8px; }
+::selection { background: var(--acc); color: var(--onacc); }
+.skip { position: absolute; left: -9999px; top: 12px; z-index: 40; }
 .skip:focus { left: 16px; }
 
-/* ── Nav: the mark home, the sections, the two ways in ── */
-.nav {
-  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20;
-  background: rgba(10, 10, 10, 0.82);
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-}
-.nav-in { display: flex; align-items: center; gap: 28px; height: 64px; }
-.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-weight: 500; font-size: 15px; }
-.brand svg { width: 20px; height: 21px; color: #fff; }
-.links { display: flex; gap: 22px; font-size: 14px; color: #c9cdd2; }
-.links a { text-decoration: none; transition: color 0.15s; }
-.links a:hover { color: #fff; }
-.nav .btns { margin-left: auto; display: flex; gap: 8px; }
-@media (max-width: 760px) {
-  .links { display: none; }
-  .nav .btns .grey { display: none; }
-}
+/* ── The sheet: one 1200 px column of bands, with room between them instead of rules ── */
+.sheet { max-width: 1200px; margin: 0 auto; }
+.band { position: relative; padding: 120px var(--gutter); }
 
-/* ── Buttons: pills, white for Download, grey for the rest ── */
+/* ── Type ── */
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+.h1, .h2, h3, .brand, .stat b, blockquote { font-family: var(--display); }
+.h1 { font-size: clamp(40px, 5vw, 70px); line-height: 1; font-weight: 800; letter-spacing: -0.035em; }
+.h2 { font-size: clamp(32px, 4.1vw, 52px); line-height: 1.06; font-weight: 800; letter-spacing: -0.035em; margin-top: 18px; }
+h3 { font-size: 18px; line-height: 1.3; font-weight: 700; letter-spacing: -0.015em; }
+.ln { display: block; }
+.em { color: var(--acc); }
+.lead { max-width: 60ch; margin-top: 18px; font-size: 18px; color: var(--grey); }
+.eyebrow { display: inline-flex; align-items: center; gap: 10px; font: 500 13px/1 var(--mono); color: var(--grey); }
+.eyebrow i { width: 7px; height: 7px; background: var(--acc); border-radius: 2px; }
+.head { display: grid; margin-bottom: 64px; }
+/* A heading with a penguin scene to its right. */
+.art-head { grid-template-columns: minmax(0, 1fr) auto; align-items: end; column-gap: 40px; }
+.art-head > div:first-child { display: grid; }
+
+/* ── Buttons: ink is the one to press, soft is everything else ── */
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  height: 40px; padding: 0 18px; border-radius: 999px;
-  font-family: inherit; font-weight: 500; font-size: 14px; line-height: 1;
-  text-decoration: none; white-space: nowrap; cursor: pointer; border: 0;
-  transition: background 0.15s, transform 0.15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 20px;
+  border-radius: 999px; border: 0; font: 500 15px/1 var(--sans); text-decoration: none; white-space: nowrap; cursor: pointer;
+  transition: background 0.15s, opacity 0.15s, transform 0.15s;
 }
-.btn.white { background: #fff; color: #0a0a0a; }
-.btn.white:hover { background: #e6e6e6; }
-.btn.grey { background: #1f1f1f; color: #fff; }
-.btn.grey:hover { background: #2a2a2a; }
-.btn.big { height: 46px; padding: 0 22px; font-size: 15px; }
+.btn:active { transform: scale(0.97); }
+.btn.ink { background: var(--ink); color: var(--inkfg); }
+.btn.ink:hover { opacity: 0.9; }
+.btn.soft { background: var(--card2); color: var(--fg); }
+.btn.soft:hover { background: var(--line2); }
+.btn.sm { height: 34px; padding: 0 14px; font-size: 13.5px; }
 .btn svg { flex: none; }
+.ctas { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+.card { background: var(--card); border-radius: 16px; }
+kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 6px; background: var(--card2); color: var(--fg); font: 500 12px var(--mono); box-shadow: inset 0 -1px 0 var(--line2); }
 
-/* ── Hero: rises in once, the window last ── */
-.hero { text-align: center; padding: 64px 0 0; }
-.pill {
-  display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 14px;
-  border-radius: 999px; background: #161616; font-size: 13px; color: #c9cdd2;
-  animation: up 0.9s var(--ease) both;
-}
-.pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
-.h1 {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 0.22em;
-  margin: 26px 0 0; font-size: clamp(40px, 5.2vw, 66px); font-weight: 500; letter-spacing: -0.025em; line-height: 1.08;
-  animation: up 0.9s var(--ease) 0.08s both;
-}
-.h1 svg { width: 0.92em; height: 0.98em; color: #fff; translate: 0 0.04em; }
-.sub {
-  max-width: 58ch; margin: 20px auto 0; font-size: 18px; line-height: 1.55; color: var(--grey);
-  animation: up 0.9s var(--ease) 0.16s both;
-}
-.ctas {
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 28px;
-  animation: up 0.9s var(--ease) 0.24s both;
-}
-@keyframes up { from { opacity: 0; translate: 0 14px; } }
+/* A block of code with a Copy button in its corner. */
+.code-box { position: relative; }
+.code { background: var(--bg); border-radius: 12px; padding: 14px 76px 14px 16px; font: 400 13px/1.65 var(--mono); overflow-x: auto; white-space: pre; }
+.code .c { color: var(--grey); }
+.code .p { color: var(--acc); user-select: none; }
+.copy { position: absolute; top: 8px; right: 8px; height: 26px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--card2); color: var(--fg); font: 500 12px var(--sans); cursor: pointer; }
+.copy:hover { background: var(--line2); }
 
-/* The name arrives as Rookery and turns into Rowkery (Hero.tsx), once, on load: the second o
-   drops out of the w's slot (0.774em wide; an o is 0.537em in IBM Plex Sans 500), "kery" slides
-   0.237em right to make room, the w drops in orange and fades to white, and the penguin hops.
-   Only transform and opacity move, so nothing lays out or repaints as it plays. The resting
-   styles are the end state, so Reduce Motion (every animation off) shows Rowkery at once. */
-.h1 .name { display: inline-flex; align-items: baseline; }
-.swap { display: inline-grid; grid-template-columns: minmax(0, 1fr); width: 0.774em; }
-.swap span { grid-area: 1 / 1; justify-self: center; }
-.swap .from { justify-self: start; opacity: 0; animation: drop-out 0.3s ease-in 1.3s both; }
-.swap .to { animation: drop-in 0.6s var(--ease) 1.56s both; }
-.swap .lit { color: var(--orange); opacity: 0; animation: drop-in-lit 0.6s var(--ease) 1.56s both, unlit 1.4s ease 2.3s forwards; }
-.h1 .rest { animation: make-room 0.45s var(--ease) 1.5s both; }
-.h1 svg.hop { animation: hop 0.6s var(--ease) 1.55s both; }
-@keyframes make-room { from { translate: -0.237em 0; } }
-@keyframes drop-out { from { opacity: 1; translate: 0 0; } to { opacity: 0; translate: 0 0.35em; } }
-@keyframes drop-in { from { opacity: 0; translate: 0 -0.45em; } }
-@keyframes drop-in-lit { from { opacity: 0; translate: 0 -0.45em; } to { opacity: 1; translate: 0 0; } }
-@keyframes unlit { from { opacity: 1; } to { opacity: 0; } }
-@keyframes hop { 0% { translate: 0 0.04em; } 40% { translate: 0 -0.16em; } 100% { translate: 0 0.04em; } }
-.origin { margin: 10px 0 0; font-size: 14px; color: var(--grey2); animation: up 0.9s var(--ease) 2s both; }
+/* The little app windows' shared moves: a blinking caret, rows arriving, a nudge on Commit. */
+.caret { display: inline-block; width: 7px; height: 1.1em; background: var(--fg); vertical-align: -0.2em; animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+@keyframes rowin { from { opacity: 0; transform: translateY(6px); } }
+@keyframes nudge { 0%, 70%, 100% { transform: none; } 80% { transform: scale(1.05); } 90% { transform: none; } }
 
-/* On your own / With your AI agent: two buttons on one track, the white thumb sliding under the pressed one. */
-.modes {
-  position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; margin: 48px auto 0; padding: 4px;
-  border-radius: 999px; background: #161616; animation: up 1.1s var(--ease) 0.3s both;
-}
-.modes button {
-  position: relative; z-index: 1; height: 36px; padding: 0 18px; border: 0; border-radius: 999px; background: none;
-  font: inherit; font-size: 14px; font-weight: 500; color: #c9cdd2; cursor: pointer; white-space: nowrap; transition: color 0.25s;
-}
-.modes button[aria-pressed="true"] { color: #0a0a0a; }
-.modes .thumb { position: absolute; left: 4px; top: 4px; bottom: 4px; width: calc(50% - 4px); border-radius: 999px; background: #fff; transition: translate 0.45s var(--ease); }
-.modes[data-mode="own"] .thumb { translate: 100% 0; }
-.toast .hd kbd { font-size: 11px; color: #fff; background: #2a2a2a; border-radius: 5px; padding: 1px 6px; }
-@media (max-width: 420px) {
-  .modes button { padding: 0 12px; font-size: 13px; }
-}
-.shot {
-  position: relative; margin: 20px auto 0; border-radius: 24px; overflow: hidden; background: #111;
-  box-shadow: 0 60px 140px -60px rgba(0, 0, 0, 1);
-  animation: up 1.1s var(--ease) 0.32s both;
-}
-.shot img { width: 100%; }
+/* ── The penguin: the mark, one colour, with an eyelid that blinks ── */
+.pg { display: block; overflow: visible; color: var(--fg); }
+.pg .lid { transform-box: fill-box; transform-origin: 50% 0; transform: scaleY(0); fill: currentColor; }
+a:hover .pg .lid, .pg:hover .lid { animation: blink 0.18s cubic-bezier(0.5, 0, 0.5, 1); }
+@keyframes blink { 50% { transform: scaleY(1); } }
+@keyframes rise { from { opacity: 0; transform: translateY(18px); } }
+@keyframes hop { 0%, 86%, 100% { transform: translateY(0); } 91% { transform: translateY(-12px); } 95% { transform: translateY(0); } 97% { transform: translateY(-4px); } }
+@keyframes hop1 { 40% { transform: translateY(-18px); } }
+@keyframes tick { to { transform: translateX(-50%); } }
 
-/* Three agent calls take turns over the window, 4 s apart on a 12 s loop. */
-.toasts { position: absolute; right: 28px; bottom: 28px; width: min(360px, calc(100% - 56px)); height: 74px; pointer-events: none; }
-.toast {
-  position: absolute; right: 0; bottom: 0; width: 100%; padding: 11px 14px 12px; border-radius: 12px; background: #1b1b1b;
-  box-shadow: 0 20px 50px -20px rgba(0, 0, 0, 1), 0 0 0 1px rgba(255, 255, 255, 0.06);
-  opacity: 0; animation: toast 12s linear var(--d) infinite both; text-align: left;
-}
-.toast .hd { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--grey); margin-bottom: 5px; }
-.toast .hd b { color: #fff; font-weight: 500; }
-.toast .hd .env { font-family: var(--mono); font-size: 10.5px; color: #ff8a8a; background: rgba(255, 92, 92, 0.14); border-radius: 4px; padding: 1px 5px; }
-.toast code { display: block; font-size: 12px; line-height: 1.4; color: #c9cdd2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.toast .res { margin-top: 6px; font-size: 12.5px; font-weight: 500; }
-.toast .res.ok { color: var(--ok); }
-.toast .res.no { color: var(--no); }
-@keyframes toast {
-  0% { opacity: 0; translate: 0 16px; }
-  4% { opacity: 1; translate: 0 0; }
-  28% { opacity: 1; translate: 0 0; }
-  33% { opacity: 0; translate: 0 -10px; }
-  100% { opacity: 0; translate: 0 -10px; }
-}
-@media (max-width: 760px) {
-  .hero { padding-top: 44px; }
-  .shot { margin-top: 16px; border-radius: 14px; }
-  .modes { margin-top: 36px; }
-  .toasts { right: 10px; bottom: 10px; width: min(250px, calc(100% - 20px)); height: 62px; }
-  .toast { padding: 8px 10px 9px; }
-  .toast code { font-size: 10.5px; }
-  .toast .hd { font-size: 11px; }
-  .toast .res { font-size: 11px; }
-}
+/* A penguin waddling to the end of its walkway and back: the walk, the turn and the waddle are
+   its own translate, scale and rotate. In Chromium an animation inside another moving box
+   repaints every frame; three properties on one box stay on the compositor. */
+.walkway { position: relative; height: 0; container-type: inline-size; }
+.walker { position: absolute; bottom: -2px; left: 0; width: 30px; height: 31px; z-index: 3; pointer-events: none; transform-origin: 50% 100%; animation: walk 46s linear infinite, turn 46s linear infinite, waddle 0.38s ease-in-out infinite alternate; }
+.walker .pg, .marcher .pg { width: 100%; height: 100%; }
+@keyframes walk { 50% { translate: calc(100cqw - 30px); } }
+@keyframes turn { 0%, 49.99% { scale: 1; } 50%, 100% { scale: -1 1; } }
+@keyframes waddle { from { rotate: -6deg; } to { rotate: 6deg; } }
 
-/* ── Sections and cards ── */
-.sec { padding: 140px 0 0; text-align: center; }
-.h2 { margin: 0; font-size: clamp(30px, 3.3vw, 42px); font-weight: 500; letter-spacing: -0.02em; line-height: 1.15; text-wrap: balance; }
-/* A long heading breaks where its .ln parts meet on wider screens (2026-10-16: lines, not
-   commas, so the eye moves less); on a phone it wraps as it fits. */
-@media (min-width: 861px) { .h2 .ln { display: block; } }
-.lead { max-width: 60ch; margin: 16px auto 0; font-size: 17px; line-height: 1.55; color: var(--grey); text-wrap: balance; }
-.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-top: 52px; text-align: left; }
-.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.card {
-  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 380px;
-  padding: 36px; border-radius: 24px; background: var(--card); overflow: hidden;
+/* ── Nav ── */
+.nav { position: sticky; top: 0; z-index: 30; background: var(--bg); }
+.nav-in { max-width: 1200px; margin: 0 auto; height: 64px; display: flex; align-items: center; gap: 28px; padding-inline: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right)); }
+.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 17px; font-weight: 700; letter-spacing: -0.015em; }
+.brand .pg { width: 22px; height: 23px; }
+.ver { font: 500 12px/1 var(--mono); color: var(--grey); background: var(--card); padding: 6px 9px; border-radius: 999px; text-decoration: none; }
+.ver:hover { color: var(--fg); }
+.links { display: flex; gap: 22px; font-size: 14px; color: var(--grey); }
+.links a { text-decoration: none; transition: color 0.15s; }
+.links a:hover { color: var(--fg); }
+.nav .end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* ── Hero: the line on the left, connecting your agent on the right ── */
+.hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 56px; align-items: end; padding-top: 72px; padding-bottom: 56px; }
+.badge { display: inline-flex; align-items: center; gap: 10px; height: 32px; padding: 0 6px 0 12px; border-radius: 999px; background: var(--card); font-size: 13px; color: var(--grey); text-decoration: none; margin-bottom: 30px; animation: rise 0.8s var(--ease) both; }
+.badge b { font-weight: 500; color: var(--fg); }
+.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.badge .go { background: var(--card2); color: var(--fg); padding: 4px 9px; border-radius: 999px; }
+.hero .h1 .ln { animation: rise 0.9s var(--ease) both; }
+.hero .h1 .ln:nth-child(2) { animation-delay: 0.07s; }
+.hero .h1 .ln:nth-child(3) { animation-delay: 0.14s; }
+.hero .lead { animation: rise 0.9s var(--ease) 0.2s both; }
+.hero .ctas { animation: rise 0.9s var(--ease) 0.26s both; }
+.trust { margin-top: 22px; font: 400 13px/1.4 var(--mono); color: var(--grey); animation: rise 0.9s var(--ease) 0.32s both; }
+
+/* The connect card, with the penguin peeking over its edge and saying something now and then. */
+.connect { position: relative; margin-top: 70px; animation: rise 1s var(--ease) 0.35s both; }
+.connect .peek { position: absolute; right: 34px; top: -56px; width: 70px; height: 75px; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; border-radius: 12px; animation: peek 1.1s var(--ease) 1s both; }
+/* Each line has its own delay in one 26 s cycle (ConnectCard), and the penguin hops as each one
+   pops in: 0.88 of a 5.2 s hop is 4.58 s, so starting it 2.48 s in lands it at 2.1 s. */
+.connect .peek > span, .connect .peek .pg { display: block; width: 100%; height: 100%; }
+.connect .hops { animation: hop 5.2s var(--ease) -2.48s infinite; }
+@keyframes peek { from { transform: translateY(62px); } }
+.bubble {
+  position: absolute; right: 112px; top: -96px; z-index: 2; padding: 8px 14px 10px; border-radius: 14px 14px 4px 14px;
+  background: var(--ink); color: var(--inkfg); font: 600 20px/1.1 var(--hand); white-space: nowrap; pointer-events: none;
+  opacity: 0; transform-origin: 100% 100%; animation: say 26s var(--ease) infinite backwards;
 }
-.card.wide { grid-column: span 2; }
-.card h3 { margin: 0; font-size: 24px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.2; }
-.card p { margin: 10px 0 0; max-width: 42ch; font-size: 16px; line-height: 1.5; color: var(--grey); }
-/* A piece of an app screen, flush with the card's foot and fading out at its edges. */
-.frag { position: relative; flex: 1; min-height: 210px; margin: 28px -36px -36px; }
-.frag img {
-  position: absolute; left: 36px; top: 0; width: 112%; max-width: none; border-radius: 12px 0 0 0;
-  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%), linear-gradient(to right, #000 80%, transparent 100%);
-  -webkit-mask-composite: source-in;
-  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%), linear-gradient(to right, #000 80%, transparent 100%);
-  mask-composite: intersect;
+@keyframes say {
+  0% { opacity: 0; transform: scale(0.6) translateY(8px); }
+  1.7%, 19% { opacity: 1; transform: none; }
+  20%, 100% { opacity: 0; transform: none; }
 }
-.frag.fit img {
-  left: 36px; width: calc(100% - 72px); border-radius: 12px 12px 0 0;
-  -webkit-mask-image: linear-gradient(to bottom, #000 64%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 64%, transparent 100%);
-}
-/* Blocks rise in once as they come into view (Reveal.tsx); the page is .js only when that can run. */
-.reveal { transition: opacity 0.9s ease, translate 0.9s var(--ease); }
-.js .reveal:not(.in) { opacity: 0; translate: 0 24px; }
-.grid .reveal:nth-child(2n) { transition-delay: 0.1s; }
-@media (max-width: 860px) {
-  .sec { padding-top: 96px; }
-  .grid, .grid.three { grid-template-columns: minmax(0, 1fr); }
-  .card.wide { grid-column: span 1; }
-  .card { padding: 28px; min-height: 320px; }
-  .frag { margin: 24px -28px -28px; }
-  .frag img { left: 28px; }
-  .frag.fit img { left: 28px; width: calc(100% - 56px); }
+.connect .card { position: relative; z-index: 1; padding: 20px; }
+.connect h3 { font-size: 16px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.connect h3 span { font: 400 12.5px var(--mono); color: var(--grey); }
+.tabs { display: flex; gap: 4px; margin: 14px 0 12px; padding: 3px; background: var(--card2); border-radius: 999px; width: max-content; max-width: 100%; overflow-x: auto; }
+.tab { height: 30px; padding: 0 13px; border-radius: 999px; border: 0; background: transparent; color: var(--grey); font: 500 13px var(--sans); cursor: pointer; white-space: nowrap; }
+.tab[aria-selected="true"] { background: var(--bg); color: var(--fg); }
+.connect .code { font-size: 12px; min-height: 104px; }
+.connect-note { margin-top: 12px; font-size: 13.5px; color: var(--grey); }
+
+/* The ticker: what's in the app, scrolling, with a penguin walking along it. */
+.ticker { overflow: hidden; }
+.ticker-in { display: flex; width: max-content; animation: tick 46s linear infinite; }
+.ticker:hover .ticker-in { animation-play-state: paused; }
+.ticker span { display: inline-flex; align-items: center; gap: 14px; padding: 15px 0 15px 14px; font: 400 13.5px var(--mono); color: var(--grey); white-space: nowrap; }
+.ticker span::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--line2); }
+
+/* The app itself, tilting upright as it scrolls in, then the agent's limits as numbers. */
+.shot { padding: 0 var(--gutter); }
+.shot-frame { margin-top: 48px; border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); transform-origin: 50% 0; background: var(--card); }
+.shot-frame img { display: block; width: 100%; height: auto; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; margin-top: 64px; }
+.stat b { display: block; font-size: clamp(36px, 4vw, 52px); font-weight: 700; letter-spacing: -0.035em; line-height: 1; font-variant-numeric: tabular-nums; }
+.stat b small { font-size: 0.5em; letter-spacing: -0.01em; color: var(--grey); margin-left: 2px; }
+.stat span { display: block; margin-top: 10px; font-size: 14px; color: var(--grey); max-width: 22ch; }
+
+/* A penguin belly-sliding across the ice under the numbers. */
+.ice { position: relative; height: 72px; margin-top: 40px; border-bottom: 2px solid var(--line); overflow: hidden; container-type: inline-size; }
+.slider { position: absolute; left: 0; bottom: 0; display: flex; align-items: center; gap: 6px; animation: zoom 5.2s ease-in-out infinite; }
+.slider .lines { display: grid; gap: 6px; }
+.slider .lines i { display: block; height: 3px; border-radius: 2px; background: var(--grey2); }
+.slider .lines i:nth-child(1) { width: 40px; margin-left: 14px; }
+.slider .lines i:nth-child(2) { width: 54px; }
+.slider .lines i:nth-child(3) { width: 30px; margin-left: 24px; }
+.slider .pg { width: 66px; height: 68px; transform: rotate(90deg) translate(-6px, 0); }
+@keyframes zoom {
+  0% { transform: translateX(-180px); animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1); }
+  34% { transform: translateX(40cqw); animation-timing-function: linear; }
+  58% { transform: translateX(46cqw); animation-timing-function: cubic-bezier(0.6, 0, 0.9, 0.4); }
+  80%, 100% { transform: translateX(calc(100cqw + 40px)); }
 }
 
-/* The mascot card: the penguin, big, standing in the corner. */
-.card.mascot { min-height: 440px; justify-content: center; }
-.card.mascot h3 { font-size: clamp(28px, 3vw, 38px); }
-.card.mascot p { font-size: 17px; max-width: 38ch; }
-.card.mascot .pengu { position: absolute; right: -30px; bottom: -110px; width: 520px; height: 555px; color: #fff; pointer-events: none; }
-@media (max-width: 860px) {
-  .card.mascot { min-height: 520px; justify-content: flex-start; }
-  .card.mascot .pengu { right: -60px; bottom: -90px; width: 360px; height: 384px; }
-}
+/* ── The 404: the penguin Tilted, and the way home ── */
+.lost { min-height: 100svh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 16px; text-align: center; }
+.lost .pg { width: 140px; height: 144px; }
 
-/* ── The checkpoint (Checkpoint.tsx): calls ride the rail from the agent to Rowkery's
-   gate; reads pass on to the database and come back as rows, refusals shake and go back.
-   Four calls, 3 s apart on a 12 s loop; the gate's rings pulse as each one arrives.
-   Every loop here moves only transform and opacity, which the compositor plays on its own:
-   an animated left, width, background-position or border-colour would make the page lay out
-   or repaint on every frame, forever, and that main-thread work is what made scrolling stutter. ── */
-.stage { position: relative; flex: 1; min-height: 230px; margin: 28px -36px -36px; }
-.rail { position: absolute; left: 10%; right: 10%; top: 52%; height: 1px; background: linear-gradient(90deg, transparent, #3a3a3a 18%, #3a3a3a 82%, transparent); }
-/* The light running along the rail: a 140 px streak on a layer as wide as the rail, slid across it. */
-.flow { position: absolute; left: 10%; right: 10%; top: 52%; height: 1px; overflow: hidden; opacity: 0.8; }
-.flow::before {
-  content: ""; position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent 0, #fff 50%, transparent 100%) 0 0 / 140px 100% no-repeat;
-  animation: flow 2.6s linear infinite;
+@media (max-width: 1000px) {
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .connect { margin-top: 110px; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .art-head { grid-template-columns: minmax(0, 1fr); }
+  .art-head .art { margin-top: 28px; }
 }
-@keyframes flow { from { translate: -140px 0; } to { translate: 100% 0; } }
-.st { position: absolute; top: 52%; translate: -50% -22px; display: flex; flex-direction: column; align-items: center; text-align: center; z-index: 4; width: 140px; }
-.st.agent { left: 12%; }
-.st.gate { left: 50%; translate: -50% -34px; }
-.st.db { left: 88%; }
-.st .box { width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; background: #262626; color: #fff; }
-.st.gate .box { width: 68px; height: 68px; border-radius: 50%; background: #fff; color: #0a0a0a; }
-.st b { display: block; font-size: 12.5px; font-weight: 500; margin-top: 9px; color: #c9cdd2; }
-.ring { position: absolute; left: 50%; top: 34px; width: 68px; height: 68px; translate: -50% -50%; border-radius: 50%; border: 2px solid; opacity: 0; pointer-events: none; }
-.ring.ok { border-color: var(--ok); animation: pulse-ok 12s linear infinite; }
-.ring.no { border-color: var(--no); animation: pulse-no 12s linear infinite; }
-/* A lane spans the stage, so translating it by 30% puts its call 30% across the stage. */
-.lane { position: absolute; inset: 0; z-index: 3; pointer-events: none; opacity: 0; animation: pass 12s linear var(--d) infinite both; }
-.lane.no { animation-name: refuse; }
-.lane.back { animation-name: back; }
-.pk {
-  position: absolute; top: 52%; left: 0; translate: -50% -50%; max-width: 200px; padding: 7px 10px;
-  border-radius: 8px; background: #242424; box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.9); border: 1px solid transparent;
+@media (max-width: 900px) { .links, .nav .gh { display: none; } }
+@media (max-width: 720px) {
+  :root { --gutter: max(16px, env(safe-area-inset-left)); }
+  /* Long commands scroll sideways here, so Copy gets a row of its own above them. */
+  .code { padding: 42px 16px 14px; }
+  .band { padding-block: 80px; }
+  .hero { padding-top: 40px; }
+  .connect .peek { width: 52px; height: 56px; top: -48px; }
+  .bubble { right: 76px; top: -84px; font-size: 18px; }
+  .stats { gap: 28px 16px; }
 }
-/* The call's edge turns green or red at the gate: a border of its own, faded in. */
-.pk::after {
-  content: ""; position: absolute; inset: -1px; border-radius: inherit; border: 1px solid var(--ok); pointer-events: none;
-  opacity: 0; animation: edge-ok 12s linear var(--d) infinite both;
-}
-.lane.no .pk::after { border-color: var(--no); animation-name: edge-no; }
-.pk code { display: block; font-size: 11px; line-height: 1.35; color: #c9cdd2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
-.pk code b { color: #fff; font-weight: 500; margin-right: 5px; }
-.vd {
-  position: absolute; left: 50%; top: -26px; translate: -50% 0; white-space: nowrap;
-  font-family: var(--mono); font-size: 10px; font-weight: 500; padding: 3px 7px; border-radius: 5px;
-  opacity: 0; animation: vshow 12s linear var(--d) infinite both;
-}
-.vd.ok { color: var(--ok); background: rgba(76, 195, 138, 0.14); }
-.vd.no { color: var(--no); background: rgba(255, 107, 107, 0.14); }
-.rt {
-  position: absolute; top: calc(52% + 28px); left: 0; translate: -50% 0;
-  font-family: var(--mono); font-size: 11px; color: var(--ok); padding: 3px 9px; border-radius: 999px; background: rgba(76, 195, 138, 0.14);
-}
-@keyframes pass {
-  0% { translate: 30% 0; opacity: 0; }
-  5% { opacity: 1; }
-  28% { translate: 50% 0; }
-  35% { translate: 50% 0; }
-  58% { translate: 70% 0; opacity: 1; }
-  62% { opacity: 0; }
-  100% { translate: 70% 0; opacity: 0; }
-}
-@keyframes refuse {
-  0% { translate: 30% 0; opacity: 0; }
-  5% { opacity: 1; }
-  28% { translate: 50% 0; }
-  30% { translate: 51.5% 0; }
-  32% { translate: 48.5% 0; }
-  34% { translate: 50.6% 0; }
-  36% { translate: 50% 0; }
-  40% { translate: 50% 0; opacity: 1; }
-  60% { translate: 30% 0; opacity: 1; }
-  64% { opacity: 0; }
-  100% { translate: 30% 0; opacity: 0; }
-}
-@keyframes edge-ok {
-  0%, 28% { opacity: 0; }
-  31%, 100% { opacity: 1; }
-}
-@keyframes edge-no {
-  0%, 28% { opacity: 0; }
-  30%, 100% { opacity: 1; }
-}
-@keyframes vshow {
-  0%, 29% { opacity: 0; translate: -50% 5px; }
-  33%, 58% { opacity: 1; translate: -50% 0; }
-  63%, 100% { opacity: 0; translate: -50% 0; }
-}
-@keyframes back {
-  0%, 60% { translate: 70% 0; opacity: 0; }
-  64% { opacity: 1; }
-  90% { translate: 30% 0; opacity: 1; }
-  94%, 100% { translate: 30% 0; opacity: 0; }
-}
-@keyframes pulse-ok {
-  0%, 26% { opacity: 0; scale: 0.85; }
-  28% { opacity: 0.9; scale: 1; }
-  36% { opacity: 0; scale: 1.7; }
-  37%, 76% { opacity: 0; scale: 0.85; }
-  78% { opacity: 0.9; scale: 1; }
-  86% { opacity: 0; scale: 1.7; }
-  87%, 100% { opacity: 0; scale: 0.85; }
-}
-@keyframes pulse-no {
-  0%, 1% { opacity: 0; scale: 0.85; }
-  3% { opacity: 0.9; scale: 1; }
-  11% { opacity: 0; scale: 1.7; }
-  12%, 51% { opacity: 0; scale: 0.85; }
-  53% { opacity: 0.9; scale: 1; }
-  61% { opacity: 0; scale: 1.7; }
-  62%, 100% { opacity: 0; scale: 0.85; }
-}
-/* Narrower than the approved page was drawn (a 582 px stage): each call stays a third of the
-   stage at most, as 200 px is there, so two never cover each other; on a phone the stage
-   meets the card's sides and the end stations sit on its padding line, labels inside. */
-.pk { max-width: min(200px, 34.4%); }
-.pk code { max-width: none; }
-@media (max-width: 860px) {
-  .stage { margin-left: -28px; margin-right: -28px; }
-  .st.agent { left: max(12%, 50px); }
-  .st.db { left: min(88%, calc(100% - 50px)); }
-}
-/* The longest stamps ride a refused call back to the left; on the smallest phones they shrink a little to stay in the card. */
-@media (max-width: 374px) {
-  .vd { font-size: 9px; }
-}
-
-/* ── The key list ── */
-.keys { list-style: none; margin: 28px 0 0; padding: 0; display: grid; gap: 10px; font-size: 15px; color: #c9cdd2; }
-.keys li { display: flex; align-items: center; gap: 12px; }
-.keys kbd {
-  display: inline-grid; place-items: center; min-width: 44px; height: 30px; padding: 0 9px; border-radius: 8px;
-  background: #262626; font-size: 13px; font-weight: 500; color: #fff; box-shadow: 0 2px 0 #111;
-}
-
-/* ── Speed: the number and the ruler ── */
-.speed { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 40px; align-items: center; }
-.num { display: flex; align-items: baseline; gap: 8px; font-weight: 500; letter-spacing: -0.04em; line-height: 0.9; }
-.num span { font-size: clamp(84px, 9vw, 140px); font-variant-numeric: tabular-nums; }
-/* 0.26 of the number's size. (The approved page wrote .26em, which measured against
-   .num's 16 px and left a 4 px speck.) */
-.num small { font-size: clamp(21.84px, 2.34vw, 36.4px); color: var(--grey); font-weight: 400; letter-spacing: 0; font-family: var(--mono); }
-.numcap { margin: 12px 0 0; font-size: 16px; color: var(--grey); }
-.numcap kbd { color: #fff; font-size: 14px; }
-.ruler { display: grid; gap: 12px; }
-.rr { display: grid; grid-template-columns: 190px minmax(0, 1fr) 64px; gap: 14px; align-items: center; font-size: 14px; color: #c9cdd2; }
-.trk { height: 8px; border-radius: 999px; background: #262626; overflow: hidden; }
-.trk i { display: block; height: 100%; border-radius: 999px; background: #fff; animation: grow 1.4s var(--ease) var(--d) both; }
-/* The bars wait at zero until their card comes into view, then grow. */
-.js .reveal:not(.in) .trk i { animation-play-state: paused; }
-/* The bar slides out of the track's left end (the track clips it), which looks like growing
-   but moves by transform instead of laying the row out on every frame. */
-@keyframes grow { from { translate: -100% 0; } }
-.rv { font-family: var(--mono); text-align: right; color: #fff; font-variant-numeric: tabular-nums; }
-.axis { display: grid; grid-template-columns: 190px minmax(0, 1fr) 64px; gap: 14px; }
-.axis div { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--grey2); }
-@media (max-width: 860px) {
-  .speed { grid-template-columns: minmax(0, 1fr); }
-  .rr, .axis { grid-template-columns: minmax(0, 1fr) 60px; gap: 10px; }
-  .rr span:first-child { grid-column: 1 / -1; }
-  .axis > span:first-child { display: none; }
-}
-
-/* ── Rows inside a card: a changed row, a masked row, safe mode per connection, sessions ── */
-.rows {
-  margin-top: auto; padding-top: 28px; display: grid; gap: 1px;
-  font-family: var(--mono); font-size: 13px; color: #c9cdd2;
-}
-.rows-hd, .row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 11px 14px; background: #242424; }
-.rows > :first-child { border-radius: 12px 12px 0 0; }
-.rows > :last-child { border-radius: 0 0 12px 12px; }
-.rows-hd { font-family: var(--sans); font-size: 12.5px; color: var(--grey); background: #1e1e1e; }
-.row > span:first-child { color: var(--grey); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row > span:last-child { text-align: right; color: #fff; white-space: nowrap; }
-.row s { color: var(--grey2); margin-right: 10px; }
-.row b { font-weight: 500; color: var(--ok); }
-.row em { font-style: normal; color: #c9cdd2; margin-left: 6px; }
-.rows .row > .ok, .rows-hd > .ok { color: var(--ok); }
-.rows .row > .no { color: var(--no); }
-.rows .row > .masked { color: var(--orange); }
-@media (max-width: 420px) {
-  .rows { font-size: 12px; }
-  .rows-hd, .row { gap: 10px; padding: 10px 12px; }
-}
-.card p kbd { color: #fff; font-size: 14px; }
-/* The plan: the slowest step's bar in orange, and its hint under the steps. */
-.rr.slow .trk i { background: var(--orange); }
-.rr.slow > span:first-child { color: #fff; }
-.ruler .hint { margin: 6px 0 0; max-width: none; font-family: var(--mono); font-size: 13px; color: #c9cdd2; }
-.ruler .hint b { color: var(--orange); font-weight: 500; margin-right: 8px; }
-/* What gets timed: four lines, each with a short white rule. */
-.timed { list-style: none; margin: 24px 0 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 32px; font-size: 15px; color: #c9cdd2; }
-.timed li { display: flex; align-items: center; gap: 12px; }
-.timed li::before { content: ""; flex: none; width: 14px; height: 2px; border-radius: 2px; background: #fff; }
-.timed kbd { color: #fff; font-size: 14px; }
-@media (max-width: 860px) {
-  .timed { grid-template-columns: minmax(0, 1fr); }
-}
-
-/* ── The three small cards ── */
-.mini { min-height: 0; padding: 28px 30px; }
-.mini .ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: #262626; color: #fff; margin-bottom: 18px; }
-.mini h3 { font-size: 19px; }
-.mini p { font-size: 15px; }
-.mini .btn { align-self: flex-start; margin-top: 18px; }
-
-/* ── Try Rowkery: the close, the outline penguin behind it, the footer ── */
-.cta { position: relative; overflow: hidden; text-align: center; padding: 160px 0 0; }
-.cta .outline { position: absolute; left: 50%; bottom: -420px; width: 1100px; height: 1173px; translate: -50% 0; color: #2a2a2a; pointer-events: none; z-index: 0; }
-.cta .in { position: relative; z-index: 1; }
-.meta { margin: 14px 0 0; font-family: var(--mono); font-size: 12.5px; color: var(--grey2); }
-.first {
-  position: relative; z-index: 1; margin: 40px auto 0; max-width: 560px; text-align: left; padding: 16px 18px;
-  border-radius: 14px; background: #161616; font-size: 14px; line-height: 1.5; color: var(--grey);
-}
-.first p { margin: 0; }
-.first b { color: #fff; font-weight: 500; }
-/* The command, with its copy button at the end of the line. */
-.cmd { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; padding: 4px 4px 4px 12px; border-radius: 9px; background: #0a0a0a; }
-.cmd pre { flex: 1; min-width: 0; margin: 0; padding: 6px 0; font-size: 12.5px; color: #fff; overflow-x: auto; white-space: pre; }
-.copy {
-  flex: none; display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 7px;
-  background: #1f1f1f; color: #c9cdd2; cursor: pointer; transition: background 0.15s, color 0.15s;
-}
-.copy:hover { background: #2a2a2a; color: #fff; }
-/* On a phone the command breaks between characters instead of hiding its end off to the side. */
-@media (max-width: 560px) {
-  .cmd pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-}
-.copy:focus-visible { border-radius: 7px; }
-.copy[data-copied] { color: var(--ok); }
-.ctas.alt { margin-top: 20px; animation: none; }
-.foot { position: relative; z-index: 1; margin-top: 220px; }
-.foot-in { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 28px 24px 36px; font-size: 13px; color: var(--grey2); }
-.foot-in a { color: var(--grey); }
-.foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
-.foot-links a { display: inline-flex; align-items: center; gap: 6px; }
-@media (max-width: 860px) {
-  .cta { padding-top: 110px; }
-  .cta .outline { width: 760px; height: 810px; bottom: -300px; }
-  .foot { margin-top: 140px; }
-}
-
-/* ── 404: the penguin Tilted, and the way home ── */
-/* The penguin (Penguin.tsx): the mark posed by a transform, never redrawn. */
-.penguin-box { display: inline-block; line-height: 0; color: #fff; }
-.penguin { display: block; overflow: visible; }
-.penguin-body { transform-box: fill-box; transform-origin: 50% 100%; }
-.penguin[data-pose="tilted"] .penguin-body { transform: rotate(-10deg); }
-.lost { min-height: 100svh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; text-align: center; }
-
-/* ── Reduce Motion: everything still; one toast, and two calls held either side of the gate ── */
+@media (max-width: 520px) { .ver { display: none; } }
 @media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  .pill, .h1, .sub, .ctas, .shot { opacity: 1; translate: none; }
-  .toast { opacity: 1; }
-  .toast:nth-child(2), .toast:nth-child(3) { display: none; }
-  .lane, .vd { opacity: 1; }
-  .lane.c, .lane.d, .lane.back { display: none; }
-  .lane.a { translate: 34% 0; }
-  .lane.b { translate: 66% 0; }
-  .lane.b .pk::after { opacity: 1; }
-  .trk i { width: var(--w); }
-  .js .reveal:not(.in) { opacity: 1; translate: none; }
-  .mask .row > span:last-child { opacity: 1; }
-  .mask .lk { scale: 1; }
-  .mask .beam, .mask .bot { opacity: 0; }
-  .sc-l, .sc-tag.hold, .sc-row.hit::after { opacity: 1; }
-  .marquee .track { flex-wrap: wrap; justify-content: center; width: auto; }
-  .marquee .track [data-copy] { display: none; }
+  .walker, .slider { display: none; }
+  .bubble.on { opacity: 1; }
 }
 
-/* ── Nothing changes until you press Commit (CommitDemo.tsx), an 8 s loop: the new values wait
-   faint; the pointer arrives at 2.8 s and presses Commit at 3.3 s; the old values are struck
-   and the new ones lit; at 7.2 s it all fades back. Transform and opacity only. ── */
-.commit { position: relative; margin-top: auto; padding-top: 28px; }
-.commit .rows { padding-top: 0; margin-top: 0; }
-.commit .state { display: inline-grid; justify-items: end; }
-.commit .state > span { grid-area: 1 / 1; }
-.commit .wait { color: var(--orange); animation: c-wait 5.33s linear infinite both; }
-.commit .done { color: var(--ok); opacity: 0; animation: c-done 5.33s linear infinite both; }
-.commit .cell { display: inline-flex; gap: 10px; align-items: baseline; }
-.commit .was { position: relative; color: #fff; animation: c-was 5.33s linear infinite both; }
-.commit .was i { position: absolute; left: -2px; right: -2px; top: 55%; height: 1px; background: currentColor; transform-origin: left; scale: 0 1; animation: c-strike 5.33s linear infinite both; }
-.commit .next { color: var(--ok); font-weight: 500; opacity: 0.3; animation: c-next 5.33s linear infinite both; }
-.cbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 8px 8px 8px 14px; border-radius: 12px; background: #1e1e1e; font-size: 12.5px; color: var(--grey); }
-.cbar > span:first-child { margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.cb { flex: none; display: inline-grid; place-items: center; height: 30px; padding: 0 14px; border-radius: 999px; font-size: 13px; font-weight: 500; }
-.cb.grey { background: #2a2a2a; color: #fff; }
-.cb.white { background: #fff; color: #0a0a0a; }
-.cb.press { animation: c-press 5.33s linear infinite both; }
-.commit .pointer { position: absolute; right: 26px; bottom: 0; z-index: 2; pointer-events: none; animation: c-pointer 5.33s linear infinite both; }
-@keyframes c-pointer {
-  0%, 18% { opacity: 0; translate: 70px 40px; }
-  22% { opacity: 1; }
-  35% { opacity: 1; translate: 0 0; scale: 1; }
-  40% { scale: 0.86; }
-  44% { scale: 1; translate: 0 0; }
-  62% { opacity: 1; translate: 26px 30px; }
-  70%, 100% { opacity: 0; translate: 26px 30px; }
-}
-@keyframes c-press { 0%, 39% { scale: 1; } 41% { scale: 0.93; } 45%, 100% { scale: 1; } }
-@keyframes c-wait { 0%, 41% { opacity: 1; } 44%, 92% { opacity: 0; } 96%, 100% { opacity: 1; } }
-@keyframes c-done { 0%, 42% { opacity: 0; translate: 0 4px; } 46%, 90% { opacity: 1; translate: 0 0; } 94%, 100% { opacity: 0; } }
-@keyframes c-was { 0%, 42% { opacity: 1; } 48%, 90% { opacity: 0.4; } 96%, 100% { opacity: 1; } }
-@keyframes c-strike { 0%, 42% { scale: 0 1; } 48%, 90% { scale: 1 1; opacity: 1; } 94% { opacity: 0; scale: 1 1; } 95%, 100% { opacity: 0; scale: 0 1; } }
-@keyframes c-next { 0%, 42% { opacity: 0.3; } 48%, 90% { opacity: 1; } 96%, 100% { opacity: 0.3; } }
-
-/* ── Sensitive columns (MaskDemo.tsx), an 8 s loop: the robot reads down the row, a column every
-   2 s (45 px apart: 44 px rows and a 1 px rule). Plain values come back; at email and phone it
-   gets a stand-in, a lock shows, and it shakes its head. Transform and opacity only. ── */
-.mask { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; align-items: start; margin-top: auto; padding-top: 28px; }
-.mask .rows { position: relative; margin: 0; padding: 0; }
-.mask .row { height: 44px; align-items: center; padding-top: 0; padding-bottom: 0; }
-.mask .row > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
-.mask .lk { color: var(--orange); scale: 0; }
-.mask .row > span:last-child { opacity: 0.12; }
-.mask .row:nth-child(1) > span:last-child { animation: m-v0 5.33s linear infinite both; }
-.mask .row:nth-child(2) > span:last-child { animation: m-v1 5.33s linear infinite both; }
-.mask .row:nth-child(3) > span:last-child { animation: m-v2 5.33s linear infinite both; }
-.mask .row:nth-child(4) > span:last-child { animation: m-v3 5.33s linear infinite both; }
-.mask .row:nth-child(2) .lk { animation: m-l1 5.33s linear infinite both; }
-.mask .row:nth-child(3) .lk { animation: m-l2 5.33s linear infinite both; }
-.mask .beam { position: absolute; left: 0; right: 0; top: 0; height: 44px; border-radius: 10px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28); pointer-events: none; animation: m-walk 5.33s linear infinite both; }
-.mask .rows > .row:nth-child(4) { border-radius: 0 0 12px 12px; }
-.mask .bot { width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; background: #262626; color: #fff; animation: m-walk 5.33s linear infinite both; }
-.mask .head { animation: m-shake 5.33s linear infinite both; }
-@keyframes m-walk {
-  0% { opacity: 0; translate: 0 0; }
-  3%, 20% { opacity: 1; translate: 0 0; }
-  25%, 45% { translate: 0 45px; }
-  50%, 70% { translate: 0 90px; }
-  75%, 92% { opacity: 1; translate: 0 135px; }
-  98%, 100% { opacity: 0; translate: 0 135px; }
-}
-@keyframes m-shake {
-  0%, 27% { rotate: 0deg; }
-  29% { rotate: -12deg; } 31% { rotate: 10deg; } 33% { rotate: -7deg; } 35% { rotate: 0deg; }
-  52% { rotate: 0deg; }
-  54% { rotate: -12deg; } 56% { rotate: 10deg; } 58% { rotate: -7deg; } 60%, 100% { rotate: 0deg; }
-}
-@keyframes m-v0 { 0%, 3% { opacity: 0.12; } 7%, 92% { opacity: 1; } 98%, 100% { opacity: 0.12; } }
-@keyframes m-v1 { 0%, 26% { opacity: 0.12; } 30%, 92% { opacity: 1; } 98%, 100% { opacity: 0.12; } }
-@keyframes m-v2 { 0%, 51% { opacity: 0.12; } 55%, 92% { opacity: 1; } 98%, 100% { opacity: 0.12; } }
-@keyframes m-v3 { 0%, 76% { opacity: 0.12; } 80%, 92% { opacity: 1; } 98%, 100% { opacity: 0.12; } }
-@keyframes m-l1 { 0%, 26% { scale: 0; } 30%, 92% { scale: 1; } 98%, 100% { scale: 0; } }
-@keyframes m-l2 { 0%, 51% { scale: 0; } 55%, 92% { scale: 1; } 98%, 100% { scale: 0; } }
-@media (max-width: 420px) {
-  .cbar > span:first-child { display: none; }
-  .cbar { justify-content: flex-end; }
-}
-
-/* ── The databases we'd like to add (Exploring.tsx): a band as wide as the page, the list drawn
-   twice and slid by half its width on a 50 s loop, fading out at both edges. Transform only. ── */
-.marquee {
-  margin-top: 52px; overflow: hidden;
-  -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
-  mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
-}
-.marquee .track { display: flex; width: max-content; margin: 0; padding: 6px 0; list-style: none; animation: marquee 50s linear infinite; }
-.marquee:hover .track { animation-play-state: paused; }
-.marquee li { display: flex; align-items: center; gap: 12px; padding: 0 30px; font-size: 16px; font-weight: 500; color: #c9cdd2; white-space: nowrap; }
-.marquee li svg { color: #fff; opacity: 0.85; flex: none; }
-@keyframes marquee { to { translate: -50% 0; } }
-.marquee + .wrap .grid { margin-top: 44px; }
-@media (max-width: 860px) {
-  .marquee { margin-top: 40px; }
-  .marquee li { padding: 0 20px; font-size: 14px; gap: 10px; }
-  .marquee li svg { width: 24px; height: 24px; }
-}
-
-/* ── The sponsor note (Get.tsx): the penguin beside a few lines from Lucas, and Sponsor ── */
-.sponsor {
-  position: relative; z-index: 1; display: flex; gap: 22px; align-items: flex-start; max-width: 600px; margin: 56px auto 0;
-  padding: 26px 28px; border-radius: 20px; background: #161616; text-align: left;
-}
-.sponsor .sp-mark { flex: none; width: 44px; height: 47px; color: #fff; }
-.sponsor h3 { margin: 0; font-size: 19px; font-weight: 500; }
-.sponsor p { margin: 8px 0 0; font-size: 15px; line-height: 1.55; color: var(--grey); }
-.sponsor .btn { margin-top: 18px; }
-.sponsor .btn svg { color: var(--no); }
-@media (max-width: 560px) {
-  .sponsor { flex-direction: column; gap: 14px; padding: 22px; }
-  .sponsor .sp-mark { width: 34px; height: 36px; }
-}
-
-/* ── The hero's two stages (HeroShot.tsx) share one box and cross-fade: the app window for On
-   your own, the agent scene for With your AI agent. On a phone the box is 3:4, the window cropped
-   to its left side and the scene stacked top to bottom. ── */
-.shot img { transition: opacity 0.5s ease; }
-.shot[data-mode="agent"] img { opacity: 0; }
-.stage-own, .stage-agent { position: absolute; inset: 0; transition: opacity 0.5s ease; }
-.shot[data-mode="agent"] .stage-own, .shot[data-mode="own"] .stage-agent { opacity: 0; pointer-events: none; }
-@media (max-width: 760px) {
-  .shot { aspect-ratio: 3 / 4; }
-  .shot img { height: 100%; object-fit: cover; object-position: left top; }
-}
-
-/* ── The agent scene (AgentScene.tsx): one 12 s pass, started again by HeroShot. Lines and tags
-   rise in at their moment (--at); dots cross the fixed gaps by translate; the rows the query reads
-   light up through an overlay's opacity; the whole scene fades out at the end. ── */
-.scene {
-  position: absolute; inset: 0; display: grid; grid-template-columns: minmax(0, 1.25fr) 80px 150px 80px minmax(0, 1fr);
-  align-items: center; padding: 56px; background: #111; text-align: left;
-  animation: sc-out 0.5s ease 11.4s both;
-}
-@keyframes sc-out { to { opacity: 0; } }
-.sc-agent, .sc-db { border-radius: 20px; background: #191919; padding: 28px 30px; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05); }
-.sc-hd { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--grey); margin-bottom: 18px; }
-.sc-hd svg { width: 16px; height: 16px; }
-.sc-l { margin: 14px 0 0; font-family: var(--mono); font-size: 14px; line-height: 1.45; color: #c9cdd2; opacity: 0; animation: sc-in 0.5s var(--ease) var(--at) both; }
-.sc-l b { color: #fff; font-weight: 500; margin-right: 6px; }
-.sc-l.you { margin: 0 0 4px auto; width: fit-content; max-width: 90%; padding: 9px 13px; border-radius: 14px 14px 4px 14px; background: #fff; color: #0a0a0a; font-family: var(--sans); font-size: 16px; --at: 0.3s; }
-.sc-l.t1 { --at: 1s; } .sc-l.t2 { --at: 5.2s; } .sc-l.t3 { --at: 6s; } .sc-l.t4 { --at: 7.6s; } .sc-l.t5 { --at: 8.6s; }
-.sc-l.ok { color: var(--ok); } .sc-l.wait { color: var(--orange); }
-.sc-l.say { font-family: var(--sans); font-size: 16px; color: #fff; }
-@keyframes sc-in { from { opacity: 0; translate: 0 6px; } to { opacity: 1; translate: 0 0; } }
-.sc-gap { position: relative; height: 1px; background: #333; }
-.sc-dot { position: absolute; left: -5px; top: -5px; width: 11px; height: 11px; border-radius: 50%; background: #fff; opacity: 0; }
-.sc-dot.d-q { animation: sc-fwd 0.8s ease-in-out 1.3s both; }
-.sc-dot.d-q2 { animation: sc-fwd 0.8s ease-in-out 2.2s both; }
-.sc-dot.d-r2 { background: var(--ok); animation: sc-back 0.8s ease-in-out 3.4s both; }
-.sc-dot.d-r { background: var(--ok); animation: sc-back 0.8s ease-in-out 4.3s both; }
-.sc-dot.d-w { background: var(--orange); animation: sc-fwd 0.8s ease-in-out 6.4s both; }
-@keyframes sc-fwd { 0% { opacity: 0; translate: 0 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; translate: 80px 0; } }
-@keyframes sc-back { 0% { opacity: 0; translate: 80px 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; translate: 0 0; } }
-.sc-gate { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; }
-.sc-mark { width: 88px; height: 88px; border-radius: 50%; display: grid; place-items: center; background: #fff; color: #0a0a0a; }
-.sc-gate b { margin-top: 10px; font-size: 14px; font-weight: 500; }
-.sc-gate span { font-size: 12px; color: var(--grey); }
-.sc-ring { position: absolute; left: 50%; top: 0; width: 88px; height: 88px; margin-left: -44px; border-radius: 50%; border: 2px solid var(--ok); opacity: 0; }
-.sc-ring.ok { animation: sc-pulse 0.9s ease-out 2.1s forwards; }
-.sc-ring.hold { border-color: var(--orange); animation: sc-pulse 0.9s ease-out 7.2s forwards; }
-@keyframes sc-pulse { from { opacity: 0.9; scale: 1; } to { opacity: 0; scale: 1.7; } }
-.sc-tag { position: absolute; top: calc(100% + 10px); font-style: normal; font-family: var(--mono); font-size: 11px; white-space: nowrap; padding: 3px 8px; border-radius: 6px; opacity: 0; }
-.sc-tag.ok { color: var(--ok); background: rgba(76, 195, 138, 0.14); animation: sc-tag 3s ease 2.1s both; }
-.sc-tag.hold { color: var(--orange); background: rgba(255, 138, 61, 0.14); animation: sc-in 0.5s var(--ease) 7.2s both; }
-@keyframes sc-tag { 0% { opacity: 0; } 10%, 85% { opacity: 1; } 100% { opacity: 0; } }
-.sc-row { position: relative; display: grid; grid-template-columns: 1fr 1fr 0.8fr; gap: 10px; padding: 11px 12px; border-radius: 8px; font-family: var(--mono); font-size: 14px; color: #c9cdd2; }
-.sc-row > span:last-child { text-align: right; color: var(--grey); }
-.sc-row.hit::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: rgba(255, 138, 61, 0.16); box-shadow: inset 0 0 0 1px rgba(255, 138, 61, 0.4); opacity: 0; animation: sc-in 0.4s ease 3s both; }
-@media (max-width: 960px) {
-  .scene { grid-template-columns: minmax(0, 1.2fr) 44px 112px 44px minmax(0, 1fr); padding: 28px; }
-  .sc-agent, .sc-db { padding: 18px 20px; }
-  .sc-l { font-size: 11px; margin-top: 8px; } .sc-l.you, .sc-l.say { font-size: 12.5px; }
-  .sc-row { font-size: 11px; padding: 6px 8px; }
-  .sc-mark, .sc-ring { width: 64px; height: 64px; } .sc-ring { margin-left: -32px; }
-  @keyframes sc-fwd { 0% { opacity: 0; translate: 0 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; translate: 44px 0; } }
-  @keyframes sc-back { 0% { opacity: 0; translate: 44px 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; translate: 0 0; } }
-}
-/* A phone: the agent on top, Rowkery, then the database; the dots travel down and up. */
-@media (max-width: 760px) {
-  .scene { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 26px auto 26px auto; align-items: stretch; padding: 14px; }
-  .sc-agent, .sc-db { padding: 12px 14px; border-radius: 14px; }
-  .sc-hd { margin-bottom: 6px; font-size: 11.5px; }
-  .sc-l { margin-top: 5px; font-size: 10px; } .sc-l.you, .sc-l.say { font-size: 11.5px; } .sc-l.you { padding: 6px 10px; }
-  .sc-l.t1, .sc-l.t3 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sc-gap { width: 1px; height: auto; justify-self: center; }
-  .sc-gate { flex-direction: row; gap: 10px; justify-content: center; }
-  .sc-mark { width: 40px; height: 40px; } .sc-mark svg { width: 20px; height: 21px; }
-  .sc-ring { width: 40px; height: 40px; left: calc(50% - 46px); margin-left: 0; }
-  .sc-gate b { margin: 0; font-size: 12.5px; } .sc-gate span { display: none; }
-  .sc-tag { position: static; }
-  .sc-tag.ok, .sc-tag.hold { position: absolute; right: 0; top: 50%; margin-top: -10px; }
-  .sc-row { padding: 3px 8px; font-size: 10px; }
-  @keyframes sc-fwd { 0% { opacity: 0; translate: 0 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; translate: 0 26px; } }
-  @keyframes sc-back { 0% { opacity: 0; translate: 0 26px; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; translate: 0 0; } }
-}
-
-/* A card off screen holds its loops still (Reveal.tsx marks it). */
-[data-off] *, [data-off] *::before, [data-off] *::after, [data-off]::after { animation-play-state: paused !important; }
-
-/* ── The cards' small loops (CardMotion.tsx and the Tools, Keys, Speed and Security cards).
-   Owner, 2026-10-16: every card moves a little. Transform and opacity only. ── */
-.kp, .ql, .tp, .sh, .hm { position: relative; margin-top: auto; padding-top: 28px; font-family: var(--mono); font-size: 13px; color: #c9cdd2; }
-/* ⌘K, 8 s: keys at 0-6 %, the box opens at 8 %, "orders" typed 15-33 % (a cover slides off it a
-   letter at a time), the list narrows at 24 %, the first row is picked at 38 %, ↵ at 50 %, closes at 58 %. */
-.kp-keys { display: flex; gap: 6px; justify-content: flex-end; margin-bottom: 12px; }
-.kp-keys kbd, .ql-key { display: inline-grid; place-items: center; min-width: 32px; height: 28px; padding: 0 8px; border-radius: 7px; background: #262626; color: #fff; font-size: 12.5px; box-shadow: 0 2px 0 #111; }
-.kp-keys .k1 { animation: kp-k1 5.33s linear infinite; }
-.kp-keys .k2 { animation: kp-k2 5.33s linear infinite; }
-@keyframes kp-k1 { 0%, 2% { scale: 1; } 4% { scale: 0.88; } 7%, 100% { scale: 1; } }
-@keyframes kp-k2 { 0%, 48% { scale: 1; } 50% { scale: 0.88; } 53%, 100% { scale: 1; } }
-.kp-box { border-radius: 14px; background: #242424; padding: 6px; transform-origin: 50% 0; animation: kp-box 5.33s var(--ease) infinite both; }
-@keyframes kp-box { 0%, 6% { opacity: 0; scale: 0.96; } 10%, 56% { opacity: 1; scale: 1; } 60%, 100% { opacity: 0; scale: 0.98; } }
-.kp-in { position: relative; height: 38px; display: flex; align-items: center; padding: 0 12px; border-radius: 9px; background: #1a1a1a; color: #fff; overflow: hidden; }
-.kp-word { position: relative; z-index: 1; }
-/* The cover over the word: as wide as the word plus a caret, slid right one 1ch letter at a time. */
-.kp-word i { position: absolute; left: 0; top: -4px; bottom: -4px; width: 7ch; background: #1a1a1a; border-left: 2px solid var(--orange); animation: kp-type 5.33s steps(1) infinite both; }
-@keyframes kp-type {
-  0%, 15% { translate: 0 0; } 18% { translate: 1ch 0; } 21% { translate: 2ch 0; } 24% { translate: 3ch 0; }
-  27% { translate: 4ch 0; } 30% { translate: 5ch 0; } 33%, 100% { translate: 6ch 0; }
-}
-.kp-ph { position: absolute; left: 12px; color: var(--grey2); font-family: var(--sans); animation: kp-ph 5.33s steps(1) infinite both; }
-@keyframes kp-ph { 0%, 15% { opacity: 1; } 16%, 100% { opacity: 0; } }
-.kp-res { position: relative; margin-top: 6px; display: grid; }
-.kp-row { position: relative; z-index: 1; display: flex; justify-content: space-between; padding: 9px 12px; }
-.kp-row span:last-child { color: var(--grey2); }
-.kp-row.a { animation: kp-a 5.33s ease infinite both; }
-.kp-row.b { animation: kp-b 5.33s ease infinite both; }
-@keyframes kp-a { 0%, 17% { opacity: 0; } 19%, 100% { opacity: 1; } }
-@keyframes kp-b { 0%, 17% { opacity: 0; } 19%, 23% { opacity: 1; } 26%, 100% { opacity: 0; } }
-.kp-sel { position: absolute; left: 0; right: 0; top: 0; height: 37px; border-radius: 8px; background: #333; animation: kp-sel 5.33s ease infinite both; }
-@keyframes kp-sel { 0%, 36% { opacity: 0; } 39%, 100% { opacity: 1; } }
-
-/* Space, 8 s: the selection moves to the second row at 15 %, Space at 28 %, the panel slides in at
-   30 % and out at 80 %. */
-.ql { overflow: hidden; margin: auto -36px -36px; padding: 28px 36px 36px; }
-.ql-grid { position: relative; border-radius: 12px; background: #242424; overflow: hidden; }
-.ql-row { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 10px 14px; height: 40px; }
-.ql-row span:last-child { text-align: right; }
-.ql-sel { position: absolute; left: 0; right: 0; top: 0; height: 40px; background: rgba(255, 138, 61, 0.16); animation: ql-sel 5.33s var(--ease) infinite both; }
-@keyframes ql-sel { 0%, 12% { translate: 0 0; } 18%, 92% { translate: 0 40px; } 98%, 100% { translate: 0 0; } }
-.ql-key { position: absolute; left: 36px; bottom: 44px; z-index: 3; animation: ql-key 5.33s linear infinite both; }
-@keyframes ql-key { 0%, 22% { opacity: 0; scale: 1; } 24% { opacity: 1; } 28% { scale: 0.88; } 31% { scale: 1; opacity: 1; } 36%, 100% { opacity: 0; } }
-.ql-panel {
-  position: absolute; right: 0; top: 28px; bottom: 0; width: 58%; z-index: 2; padding: 14px 18px; border-radius: 14px 0 0 0;
-  background: #2a2a2a; box-shadow: -20px 0 40px -20px #000; display: grid; align-content: start; gap: 8px; animation: ql-panel 5.33s var(--ease) infinite both;
-}
-.ql-panel b { font-family: var(--sans); font-weight: 500; color: #fff; margin-bottom: 4px; }
-.ql-panel div { display: flex; justify-content: space-between; gap: 10px; }
-.ql-panel div span:first-child { color: var(--grey); }
-@keyframes ql-panel { 0%, 29% { translate: 105% 0; } 36%, 78% { translate: 0 0; } 84%, 100% { translate: 105% 0; } }
-@media (max-width: 860px) { .ql { margin: auto -28px -28px; padding: 24px 28px 28px; } .ql-key { left: 28px; } }
-
-/* The log, 10 s: the column, drawn twice, steps down one 46 px row every 2 s from five rows up. */
-.lg { position: relative; margin-top: auto; height: 258px; border-top: 28px solid transparent; overflow: hidden; font-family: var(--mono); color: #c9cdd2; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
-.lg-col { display: grid; animation: lg-step 6.67s var(--ease) infinite both; }
-.lg-row { display: grid; grid-template-columns: minmax(0, 1fr); height: 46px; padding: 4px 0; border-bottom: 1px solid #242424; font-size: 11.5px; }
-.lg-row code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #fff; }
-.lg-row > span:last-child { font-size: 11px; }
-.lg .ok { color: var(--ok); } .lg .no { color: var(--no); }
-@keyframes lg-step {
-  0%, 16% { translate: 0 -230px; } 20%, 36% { translate: 0 -184px; } 40%, 56% { translate: 0 -138px; }
-  60%, 76% { translate: 0 -92px; } 80%, 96% { translate: 0 -46px; } 100% { translate: 0 0; }
-}
-
-/* Tables, 9 s: ticks at 15, 35 and 55 %, the count beside them, all cleared at 92 %. */
-.tp { display: grid; gap: 1px; }
-.tp-hd, .tp-row { display: flex; align-items: center; gap: 12px; padding: 9px 14px; background: #242424; }
-.tp-hd { font-family: var(--sans); font-size: 12.5px; color: var(--grey); background: #1e1e1e; border-radius: 12px 12px 0 0; }
-.tp-row:last-child { border-radius: 0 0 12px 12px; }
-.tp-row span:nth-child(2) { flex: 1; color: #fff; }
-.tp-row span:last-child { color: var(--grey2); }
-.tp-box { position: relative; width: 16px; height: 16px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px #555; }
-.tp-box i { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 4px; background: var(--orange); color: #0a0a0a; scale: 0; will-change: transform; }
-.tp-box svg { width: 12px; height: 12px; }
-.tp-box .s1 { animation: tp-1 6s var(--ease) infinite both; }
-.tp-box .s2 { animation: tp-2 6s var(--ease) infinite both; }
-.tp-box .s3 { animation: tp-3 6s var(--ease) infinite both; }
-@keyframes tp-1 { 0%, 15% { scale: 0; } 19%, 90% { scale: 1; } 94%, 100% { scale: 0; } }
-@keyframes tp-2 { 0%, 35% { scale: 0; } 39%, 90% { scale: 1; } 94%, 100% { scale: 0; } }
-@keyframes tp-3 { 0%, 55% { scale: 0; } 59%, 90% { scale: 1; } 94%, 100% { scale: 0; } }
-.tp-n { margin-left: auto; display: inline-grid; justify-items: end; }
-.tp-n b { grid-area: 1 / 1; font-weight: 500; color: #fff; opacity: 0; }
-.tp-n .n0 { animation: tp-n0 6s steps(1) infinite both; } .tp-n .n1 { animation: tp-n1 6s steps(1) infinite both; }
-.tp-n .n2 { animation: tp-n2 6s steps(1) infinite both; } .tp-n .n3 { animation: tp-n3 6s steps(1) infinite both; }
-@keyframes tp-n0 { 0% { opacity: 1; } 17% { opacity: 0; } 93% { opacity: 1; } }
-@keyframes tp-n1 { 0% { opacity: 0; } 17% { opacity: 1; } 37% { opacity: 0; } }
-@keyframes tp-n2 { 0% { opacity: 0; } 37% { opacity: 1; } 57% { opacity: 0; } }
-@keyframes tp-n3 { 0% { opacity: 0; } 57% { opacity: 1; } 93% { opacity: 0; } }
-
-/* Sharing, 8 s: the thumb slides to 1 hour at 25 % and back at 85 %; the end time follows. */
-.sh { font-family: var(--sans); font-size: 14px; }
-.sh > div { border-radius: 12px; }
-.sh-hd { display: flex; align-items: center; gap: 8px; padding: 14px 16px 4px; background: #242424; border-radius: 12px 12px 0 0 !important; color: #fff; }
-.sh-hd .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--no); }
-.sh-hd .env { font-family: var(--mono); font-size: 11px; color: #ff8a8a; background: rgba(255, 92, 92, 0.14); border-radius: 4px; padding: 1px 6px; }
-.sh-hd .sw { margin-left: auto; width: 34px; height: 20px; border-radius: 999px; background: var(--orange); position: relative; }
-.sh-hd .sw::after { content: ""; position: absolute; right: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
-.sh-when { display: grid; padding: 4px 16px 14px; background: #242424; border-radius: 0 !important; color: var(--grey); font-size: 13px; }
-.sh-when span { grid-area: 1 / 1; }
-.sh-when .a { animation: sh-a 5.33s ease infinite both; } .sh-when .b { opacity: 0; animation: sh-b 5.33s ease infinite both; }
-@keyframes sh-a { 0%, 26% { opacity: 1; } 30%, 84% { opacity: 0; } 88%, 100% { opacity: 1; } }
-@keyframes sh-b { 0%, 28% { opacity: 0; } 32%, 84% { opacity: 1; } 88%, 100% { opacity: 0; } }
-.sh-seg { position: relative; display: grid; grid-template-columns: 1.6fr 1fr 1fr; padding: 4px; margin: 0 0 0; background: #1c1c1c; border-radius: 0 0 12px 12px !important; font-size: 13px; }
-.sh-seg span { position: relative; z-index: 1; padding: 8px 0; text-align: center; color: #c9cdd2; }
-.sh-seg i { position: absolute; left: 4px; top: 4px; bottom: 4px; width: calc((100% - 8px) * 1.6 / 3.6); border-radius: 8px; background: #333; animation: sh-thumb 5.33s var(--ease) infinite both; }
-@keyframes sh-thumb { 0%, 24% { translate: 0 0; scale: 1 1; } 30%, 84% { translate: 100% 0; scale: 0.625 1; } 90%, 100% { translate: 0 0; scale: 1 1; } }
-.sh-seg i { transform-origin: 0 50%; }
-
-/* The host, 6 s: the full host for you, then the masked one your agent sees. */
-.hm-who { display: grid; font-family: var(--sans); font-size: 12.5px; color: var(--grey); margin-bottom: 8px; }
-.hm-who span, .hm-host > span { grid-area: 1 / 1; }
-.hm-host { display: inline-grid; grid-template-columns: auto auto; align-items: center; padding: 12px 16px; border-radius: 12px; background: #242424; font-size: 14px; max-width: 100%; }
-.hm-host b { color: var(--orange); letter-spacing: 0.14em; font-weight: 500; }
-.hm-host em { grid-column: 2; grid-row: 1; margin-left: 12px; white-space: nowrap; font-style: normal; font-family: var(--sans); font-size: 11.5px; color: var(--ok); background: rgba(76, 195, 138, 0.14); border-radius: 4px; padding: 3px 7px; }
-.hm .a { animation: hm-a 4s ease infinite both; } .hm .b { opacity: 0; animation: hm-b 4s ease infinite both; }
-@keyframes hm-a { 0%, 42% { opacity: 1; } 50%, 92% { opacity: 0; } 100% { opacity: 1; } }
-@keyframes hm-b { 0%, 42% { opacity: 0; } 50%, 92% { opacity: 1; } 100% { opacity: 0; } }
-
-/* Safe mode and Sessions: the right-hand value turns into what happens, row after row. */
-.flip { display: inline-grid; justify-items: end; }
-.flip > span { grid-area: 1 / 1; }
-.safe .flip > :first-child { animation: fl-a 6s ease infinite both; }
-.safe .flip > :last-child { opacity: 0; animation: fl-b 6s ease infinite both; }
-.safe .row:nth-child(2) .flip > * { animation-delay: 0.8s; }
-.safe .row:nth-child(3) .flip > * { animation-delay: 1.6s; }
-@keyframes fl-a { 0%, 20% { opacity: 1; } 24%, 60% { opacity: 0; } 64%, 100% { opacity: 1; } }
-@keyframes fl-b { 0%, 20% { opacity: 0; } 24%, 60% { opacity: 1; } 64%, 100% { opacity: 0; } }
-.rows .row .wait { color: var(--orange); }
-.sess .flip > :first-child { animation: fl-a 5.33s ease infinite both; }
-.sess .flip > :last-child { opacity: 0; animation: fl-b 5.33s ease infinite both; }
-.sess .row:not(:has(.end)) .flip > * { animation-delay: 0.4s; }
-.rows .row > .flip > .no { color: var(--no); } .rows .row > .flip > .ok { color: var(--ok); }
-
-/* The plan's bars grow again every 8 s; the review keys go down one after another. */
-.rr .trk i { animation: grow-loop 5.33s var(--ease) var(--d) infinite both; }
-@keyframes grow-loop { 0% { translate: -100% 0; } 18%, 88% { translate: 0 0; } 96%, 100% { translate: -100% 0; } }
-.keys.press li kbd { animation: kp-k2 4s linear infinite; }
-.keys.press li:nth-child(2) kbd { animation-delay: 1s; }
-.keys.press li:nth-child(3) kbd { animation-delay: 2s; }
-/* Security icons: the key turns, the lock clicks shut, the account gets struck out. (The icons
-   move as a whole: moving a path inside an SVG lays the page out on every frame.) */
-.ic.m-key svg { animation: ic-key 3.33s var(--ease) infinite; }
-@keyframes ic-key { 0%, 60% { rotate: 0deg; } 70%, 85% { rotate: -35deg; } 95%, 100% { rotate: 0deg; } }
-.ic.m-lock svg { animation: ic-lock 3.33s var(--ease) infinite; }
-@keyframes ic-lock { 0%, 55% { scale: 1; } 60% { scale: 0.82; } 66%, 100% { scale: 1; } }
-.ic.m-user { position: relative; }
-.ic.m-user::after { content: ""; position: absolute; left: 9px; top: 9px; width: 25px; height: 2px; margin-top: -1px; border-radius: 2px; background: var(--no); rotate: 45deg; transform-origin: 0 50%; animation: ic-user 3.33s var(--ease) infinite; }
-@keyframes ic-user { 0%, 50% { scale: 0 1; } 60%, 90% { scale: 1 1; } 100% { scale: 0 1; } }
-/* The mascot leans back now and then (the Tilted posture), from its feet. */
-.card.mascot .pengu { transform-origin: 50% 100%; animation: tilt 5.33s var(--ease) infinite; }
-@keyframes tilt { 0%, 70% { rotate: 0deg; } 78%, 90% { rotate: -6deg; } 100% { rotate: 0deg; } }
-@media (max-width: 420px) {
-  .hm-host em { grid-column: 1; grid-row: 2; justify-self: start; margin: 8px 0 0; }
+/* ── Footer ── */
+.foot { display: grid; grid-template-columns: 1.4fr repeat(3, 1fr); gap: 32px; padding-block: 56px; }
+.foot h4 { margin: 0 0 12px; font: 500 13px var(--mono); color: var(--grey); }
+.foot ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14.5px; }
+.foot a { text-decoration: none; opacity: 0.86; }
+.foot a:hover { opacity: 1; }
+.foot .about { display: grid; gap: 14px; align-content: start; max-width: 34ch; color: var(--grey); font-size: 14.5px; }
+.foot .about .brand { color: var(--fg); opacity: 1; }
+.legal { position: relative; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 18px var(--gutter) 28px; font: 400 12.5px var(--mono); color: var(--grey); }
+.legal .walkway { position: absolute; left: var(--gutter); right: var(--gutter); top: 0; }
+@media (max-width: 720px) {
+  .foot { grid-template-columns: 1fr 1fr; }
+  .foot .about { grid-column: 1 / -1; }
 }

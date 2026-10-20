@@ -39,10 +39,11 @@ describe("the mark", () => {
   test("the website draws the same path, never orange", () => {
     const text = read("../../web/components/Mark.tsx");
     for (const d of markPaths) expect(text).toContain(`"${d}"`);
-    expect(text).not.toMatch(/e8602c|--accent/i);
-    expect(read("../../web/components/Penguin.tsx")).toContain("<MarkPaths />");
-    // The website's CSS isn't minified: spaces allowed.
-    expect(read("../../web/app/globals.css")).toMatch(/\.penguin\[data-pose="tilted"\] \.penguin-body\s*\{\s*transform:\s*rotate\(-10deg\);?\s*\}/);
+    expect(text).not.toMatch(/e8602c|--acc/i);
+    // Its penguin (Pg) poses the mark whole: Tilted rotates it 10° on its feet.
+    const pg = read("../../web/components/Pg.tsx");
+    expect(pg).toContain("<MarkPaths />");
+    expect(pg).toContain('"rotate(-10 ');
   });
 
   test("Posture only: a transform on the body, no eyes, no motion, one colour", () => {
