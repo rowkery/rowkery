@@ -1,0 +1,110 @@
+/* With your agent: the stage on the left stays in view while the steps scroll past. */
+.scene { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 56px; margin-top: 112px; }
+.stage-wrap { position: relative; }
+.stage { position: sticky; top: 150px; }
+.stage .card { position: relative; z-index: 1; padding: 22px; min-height: 404px; display: flex; flex-direction: column; gap: 18px; }
+.stage-pg { position: absolute; right: 26px; bottom: calc(100% - 6px); width: 92px; height: 95px; }
+.stage-pg .pg { width: 100%; height: 100%; }
+.stage-pg.jump { animation: hop1 0.5s var(--ease); }
+
+/* Agent → Rowkery → database, a dot riding each wire; past Rowkery it stops short while a check or a held change is shown. */
+.route { display: grid; grid-template-columns: auto 1fr auto 1fr auto; align-items: center; gap: 10px; }
+.node { display: grid; justify-items: center; gap: 8px; font: 500 12.5px var(--mono); color: var(--grey); }
+.node .box { width: 58px; height: 58px; border-radius: 14px; background: var(--card2); display: grid; place-items: center; color: var(--fg); transition: background 0.3s, color 0.3s; }
+.node.lit .box { background: var(--ink); color: var(--inkfg); }
+.node .box svg { width: 28px; height: 28px; }
+.node.rowkery .box { background: var(--acc); color: var(--onacc); }
+.node.rowkery .box .pg { width: 34px; height: 36px; color: inherit; }
+.wire { position: relative; height: 1px; background: var(--line2); container-type: inline-size; }
+.wire i { position: absolute; top: -3px; left: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--acc); animation: travel 2.4s var(--ease) infinite; }
+.wire.two i { animation-delay: 1.2s; }
+.wire.stops i { background: var(--grey2); animation-name: stopshort; }
+@keyframes travel {
+  0% { transform: translateX(0); opacity: 0; }
+  10%, 90% { opacity: 1; }
+  100% { transform: translateX(calc(100cqw - 7px)); opacity: 0; }
+}
+@keyframes stopshort {
+  0% { transform: translateX(0); opacity: 0; }
+  15% { opacity: 1; }
+  60% { transform: translateX(40cqw); opacity: 1; }
+  100% { transform: translateX(40cqw); opacity: 0; }
+}
+
+.panels { position: relative; flex: 1; }
+.panel { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; opacity: 0; transform: translateY(10px); transition: opacity 0.3s, transform 0.4s var(--ease); pointer-events: none; }
+.panel.on { opacity: 1; transform: none; pointer-events: auto; transition: opacity 0.45s 0.08s, transform 0.6s var(--ease) 0.08s; }
+.panel-cap { display: flex; justify-content: space-between; font: 500 12.5px var(--mono); color: var(--grey); }
+.sql { background: var(--bg); border-radius: 12px; padding: 14px 16px; font: 400 13.5px/1.7 var(--mono); white-space: pre-wrap; }
+.sql .k { color: var(--acc); }
+.typing { display: inline-block; overflow: hidden; white-space: nowrap; vertical-align: bottom; max-width: 0; }
+/* The WHERE clause is 38 characters. */
+.panel.on .typing { animation: type 1.6s steps(38) 0.3s forwards; }
+@keyframes type { to { max-width: 38ch; } }
+.why { font-size: 13.5px; color: var(--grey); padding: 0 2px; }
+.muted { color: var(--grey); }
+
+.checks { display: grid; gap: 8px; }
+.check { display: flex; align-items: center; gap: 12px; background: var(--bg); border-radius: 10px; padding: 11px 14px; font-size: 14px; }
+.check code { font-size: 12.5px; color: var(--grey); }
+.check .ok { margin-left: auto; font: 500 12.5px var(--mono); color: var(--ok); opacity: 0; transform: scale(0.8); }
+.check .ok.swap { color: var(--fg); }
+.panel.on .check .ok { animation: pop 0.35s var(--ease) forwards; }
+.panel.on .check:nth-child(2) .ok { animation-delay: 0.35s; }
+.panel.on .check:nth-child(3) .ok { animation-delay: 0.7s; }
+.panel.on .check:nth-child(4) .ok { animation-delay: 1.05s; }
+.panel.on .check:nth-child(5) .ok { animation-delay: 1.4s; }
+@keyframes pop { to { opacity: 1; transform: none; } }
+
+.rows { background: var(--bg); border-radius: 12px; overflow: hidden; font: 400 13px/1 var(--mono); }
+.rows div { display: grid; grid-template-columns: 1.3fr 1.5fr 0.8fr; gap: 10px; padding: 11px 14px; border-top: 1px solid var(--line); }
+.rows span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rows div:first-child { border-top: 0; color: var(--grey); font: 500 12.5px var(--sans); }
+.rows .masked { color: var(--grey); }
+.panel.on .rows div:not(:first-child) { animation: rowin 0.5s var(--ease) both; }
+.panel.on .rows div:nth-child(3) { animation-delay: 0.12s; }
+.panel.on .rows div:nth-child(4) { animation-delay: 0.24s; }
+
+.diff { display: grid; grid-template-columns: 54px 1fr auto; gap: 10px; align-items: center; background: var(--bg); border-radius: 12px; padding: 14px; font: 400 13px/1 var(--mono); }
+.diff s { color: var(--grey); text-decoration-color: var(--no); }
+.diff ins { text-decoration: none; color: var(--ok); }
+.act { display: flex; gap: 8px; margin-top: auto; }
+.act .btn { cursor: default; }
+.panel.on .act .ink { animation: nudge 2.4s var(--ease) 1.2s infinite; }
+
+/* The steps: the one at the middle of the screen is lit. */
+.step { min-height: 46vh; display: flex; flex-direction: column; justify-content: center; gap: 12px; padding-block: 24px; color: var(--grey); transition: color 0.3s; }
+.step:first-child { min-height: 0; height: 46vh; padding-top: 20px; justify-content: flex-start; }
+.step:last-child { min-height: 44vh; }
+.step .num { font: 500 13px var(--mono); color: var(--grey); transition: color 0.3s; }
+.step h3 { font-size: clamp(22px, 2.3vw, 30px); letter-spacing: -0.02em; transition: color 0.3s; }
+.step p { max-width: 42ch; font-size: 16.5px; }
+.step.on, .step.on h3, .step.on p { color: var(--fg); }
+.step.on .num { color: var(--acc); }
+
+@media (max-width: 1000px) {
+  .scene { display: block; margin-top: 0; }
+  .stage-wrap { display: contents; }
+  .stage { top: 64px; z-index: 2; background: var(--bg); padding: 8px 0 12px; }
+  .stage .card { min-height: 360px; padding: 16px; }
+  .stage-pg { display: none; }
+  .steps { position: relative; z-index: 1; }
+  .step, .step:first-child { min-height: 32vh; height: auto; justify-content: center; padding-top: 24px; }
+  .step:last-child { min-height: 30vh; }
+}
+@media (max-width: 720px) {
+  .stage .card { gap: 12px; min-height: 384px; }
+  .route { gap: 6px; }
+  .node .box { width: 46px; height: 46px; border-radius: 12px; }
+  .node .box svg { width: 22px; height: 22px; }
+  .node.rowkery .box .pg { width: 27px; height: 29px; }
+  .checks { gap: 6px; }
+  .check { padding: 8px 12px; font-size: 13.5px; }
+  .check code { display: none; }
+  .rows div { grid-template-columns: 1.2fr 1.6fr 0.7fr; font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .typing { max-width: none; }
+  .check .ok { opacity: 1; transform: none; }
+  .wire i { display: none; }
+}
