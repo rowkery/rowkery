@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import localFont from "next/font/local";
+import { DOWNLOAD_URL, MAKER_URL, RELEASE } from "@/lib/site";
 import "./globals.css";
 
 // IBM Plex Sans for text, IBM Plex Mono for SQL, keys and numbers, Gabarito for headings, and
@@ -36,9 +37,10 @@ const hand = localFont({
   preload: false,
 });
 
-const TITLE = "Rowkery · Postgres and SQLite for the Mac";
+// Search results show the title and description; Google cuts the description near 155 characters.
+const TITLE = "Rowkery · Free Postgres and SQLite client for the Mac";
 const DESCRIPTION =
-  "Rowkery is a Mac app for Postgres and SQLite. Use it on your own, or let your AI agent read your database through it. Nothing changes until you press Commit.";
+  "Rowkery is a free, open-source Postgres and SQLite client for the Mac. Use it from the keyboard, or let Claude, Cursor or another AI agent read your database.";
 
 // The link preview (X, Slack, iMessage, Discord, Bluesky) comes from these tags and from
 // public/og.png (1200 × 630: the mark, the name and one line). Without them a shared
@@ -47,7 +49,16 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://rowkery.com"),
   title: TITLE,
   description: DESCRIPTION,
-  icons: { icon: "/favicon.svg" },
+  alternates: { canonical: "/" },
+  // Google shows a favicon only when it can fetch a square raster one, 48 px or a multiple of it.
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "16x16 32x32 48x48" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/favicon.svg", type: "image/svg+xml" },
+    ],
+    apple: "/apple-touch-icon.png",
+  },
   openGraph: {
     type: "website",
     url: "/",
@@ -64,6 +75,38 @@ export const metadata: Metadata = {
   },
 };
 
+// What Google reads about the site and the app: the site name in results (instead of the bare
+// domain), the logo, and the app as free macOS software.
+const STRUCTURED_DATA = {
+  "@context": "https://schema.org",
+  "@graph": [
+    { "@type": "WebSite", "@id": "https://rowkery.com/#website", name: "Rowkery", url: "https://rowkery.com/", publisher: { "@id": "https://rowkery.com/#org" } },
+    {
+      "@type": "Organization",
+      "@id": "https://rowkery.com/#org",
+      name: "Rowkery",
+      url: "https://rowkery.com/",
+      logo: "https://rowkery.com/icon-512.png",
+      sameAs: ["https://github.com/rowkery"],
+    },
+    {
+      "@type": "SoftwareApplication",
+      name: "Rowkery",
+      description: DESCRIPTION,
+      url: "https://rowkery.com/",
+      image: "https://rowkery.com/og.png",
+      applicationCategory: "DeveloperApplication",
+      operatingSystem: "macOS",
+      softwareVersion: RELEASE.version,
+      downloadUrl: DOWNLOAD_URL,
+      license: "https://www.apache.org/licenses/LICENSE-2.0",
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      author: { "@type": "Person", name: "Lucas Sim", url: MAKER_URL },
+      publisher: { "@id": "https://rowkery.com/#org" },
+    },
+  ],
+};
+
 // Dark only (2026-10-14).
 export const viewport: Viewport = {
   themeColor: "#0a0a0a",
@@ -76,6 +119,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable} ${hand.variable}`}>
       <body>
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(STRUCTURED_DATA) }} />
         {children}
         <Analytics />
       </body>
