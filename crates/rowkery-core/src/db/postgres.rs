@@ -1536,7 +1536,7 @@ fn make_tls_connector(
 
 fn root_store(root_cert: Option<&str>) -> Result<RootCertStore, DriverError> {
     let Some(path) = root_cert.map(str::trim).filter(|p| !p.is_empty()) else {
-        return Ok(system_roots().clone());
+        return Ok(trust_roots().clone());
     };
     let path = expand_home(path);
     let certs = CertificateDer::pem_file_iter(&path)
@@ -1560,7 +1560,7 @@ fn root_store(root_cert: Option<&str>) -> Result<RootCertStore, DriverError> {
 /// Corporate and locally added CAs live in the system store; the Mozilla
 /// roots cover machines where it can't be read. Loaded once, since reading
 /// the macOS trust settings takes a while and every session needs them.
-fn system_roots() -> &'static RootCertStore {
+pub(crate) fn trust_roots() -> &'static RootCertStore {
     static ROOTS: OnceLock<RootCertStore> = OnceLock::new();
     ROOTS.get_or_init(|| {
         let mut roots = RootCertStore::empty();

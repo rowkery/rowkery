@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod catalog_cache;
+pub mod cloudsql;
 pub mod config;
 pub mod config_writer;
 pub mod connections;
