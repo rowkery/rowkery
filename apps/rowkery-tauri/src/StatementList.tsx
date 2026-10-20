@@ -7,9 +7,6 @@ import "./StatementList.css";
 export interface StatementResult {
   result: QueryResultDto | null;
   tableKey: string | null;
-  /** Rows remained when it ran (only the run's last statement can still load them). */
-  hasMore: boolean;
-  paged?: boolean;
   ranSql?: string;
   runNo?: number;
 }
@@ -23,7 +20,7 @@ export function statementOutcome(s: StatementResult): string {
   if (r.error) return "Error";
   if (r.cancelled) return "Cancelled";
   const count = (n: number, word: string) => `${n.toLocaleString()} ${n === 1 ? word : `${word}s`}`;
-  if (r.columns.length > 0) return s.hasMore ? `${r.row_count.toLocaleString()}+ rows` : count(r.row_count, "row");
+  if (r.columns.length > 0) return count(r.row_count, "row");
   const changed = r.affected_rows ?? 0;
   return changed > 0 || WRITES_ROWS.test(s.ranSql ?? "") ? `${count(changed, "row")} changed` : "Done";
 }

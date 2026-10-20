@@ -2,8 +2,8 @@
 // Docs screens for the "Working with data" query pages (docs.rowkery.com /query-tabs/,
 // /completion/, /query-plans/, /sessions/), from the running app (Vite) with the docs'
 // stubbed storefront backend:
-//  - query-tabs-overview: a query tab with two statements, the second run, its first
-//    1,000 rows paged with Load more and the page-size menu, column profiles in the header;
+//  - query-tabs-overview: a query tab with two statements, the second run, all its rows
+//    loaded, column profiles in the header;
 //  - query-tabs-status: three query tabs (one done, one failed, one running) and the
 //    running tab's Cancel turned into Force stop after a cancel the server didn't answer;
 //  - query-tabs-error: a failed run: the underlined token, the server's sentence,
@@ -194,7 +194,7 @@ if (wanted("query-tabs")) {
   const two = "SELECT status, count(*) FROM orders GROUP BY status;\n\nSELECT id, customer_id, status, total, currency, placed_at\n  FROM orders\n ORDER BY placed_at DESC;";
   await setSql(page, two, two.indexOf("FROM orders\n ORDER"));
   await page.keyboard.press("Meta+Enter");
-  await page.waitForSelector(`${WS} [data-load-more]`);
+  await page.waitForSelector(`${WS} [data-row]`);
   await settle(page);
   await page.focus(EDITOR);
   await shot(page, "query-tabs-overview");

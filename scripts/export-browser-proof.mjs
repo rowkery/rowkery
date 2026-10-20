@@ -3,9 +3,10 @@
 // so `export_results` stands in for it): ⇧⌘E exports the whole result of the
 // statement the tab last ran, not just the loaded page; the tab shows
 // "Exporting · n rows" with Cancel meanwhile and a toast names the file;
-// Esc cancels; a dismissed dialog does nothing. ⌘K says "Copy loaded 1,000
-// rows" vs "Copy all results" while rows remain; Copy all runs core-side. A
-// table tab exports its browse without the page LIMIT.
+// Esc cancels; a dismissed dialog does nothing. A query tab holds its whole
+// result, so ⌘K offers plain Copy results. A table tab with rows left says
+// "Copy loaded 1,000 rows" vs "Copy all results"; Copy all runs core-side,
+// and Export exports its browse without the page LIMIT.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/export-browser-proof.mjs [outDir]
@@ -137,7 +138,7 @@ await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="r
 await settle();
 
 const rows = await palette("copy");
-check(rows.some((r) => r.startsWith("cmd:copy-csv=Copy loaded 1,000 rows as CSV")) && rows.some((r) => r === "cmd:copy-all-csv=Copy all results as CSV"), `⌘K: loaded vs all (${rows.join(" | ")})`);
+check(rows.some((r) => r === "cmd:copy-csv=Copy results as CSV") && !rows.some((r) => r.startsWith("cmd:copy-all-csv")), `⌘K on a query tab: Copy results, all of it loaded (${rows.join(" | ")})`);
 await page.keyboard.press("Escape");
 await page.keyboard.press("Escape");
 
@@ -174,23 +175,26 @@ await page.waitForTimeout(200);
 const dismissed = { calls: (await calls("export_results")).length - before, running: !!(await page.$(`${ws} [data-testid="card-meta"][data-state="running"]`)), toast: await page.$eval("[data-toast]", (e) => e.textContent).catch(() => null) };
 check(dismissed.calls === 1 && !dismissed.running && dismissed.toast === null, `dismissing the dialog does nothing (${JSON.stringify(dismissed)})`);
 
-// Copy all from ⌘K.
-await palette("copy all results as csv");
-await page.click('[data-testid="cp-row"][data-item="cmd:copy-all-csv"]');
-await page.waitForFunction(() => document.querySelector("[data-toast]")?.textContent.includes("Copied"));
-const copy = (await calls("copy_all_results"))[0];
-check(copy?.sql === "SELECT n FROM players" && copy.format === "csv", "Copy all runs the statement core-side as CSV");
-check((await toast()).replace(/\s+/g, " ") === "Copied 2,500 rows CSV", `toast says so (${await toast()})`);
-
 // A table tab exports its browse without the page LIMIT.
 await page.evaluate(() => (window.__DIALOG__ = "/home/me/players.sql"));
 await page.click(`${ws} [data-table="rowkery.public.players"] [data-testid="sb-row-main"]`);
 await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "1000", ws);
 await settle();
+const tableRows = await palette("copy");
+check(tableRows.some((r) => r.startsWith("cmd:copy-csv=Copy loaded 1,000 rows as CSV")) && tableRows.some((r) => r === "cmd:copy-all-csv=Copy all results as CSV"), `⌘K on a table tab: loaded vs all (${tableRows.join(" | ")})`);
+await page.keyboard.press("Escape");
+await page.keyboard.press("Escape");
 await page.waitForTimeout(1800);
 await page.click(`${ws} [data-testid="results-grid-wrap"]`);
 await page.keyboard.press("Control+Shift+E");
 await page.waitForFunction(() => document.querySelector("[data-toast]")?.textContent.includes("players.sql"));
 const tableExp = (await calls("export_results")).at(-1);
 check(!tableExp.sql.includes("LIMIT") && tableExp.table === "players" && tableExp.schema === "public", `table tab: whole table, INSERT target public.players (${JSON.stringify(tableExp)})`);
+// Copy all from ⌘K.
+await palette("copy all results as csv");
+await page.click('[data-testid="cp-row"][data-item="cmd:copy-all-csv"]');
+await page.waitForFunction(() => document.querySelector("[data-toast]")?.textContent.includes("Copied"));
+const copy = (await calls("copy_all_results"))[0];
+check(/players/.test(copy?.sql ?? "") && !/LIMIT/.test(copy?.sql ?? "") && copy.format === "csv", `Copy all runs the whole browse core-side as CSV (${copy?.sql})`);
+check((await toast()).replace(/\s+/g, " ") === "Copied 2,500 rows CSV", `toast says so (${await toast()})`);
 await browser.close();

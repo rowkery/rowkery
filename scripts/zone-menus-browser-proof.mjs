@@ -4,8 +4,8 @@
 // editor's foot left of Run, the schema panel's head) listing that zone's
 // commands from the registry with their keys, only the ones that can run
 // now; a pick runs the command. Data | Structure sits at the tab row's right
-// on a table tab (Paper, 2026-10-10) and in the results head on a query tab
-// that reads one table.
+// on a table tab (Paper, 2026-10-10); a query tab has none (reports#7: a
+// query can join several tables).
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/zone-menus-browser-proof.mjs [outDir]
@@ -181,7 +181,7 @@ await page.waitForSelector("[data-timings]");
 check(true, "Timings opened from the results menu");
 await page.keyboard.press("Escape");
 await page.waitForSelector("[data-timings]", { state: "detached" });
-check(!!(await page.$(`${ws} [data-testid="card-toolbar"] [data-testid="view-switch"]`)), "a query reading one table keeps Data | Structure in its results head");
+check(!(await page.$(`${ws} [data-testid="card-toolbar"] [data-testid="view-switch"]`)), "a query reading one table has no Data | Structure in its results head");
 
 // 4. Run all from the editor's `…` runs the statements.
 const runsBefore = (await calls("run_query")).length;

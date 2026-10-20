@@ -5,7 +5,6 @@ import {
   copyAllResults,
   reviewChanges,
   exportResults,
-  fetchMore,
   browseTableSql,
   cancelCount,
   cancelQuery,
@@ -177,7 +176,6 @@ const SCHEMA_STALE_MS = 15 * 60_000;
 const DEFAULT_PAGE = 1000;
 /** The page-size menu; 0 loads every row. */
 const PAGE_SIZES = [1000, 5000, 0];
-const pageLabel = (n: number) => (n === 0 ? "All" : n.toLocaleString());
 
 type SortState = SortKey;
 
@@ -271,17 +269,10 @@ interface TabRun {
    */
   tableKey: string | null;
   /**
-   * More rows remain: a table tab's last page came back full, or a query
-   * tab's cursor has rows left. Load more (or scrolling to the end) gets them.
+   * More rows remain: a table tab's last page came back full. Load more (or
+   * scrolling to the end) gets them. A query tab gets every row at once.
    */
   hasMore: boolean;
-  /**
-   * Rows remain, but a later statement of the run closed the cursor: the
-   * count says so ("1,000+ rows") and there is no Load more.
-   */
-  cut?: boolean;
-  /** The last run was a query tab's cursor page (its page size applies). */
-  paged?: boolean;
   /** The statement the last run ran (a query tab's), for Export and Copy all. */
   ranSql?: string;
   /**
@@ -341,8 +332,8 @@ function keepShownStatement(run: TabRun): Pick<TabRun, "statements"> {
 
 /** The statement a tab shows, to keep while it shows another. */
 function shownStatement(run: TabRun): StatementResult {
-  const { result, tableKey, paged, ranSql, runNo } = run;
-  return { result, tableKey, hasMore: run.hasMore || !!run.cut, paged, ranSql, runNo };
+  const { result, tableKey, ranSql, runNo } = run;
+  return { result, tableKey, ranSql, runNo };
 }
 
 const IDLE_RUN: TabRun = {
@@ -1255,7 +1246,7 @@ export function Workspace({
   const activeTableKey = isTableTab ? activeTab?.tableKey : activeRun.tableKey;
   const activeTable = activeTableKey ? findTable(schemaTree, activeTableKey) : undefined;
   const resultsView: ResultsView =
-    activeTable && activeTab?.view === "structure" ? "structure" : "data";
+    isTableTab && activeTable && activeTab?.view === "structure" ? "structure" : "data";
 
   // Memoised on the table, so the grid only re-sizes columns for a new result.
   const keyColumns: KeyColumns | null = useMemo(() => {
@@ -2010,7 +2001,6 @@ export function Workspace({
       appending: !!paging?.append,
       runNo: paging?.append ? prev.runNo : (prev.runNo ?? 0) + 1,
       errorMark: paging?.append ? prev.errorMark : null,
-      cut: false,
       // A run of its own ends the last run's statement list; the next of a
       // run keeps the one shown until now as it is (rows Load more added).
       ...(paging?.append ? {} : part ? keepShownStatement(prev) : { statements: null, statementAt: undefined }),
@@ -2037,25 +2027,16 @@ export function Workspace({
               streamed = true;
               patchRun(tabId, { result: partial, streaming: true });
           };
-      // A query tab pages free-form reads through a cursor (core decides
-      // which statements can); Load more continues that cursor.
-      const queryTab = tabsRef.current.find((t) => t.id === tabId && t.kind === "query");
       // Every connection is busy: the tab says it waits, rather than look stuck.
       const onWaiting = (waiting: boolean) => {
         if (tableRun && !tableRun.current()) return;
         patchRun(tabId, { waiting });
       };
+      // A query runs as written, every row it returns (up to the cap a tab
+      // holds): its own LIMIT says how many it wants.
       const res = browse
         ? await browseTable(windowId, tabId, browse, onProgress, onWaiting)
-        : paging?.append
-          ? await fetchMore(windowId, tabId, paging.page, onProgress, onWaiting)
-          : await runQuery(windowId, tabId, text, {
-              confirmed,
-              onProgress,
-              onWaiting,
-              // All is everything up to the cap.
-              page: queryTab ? nextFetchRows(queryTab.pageSize ?? DEFAULT_PAGE, 0) : undefined,
-            });
+        : await runQuery(windowId, tabId, text, { confirmed, onProgress, onWaiting });
       if (!res.hold) timing.rows(res.row_count, res.elapsed_ms, res.first_row_ms ?? null);
       // The tab changed while this ran: the run `runTable` queued shows instead.
       if (tableRun && !tableRun.current()) {
@@ -2104,7 +2085,7 @@ export function Workspace({
         // A failed page leaves the rows already loaded in place.
         if (answered) {
           const hasMore = capAt(
-            res.paged ? !!res.more : paging.page > 0 && res.row_count >= paging.page,
+            paging.page > 0 && res.row_count >= paging.page,
             (runsRef.current[tabId]?.result?.rows.length ?? 0) + res.rows.length,
           );
           patchRun(tabId, (prev) => ({
@@ -2125,10 +2106,9 @@ export function Workspace({
         const patch: Partial<TabRun> = {
           result: res,
           hasMore: capAt(
-            res.paged ? !!res.more : !!paging && paging.page > 0 && answered && res.row_count >= paging.page,
+            !!paging && paging.page > 0 && answered && res.row_count >= paging.page,
             res.rows.length,
           ),
-          paged: !!res.paged,
           ranSql: browse ? undefined : text,
         };
         // A table tab names its table; a query's own SQL says which it read.
@@ -2240,18 +2220,15 @@ export function Workspace({
   };
 
   /**
-   * Shows statement `index` of the tab's last run of several. The one shown
-   * until now keeps what it has (rows Load more added). Only the run's last
-   * statement still has its cursor, so only it can load more.
+   * Shows statement `index` of the tab's last run of several; the one shown
+   * until now keeps what it has.
    */
   const showStatement = (tabId: typeof activeTabId, index: number) =>
     patchRun(tabId, (prev) => {
       const list = prev.statements;
       if (!list?.[index] || prev.startedAt != null || index === prev.statementAt) return {};
       const statements = keepShownStatement(prev).statements ?? list;
-      const next = statements[index];
-      const last = index === statements.length - 1;
-      return { ...next, hasMore: last && next.hasMore, cut: !last && next.hasMore, statements, statementAt: index };
+      return { ...statements[index], statements, statementAt: index };
     });
 
   /** Run All Statements: every statement of the editor. */
@@ -2978,20 +2955,8 @@ export function Workspace({
     if (table) openTable(table, { keep: true, state: { filter: "", sort: [] } });
   };
 
-  const loadMore = (rows?: number) => {
-    if (!activeTab) return;
-    if (activeTab.kind === "query") {
-      const loaded = runsRef.current[activeTab.id]?.result?.rows.length ?? 0;
-      // All is the rest up to the cap; at the cap there's nothing to ask for.
-      const page = nextFetchRows(rows ?? activeTab.pageSize ?? DEFAULT_PAGE, loaded);
-      if (page === 0) {
-        patchRun(activeTab.id, { hasMore: false });
-        showToast(CAPPED_MESSAGE);
-        return;
-      }
-      void onRun("fetch more", false, undefined, activeTab.id, false, { page, append: true });
-      return;
-    }
+  const loadMore = () => {
+    if (activeTab?.kind !== "table") return;
     if (activeTab.preview) patchTab(activeTab.id, { preview: false });
     void runTable({ ...activeTab, preview: false }, true);
   };
@@ -3006,13 +2971,7 @@ export function Workspace({
 
   /** Page size menu: reloads the tab's first page at the new size. */
   const setPageSize = (pageSize: number) => {
-    if (!activeTab) return;
-    if (activeTab.kind === "query") {
-      // Applies to the next page; All loads the rest of an open cursor now.
-      patchTab(activeTab.id, { pageSize });
-      if (pageSize === 0 && runsRef.current[activeTab.id]?.hasMore) loadMore(0);
-      return;
-    }
+    if (activeTab?.kind !== "table") return;
     const next = { ...activeTab, pageSize, preview: false };
     patchTab(next.id, { pageSize, preview: false });
     pendingWash.current[next.id] = "limit";
@@ -3318,11 +3277,11 @@ export function Workspace({
       windowCount,
       hasResult: !!result,
       hasRows,
-      hasActiveTable: !!activeTable,
+      hasActiveTable: isTableTab && !!activeTable,
       resultsView,
       failed: connState === "error",
       loadedRows: result?.row_count ?? 0,
-      moreRows: !!(activeRun.hasMore || activeRun.cut),
+      moreRows: !!activeRun.hasMore,
       closedTabs: closedCount,
       historyBack: navHistory.index > 0,
       historyForward: navHistory.index < navHistory.entries.length - 1,
@@ -4167,18 +4126,10 @@ export function Workspace({
           <>
           {!isTableTab && (
           <div data-testid="card-toolbar" className="card-toolbar">
-            {/* A plan replaces the result, so its Data / Structure and table go too. */}
-            {(!shownPlan && viewSwitch) || (
-              <span data-testid="card-title" className="card-title">
-                {shownPlan ? "Plan" : "Results"}
-              </span>
-            )}
-            {!isTableTab && !shownPlan && activeTable && (
-              <span data-testid="card-table" className="card-table">
-                <TableIcon size={12} />
-                {activeTable.name}
-              </span>
-            )}
+            {/* A query can join several tables, so it has no one table's Data / Structure. */}
+            <span data-testid="card-title" className="card-title">
+              {shownPlan ? "Plan" : "Results"}
+            </span>
             {findShown && find && !shownPlan && (
               <span className="find-bar" data-find>
                 <input
@@ -4249,43 +4200,10 @@ export function Workspace({
               result.columns.length > 0 && (
                 <span data-testid="card-meta" className="card-meta">
                   <span className="conn-dot connected" />
-                  <b
-                    title={
-                      isTableTab && activeTable && !activeTable.table.primary_key?.length
-                        ? "Pages use OFFSET (no primary key)"
-                        : undefined
-                    }
-                  >
-                    {isTableTab && activeTable?.rows != null && activeRun.hasMore && !activeTab?.filter?.trim()
-                      ? `${result.row_count.toLocaleString()} of ≈${activeTable.rows.toLocaleString()}`
-                      : !isTableTab && (activeRun.hasMore || activeRun.cut)
-                        ? `${result.row_count.toLocaleString()}+ rows`
-                        : `${result.row_count.toLocaleString()} ${result.row_count === 1 ? "row" : "rows"}`}
-                  </b>
+                  <b>{`${result.row_count.toLocaleString()} ${result.row_count === 1 ? "row" : "rows"}`}</b>
                   {formatMs(result.elapsed_ms)}
-                  {activeRun.hasMore && (
-                    <button type="button" className="cancel-btn" data-load-more onClick={() => loadMore()}>
-                      Load more · {pageLabel(activeTab?.pageSize ?? DEFAULT_PAGE)} rows
-                    </button>
-                  )}
                 </span>
               )
-            )}
-            {activeRun.paged && !shownPlan && resultsView !== "structure" && activeTab && (
-              <label className="page-size" title="Rows per page for this tab">
-                <select
-                  data-page-size={activeTab.pageSize ?? DEFAULT_PAGE}
-                  value={activeTab.pageSize ?? DEFAULT_PAGE}
-                  disabled={runStartedAt !== null}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                >
-                  {PAGE_SIZES.map((n) => (
-                    <option key={n} value={n}>
-                      {n === 0 ? "All rows" : `${n.toLocaleString()} rows`}
-                    </option>
-                  ))}
-                </select>
-              </label>
             )}
             {/* Paper: Export as a bordered button ahead of
                 the zone's …, running the registry's export command. */}
@@ -4395,7 +4313,7 @@ export function Workspace({
                     onFindCount={setFindCount}
                     commandState={commandState}
                     onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
-                    onStructure={activeTable ? () => setActiveView("structure") : undefined}
+                    onStructure={isTableTab && activeTable ? () => setActiveView("structure") : undefined}
                     markedColumns={markedSet}
                     hiddenColumns={hiddenSet}
                     onMarkColumn={markTable ? markColumn : undefined}

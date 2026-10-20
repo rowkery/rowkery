@@ -2,10 +2,8 @@
 // reports#7: a run of several statements (Run All, or a selection of several)
 // keeps each statement's result. A list beside the grid shows every statement
 // with how it ended (rows, rows changed, Error); picking one, by click or
-// ↑ / ↓, shows its result. Only the run's last statement keeps its cursor, so
-// an earlier one with rows left says "N+ rows" without Load more. A failing
-// statement stops the run and shows its error. A single statement's run
-// takes the list away.
+// ↑ / ↓, shows its result. A failing statement stops the run and shows its
+// error. A single statement's run takes the list away.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/statement-list-browser-proof.mjs [outDir]
@@ -50,20 +48,14 @@ function stubTauri() {
           window.__RUNS__.push(sql);
           if (/;\s*\S/.test(sql)) return { ...done, error: "cannot insert multiple commands into a prepared statement", sqlstate: "42601" };
           if (/\bnmae\b/.test(sql)) return { ...done, error: 'column "nmae" does not exist', sqlstate: "42703", error_position: sql.indexOf("nmae") + 1 };
-          // A page of a longer read: the cursor has rows left. A full page,
-          // so the grid's end (which loads more) stays out of sight.
           if (/from users/i.test(sql)) {
             const rows = Array.from({ length: 200 }, (_, n) => [I(n + 1), T(`u${n + 1}@example.com`)]);
-            return { ...done, elapsed_ms: 4, columns: [col("id", "int8"), col("email", "text")], rows, row_count: 200, paged: true, more: true };
+            return { ...done, elapsed_ms: 4, columns: [col("id", "int8"), col("email", "text")], rows, row_count: 200 };
           }
           if (/group by status/i.test(sql)) return { ...done, columns: [col("status", "text"), col("count", "int8")], rows: [[T("paid"), I(6120)], [T("pending"), I(1830)], [T("refunded"), I(450)]], row_count: 3 };
           if (/^update/i.test(sql)) return { ...done, affected_rows: 1 };
           if (/^select/i.test(sql)) return { ...done, columns: [col("id", "int8"), col("status", "text")], rows: [[I(42), T("shipped")]], row_count: 1 };
           return done;
-        }
-        case "fetch_more": {
-          const rows = Array.from({ length: 50 }, (_, n) => [I(n + 201), T(`u${n + 201}@example.com`)]);
-          return { ...done, columns: [col("id", "int8"), col("email", "text")], rows, row_count: 50, paged: true, more: false };
         }
         default:
           return null;
@@ -125,15 +117,14 @@ check((await page.$$(`${list} [data-statement]`)).length === 4, "four statements
 check((await selected()) === "3" && (await gridRows()) === 1, "the last statement shows, as before");
 check(/^4\s*SELECT/.test((await page.textContent(row(3)))?.trim() ?? ""), "rows are numbered");
 check(/1 row changed/.test(await rowMeta(2)), `the UPDATE says what it changed (${await rowMeta(2)})`);
-check(/200\+ rows/.test(await rowMeta(0)), `a read with rows left says so (${await rowMeta(0)})`);
+check(/200 rows/.test(await rowMeta(0)), `a read says how many rows (${await rowMeta(0)})`);
 await page.screenshot({ path: `${OUT}/1-run-all.png` });
 
-// Click: the first statement's rows. Its cursor is gone, so no Load more.
+// Click: the first statement's rows.
 await page.click(row(0));
 await page.waitForFunction(() => document.querySelector('[data-testid="workspace"]:not([hidden]) [data-row-count]')?.getAttribute("data-row-count") === "200");
 check((await selected()) === "0", "a click shows that statement");
-check(/200\+ rows/.test((await meta()) ?? ""), `its count keeps the + (${await meta()})`);
-check((await page.$(`${ws} [data-load-more]`)) === null, "no Load more for an earlier statement");
+check(/200 rows/.test((await meta()) ?? ""), `the header says its count (${await meta()})`);
 await page.screenshot({ path: `${OUT}/2-first-picked.png` });
 
 // ↓ steps to the next one; ↓ again to the UPDATE.
@@ -146,26 +137,6 @@ check((await selected()) === "2", "↓ again: the UPDATE, and the grid says 1 ro
 await page.keyboard.press("ArrowUp");
 await page.waitForFunction(() => document.querySelector('[data-testid="workspace"]:not([hidden]) [data-row-count]')?.getAttribute("data-row-count") === "3");
 check((await selected()) === "1", "↑ goes back");
-
-// The run's last statement keeps its cursor: Load more, also after
-// looking at another one and coming back.
-await setSql("SELECT status, count(*) FROM orders GROUP BY status;\nSELECT id, email FROM users;");
-await page.focus(editor);
-await page.keyboard.press("Control+Alt+Enter");
-await page.waitForSelector(row(1));
-await idle();
-check((await page.$(`${ws} [data-load-more]`)) !== null, "the last statement can load more");
-await page.click(row(0));
-await page.waitForFunction(() => !document.querySelector('[data-testid="workspace"]:not([hidden]) [data-load-more]'));
-await page.click(row(1));
-await page.waitForSelector(`${ws} [data-load-more]`);
-// Load more grows the shown statement, and its row in the list says so.
-await page.click(`${ws} [data-load-more]`);
-await page.waitForFunction((sel) => /250 rows/.test(document.querySelector(sel)?.textContent ?? ""), `${row(1)} [data-testid="statement-outcome"]`);
-await page.click(row(0));
-await page.click(row(1));
-await page.waitForFunction(() => document.querySelector('[data-testid="workspace"]:not([hidden]) [data-row-count]')?.getAttribute("data-row-count") === "250");
-check(true, "still loads more after showing another statement, and keeps the rows it loaded");
 
 // A failing statement stops the run; its row says Error and its error shows.
 await page.evaluate(() => (window.__RUNS__ = []));

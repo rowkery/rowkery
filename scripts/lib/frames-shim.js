@@ -41,8 +41,6 @@
       sqlstate: res.sqlstate ?? null,
       error_position: res.error_position ?? null,
       hold: null,
-      paged: res.paged ?? false,
-      more: res.more ?? false,
     });
     return out;
   };
@@ -77,7 +75,7 @@
           }),
         );
       }
-      const channel = cmd === "run_query" || cmd === "fetch_more" ? args?.onFrame : undefined;
+      const channel = cmd === "run_query" ? args?.onFrame : undefined;
       const res = await call(cmd, args);
       if (!channel || !res || typeof res !== "object") return res;
       const queryId = ++nextId;

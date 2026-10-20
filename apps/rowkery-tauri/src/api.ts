@@ -251,11 +251,6 @@ export interface RunOptions {
   /** The user confirmed this run on a Confirm writes connection. */
   confirmed?: boolean;
   /**
-   * Rows per page (0: all) when the statement is a free-form read core can
-   * page through a cursor (Postgres; queries with their own LIMIT run whole).
-   */
-  page?: number;
-  /**
    * Called once, when the first rows arrive while the query still runs, with
    * the result they are in. Its `rows` keep growing in place; read them with
    * `useResultRows`. A run whose done frame lands in the same task as its
@@ -297,27 +292,14 @@ export function runQuery(
   sql: string,
   opts: RunOptions | boolean = {},
 ): Promise<QueryResultDto> {
-  const { confirmed = false, onProgress, onWaiting, page } = typeof opts === "boolean" ? { confirmed: opts } : opts;
+  const { confirmed = false, onProgress, onWaiting } = typeof opts === "boolean" ? { confirmed: opts } : opts;
   return stream<number>(
     "run_query",
-    { windowId, tabId, sql, confirmed, page: page ?? null },
+    // Every row the query returns (up to the cap a tab holds), never a cursor page.
+    { windowId, tabId, sql, confirmed, page: null },
     onProgress,
     onWaiting,
   ).then(([result]) => result);
-}
-
-/**
- * The next `rows` (0: the rest) of the tab's paged query, as a result of its
- * own for the caller to append.
- */
-export function fetchMore(
-  windowId: string,
-  tabId: number,
-  rows: number,
-  onProgress?: RunOptions["onProgress"],
-  onWaiting?: RunOptions["onWaiting"],
-): Promise<QueryResultDto> {
-  return stream<number>("fetch_more", { windowId, tabId, rows }, onProgress, onWaiting).then(([result]) => result);
 }
 
 /** A table tab's browse: which table, filtered, sorted and paged how. */
