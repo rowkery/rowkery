@@ -575,11 +575,14 @@ async fn cloudsql_account(
 }
 
 /// Every Cloud SQL instance the account can see, for the instance picker.
+/// `project` (the one the form names) is searched when Google won't list
+/// the account's projects.
 #[tauri::command]
 async fn cloudsql_instances(
     credentials: String,
     key: Option<String>,
     connection_id: Option<String>,
+    project: Option<String>,
 ) -> Result<rowkery_core::cloudsql::InstanceList, String> {
     let key = if credentials == "key" {
         cloudsql_key(key, connection_id)
@@ -588,9 +591,12 @@ async fn cloudsql_instances(
     } else {
         String::new()
     };
-    rowkery_core::cloudsql::instances(Some(key.as_str()).filter(|k| !k.is_empty()))
-        .await
-        .map_err(|e| e.to_string())
+    rowkery_core::cloudsql::instances(
+        Some(key.as_str()).filter(|k| !k.is_empty()),
+        project.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Asks for a service account key file (the native dialog: only a file the

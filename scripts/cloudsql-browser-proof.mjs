@@ -60,6 +60,13 @@ function stubTauri(scn) {
           return scn.gcloud ? { kind: "gcloud", email: "dev@acme.dev" } : null;
         case "cloudsql_instances":
           if (args.credentials === "gcloud" && !scn.gcloud) throw "Google login: No gcloud login on this computer";
+          if (scn.listError) throw "Cloud SQL Admin API: 403 Cloud Resource Manager API has not been used in project acme-billing before or it is disabled.";
+          if (scn.projectsError)
+            return {
+              instances: args.project ? [inst(args.project, "kioskuno-db-backoffice-prd", "asia-east1", "Postgres 16")] : [],
+              skipped: [],
+              projects_error: "Cloud Resource Manager API has not been used in project acme-billing before or it is disabled.",
+            };
           return {
             instances: [
               inst("acme-prod", "analytics-prd", "asia-southeast1", "Postgres 15"),
@@ -250,7 +257,32 @@ const secrets = await page.evaluate(() => window.__SECRETS__);
 check(secrets?.gcp_key === "picked-key-1", "Save hands the picked key's id over with the password");
 await page.close();
 
-// 3. Dark.
+// 3. A long connection name stays on one line; Google's reason shows when listing fails.
+page = await sheet({ gcloud: true, listError: true });
+await page.click('[data-testid="csql-instance"]');
+await page.fill("[data-csql-filter]", "kioskunoprod:asia-east1:kioskuno-db-backoffice-prd");
+await page.waitForSelector('[data-csql-option="typed"]');
+const name = page.locator('[data-csql-option="typed"] .csql-option-name');
+check((await name.textContent()) === "kioskuno-db-backoffice-prd", "a typed name shows the instance's own name");
+const fits = await name.evaluate((el) => el.getBoundingClientRect().height < 20 && el.closest("button").scrollHeight <= el.closest("button").clientHeight);
+check(fits, "a long name stays on one line inside its row");
+check((await page.locator(".csql-list-why").textContent()).includes("Cloud Resource Manager API"), "the picker says why it couldn't list instances");
+await shot(page, "10-long-name-list-error");
+await page.click('[data-csql-option="typed"]');
+await page.close();
+
+// 4. Google won't list projects: the named project is searched, and the foot says so.
+page = await sheet({ gcloud: true, projectsError: true });
+await page.click('[data-testid="csql-instance"]');
+await page.fill("[data-csql-filter]", "kioskunoprod:asia-east1:kioskuno-db-backoffice-prd");
+await page.keyboard.press("Enter");
+await page.click('[data-testid="csql-instance"]');
+await page.waitForSelector('[data-csql-option="kioskuno-db-backoffice-prd"]');
+check((await page.locator("[data-csql-foot]").textContent()).includes("Couldn't list your projects"), "the foot says only some projects were searched");
+await shot(page, "11-projects-error");
+await page.close();
+
+// 5. Dark.
 page = await sheet({ gcloud: true }, "dark");
 await page.click('[data-testid="csql-instance"]');
 await page.waitForSelector('[data-csql-option="orders-prd"]');

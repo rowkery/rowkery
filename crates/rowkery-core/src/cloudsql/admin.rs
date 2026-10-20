@@ -34,11 +34,20 @@ async fn call<T: serde::de::DeserializeOwned>(
     login: &Login,
     build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
 ) -> Result<T, CloudSqlError> {
+    call_billed(login, true, build).await
+}
+
+/// [`call`], sending the login's quota project only when `quota` is set.
+async fn call_billed<T: serde::de::DeserializeOwned>(
+    login: &Login,
+    quota: bool,
+    build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
+) -> Result<T, CloudSqlError> {
     let creds = login.credentials().await?;
     for attempt in 0..2 {
         let token = auth::token(&creds).await?;
         let mut req = build(http()?).bearer_auth(&token.value);
-        if let Some(q) = creds.quota_project() {
+        if let Some(q) = creds.quota_project().filter(|_| quota) {
             req = req.header("x-goog-user-project", q);
         }
         let res = req.send().await.map_err(|e| {
@@ -339,15 +348,50 @@ pub struct InstanceList {
     /// The account sees more than [`PROJECT_CAP`] projects; only those
     /// were searched.
     pub more_projects: bool,
+    /// Google wouldn't list the account's projects (why, in its words), so
+    /// only the login's quota project and the one asked about were searched.
+    pub projects_error: Option<String>,
 }
 
 /// How many projects the picker searches (one Admin API call each).
 pub const PROJECT_CAP: usize = 500;
 
-/// Every Cloud SQL instance in the projects the account can see.
-pub async fn instances(key_json: Option<&str>) -> Result<InstanceList, CloudSqlError> {
+/// Every Cloud SQL instance in the projects the account can see. When
+/// Google won't list those projects, the login's quota project and
+/// `project` (the one the form already names) are searched instead.
+pub async fn instances(
+    key_json: Option<&str>,
+    project: Option<&str>,
+) -> Result<InstanceList, CloudSqlError> {
     let login = login_for(key_json)?;
-    let (projects, more_projects) = projects(&login).await?;
+    // Only a real project id: it goes into the Admin API's URL path.
+    let project = project
+        .map(str::trim)
+        .filter(|p| InstanceName::parse(&format!("{p}:r:i")).is_some());
+    let (mut projects, more_projects, projects_error) = match projects(&login).await {
+        Ok((p, more)) => (p, more, None),
+        Err(e) => {
+            let quota = login
+                .credentials()
+                .await?
+                .quota_project()
+                .map(str::to_string);
+            let known: Vec<String> = quota.into_iter().collect();
+            (known, false, Some(e))
+        }
+    };
+    // The project the form names is searched even when the listing leaves
+    // it out (an account with access to the instance, not the project).
+    if let Some(p) = project {
+        if !projects.iter().any(|x| x == p) {
+            projects.push(p.to_string());
+        }
+    }
+    if projects.is_empty() {
+        if let Some(e) = projects_error {
+            return Err(e);
+        }
+    }
     let lists: Vec<_> = futures::stream::iter(projects)
         .map(|p| {
             let login = login.clone();
@@ -363,11 +407,23 @@ pub async fn instances(key_json: Option<&str>) -> Result<InstanceList, CloudSqlE
         more_projects,
         ..Default::default()
     };
+    let searched = lists.len();
     for (project, listed) in lists {
         match listed {
             Ok(list) => out.instances.extend(list),
             Err(_) => out.skipped.push(project),
         }
+    }
+    if let Some(e) = projects_error {
+        // No project could be searched the other way either: the listing's
+        // own failure says why.
+        if out.skipped.len() == searched {
+            return Err(e);
+        }
+        out.projects_error = Some(match e {
+            CloudSqlError::Api { message, .. } => message,
+            other => other.to_string(),
+        });
     }
     out.instances
         .sort_by(|a, b| (&a.project, &a.name).cmp(&(&b.project, &b.name)));
@@ -393,15 +449,26 @@ async fn projects(login: &Login) -> Result<(Vec<String>, bool), CloudSqlError> {
     let mut out = Vec::new();
     let mut page_token = String::new();
     // Pages can come back short, so the number of calls is capped too.
+    // A gcloud login bills its quota project, which may not have the
+    // Resource Manager API on (Cloud SQL's own API is on wherever the
+    // instances are). gcloud's own `projects list` sends none, so after a
+    // 403 the listing goes without it, as gcloud does.
+    let mut quota = login.credentials().await?.quota_project().is_some();
     for _ in 0..10 {
-        let page: Page = call(login, |c| {
+        let request = |c: &reqwest::Client| {
             let mut q = vec![("filter", "lifecycleState:ACTIVE"), ("pageSize", "500")];
             if !page_token.is_empty() {
                 q.push(("pageToken", page_token.as_str()));
             }
             c.get(&url).query(&q)
-        })
-        .await?;
+        };
+        let page: Page = match call_billed(login, quota, request).await {
+            Err(CloudSqlError::Api { status: 403, .. }) if quota => {
+                quota = false;
+                call_billed(login, false, request).await?
+            }
+            other => other?,
+        };
         out.extend(page.projects.into_iter().map(|p| p.project_id));
         if out.len() >= PROJECT_CAP {
             let more = out.len() > PROJECT_CAP || !page.next_page_token.is_empty();

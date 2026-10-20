@@ -53,6 +53,9 @@ struct Google {
     /// The instance closes the next connection right after the handshake,
     /// as it does when it refuses a client certificate under TLS 1.3.
     refuse_next: std::sync::atomic::AtomicBool,
+    /// How `/v1/projects` answers: 0 lists, 1 refuses a call billed to a
+    /// quota project without the Resource Manager API, 2 refuses always.
+    projects_mode: AtomicUsize,
 }
 
 fn json(status: u16, body: serde_json::Value) -> (u16, String) {
@@ -86,6 +89,22 @@ impl Google {
             .find_map(|l| l.strip_prefix("x-goog-user-project: "))
             .map(str::to_string);
         if path == "/v1/projects" {
+            let billed = self.quota_project.lock().unwrap().is_some();
+            match self.projects_mode.load(Ordering::SeqCst) {
+                1 if billed => {
+                    return json(
+                        403,
+                        serde_json::json!({ "error": { "code": 403, "message": "Cloud Resource Manager API has not been used in project acme-billing before or it is disabled." } }),
+                    )
+                }
+                2 => {
+                    return json(
+                        403,
+                        serde_json::json!({ "error": { "code": 403, "message": "Projects are off limits" } }),
+                    )
+                }
+                _ => {}
+            }
             return json(
                 200,
                 serde_json::json!({ "projects": [{ "projectId": "acme" }, { "projectId": "locked" }] }),
@@ -322,6 +341,7 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         moving_calls: AtomicUsize::new(0),
         quota_project: Mutex::new(None),
         refuse_next: Default::default(),
+        projects_mode: AtomicUsize::new(0),
     });
     let ca_pem = google.server_ca.pem();
     let imposter_pem = ca("Someone else").pem();
@@ -420,7 +440,7 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         (account.kind, account.email.as_deref()),
         ("gcloud", Some("dev@example.com"))
     );
-    let list = cloudsql::instances(None).await.unwrap();
+    let list = cloudsql::instances(None, None).await.unwrap();
     let names: Vec<_> = list
         .instances
         .iter()
@@ -442,11 +462,43 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         r#"{"type":"authorized_user","client_id":"id","client_secret":"s","refresh_token":"r","quota_project_id":"acme-other"}"#,
     )
     .unwrap();
-    cloudsql::instances(None).await.unwrap();
+    cloudsql::instances(None, None).await.unwrap();
     assert_eq!(
         google.quota_project.lock().unwrap().as_deref(),
         Some("acme-other")
     );
+
+    // The quota project hasn't the Resource Manager API on: projects are
+    // listed without it, as gcloud does, and the rest still bills it.
+    google.projects_mode.store(1, Ordering::SeqCst);
+    let list = cloudsql::instances(None, None).await.unwrap();
+    assert_eq!(list.instances.len(), 2);
+    assert_eq!(list.projects_error, None);
+
+    // Google won't list projects at all: the quota project and the one the
+    // form names are searched, and the picker says why.
+    google.projects_mode.store(2, Ordering::SeqCst);
+    let list = cloudsql::instances(None, Some("acme")).await.unwrap();
+    assert_eq!(list.instances.len(), 2);
+    assert_eq!(list.skipped, vec!["acme-other".to_string()]);
+    assert_eq!(
+        list.projects_error.as_deref(),
+        Some("Projects are off limits")
+    );
+    // Nothing found that way either: the listing's own error.
+    let err = cloudsql::instances(None, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Projects are off limits"), "{err}");
+    google.projects_mode.store(0, Ordering::SeqCst);
+
+    // A project the listing leaves out is searched when the form names it;
+    // anything that isn't a project id stays out of the URL.
+    let list = cloudsql::instances(None, Some("hidden")).await.unwrap();
+    assert!(list.skipped.contains(&"hidden".to_string()));
+    let list = cloudsql::instances(None, Some("x/../y")).await.unwrap();
+    assert_eq!(list.skipped, vec!["locked".to_string()]);
 
     // No gcloud login: the form says so rather than failing.
     std::env::set_var(

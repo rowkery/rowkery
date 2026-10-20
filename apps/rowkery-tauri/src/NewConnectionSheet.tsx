@@ -258,6 +258,14 @@ export function NewConnectionSheet({
   const [probeMark, setProbeMark] = useState<ProbeMark | null>(null);
   const [locked, setLocked] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Delete… asks first: the foot turns into Keep / Delete until one is picked.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteRef = useRef<HTMLButtonElement>(null);
+  // Backing out puts focus back on Delete…, so the sheet keeps its keys.
+  const keepConnection = () => {
+    setConfirmDelete(false);
+    requestAnimationFrame(() => deleteRef.current?.focus());
+  };
   const [saveError, setSaveError] = useState<string | null>(null);
   // Save on a tuple that failed keeps the sheet once; the next Save keeps it anyway.
   const [blockedTuple, setBlockedTuple] = useState<string | null>(null);
@@ -657,8 +665,8 @@ export function NewConnectionSheet({
     if (!editing || saving) return;
     setSaving(true);
     try {
-      // One step: the toast offers Undo, so the keychain entries stay
-      // until it is gone.
+      // Asked first in the foot; the toast still offers Undo, so the
+      // keychain entries stay until it is gone.
       await deleteConnection(editing.id, true);
       onDeleted?.(editing.id);
     } catch (e) {
@@ -672,8 +680,10 @@ export function NewConnectionSheet({
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      onClose();
-    } else if (e.key === "Enter" && modKey) {
+      // Esc backs out of the delete question before it closes the sheet.
+      if (confirmDelete) keepConnection();
+      else onClose();
+    } else if (e.key === "Enter" && modKey && !confirmDelete) {
       // connection-save's chord (commands.ts). Test has none: ⌘T is New window.
       e.preventDefault();
       void onSave();
@@ -893,7 +903,8 @@ export function NewConnectionSheet({
           className="nc-body"
           onSubmit={(e) => {
             e.preventDefault();
-            void onSave();
+            // Enter in a field doesn't save from under the delete question.
+            if (!confirmDelete) void onSave();
           }}
         >
           {engine === "postgres" ? (
@@ -1295,14 +1306,27 @@ export function NewConnectionSheet({
           <button type="submit" hidden />
         </form>
 
+        {confirmDelete && editing ? (
+          <div className="insp-foot nc-foot" data-delete-confirm>
+            <span className="nc-delete-ask">Delete {editing.name}?</span>
+            <span className="insp-gap" />
+            <button type="button" className="insp-btn ghost" autoFocus data-delete-keep disabled={saving} onClick={keepConnection}>
+              Keep
+            </button>
+            <button type="button" className="insp-btn ink" data-delete-go disabled={saving} onClick={() => void onDelete()}>
+              Delete
+            </button>
+          </div>
+        ) : (
         <div className="insp-foot nc-foot">
           {editing && (
             <button
+              ref={deleteRef}
               type="button"
               className="insp-btn ghost nc-delete"
               data-delete
               disabled={saving}
-              onClick={() => void onDelete()}
+              onClick={() => setConfirmDelete(true)}
             >
               Delete…
             </button>
@@ -1342,6 +1366,7 @@ export function NewConnectionSheet({
             <kbd><Keys text={keysFor("connection-save", mac)} /></kbd>
           </button>
         </div>
+        )}
       </Inspector>
     </div>
   );

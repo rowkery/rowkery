@@ -8,7 +8,7 @@ export const metadata = { title: "Undo and Esc" };
 
 ## Undo in the toast
 
-When you close, discard, hide or delete something, it happens straight away and a toast at the foot of the window says what happened, with an **Undo** button.
+When you close, discard, hide or delete something, it happens straight away (deleting a connection asks once first) and a toast at the foot of the window says what happened, with an **Undo** button.
 
 <Shot src="/img/undo-and-esc-toast.webp" width={1016} height={200} alt="The toast at the foot of the grid: Closed Query 2 with unsaved SQL, then Undo with ⌥⌘Z in orange." />
 
@@ -17,7 +17,7 @@ When you close, discard, hide or delete something, it happens straight away and 
 | Close a query tab or table tab | **Closed Query 2**, adding **with unsaved SQL** or **with 3 unsaved changes** when it had them | The tab where it was, with its SQL, filters, sort, staged edits and rows |
 | **Close other tabs** (right-click a tab) | **Closed 3 tabs** | All of them |
 | Close a window that has a connection | **Closed storefront / shop** | The window in its place, with its tabs. It connects again when you show it |
-| Delete a connection (in its form) | **Removed storefront** | The connection, and its windows. A second toast says **Restored** |
+| Delete a connection (in its form, after **Delete**) | **Removed storefront** | The connection, and its windows. A second toast says **Restored** |
 | Discard staged edits | **Discarded 3 edits** | Every edit, as it was |
 | **Hide column** (a column header's menu) | **Hid email** | The column |
 | Switch database or connection while table tabs are open that it doesn't have | **Closed orders: not in shop**, or **Closed 3 table tabs not in shop** | Those tabs |

@@ -146,23 +146,32 @@ export function CloudSqlInstanceField({
   onPick: (connectionName: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // Listed once per login while the sheet is open.
-  const [listed, setListed] = useState<{ key: string; list?: CloudSqlInstanceList; error?: string } | null>(null);
+  // Listed once per login while the sheet is open, and again only when the
+  // project the form names has nothing in that list (it may not be among
+  // the projects Google listed).
+  const [listed, setListed] = useState<{ key: string; project: string | null; list?: CloudSqlInstanceList; error?: string } | null>(null);
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   useGlideHover(listRef, ".csql-option");
   const loginKey = JSON.stringify(login);
+  const project = isConnectionName(value) ? value.trim().split(":").slice(0, -2).join(":") : null;
 
   useEffect(() => {
-    if (!open || listed?.key === loginKey) return;
-    setListed({ key: loginKey });
-    cloudsqlInstances(login).then(
-      (list) => setListed((cur) => (cur?.key === loginKey ? { key: loginKey, list } : cur)),
-      (e) => setListed((cur) => (cur?.key === loginKey ? { key: loginKey, error: String(e) } : cur)),
+    if (!open) return;
+    if (listed?.key === loginKey) {
+      const settled = listed.list || listed.error;
+      const covered = !project || listed.project === project || listed.list?.instances.some((i) => i.project === project);
+      if (!settled || covered) return;
+    }
+    const mine = { key: loginKey, project };
+    setListed(mine);
+    cloudsqlInstances(login, project).then(
+      (list) => setListed((cur) => (cur?.key === mine.key && cur.project === mine.project ? { ...mine, list } : cur)),
+      (e) => setListed((cur) => (cur?.key === mine.key && cur.project === mine.project ? { ...mine, error: String(e) } : cur)),
     );
-  }, [open, loginKey]);
+  }, [open, loginKey, project]);
 
   // A click outside closes it.
   useEffect(() => {
@@ -225,12 +234,12 @@ export function CloudSqlInstanceField({
         >
           <span className="db-check">{value.trim() === name ? "✓" : ""}</span>
           {row.kind === "typed" ? (
-            <span className="csql-option-text">
-              <span className="csql-option-name mono">{row.name}</span>
+            <span className="csql-option-text" title={row.name}>
+              <span className="csql-option-name">{instanceShortName(row.name)}</span>
               <span className="conn-option-sub">Use this connection name</span>
             </span>
           ) : (
-            <span className="csql-option-text">
+            <span className="csql-option-text" title={row.instance.connection_name}>
               <span className="csql-option-name">{row.instance.name}</span>
               <span className="conn-option-sub">
                 {row.instance.region} · {row.instance.engine}
@@ -298,6 +307,7 @@ export function CloudSqlInstanceField({
             ) : listError ? (
               <li className="conn-empty" data-csql-list-error title={listError}>
                 Couldn't list instances. Type the connection name instead.
+                <span className="csql-list-why">{listError}</span>
               </li>
             ) : matches.length === 0 && !typed ? (
               <li className="conn-empty">{postgres.length ? "No matches" : "No Postgres instances. Type a connection name instead."}</li>
@@ -310,9 +320,10 @@ export function CloudSqlInstanceField({
               ))
             )}
           </ul>
-          {list && (others > 0 || list.skipped.length > 0 || list.more_projects) && (
-            <div className="db-foot csql-foot" data-csql-foot>
+          {list && (others > 0 || list.skipped.length > 0 || list.more_projects || list.projects_error) && (
+            <div className="db-foot csql-foot" data-csql-foot title={list.projects_error ?? undefined}>
               {[
+                list.projects_error ? "Couldn't list your projects, so only these were searched" : "",
                 others > 0 ? `${others} MySQL / SQL Server ${others === 1 ? "instance" : "instances"} not shown` : "",
                 list.skipped.length > 0 ? `${list.skipped.length} ${list.skipped.length === 1 ? "project" : "projects"} couldn't be listed` : "",
                 list.more_projects ? "Only the first 500 projects searched" : "",
