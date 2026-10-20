@@ -1,0 +1,15 @@
+/* Try Rowkery: two cards, a penguin peeking over each. */
+.get { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; isolation: isolate; }
+.get > div { position: relative; }
+.get .peek2 { position: absolute; top: -74px; right: 30px; width: 88px; height: 91px; }
+.get .card { position: relative; z-index: 1; height: 100%; padding: 28px; display: flex; flex-direction: column; gap: 12px; }
+.get .top { display: flex; justify-content: space-between; align-items: center; }
+.get h3 { font-size: 22px; }
+.get p { color: var(--grey); }
+.get .meta { font: 400 12.5px var(--mono); }
+.get .row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: auto; padding-top: 6px; }
+.rec { padding: 5px 9px; border-radius: 999px; background: var(--acc); color: var(--onacc); font: 500 12px var(--mono); }
+
+@media (max-width: 720px) {
+  .get { grid-template-columns: minmax(0, 1fr); row-gap: 96px; }
+}

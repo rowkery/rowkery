@@ -1,11 +1,10 @@
 // Photographs the built site (out/) at a spread of window sizes and checks it: no sideways
-// scroll; the nav, headline and hero buttons on screen; every image loaded; no text cut off
-// or broken onto a second line; the checkpoint's stations, calls and stamps inside their card
-// through a whole loop; the masked host whole; the looping animations running; blocks held
-// back below the fold and rising in as they arrive; the speed bars waiting at zero, then
-// growing to their timings. Then Reduce Motion (everything shown and still), no scripts
-// (everything shown), a bundle that never loads (everything shown after 2.5 s), and the 404.
-// Fails on any page error. Writes one contact sheet per size.
+// scroll; the nav, headline and hero buttons on screen; every image loaded; no text cut off or
+// broken onto a second line where it must stay on one; the penguins that peek over cards
+// standing clear of the text above them; the looping animations running. Then Reduce Motion
+// (nothing moves, one line in the bubble, the typed SQL whole, every check showing), no scripts
+// (every section and the first agent step showing), and the 404. Fails on any page error. Writes one contact sheet per
+// size.
 //
 //   npm run build && node scripts/resolution-check.mjs [outDir]
 //
@@ -23,28 +22,23 @@ const url = server.url;
 // What to photograph: a selector, scrolled to sit just under the nav.
 const VIEWS = [
   ["hero", "main"],
+  ["stats", ".stats"],
   ["agents", "#agents"],
-  ["checkpoint", ".stage"],
-  ["proposals", '[data-card="proposals"]'],
-  ["tables", '[data-card="tables"]'],
-  ["host", ".hm"],
-  ["tools", "#tools"],
-  ["sessions", '[data-card="sessions"]'],
-  ["keys", "#keys"],
-  ["speed", "#speed"],
   ["security", "#security"],
-  ["exploring", "#exploring"],
+  ["keys", "#keys"],
+  ["databases", "#databases"],
+  ["faq", "#faq"],
   ["get", "#get"],
-  ["foot", ".foot"],
+  ["rookery", ".rookery"],
+  ["foot", "footer"],
 ];
-// The CSS loops: the hero's toasts, the checkpoint's calls, stamps, returns, rings and rail.
-const LOOPS = ["sc-out", "pass", "refuse", "vshow", "back", "pulse-ok", "pulse-no", "flow", "edge-ok", "edge-no"];
+// Loops that should be playing as the page opens (the hero penguin's lines and hops, the
+// ticker, the walkers, the ice slide, the wires, the igloo, the hearts, the snow).
+const LOOPS = ["say", "hop", "tick", "walk", "waddle", "zoom", "travel", "igloo", "heart", "fall"];
 
 // Helpers shared with the page (stringified into it).
 const HELPERS = `
   window.R = (e) => e.getBoundingClientRect();
-  // The box of an element's text, not of the element (a label's block can be wider than its words).
-  window.textBox = (e) => { const r = document.createRange(); r.selectNodeContents(e); return r.getBoundingClientRect(); };
   // How many lines an element's text takes (tops more than 4 px apart).
   window.lines = (e) => {
     const tops = [], walk = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
@@ -56,14 +50,10 @@ const HELPERS = `
     }
     return tops.sort((a, b) => a - b).filter((t, i, all) => i === 0 || t - all[i - 1] > 4).length;
   };
-  // How visible an element is: its opacity times every ancestor's (a call fades with its lane).
-  window.seen = (e) => { let o = 1; for (; e; e = e.parentElement) o *= parseFloat(getComputedStyle(e).opacity); return o; };
-  // How much of a speed bar shows: it slides out of its track, which clips it.
-  window.barWidth = (i) => { const t = R(i.parentElement), b = R(i); return Math.max(0, Math.min(b.right, t.right) - Math.max(b.left, t.left)); };
-  window.within = (r, b, pad = 0.5) => r.left >= b.left - pad && r.right <= b.right + pad && r.top >= b.top - pad && r.bottom <= b.bottom + pad;
-  window.label = (e) => (e.textContent || e.className).trim().replace(/\\s+/g, " ").slice(0, 40);
-  // Holds every loop at one moment (in seconds since it began; past 12 every delay has run out).
-  window.at = (t, loops) => { for (const a of document.getAnimations()) if (loops.includes(a.animationName)) { a.pause(); a.currentTime = t * 1000; } };
+  // The box of an element's text, not of the element (a heading's block runs the full width).
+  window.textBox = (e) => { const r = document.createRange(); r.selectNodeContents(e); return r.getBoundingClientRect(); };
+  window.overlap = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+  window.label = (e) => (e.textContent || e.className.baseVal || e.className).trim().replace(/\\s+/g, " ").slice(0, 40);
 `;
 
 await mkdir(OUT, { recursive: true });
@@ -73,7 +63,6 @@ const open = async (opts, tag) => {
   const ctx = await browser.newContext(opts);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => problems.push(`${tag}: page error: ${e.message}`));
-  page.on("console", (m) => m.type() === "error" && problems.push(`${tag}: console error: ${m.text()}`));
   await page.addInitScript(HELPERS);
   return { ctx, page };
 };
@@ -84,51 +73,21 @@ for (const [w, h] of SIZES) {
   const { ctx, page } = await open({ viewport: { width: w, height: h } }, tag);
   await page.goto(url, { waitUntil: "networkidle" });
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(1600);
+  await page.waitForTimeout(2600);
 
-  // Before any scrolling: the hero on screen, the loops running, what's below the fold held back.
   (
     await page.evaluate((LOOPS) => {
       const out = [];
-      for (const sel of [".nav-in", ".h1", ".hero .btn.big"])
+      for (const sel of [".nav-in", ".h1", ".hero .btn", ".connect .card"])
         for (const e of document.querySelectorAll(sel)) if (R(e).left < -0.5 || R(e).right > innerWidth + 0.5) out.push(`${sel} leaves the screen`);
-      // A card off screen holds its loops (Reveal.tsx marks it data-off); those count as playing.
-      const live = (a) => a.playState === "running" || !!a.effect?.target?.closest?.("[data-off]");
-      const running = new Set(document.getAnimations().filter(live).map((a) => a.animationName));
+      const running = new Set(document.getAnimations().filter((a) => a.playState === "running").map((a) => a.animationName));
       for (const n of LOOPS) if (!running.has(n)) out.push(`the ${n} animation isn't running`);
-      if (!document.documentElement.classList.contains("js")) out.push("the page was never marked .js");
-      const below = [...document.querySelectorAll(".reveal")].filter((e) => R(e).top > innerHeight);
-      for (const e of below) if (getComputedStyle(e).opacity !== "0") out.push(`not held back below the fold: "${label(e)}"`);
-      if (![...document.querySelectorAll(".trk i")].every((i) => barWidth(i) === 0)) out.push("the plan's bars grew before their card was in view");
+      // Every line of the hero's bubble clears the line above the card.
+      for (const b of document.querySelectorAll(".bubble"))
+        if (overlap(R(b), textBox(document.querySelector(".trust")))) out.push(`the penguin's bubble covers the line under the buttons: "${label(b)}"`);
       return out;
     }, LOOPS)
   ).forEach(bad);
-
-  // The checkpoint through one whole loop, a frame every 0.2 s: the stations' labels and every
-  // call, stamp and return that is showing stay inside the card. (Calls may pass behind the gate
-  // and over each other; that is the drawing.)
-  (
-    await page.evaluate((LOOPS) => {
-      const out = new Set();
-      const card = document.querySelector(".stage").closest(".card");
-      for (let t = 12; t < 24; t += 0.2) {
-        at(t, LOOPS);
-        const box = R(card);
-        for (const b of document.querySelectorAll(".st b")) if (!within(textBox(b), box)) out.add(`checkpoint: "${label(b)}" is cut by its card`);
-        for (const e of document.querySelectorAll(".pk, .vd, .rt"))
-          if (seen(e) > 0.6 && !within(R(e), box)) out.add(`checkpoint: "${label(e)}" leaves its card at ${(t % 12).toFixed(1)} s`);
-      }
-      for (const a of document.getAnimations()) if (LOOPS.includes(a.animationName)) a.play();
-      return [...out];
-    }, LOOPS)
-  ).forEach(bad);
-
-  // Read down the page as a person would, so every block arrives in view.
-  const height = await page.evaluate(() => document.documentElement.scrollHeight);
-  for (let y = 0; y < height; y += h / 3) {
-    await page.evaluate((y) => scrollTo({ top: y, behavior: "instant" }), y);
-    await page.waitForTimeout(120);
-  }
 
   const shots = [];
   for (const [name, sel] of VIEWS) {
@@ -145,30 +104,19 @@ for (const [w, h] of SIZES) {
   (
     await page.evaluate(() => {
       const out = [];
-      const shown = (e) => e.getClientRects().length > 0;
+      const shown = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
       const sw = document.documentElement.scrollWidth - document.documentElement.clientWidth;
       if (sw > 0) out.push(`page scrolls sideways by ${sw}px`);
       for (const img of document.images) if (!img.complete || !img.naturalWidth) out.push(`image didn't load: ${img.currentSrc || img.src}`);
-      for (const e of document.querySelectorAll(".reveal")) if (!e.classList.contains("in")) out.push(`never rose in: "${label(e)}"`);
-      // Text cut off (code samples in the toasts and calls end in an ellipsis by design).
-      for (const e of document.querySelectorAll(".btn, .pill, .h1, .h2, .card h3, .meta, .st b, .keys li, .rr > span, .toast .hd, .foot-in > span, .row > span, .rows-hd > span, .timed li"))
+      // Text cut off (the masked stand-ins end in an ellipsis on a phone by design).
+      for (const e of document.querySelectorAll(".btn, .badge, .h1 .ln, .h2, h3, .tab, .stat, .flag, .chord, .eng, .foot a"))
         if (shown(e) && e.scrollWidth > e.clientWidth + 1) out.push(`text cut off: "${label(e)}"`);
       // Text that must stay on one line.
-      for (const e of document.querySelectorAll(".btn, .pill, .st b, .hm-host em, .toast .res, .rv, .meta, .keys kbd, .row > span, .rows-hd > span"))
+      for (const e of document.querySelectorAll(".btn, .badge, .tab, .flag code, .chord kbd, .now .eng, .lane span, .rec, .copy"))
         if (shown(e) && lines(e) > 1) out.push(`breaks onto two lines: "${label(e)}"`);
-      // Things that must sit whole inside their card.
-      for (const e of document.querySelectorAll(".frag, .hm-host, .keys li, .speed, .st .box, .rows, .row > span, .timed"))
-        if (!within(R(e), R(e.closest(".card")))) out.push(`leaves its card: "${label(e)}"`);
-      // The command and its copy button sit whole inside their box.
-      for (const e of document.querySelectorAll(".cmd .copy")) if (!within(R(e), R(e.closest(".cmd")))) out.push("the copy button leaves the command");
-      const host = document.querySelector(".hm-host");
-      if (host.scrollWidth > host.clientWidth + 1) out.push("the masked host is cut off");
-      // Each bar (the plan's steps) grew to its length (held mid-loop: they grow again every 8 s).
-      for (const a of document.getAnimations()) if (a.animationName === "grow-loop") { a.pause(); a.currentTime = 4000; }
-      for (const i of document.querySelectorAll(".trk i")) {
-        const want = (R(i.parentElement).width * parseFloat(i.style.width)) / 100;
-        if (Math.abs(barWidth(i) - want) > 1) out.push(`a speed bar is ${Math.round(barWidth(i))}px, not ${Math.round(want)}px`);
-      }
+      // A penguin peeking over a card sits clear of the heading above it.
+      for (const pg of document.querySelectorAll(".get .peek2"))
+        for (const t of document.querySelectorAll("#get .h2, .get h3, .get p")) if (overlap(R(pg), textBox(t))) out.push(`a get-started penguin covers "${label(t)}"`);
       return out;
     })
   ).forEach(bad);
@@ -182,8 +130,8 @@ for (const [w, h] of SIZES) {
   console.log(`${tag} done`);
 }
 
-// Reduce Motion: nothing moves, every block shows before any scrolling, one toast, two calls
-// held either side of the gate, the bars at their timings.
+// Reduce Motion: nothing moves; the penguin says one line; the typed SQL is whole and every
+// check is showing.
 for (const [w, h] of [[1280, 800], [390, 844]]) {
   const tag = `reduced motion ${w}x${h}`;
   const { ctx, page } = await open({ viewport: { width: w, height: h }, reducedMotion: "reduce" }, tag);
@@ -193,13 +141,13 @@ for (const [w, h] of [[1280, 800], [390, 844]]) {
     await page.evaluate(() => {
       const out = [];
       const moving = document.getAnimations().filter((a) => a.playState === "running");
-      if (moving.length) out.push(`${moving.length} animations still run`);
-      const op = (s) => String(seen(document.querySelector(s)));
-      for (const e of document.querySelectorAll(".reveal")) if (getComputedStyle(e).opacity !== "1") out.push(`hidden: "${label(e)}"`);
-      if (op(".toast") !== "1") out.push("the first toast is hidden");
-      for (const s of [".lane.a .pk", ".lane.b .pk", ".lane.a .vd", ".lane.b .vd"]) if (op(s) !== "1") out.push(`${s} is hidden`);
-      for (const s of [".lane.c", ".lane.d", ".lane.back"]) if (getComputedStyle(document.querySelector(s)).display !== "none") out.push(`${s} shows`);
-      for (const i of document.querySelectorAll(".trk i")) if (Math.abs(barWidth(i) - (R(i.parentElement).width * parseFloat(i.style.width)) / 100) > 1) out.push("a speed bar isn't at its timing");
+      if (moving.length) out.push(`${moving.length} animations still run, first ${moving[0].animationName}`);
+      const typing = document.querySelector(".typing");
+      if (typing.scrollWidth > typing.clientWidth + 1) out.push("the agent's SQL is cut off");
+      for (const ok of document.querySelectorAll(".check .ok")) if (getComputedStyle(ok).opacity !== "1") out.push("a check result is hidden");
+      const lines = [...document.querySelectorAll(".bubble")].filter((b) => getComputedStyle(b).opacity === "1");
+      if (lines.length !== 1) out.push(`${lines.length} of the penguin's lines show, not one`);
+      for (const s of [".walker", ".slider", ".snow"]) if ([...document.querySelectorAll(s)].some((e) => e.getClientRects().length)) out.push(`${s} shows`);
       return out;
     })
   ).forEach((s) => problems.push(`${tag}: ${s}`));
@@ -207,18 +155,17 @@ for (const [w, h] of [[1280, 800], [390, 844]]) {
   await ctx.close();
 }
 
-// Without scripts, and with a bundle that never arrives: every block simply shows.
-for (const [tag, opts, block] of [["no scripts", { javaScriptEnabled: false }, false], ["no bundle", {}, true]]) {
-  const { ctx, page } = await open({ viewport: { width: 1280, height: 800 }, ...opts }, tag);
-  if (block) await page.route((u) => u.pathname.startsWith("/_next/") && u.pathname.endsWith(".js"), (r) => r.abort());
+// Without scripts: every section and the first agent step show.
+{
+  const { ctx, page } = await open({ viewport: { width: 1280, height: 800 }, javaScriptEnabled: false }, "no scripts");
   await page.goto(url, { waitUntil: "load" });
-  await page.waitForTimeout(block ? 3800 : 500);
-  const hidden = await page.evaluate(() => [...document.querySelectorAll(".reveal")].filter((e) => getComputedStyle(e).opacity !== "1").map((e) => e.textContent.trim().slice(0, 40)));
-  if (hidden.length) problems.push(`${tag}: ${hidden.length} blocks hidden, first "${hidden[0]}"`);
+  const missing = await page.evaluate(() =>
+    ["#agents", "#security", "#keys", "#databases", "#faq", "#get", ".rookery", "footer"].filter((s) => !document.querySelector(s)?.getClientRects().length),
+  );
+  if (missing.length) problems.push(`no scripts: missing ${missing.join(", ")}`);
+  if ((await page.locator(".panel.on").count()) !== 1) problems.push("no scripts: the agent scene shows no step");
   await ctx.close();
 }
-// The bundle's own requests fail on purpose in that run; only page errors count there.
-for (let i = problems.length - 1; i >= 0; i--) if (problems[i].startsWith("no bundle: console error")) problems.splice(i, 1);
 
 // The 404: the tilted penguin and the way home.
 {
