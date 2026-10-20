@@ -29,7 +29,21 @@ const mono = localFont({
 export const metadata: Metadata = {
   title: { default: "Rowkery Docs", template: "%s · Rowkery Docs" },
   description: "How to install Rowkery, connect to Postgres and SQLite, and let your AI agent read your database through it.",
-  icons: { icon: "/favicon.svg" },
+  metadataBase: new URL("https://docs.rowkery.com"),
+  // Each page names its own address as the one to index.
+  alternates: { canonical: "./" },
+  // Google shows a favicon only when it can fetch a square raster one, 48 px or a multiple of it.
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "16x16 32x32 48x48" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/favicon.svg", type: "image/svg+xml" },
+    ],
+    apple: "/apple-touch-icon.png",
+  },
+  // A shared docs link previews with the site's card.
+  openGraph: { type: "website", siteName: "Rowkery Docs", images: ["https://rowkery.com/og.png"] },
+  twitter: { card: "summary_large_image", images: ["https://rowkery.com/og.png"] },
 };
 
 // Dark only, like rowkery.com.
