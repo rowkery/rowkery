@@ -5,6 +5,10 @@ import { AppShot } from "@/components/AppShot";
 import { Agents } from "@/components/sections/Agents";
 import { Security } from "@/components/sections/Security";
 import { Keys } from "@/components/sections/Keys";
+import { Databases } from "@/components/sections/Databases";
+import { Faq, Note } from "@/components/sections/Faq";
+import { Get } from "@/components/sections/Get";
+import { Rookery } from "@/components/sections/Rookery";
 import { Footer } from "@/components/Footer";
 
 /** The page (2026-10-16: agent first, then security, then ⌘K). */
@@ -22,6 +26,11 @@ export default function Home() {
         <Agents />
         <Security />
         <Keys />
+        <Databases />
+        <Note />
+        <Faq />
+        <Get />
+        <Rookery />
         <Footer />
       </main>
     </>

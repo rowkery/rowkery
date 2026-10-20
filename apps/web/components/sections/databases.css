@@ -1,0 +1,18 @@
+/* The databases: today's two, then two lanes of ones we'd like to add. */
+#databases { padding-inline: 0; }
+#databases .head, .now, .eng-cap { padding-inline: var(--gutter); }
+.now { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 40px; }
+.now .eng { display: inline-flex; align-items: center; gap: 12px; height: 56px; padding: 0 22px 0 16px; border-radius: 14px; background: var(--card); font-size: 17px; font-weight: 500; }
+.now .eng svg { width: 28px; height: 28px; }
+.lane { overflow: hidden; }
+.lane-in { display: flex; align-items: center; width: max-content; animation: tick 60s linear infinite; }
+.lane.rev .lane-in { animation-direction: reverse; animation-duration: 70s; }
+.lanes:hover .lane-in { animation-play-state: paused; }
+.lane span { display: inline-flex; align-items: center; gap: 12px; padding: 18px 36px; color: var(--grey); font-size: 15px; white-space: nowrap; transition: color 0.2s; }
+.lane span:hover { color: var(--fg); }
+.lane span svg { width: 24px; height: 24px; }
+.lane .floe { flex: none; width: 52px; height: 54px; margin-inline: 30px; }
+.eng-cap { padding-top: 24px; color: var(--grey); font-size: 15px; }
+.eng-cap a { color: var(--fg); }
+
+@media (max-width: 720px) { .lane span { padding: 18px 24px; } }
