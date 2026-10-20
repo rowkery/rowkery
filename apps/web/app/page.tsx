@@ -8,6 +8,7 @@ import { Keys } from "@/components/sections/Keys";
 import { Databases } from "@/components/sections/Databases";
 import { Faq, Note } from "@/components/sections/Faq";
 import { Get } from "@/components/sections/Get";
+import { Follow } from "@/components/sections/Follow";
 import { Rookery } from "@/components/sections/Rookery";
 import { Footer } from "@/components/Footer";
 
@@ -30,6 +31,7 @@ export default function Home() {
         <Note />
         <Faq />
         <Get />
+        <Follow />
         <Rookery />
         <Footer />
       </main>
