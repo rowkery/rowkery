@@ -240,9 +240,6 @@ export interface DoneFrame {
   sqlstate: string | null;
   error_position: number | null;
   hold: SafetyHold | null;
-  /** The rows are a cursor page; `more` while it has rows for `fetchMore`. */
-  paged?: boolean;
-  more?: boolean;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
 }
@@ -418,8 +415,6 @@ function stream<Started>(
             frames: frame.frames,
             sqlstate: frame.sqlstate,
             error_position: frame.error_position,
-            paged: frame.paged ?? false,
-            more: frame.more ?? false,
             capped: frame.capped ?? false,
           };
           settle();

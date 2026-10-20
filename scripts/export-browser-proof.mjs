@@ -78,7 +78,7 @@ function stubTauri() {
             const f = (x) => args.onFrame.onmessage({ query_id: id, ...x });
             f({ t: "columns", columns: [{ name: "n", type_name: "int8" }] });
             f({ t: "rows", seq: 0, rows: Array.from({ length: n }, (_, i) => [{ Int: i + 1 }]) });
-            f({ t: "done", status: "ok", row_count: n, affected_rows: null, elapsed_ms: 3, first_row_ms: 1, frames: 1, error: null, sqlstate: null, error_position: null, hold: null, paged: cmd === "run_query", more: true });
+            f({ t: "done", status: "ok", row_count: n, affected_rows: null, elapsed_ms: 3, first_row_ms: 1, frames: 1, error: null, sqlstate: null, error_position: null, hold: null });
           }, 5);
           return cmd === "browse_table" ? { query_id: id, sql: "SELECT * FROM players" } : id;
         }
