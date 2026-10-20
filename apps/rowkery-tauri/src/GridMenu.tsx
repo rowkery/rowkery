@@ -5,6 +5,7 @@ import { Presence, useGlideHover } from "./motion";
 import { isMacPlatform } from "./platform";
 import "./GridMenu.css";
 import { Keys } from "./Keys";
+import { TYPE_SELECT_PAUSE_MS, typeSelect } from "./typeSelect";
 
 /** A menu row; its key comes from `command` (commands.ts), never typed here. */
 export type GridMenuItem = MenuRow;
@@ -32,7 +33,8 @@ const EDGE = 8;
  * page size, history). Keys sit right-aligned, read from the registry. HTML
  * rather than native, so each pick runs inside a click and the clipboard
  * accepts the write (WebKit refuses `clipboard.writeText` outside a user
- * gesture). ↑↓ move, ↵ picks, Esc, a click outside, a scroll or blur close.
+ * gesture). ↑↓ move, typing a row's first letters moves to it, ↵ picks,
+ * Esc, a click outside, a scroll or blur close.
  */
 export function GridMenu({ at, items, onPick, onClose, footer, name, label }: Props) {
   return createPortal(
@@ -91,6 +93,8 @@ function MenuPanel({
   const idBase = useId();
   /** What had focus when the menu opened. */
   const opener = useRef<HTMLElement | null>(null);
+  /** Letters typed for type-to-select, and when the last one came. */
+  const typed = useRef({ text: "", at: 0 });
 
   // Open at the pointer; flip left or up when it would leave the window. A
   // long list (a wide table's columns) stops at min(420 px, the room on its
@@ -115,6 +119,12 @@ function MenuPanel({
     el.focus({ preventScroll: true });
     setCursor(-1);
   }, [at]);
+
+  // A long list scrolls to follow the keyboard's cursor.
+  useEffect(() => {
+    if (keyed && cursor >= 0)
+      ref.current?.querySelectorAll(".grid-menu-item")[cursor]?.scrollIntoView({ block: "nearest" });
+  }, [cursor, keyed]);
 
   // Closing hands the keyboard back to what had it (the grid, a tab), like a
   // native menu, unless a pick moved focus somewhere on purpose.
@@ -191,6 +201,15 @@ function MenuPanel({
           e.preventDefault();
           const item = items[cursor];
           if (item) pick(item.id);
+        } else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          // Type-to-select, like a Mac menu. A space only counts mid-word ("more than").
+          const now = performance.now();
+          const fresh = now - typed.current.at > TYPE_SELECT_PAUSE_MS;
+          if (e.key === " " && (fresh || !typed.current.text)) return;
+          e.preventDefault();
+          typed.current = { text: (fresh ? "" : typed.current.text) + e.key, at: now };
+          setKeyed(true);
+          setCursor(typeSelect(items.map((i) => i.label), cursor, typed.current.text));
         }
       }}
     >

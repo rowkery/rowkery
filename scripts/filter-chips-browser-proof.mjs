@@ -7,7 +7,9 @@
 // chip, × and ⌫ remove one. Right-click a value, click a profile segment or
 // drag across histogram bars to add chips. Typing on a cell is locked until
 // the first chip, then opens the chip editor for that column (# still
-// counts). Chips persist with the tab. ⌘F on a query tab finds in the rows.
+// counts). Typing in the column and operator pickers moves to the row that
+// starts with it, ↵ picks it. Chips persist with the tab. ⌘F on a query tab
+// finds in the rows.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/filter-chips-browser-proof.mjs [outDir]
@@ -202,6 +204,27 @@ await page.keyboard.press("Enter");
 await waitLine("amount >= 200");
 await idle();
 check(JSON.stringify((await chips())[1]) === JSON.stringify(["pred", "amount >= 200"]), "edited chip: amount >= 200");
+
+// Type-to-select in the pickers, like a Mac menu: letters move to the row, ↵ picks it.
+await page.keyboard.press("Control+f");
+await page.waitForSelector(editor);
+await page.click(`${editor} [data-chip-column]`);
+await page.waitForSelector('[data-menu="chip-column"]');
+await page.keyboard.type("st");
+await page.waitForSelector('[data-menu="chip-column"] [data-item="status"].is-cursor');
+await page.screenshot({ path: `${OUT}/4b-type-to-select.png` });
+await page.keyboard.press("Enter");
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-column") === "status", editor, { timeout: 2000 }).catch(() => {});
+check((await page.getAttribute(editor, "data-column")) === "status", "typing st in the column picker and ↵ picks status");
+await page.click(`${editor} [data-chip-op]`);
+await page.waitForSelector('[data-menu="chip-op"]');
+await page.keyboard.type("is n");
+await page.keyboard.press("Enter");
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-op") === "IS DISTINCT FROM", editor, { timeout: 2000 }).catch(() => {});
+check((await page.getAttribute(editor, "data-op")) === "IS DISTINCT FROM", "typing is n in the operator picker and ↵ picks is not, or empty");
+await page.focus(`${editor} textarea`);
+await page.keyboard.press("Escape");
+await page.waitForFunction((sel) => !document.querySelector(sel), editor);
 
 // × removes a chip; ⌫ removes a focused one.
 await page.hover(`${line} [data-chip="2"]`);
