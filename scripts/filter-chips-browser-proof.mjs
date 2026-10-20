@@ -7,7 +7,9 @@
 // chip, × and ⌫ remove one. Right-click a value, click a profile segment or
 // drag across histogram bars to add chips. Typing on a cell is locked until
 // the first chip, then opens the chip editor for that column (# still
-// counts). Chips persist with the tab. ⌘F on a query tab finds in the rows.
+// counts). Typing in the column and operator pickers moves to the row that
+// starts with it, ↵ picks it. Chips persist with the tab. ⌘F on a query tab
+// finds in the rows.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/filter-chips-browser-proof.mjs [outDir]
@@ -202,6 +204,44 @@ await page.keyboard.press("Enter");
 await waitLine("amount >= 200");
 await idle();
 check(JSON.stringify((await chips())[1]) === JSON.stringify(["pred", "amount >= 200"]), "edited chip: amount >= 200");
+
+// Type-to-select in the pickers, like a Mac menu: letters move to the row, ↵ picks it.
+await page.keyboard.press("Control+f");
+await page.waitForSelector(editor);
+await page.click(`${editor} [data-chip-column]`);
+await page.waitForSelector('[data-menu="chip-column"]');
+await page.keyboard.type("st");
+await page.waitForSelector('[data-menu="chip-column"] [data-item="status"].is-cursor');
+await page.screenshot({ path: `${OUT}/4b-type-to-select.png` });
+await page.keyboard.press("Enter");
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-column") === "status", editor, { timeout: 2000 }).catch(() => {});
+check((await page.getAttribute(editor, "data-column")) === "status", "typing st in the column picker and ↵ picks status");
+await page.click(`${editor} [data-chip-op]`);
+await page.waitForSelector('[data-menu="chip-op"]');
+await page.keyboard.type("is n");
+await page.keyboard.press("Enter");
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-op") === "IS DISTINCT FROM", editor, { timeout: 2000 }).catch(() => {});
+check((await page.getAttribute(editor, "data-op")) === "IS DISTINCT FROM", "typing is n in the operator picker and ↵ picks is not, or empty");
+// In a list short enough to scroll, a typed row scrolled under a still pointer keeps the cursor.
+const size = page.viewportSize();
+await page.setViewportSize({ width: size.width, height: 300 });
+await page.click(`${editor} [data-chip-column]`);
+await page.waitForSelector('[data-menu="chip-column"]');
+const scrolls = await page.$eval('[data-menu="chip-column"]', (m) => m.scrollHeight > m.clientHeight);
+const first = await page.$('[data-menu="chip-column"] [data-item]');
+const firstBox = await first.boundingBox();
+await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2);
+await page.keyboard.type("k");
+await page.waitForTimeout(150);
+const cursorRow = await page.$eval('[data-menu="chip-column"] .is-cursor', (e) => e.getAttribute("data-item")).catch(() => null);
+check(scrolls && cursorRow === "kiosk_id", `a scrolling list keeps the typed row under a still pointer (scrolls: ${scrolls}, cursor: ${cursorRow})`);
+await page.keyboard.press("Enter");
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-column") === "kiosk_id", editor, { timeout: 2000 }).catch(() => {});
+check((await page.getAttribute(editor, "data-column")) === "kiosk_id", "↵ picks the typed row, not the one under the pointer");
+await page.setViewportSize(size);
+await page.focus(`${editor} textarea`);
+await page.keyboard.press("Escape");
+await page.waitForFunction((sel) => !document.querySelector(sel), editor);
 
 // × removes a chip; ⌫ removes a focused one.
 await page.hover(`${line} [data-chip="2"]`);
