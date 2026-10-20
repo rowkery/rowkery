@@ -76,6 +76,8 @@ export interface CloudSqlInstanceList {
   skipped: string[];
   /** The account sees more projects than were searched. */
   more_projects?: boolean;
+  /** Google wouldn't list the account's projects (its reason): only the quota project and the one named were searched. */
+  projects_error?: string | null;
 }
 
 /** Which login a Cloud SQL call uses: the key picked in the form (its id; the key stays in Rust), else the one saved for `connectionId`. */
@@ -91,8 +93,8 @@ export async function cloudsqlAccount(login: CloudSqlLogin): Promise<CloudSqlAcc
 }
 
 /** Every Cloud SQL instance the account can see. */
-export async function cloudsqlInstances(login: CloudSqlLogin): Promise<CloudSqlInstanceList> {
-  return invoke("cloudsql_instances", { ...login });
+export async function cloudsqlInstances(login: CloudSqlLogin, project?: string | null): Promise<CloudSqlInstanceList> {
+  return invoke("cloudsql_instances", { ...login, project: project ?? null });
 }
 
 /**

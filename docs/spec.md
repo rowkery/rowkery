@@ -112,7 +112,7 @@ Staged edits are marked at the cell's edge and in the gutter, and counted in the
 
 ## Undo and Esc
 
-- **Undo, not confirm:** closing a tab or a window, deleting a connection (its keychain entry is removed only once the toast has gone), discarding staged edits, hiding a column, closing the table tabs a database switch leaves behind. The toast holds 10 s; Undo is its button or ⌥⌘Z wherever focus is. ⌘Z in a text field stays the native text undo.
+- **Undo, not confirm:** closing a tab or a window, deleting a connection (asked first in its form, as Keep / Delete; its keychain entry is removed only once the toast has gone), discarding staged edits, hiding a column, closing the table tabs a database switch leaves behind. The toast holds 10 s; Undo is its button or ⌥⌘Z wherever focus is. ⌘Z in a text field stays the native text undo.
 - **Reopen closed tab** (⇧⌘T) works any time this session: a tab comes back with its SQL, chips and staged edits. It keeps its rows only while the Undo toast is up; reopened later, a table tab browses again and a query tab waits for ⌘↵.
 - **⌘W** closes the shown query tab or the shown window, whichever area you used last.
 - **Esc** dismisses the nearest thing first (completion, a chip draft, a menu or sheet, Quick Look, a held write, the selection) and cancels the running query when nothing else is open.

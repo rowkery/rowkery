@@ -225,6 +225,7 @@ export default {
         await app.menu("edit-connection");
         await app.waitFor("[data-delete]");
         await app.click("[data-delete]");
+        await app.click("[data-delete-go]");
         await toast(app, /Deleted|Removed|to delete/i);
         await app.waitFor("[data-toast-undo]");
         await app.click("[data-toast-undo]");

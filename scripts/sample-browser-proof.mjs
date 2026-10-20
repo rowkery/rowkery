@@ -145,6 +145,7 @@ await page.waitForSelector(`${ws} [data-db-file]`);
 await palette("edit connection", "edit-connection");
 await page.waitForSelector('[data-testid="nc-sheet"] [data-delete]');
 await page.click('[data-testid="nc-sheet"] [data-delete]');
+await page.click('[data-testid="nc-sheet"] [data-delete-go]');
 await waitToast("Removed Sample database");
 await page.waitForSelector(`${ws}[data-conn-state="idle"]`);
 await palette("open the sample", "open-sample");

@@ -216,6 +216,7 @@ await page.keyboard.press("Control+e");
 await page.waitForSelector('[data-testid="nc-sheet"]');
 check((await page.inputValue('[data-testid="nc-sheet"] [data-field="name"] input')) === "wallet staging", "⌘E edits the highlighted row");
 await page.click('[data-testid="nc-sheet"] [data-delete]');
+await page.click('[data-testid="nc-sheet"] [data-delete-go]');
 await page.waitForSelector('[data-testid="nc-sheet"]', { state: "detached" });
 await page.waitForSelector("[data-toast-undo]");
 await shot("4-deleted-undo", { x: 0, y: 0, width: 1280, height: 800 });

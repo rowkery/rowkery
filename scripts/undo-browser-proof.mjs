@@ -2,7 +2,8 @@
 // Undo instead of confirm (stubbed `invoke`): closing a query tab, closing a
 // window and deleting a connection happen at once, and the toast offers Undo
 // (a button, and ⌥⌘Z — Ctrl+Alt+Z here) for 10 s. ⌘⇧T reopens the most
-// recently closed tab with its SQL. Deleting is one step: the record goes
+// recently closed tab with its SQL. Deleting a connection asks first (Keep /
+// Delete in the sheet's foot; Esc backs out), then the record goes
 // (delete_connection with keepSecrets), its windows empty but keep their
 // tabs; Undo saves the record back with empty secrets (keychain kept); when
 // the toast goes any other way the keychain entries are removed
@@ -160,9 +161,20 @@ await page.waitForSelector('[data-testid="cp-row"][data-item="cmd:edit-connectio
 await page.keyboard.press("Enter");
 await page.waitForSelector("[data-delete]");
 await page.click("[data-delete]");
+// Delete… asks first: Esc and Keep back out without deleting.
+await page.waitForSelector("[data-delete-confirm]");
+await page.locator('[data-testid="nc-sheet"]').screenshot({ path: `${OUT}/delete-confirm.png` });
+await page.keyboard.press("Escape");
+await page.waitForSelector("[data-delete]");
+check((await page.locator('[data-testid="nc-sheet"]').count()) === 1, "Esc backs out of the delete question, the sheet stays");
+await page.click("[data-delete]");
+await page.click("[data-delete-keep]");
+check((await calls("delete_connection")).length === 0, "Keep deletes nothing");
+await page.click("[data-delete]");
+await page.click("[data-delete-go]");
 await waitToast("Removed analytics");
 let del = await calls("delete_connection");
-check(del.length === 1 && del[0].keepSecrets === true, `one step, no confirm; deleted with keepSecrets (${JSON.stringify(del)})`);
+check(del.length === 1 && del[0].keepSecrets === true, `deleted once confirmed, with keepSecrets (${JSON.stringify(del)})`);
 check((await page.getAttribute(ws, "data-conn-state")) === "idle", "its window is emptied");
 await page.screenshot({ path: `${OUT}/3-removed-undo.png` });
 await page.click("[data-toast-undo]");
@@ -178,6 +190,7 @@ await page.keyboard.type("edit connection");
 await page.waitForSelector('[data-testid="cp-row"][data-item="cmd:edit-connection"]');
 await page.keyboard.press("Enter");
 await page.click("[data-delete]");
+await page.click("[data-delete-go]");
 await waitToast("Removed analytics");
 check((await calls("forget_connection_secrets")).length === 0, "keychain kept while the toast is live");
 await page.keyboard.press("Control+1");

@@ -146,19 +146,21 @@ export function CloudSqlInstanceField({
   onPick: (connectionName: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // Listed once per login while the sheet is open.
+  // Listed once per login (and project named) while the sheet is open.
   const [listed, setListed] = useState<{ key: string; list?: CloudSqlInstanceList; error?: string } | null>(null);
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   useGlideHover(listRef, ".csql-option");
-  const loginKey = JSON.stringify(login);
+  // The project already named is searched too if Google won't list the account's.
+  const project = isConnectionName(value) ? value.trim().split(":").slice(0, -2).join(":") : null;
+  const loginKey = JSON.stringify([login, project]);
 
   useEffect(() => {
     if (!open || listed?.key === loginKey) return;
     setListed({ key: loginKey });
-    cloudsqlInstances(login).then(
+    cloudsqlInstances(login, project).then(
       (list) => setListed((cur) => (cur?.key === loginKey ? { key: loginKey, list } : cur)),
       (e) => setListed((cur) => (cur?.key === loginKey ? { key: loginKey, error: String(e) } : cur)),
     );
@@ -225,12 +227,12 @@ export function CloudSqlInstanceField({
         >
           <span className="db-check">{value.trim() === name ? "✓" : ""}</span>
           {row.kind === "typed" ? (
-            <span className="csql-option-text">
-              <span className="csql-option-name mono">{row.name}</span>
+            <span className="csql-option-text" title={row.name}>
+              <span className="csql-option-name">{instanceShortName(row.name)}</span>
               <span className="conn-option-sub">Use this connection name</span>
             </span>
           ) : (
-            <span className="csql-option-text">
+            <span className="csql-option-text" title={row.instance.connection_name}>
               <span className="csql-option-name">{row.instance.name}</span>
               <span className="conn-option-sub">
                 {row.instance.region} · {row.instance.engine}
@@ -296,8 +298,9 @@ export function CloudSqlInstanceField({
             {list === undefined && !listError ? (
               <li className="conn-empty">Loading instances…</li>
             ) : listError ? (
-              <li className="conn-empty" data-csql-list-error title={listError}>
+              <li className="conn-empty csql-list-error" data-csql-list-error title={listError}>
                 Couldn't list instances. Type the connection name instead.
+                <span className="csql-list-why">{listError}</span>
               </li>
             ) : matches.length === 0 && !typed ? (
               <li className="conn-empty">{postgres.length ? "No matches" : "No Postgres instances. Type a connection name instead."}</li>
@@ -310,9 +313,10 @@ export function CloudSqlInstanceField({
               ))
             )}
           </ul>
-          {list && (others > 0 || list.skipped.length > 0 || list.more_projects) && (
-            <div className="db-foot csql-foot" data-csql-foot>
+          {list && (others > 0 || list.skipped.length > 0 || list.more_projects || list.projects_error) && (
+            <div className="db-foot csql-foot" data-csql-foot title={list.projects_error ?? undefined}>
               {[
+                list.projects_error ? "Couldn't list your projects, so only these were searched" : "",
                 others > 0 ? `${others} MySQL / SQL Server ${others === 1 ? "instance" : "instances"} not shown` : "",
                 list.skipped.length > 0 ? `${list.skipped.length} ${list.skipped.length === 1 ? "project" : "projects"} couldn't be listed` : "",
                 list.more_projects ? "Only the first 500 projects searched" : "",
