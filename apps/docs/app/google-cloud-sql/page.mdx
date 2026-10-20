@@ -53,7 +53,7 @@ Rowkery reads the login that this command makes, the same one the Auth Proxy and
 gcloud auth application-default login
 ```
 
-Rowkery reads it each time it needs a new token and never copies it. If you sign in again as someone else, the connection follows. A login made with `--impersonate-service-account` works too, and acts as that service account.
+Rowkery reads it each time it needs a new token and never copies it. If you sign in again as someone else, the connection follows from its next certificate, within the hour. A login made with `--impersonate-service-account` works too, and acts as that service account.
 
 <Shot side src="/img/google-cloud-sql-no-login.webp" width={372} height={204} alt="The Google account row reading No gcloud login on this computer, Run this in Terminal, or use a service account key, the command gcloud auth application-default login with a Copy button, then Check again and Use a key file… buttons." />
 
@@ -63,9 +63,9 @@ When there's no login on your Mac, the form shows the command with a **Copy** bu
 
 ### A service account key
 
-For a connection that shouldn't depend on who's signed in to gcloud, click **Use a key file…** and choose a service account's JSON key. Rowkery shows the service account's email and, on Save, keeps the key in the connection's keychain item with its password. It doesn't keep the file's path, so you can delete the file afterwards.
+For a connection that shouldn't depend on who's signed in to gcloud, click **Use a key file…** and choose a service account's JSON key. Rowkery shows the service account's email and, on Save, keeps the key in the connection's keychain item with its password. It doesn't keep the file's path, so you can delete the file afterwards. Only a service account key is taken: gcloud's own login file, chosen here by mistake, is refused.
 
-**Use gcloud login** switches back. Workload identity federation files (`external_account`) aren't supported.
+**Use gcloud login** switches back, and Save then deletes the key. Workload identity federation files (`external_account`) aren't supported.
 
 ## Choosing the instance
 
@@ -73,7 +73,7 @@ The picker lists the Postgres instances in every project your Google account can
 
 <Shot side src="/img/google-cloud-sql-picker.webp" width={352} height={337} alt="The instance picker: a filter field, then acme-prod with analytics-prd, billing-prd and orders-prd, and acme-staging with load-test (marked Stopped) and orders-stg, each with its region and Postgres version. The foot reads 1 MySQL / SQL Server instance not shown · 1 project couldn't be listed." />
 
-The foot counts the MySQL and SQL Server instances it left out, and the projects it couldn't read.
+The foot counts the MySQL and SQL Server instances it left out, and the projects it couldn't read. An account in more than 500 projects has only the first 500 searched, and the foot says so; type the connection name for the others.
 
 <div className="clear" />
 
@@ -107,6 +107,7 @@ The window shows **Couldn't connect** with a cause line and Google's own message
 | `is in REGION, not REGION` | The connection name has the wrong region. Copy it again from the instance's Overview page |
 | `runs MySQL 8.0` | Rowkery connects to Postgres instances only |
 | `has no public IP` | The instance has no address of that kind. Pick the one it has under **Advanced**, **IP** |
+| `Couldn't reach Google` | Your Mac is offline, or a proxy or firewall blocks `googleapis.com` |
 | `didn't answer on port 3307` | A firewall blocks the port, or a private or PSC address needs your VPN. The instance may also be stopped |
 | `The secure connection failed` | The instance's certificate didn't check out. Retry; if it keeps failing, the raw error says why |
 
