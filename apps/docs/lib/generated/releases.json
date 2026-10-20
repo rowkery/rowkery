@@ -1,5 +1,9 @@
 [
   {
+    "version": "v0.2.0",
+    "markdown": "## New\n\n- **Google Cloud SQL**: pick **Google Cloud SQL** under Postgres's **Connect to** and choose an instance. Rowkery connects through Google itself, with no Cloud SQL Auth Proxy to run. It signs in to Google with your gcloud login or a service account key kept in the Keychain.\n- Running several statements lists each one's result beside the grid; pick one with a click or ↑ / ↓.\n- Query tabs load the whole result; the query's LIMIT decides how many rows come back.\n\n## Fixed\n\n- Typing a row's first letters in a menu or filter picker moves to that row.\n- + and ⌘T show the empty window if one is already open, and leave Agents or Settings.\n- The Columns table lines up each row's cells.\n- The update button shows under Automatic too, and an empty result reads No records.\n"
+  },
+  {
     "version": "v0.1.3",
     "markdown": "## New\n\n- **Agents** (⇧⌘A) is an inbox: waiting proposals over the activity log. Sharing moved to **Settings › Agents**.\n- The review page lists every waiting proposal; open them in any order.\n- The window pill holds the safe mode shield and an agent mark (green dot after a recent read). ⌘K opens mid-window.\n\n## Fixed\n\n- SSH tunnels: upgraded russh for RUSTSEC-2026-0153/0154. Saved host keys still match.\n- Patched rustls advisories (RUSTSEC-2026-0346 to 0349).\n"
   },
