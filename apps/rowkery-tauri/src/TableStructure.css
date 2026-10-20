@@ -91,12 +91,16 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Columns: Column 200 / Type 120 / Nullable 90 / Key. */
+/* Columns: Column 200 / Type 120 / Nullable 90 / Key. Cells mix mono, sans
+   and badges, and a comment or default adds a second line, so they share the
+   first line's baseline (rowkery/reports#6); align-content centres that line
+   in a one-line row. */
 .ts-row {
   display: grid;
   grid-template-columns: 200px 120px 90px minmax(0, 1fr);
   gap: 0 14px;
-  align-items: center;
+  align-items: baseline;
+  align-content: center;
   min-height: 34px;
   padding: 0 10px;
   border-bottom: 1px solid var(--rowline);

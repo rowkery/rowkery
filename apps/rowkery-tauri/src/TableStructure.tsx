@@ -378,6 +378,7 @@ export function TableStructure({
                     const del = onDeleteLabel(fk.on_delete);
                     return (
                       <div
+                        data-testid="ts-relation"
                         className="ts-item ts-relation"
                         key={fk.name}
                         title={fk.name}
@@ -410,6 +411,7 @@ export function TableStructure({
                     const del = onDeleteLabel(fk.on_delete);
                     return (
                       <div
+                        data-testid="ts-relation"
                         className="ts-item ts-relation"
                         key={`${from.key}:${fk.name}`}
                         title={fk.name}
