@@ -93,6 +93,10 @@ function MenuPanel({
   const idBase = useId();
   /** What had focus when the menu opened. */
   const opener = useRef<HTMLElement | null>(null);
+  /** Where the pointer last moved. Rows scrolled under a still pointer fire
+   *  mouse events too; only a real move takes the cursor from the keyboard. */
+  const pointer = useRef<{ x: number; y: number } | null>(null);
+  const pointerStill = (e: React.MouseEvent) => pointer.current?.x === e.clientX && pointer.current?.y === e.clientY;
   /** Letters typed for type-to-select, and when the last one came. */
   const typed = useRef({ text: "", at: 0 });
 
@@ -226,11 +230,15 @@ function MenuPanel({
             data-item={item.id}
             data-keys={keys}
             className={`grid-menu-item${i === cursor ? " is-cursor" : ""}${i === cursor && keyed ? " is-key" : ""}`}
-            onMouseEnter={() => {
+            onMouseMove={(e) => {
+              if (pointerStill(e)) return;
+              pointer.current = { x: e.clientX, y: e.clientY };
               setCursor(i);
               setKeyed(false);
             }}
-            onMouseLeave={() => setCursor(-1)}
+            onMouseLeave={(e) => {
+              if (!pointerStill(e)) setCursor(-1);
+            }}
             onClick={() => pick(item.id)}
           >
             {choice && <span className="grid-menu-check">{item.checked ? "✓" : ""}</span>}
