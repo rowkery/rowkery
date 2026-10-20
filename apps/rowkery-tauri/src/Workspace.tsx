@@ -5,7 +5,6 @@ import {
   copyAllResults,
   reviewChanges,
   exportResults,
-  fetchMore,
   browseTableSql,
   cancelCount,
   cancelQuery,
@@ -150,6 +149,7 @@ import {
   safeFormatCell,
 } from "./types";
 import { Keys } from "./Keys";
+import { StatementList, type StatementResult } from "./StatementList";
 import { SessionDetail, SessionsBar, SessionsGrid, useSessions } from "./SessionsView";
 
 type ResultsView = "data" | "structure";
@@ -176,7 +176,6 @@ const SCHEMA_STALE_MS = 15 * 60_000;
 const DEFAULT_PAGE = 1000;
 /** The page-size menu; 0 loads every row. */
 const PAGE_SIZES = [1000, 5000, 0];
-const pageLabel = (n: number) => (n === 0 ? "All" : n.toLocaleString());
 
 type SortState = SortKey;
 
@@ -270,12 +269,10 @@ interface TabRun {
    */
   tableKey: string | null;
   /**
-   * More rows remain: a table tab's last page came back full, or a query
-   * tab's cursor has rows left. Load more (or scrolling to the end) gets them.
+   * More rows remain: a table tab's last page came back full. Load more (or
+   * scrolling to the end) gets them. A query tab gets every row at once.
    */
   hasMore: boolean;
-  /** The last run was a query tab's cursor page (its page size applies). */
-  paged?: boolean;
   /** The statement the last run ran (a query tab's), for Export and Copy all. */
   ranSql?: string;
   /**
@@ -303,13 +300,40 @@ interface TabRun {
    * Safe mode stopped the last run; `sql` is exactly what would run.
    * `explain`: it was a timed plan of a write (⌘E, Run with timings).
    */
-  held: { sql: string; hold: SafetyHold; tableKey: string | null; explain?: boolean } | null;
+  held: {
+    sql: string;
+    hold: SafetyHold;
+    tableKey: string | null;
+    explain?: boolean;
+    /** A statement of a run of several: confirmed, it joins that run's list. */
+    statement?: { at: number | null };
+  } | null;
   /** ⌘E's plan of `sql`, shown in place of the results until the next run. */
   plan?: { plan: QueryPlan; sql: string; elapsedMs: number } | null;
   /** The running query's rows are arriving; `result` holds them so far. */
   streaming: boolean;
   /** Counts runs (not appended pages): a new one scrolls the grid to the top. */
   runNo?: number;
+  /**
+   * A run of several statements (Run All, or a selection of several): each
+   * one's result, in order. The fields above show `statements[statementAt]`.
+   */
+  statements?: StatementResult[] | null;
+  statementAt?: number;
+}
+
+/** The run's statements with the one shown as it is now. */
+function keepShownStatement(run: TabRun): Pick<TabRun, "statements"> {
+  if (!run.statements || run.statementAt === undefined) return {};
+  const statements = run.statements.slice();
+  statements[run.statementAt] = shownStatement(run);
+  return { statements };
+}
+
+/** The statement a tab shows, to keep while it shows another. */
+function shownStatement(run: TabRun): StatementResult {
+  const { result, tableKey, ranSql, runNo } = run;
+  return { result, tableKey, ranSql, runNo };
 }
 
 const IDLE_RUN: TabRun = {
@@ -1222,7 +1246,7 @@ export function Workspace({
   const activeTableKey = isTableTab ? activeTab?.tableKey : activeRun.tableKey;
   const activeTable = activeTableKey ? findTable(schemaTree, activeTableKey) : undefined;
   const resultsView: ResultsView =
-    activeTable && activeTab?.view === "structure" ? "structure" : "data";
+    isTableTab && activeTable && activeTab?.view === "structure" ? "structure" : "data";
 
   // Memoised on the table, so the grid only re-sizes columns for a new result.
   const keyColumns: KeyColumns | null = useMemo(() => {
@@ -1977,6 +2001,9 @@ export function Workspace({
       appending: !!paging?.append,
       runNo: paging?.append ? prev.runNo : (prev.runNo ?? 0) + 1,
       errorMark: paging?.append ? prev.errorMark : null,
+      // A run of its own ends the last run's statement list; the next of a
+      // run keeps the one shown until now as it is (rows Load more added).
+      ...(paging?.append ? {} : part ? keepShownStatement(prev) : { statements: null, statementAt: undefined }),
     }));
     setNotice(null);
     if (remember && !confirmed) {
@@ -2000,25 +2027,16 @@ export function Workspace({
               streamed = true;
               patchRun(tabId, { result: partial, streaming: true });
           };
-      // A query tab pages free-form reads through a cursor (core decides
-      // which statements can); Load more continues that cursor.
-      const queryTab = tabsRef.current.find((t) => t.id === tabId && t.kind === "query");
       // Every connection is busy: the tab says it waits, rather than look stuck.
       const onWaiting = (waiting: boolean) => {
         if (tableRun && !tableRun.current()) return;
         patchRun(tabId, { waiting });
       };
+      // A query runs as written, every row it returns (up to the cap a tab
+      // holds): its own LIMIT says how many it wants.
       const res = browse
         ? await browseTable(windowId, tabId, browse, onProgress, onWaiting)
-        : paging?.append
-          ? await fetchMore(windowId, tabId, paging.page, onProgress, onWaiting)
-          : await runQuery(windowId, tabId, text, {
-              confirmed,
-              onProgress,
-              onWaiting,
-              // All is everything up to the cap.
-              page: queryTab ? nextFetchRows(queryTab.pageSize ?? DEFAULT_PAGE, 0) : undefined,
-            });
+        : await runQuery(windowId, tabId, text, { confirmed, onProgress, onWaiting });
       if (!res.hold) timing.rows(res.row_count, res.elapsed_ms, res.first_row_ms ?? null);
       // The tab changed while this ran: the run `runTable` queued shows instead.
       if (tableRun && !tableRun.current()) {
@@ -2043,7 +2061,7 @@ export function Workspace({
       if (res.hold) {
         // Nothing ran: keep the last results (faded) under the bar.
         patchRun(tabId, {
-          held: { sql: text, hold: res.hold, tableKey: tableKey ?? null },
+          held: { sql: text, hold: res.hold, tableKey: tableKey ?? null, statement: part ?? undefined },
           startedAt: null,
           outcome: null,
           elapsedMs: null,
@@ -2067,7 +2085,7 @@ export function Workspace({
         // A failed page leaves the rows already loaded in place.
         if (answered) {
           const hasMore = capAt(
-            res.paged ? !!res.more : paging.page > 0 && res.row_count >= paging.page,
+            paging.page > 0 && res.row_count >= paging.page,
             (runsRef.current[tabId]?.result?.rows.length ?? 0) + res.rows.length,
           );
           patchRun(tabId, (prev) => ({
@@ -2088,10 +2106,9 @@ export function Workspace({
         const patch: Partial<TabRun> = {
           result: res,
           hasMore: capAt(
-            res.paged ? !!res.more : !!paging && paging.page > 0 && answered && res.row_count >= paging.page,
+            !!paging && paging.page > 0 && answered && res.row_count >= paging.page,
             res.rows.length,
           ),
-          paged: !!res.paged,
           ranSql: browse ? undefined : text,
         };
         // A table tab names its table; a query's own SQL says which it read.
@@ -2107,7 +2124,13 @@ export function Workspace({
           patch.errorMark = { ...token, suggestion: suggestName(res.error, res.sqlstate ?? null, text) };
           if (tabId === activeTabIdRef.current) requestAnimationFrame(() => sqlEditorRef.current?.jumpTo(at));
         }
-        patchRun(tabId, patch);
+        if (part) {
+          // A statement of a run of several joins its list, and shows.
+          patchRun(tabId, (prev) => {
+            const statements = [...(prev.statements ?? []), shownStatement({ ...prev, ...patch })];
+            return { ...patch, statements, statementAt: statements.length - 1 };
+          });
+        } else patchRun(tabId, patch);
       }
     } catch (e) {
       outcome = "error";
@@ -2141,10 +2164,13 @@ export function Workspace({
    * Each of `ranges` (statements of `text`) in turn on the tab's session, as
    * ⌘↵ on each would (a server runs one statement per query, so the whole
    * text can't go as one). Stops at the first that fails, is cancelled or is
-   * held by safe mode; the results show the last that ran. `at` is where
-   * `text` starts in the editor, so an error marks its statement.
+   * held by safe mode. Each keeps its result, listed beside the grid, and the
+   * results show the last that ran. `at` is where `text` starts in the
+   * editor, so an error marks its statement.
    */
   const runStatements = async (text: string, ranges: CharRange[], at: number | null, tabId: typeof activeTabId) => {
+    if (runsRef.current[tabId]?.startedAt != null) return "skipped";
+    patchRun(tabId, { statements: [], statementAt: undefined });
     let end: RunEnd = "skipped";
     for (const range of ranges) {
       nextStatement.current = { at: at === null ? null : at + range.start };
@@ -2192,6 +2218,18 @@ export function Workspace({
       });
     }
   };
+
+  /**
+   * Shows statement `index` of the tab's last run of several; the one shown
+   * until now keeps what it has.
+   */
+  const showStatement = (tabId: typeof activeTabId, index: number) =>
+    patchRun(tabId, (prev) => {
+      const list = prev.statements;
+      if (!list?.[index] || prev.startedAt != null || index === prev.statementAt) return {};
+      const statements = keepShownStatement(prev).statements ?? list;
+      return { ...statements[index], statements, statementAt: index };
+    });
 
   /** Run All Statements: every statement of the editor. */
   const runAll = async () => {
@@ -2292,7 +2330,10 @@ export function Workspace({
   const confirmHeld = () => {
     if (!held || held.hold.action !== "confirm") return;
     if (held.explain) void onExplain(true, held.sql, true);
-    else void onRun(held.sql, true, held.tableKey ?? undefined, activeTabId, true);
+    else {
+      if (held.statement) nextStatement.current = held.statement;
+      void onRun(held.sql, true, held.tableKey ?? undefined, activeTabId, true);
+    }
     sqlEditorRef.current?.focus();
   };
   dropHeldRef.current = () => {
@@ -2914,20 +2955,8 @@ export function Workspace({
     if (table) openTable(table, { keep: true, state: { filter: "", sort: [] } });
   };
 
-  const loadMore = (rows?: number) => {
-    if (!activeTab) return;
-    if (activeTab.kind === "query") {
-      const loaded = runsRef.current[activeTab.id]?.result?.rows.length ?? 0;
-      // All is the rest up to the cap; at the cap there's nothing to ask for.
-      const page = nextFetchRows(rows ?? activeTab.pageSize ?? DEFAULT_PAGE, loaded);
-      if (page === 0) {
-        patchRun(activeTab.id, { hasMore: false });
-        showToast(CAPPED_MESSAGE);
-        return;
-      }
-      void onRun("fetch more", false, undefined, activeTab.id, false, { page, append: true });
-      return;
-    }
+  const loadMore = () => {
+    if (activeTab?.kind !== "table") return;
     if (activeTab.preview) patchTab(activeTab.id, { preview: false });
     void runTable({ ...activeTab, preview: false }, true);
   };
@@ -2942,13 +2971,7 @@ export function Workspace({
 
   /** Page size menu: reloads the tab's first page at the new size. */
   const setPageSize = (pageSize: number) => {
-    if (!activeTab) return;
-    if (activeTab.kind === "query") {
-      // Applies to the next page; All loads the rest of an open cursor now.
-      patchTab(activeTab.id, { pageSize });
-      if (pageSize === 0 && runsRef.current[activeTab.id]?.hasMore) loadMore(0);
-      return;
-    }
+    if (activeTab?.kind !== "table") return;
     const next = { ...activeTab, pageSize, preview: false };
     patchTab(next.id, { pageSize, preview: false });
     pendingWash.current[next.id] = "limit";
@@ -3133,6 +3156,11 @@ export function Workspace({
   // results header on a query tab, at the SQL line's end on a table tab.
   // ⌘E's plan shows in place of the results on a query tab.
   const shownPlan = !isTableTab && resultsView !== "structure" ? (activeRun.plan ?? null) : null;
+  // A plan stands in for the results, so the statements they came from go too.
+  const statementList =
+    !isTableTab && !shownPlan && (activeRun.statements?.length ?? 0) > 1
+      ? (keepShownStatement(activeRun).statements ?? activeRun.statements!)
+      : null;
   const runningMeta = (
               <span data-testid="card-meta" className="card-meta running" data-state="running">
                 <span className="spinner" aria-hidden />
@@ -3249,7 +3277,7 @@ export function Workspace({
       windowCount,
       hasResult: !!result,
       hasRows,
-      hasActiveTable: !!activeTable,
+      hasActiveTable: isTableTab && !!activeTable,
       resultsView,
       failed: connState === "error",
       loadedRows: result?.row_count ?? 0,
@@ -4098,18 +4126,10 @@ export function Workspace({
           <>
           {!isTableTab && (
           <div data-testid="card-toolbar" className="card-toolbar">
-            {/* A plan replaces the result, so its Data / Structure and table go too. */}
-            {(!shownPlan && viewSwitch) || (
-              <span data-testid="card-title" className="card-title">
-                {shownPlan ? "Plan" : "Results"}
-              </span>
-            )}
-            {!isTableTab && !shownPlan && activeTable && (
-              <span data-testid="card-table" className="card-table">
-                <TableIcon size={12} />
-                {activeTable.name}
-              </span>
-            )}
+            {/* A query can join several tables, so it has no one table's Data / Structure. */}
+            <span data-testid="card-title" className="card-title">
+              {shownPlan ? "Plan" : "Results"}
+            </span>
             {findShown && find && !shownPlan && (
               <span className="find-bar" data-find>
                 <input
@@ -4180,43 +4200,10 @@ export function Workspace({
               result.columns.length > 0 && (
                 <span data-testid="card-meta" className="card-meta">
                   <span className="conn-dot connected" />
-                  <b
-                    title={
-                      isTableTab && activeTable && !activeTable.table.primary_key?.length
-                        ? "Pages use OFFSET (no primary key)"
-                        : undefined
-                    }
-                  >
-                    {isTableTab && activeTable?.rows != null && activeRun.hasMore && !activeTab?.filter?.trim()
-                      ? `${result.row_count.toLocaleString()} of ≈${activeTable.rows.toLocaleString()}`
-                      : !isTableTab && activeRun.hasMore
-                        ? `${result.row_count.toLocaleString()}+ rows`
-                        : `${result.row_count.toLocaleString()} ${result.row_count === 1 ? "row" : "rows"}`}
-                  </b>
+                  <b>{`${result.row_count.toLocaleString()} ${result.row_count === 1 ? "row" : "rows"}`}</b>
                   {formatMs(result.elapsed_ms)}
-                  {activeRun.hasMore && (
-                    <button type="button" className="cancel-btn" data-load-more onClick={() => loadMore()}>
-                      Load more · {pageLabel(activeTab?.pageSize ?? DEFAULT_PAGE)} rows
-                    </button>
-                  )}
                 </span>
               )
-            )}
-            {activeRun.paged && !shownPlan && resultsView !== "structure" && activeTab && (
-              <label className="page-size" title="Rows per page for this tab">
-                <select
-                  data-page-size={activeTab.pageSize ?? DEFAULT_PAGE}
-                  value={activeTab.pageSize ?? DEFAULT_PAGE}
-                  disabled={runStartedAt !== null}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                >
-                  {PAGE_SIZES.map((n) => (
-                    <option key={n} value={n}>
-                      {n === 0 ? "All rows" : `${n.toLocaleString()} rows`}
-                    </option>
-                  ))}
-                </select>
-              </label>
             )}
             {/* Paper: Export as a bordered button ahead of
                 the zone's …, running the registry's export command. */}
@@ -4258,108 +4245,121 @@ export function Workspace({
               onCancel={dropHeldEdit}
             />
           )}
-          {resultsView === "structure" && activeTable ? (
-            <TableStructure
-              key={activeTable.key}
-              table={activeTable}
-              schemas={schemaTree}
-              onOpenTable={openTableByKey}
-              loadIndexes={loadIndexes}
-            />
-          ) : held?.hold.action === "refuse" ? (
-            <SafetyRefusal
-              hold={held.hold}
-              onChangeMode={() => openShieldMenuRef.current()}
-            />
-          ) : renderError ? (
-            <div className="results-error">{renderError}</div>
-          ) : shownPlan ? (
-            <PlanView key={`${activeTabId}:${shownPlan.sql}:${shownPlan.plan.timed}`} plan={shownPlan.plan} />
-          ) : result?.error && !result.cancelled && !isTableTab ? (
-            <QueryErrorView
-              message={result.error}
-              sqlstate={result.sqlstate ?? null}
-              sql={activeRun.ranSql ?? null}
-              position={result.error_position ?? null}
-              suggestion={activeRun.errorMark?.suggestion ?? null}
-              onReplace={applySuggestion}
-              onReport={() => reportIssue(true)}
-            />
-          ) : (
-            <RenderErrorBoundary
-              fallback={(err) => (
-                <div className="results-error">
-                  {err.message || String(err)}
-                </div>
-              )}
-            >
-              <ResultsGrid
-                result={shownResult}
-                editing={rowEdits.editing}
-                columnWidths={columnWidths}
-                onColumnWidthsChange={setColumnWidths}
-                keyColumns={keyColumns}
-                columnComments={commentsByColumn}
-                sort={isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? [])}
-                sortMode={isTableTab ? "server" : "client"}
-                onSort={sortBy}
-                onSortColumn={sortColumn}
-                onHideColumn={isTableTab ? hideColumn : undefined}
-                hiddenGrips={activeGrips}
-                onShowColumn={showColumn}
-                onOpenAsTable={!isTableTab && resultTable ? openResultAsTable : undefined}
-                onSelectionStats={isTableTab ? setSelStats : undefined}
-                onFilter={isTableTab ? gridFilter : undefined}
-                onTypeKey={isTableTab ? typeToFilter : undefined}
-                find={!isTableTab && find?.tabId === activeTabId ? find : null}
-                onFindCount={setFindCount}
-                commandState={commandState}
-                onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
-                onStructure={activeTable ? () => setActiveView("structure") : undefined}
-                markedColumns={markedSet}
-                hiddenColumns={hiddenSet}
-                onMarkColumn={markTable ? markColumn : undefined}
-                tableName={resultTable?.name}
-                quickLookLinks={quickLookLinks}
-                quickLookAsk={quickLookAsk}
-                onQuickLook={setQlView}
-                onCellSelect={onCellSelect}
-                onNearEnd={activeRun.hasMore ? onNearEnd : undefined}
-                scrollKey={`${activeTabId}:${activeRun.runNo ?? 0}`}
-                emptyNote={
-                  isTableTab && activeTab?.filter?.trim() ? (
-                    <>
-                      No rows match.{" "}
-                      <button
-                        type="button"
-                        className="rg-empty-link"
-                        data-clear-filters
-                        onClick={() => activeTab.kind === "table" && setChips(activeTab, [], false)}
-                      >
-                        Clear filters
-                      </button>
-                      {/* No paging here, so a new row has its place under the note. */}
-                      {rowEdits.rowsEditable && (
-                        <button
-                          type="button"
-                          className="rg-add-row"
-                          data-add-row
-                          title={commandTip("insert-row", "Add a row")}
-                          onClick={() => runCommand("insert-row")}
-                        >
-                          <PlusIcon size={11} />
-                          Add row
-                        </button>
-                      )}
-                    </>
-                  ) : busy ? undefined : (
-                    // A finished run with no rows says so, so it doesn't read as still loading.
-                    <span data-empty-rows>No records</span>
-                  )
-                }
+          {/* After a run of several statements, the list of them sits beside the grid. */}
+          <div className="results-body" data-statements={statementList ? "" : undefined}>
+            {statementList && (
+              <StatementList
+                statements={statementList}
+                at={activeRun.statementAt ?? statementList.length - 1}
+                disabled={busy}
+                onPick={(index) => showStatement(activeTabId, index)}
               />
-            </RenderErrorBoundary>
-          )}
+            )}
+            <div className="results-main">
+              {resultsView === "structure" && activeTable ? (
+                <TableStructure
+                  key={activeTable.key}
+                  table={activeTable}
+                  schemas={schemaTree}
+                  onOpenTable={openTableByKey}
+                  loadIndexes={loadIndexes}
+                />
+              ) : held?.hold.action === "refuse" ? (
+                <SafetyRefusal
+                  hold={held.hold}
+                  onChangeMode={() => openShieldMenuRef.current()}
+                />
+              ) : renderError ? (
+                <div className="results-error">{renderError}</div>
+              ) : shownPlan ? (
+                <PlanView key={`${activeTabId}:${shownPlan.sql}:${shownPlan.plan.timed}`} plan={shownPlan.plan} />
+              ) : result?.error && !result.cancelled && !isTableTab ? (
+                <QueryErrorView
+                  message={result.error}
+                  sqlstate={result.sqlstate ?? null}
+                  sql={activeRun.ranSql ?? null}
+                  position={result.error_position ?? null}
+                  suggestion={activeRun.errorMark?.suggestion ?? null}
+                  onReplace={applySuggestion}
+                  onReport={() => reportIssue(true)}
+                />
+              ) : (
+                <RenderErrorBoundary
+                  fallback={(err) => (
+                    <div className="results-error">
+                      {err.message || String(err)}
+                    </div>
+                  )}
+                >
+                  <ResultsGrid
+                    result={shownResult}
+                    editing={rowEdits.editing}
+                    columnWidths={columnWidths}
+                    onColumnWidthsChange={setColumnWidths}
+                    keyColumns={keyColumns}
+                    columnComments={commentsByColumn}
+                    sort={isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? [])}
+                    sortMode={isTableTab ? "server" : "client"}
+                    onSort={sortBy}
+                    onSortColumn={sortColumn}
+                    onHideColumn={isTableTab ? hideColumn : undefined}
+                    hiddenGrips={activeGrips}
+                    onShowColumn={showColumn}
+                    onOpenAsTable={!isTableTab && resultTable ? openResultAsTable : undefined}
+                    onSelectionStats={isTableTab ? setSelStats : undefined}
+                    onFilter={isTableTab ? gridFilter : undefined}
+                    onTypeKey={isTableTab ? typeToFilter : undefined}
+                    find={!isTableTab && find?.tabId === activeTabId ? find : null}
+                    onFindCount={setFindCount}
+                    commandState={commandState}
+                    onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
+                    onStructure={isTableTab && activeTable ? () => setActiveView("structure") : undefined}
+                    markedColumns={markedSet}
+                    hiddenColumns={hiddenSet}
+                    onMarkColumn={markTable ? markColumn : undefined}
+                    tableName={resultTable?.name}
+                    quickLookLinks={quickLookLinks}
+                    quickLookAsk={quickLookAsk}
+                    onQuickLook={setQlView}
+                    onCellSelect={onCellSelect}
+                    onNearEnd={activeRun.hasMore ? onNearEnd : undefined}
+                    scrollKey={`${activeTabId}:${activeRun.runNo ?? 0}`}
+                    emptyNote={
+                      isTableTab && activeTab?.filter?.trim() ? (
+                        <>
+                          No rows match.{" "}
+                          <button
+                            type="button"
+                            className="rg-empty-link"
+                            data-clear-filters
+                            onClick={() => activeTab.kind === "table" && setChips(activeTab, [], false)}
+                          >
+                            Clear filters
+                          </button>
+                          {/* No paging here, so a new row has its place under the note. */}
+                          {rowEdits.rowsEditable && (
+                            <button
+                              type="button"
+                              className="rg-add-row"
+                              data-add-row
+                              title={commandTip("insert-row", "Add a row")}
+                              onClick={() => runCommand("insert-row")}
+                            >
+                              <PlusIcon size={11} />
+                              Add row
+                            </button>
+                          )}
+                        </>
+                      ) : busy ? undefined : (
+                        // A finished run with no rows says so, so it doesn't read as still loading.
+                        <span data-empty-rows>No records</span>
+                      )
+                    }
+                  />
+                </RenderErrorBoundary>
+              )}
+            </div>
+          </div>
           </>
           )}
           {/* The edits bar sits at the grid's foot, where the strip would; it prints its own keys. */}

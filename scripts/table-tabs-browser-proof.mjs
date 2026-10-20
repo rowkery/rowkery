@@ -339,33 +339,20 @@ check((await runs()).length === beforeRuns, "and it was not run");
 check((await page.locator(`${visible} [data-testid="run-btn"]`).count()) === 1, "the query tab has Run again");
 await shot("5-open-in-query-tab");
 
-// 10. Edit the query tab to read kiosks, run it: Structure follows.
-check((await page.locator(`${visible} [data-testid="view-switch"]`).count()) === 0, "before it runs there is no Structure switch");
+// 10. A query tab's results have no Data | Structure or table name, even
+// when it reads one table: a query can join several (reports#7).
 await page.click(`${visible} textarea[data-testid="sql-editor"]`);
 await page.keyboard.press("ControlOrMeta+a");
 await page.keyboard.type("SELECT * FROM kiosks LIMIT 5;");
 await page.keyboard.press("Control+Enter");
 await settle();
-check((await page.locator(`${visible} [data-testid="view-switch"]`).count()) === 1, "a query reading one table shows Data | Structure");
-check((await page.locator(`${visible} [data-testid="card-table"]`).textContent()).includes("kiosks"), "with the table's name after it");
+check((await page.locator(`${visible} [data-testid="view-switch"]`).count()) === 0, "a query reading one table shows no Data | Structure");
+check((await page.locator(`${visible} [data-testid="card-table"]`).count()) === 0, "nor the table's name");
+check((await page.locator(`${visible} [data-testid="card-title"]`).textContent()).includes("Results"), "title reads Results");
 await page.keyboard.press("Control+Alt+2");
 await settle();
-check((await page.locator(`${visible} [data-testid="ts-card"], ${visible} [class^='ts-']`).first().textContent()).length > 0 && (await page.textContent(`${visible} [data-testid="results-card"]`)).includes("kiosks"), "Structure shows kiosks");
-await shot("6-query-structure-follows");
-await page.keyboard.press("Control+Alt+1");
-await page.click(`${visible} textarea[data-testid="sql-editor"]`);
-await page.keyboard.press("ControlOrMeta+a");
-await page.keyboard.type("SELECT 1 AS n;");
-await page.keyboard.press("Control+Enter");
-await settle();
-check((await page.locator(`${visible} [data-testid="view-switch"]`).count()) === 0, "a query that reads no table goes back to plain Results");
-check((await page.locator(`${visible} [data-testid="card-title"]`).textContent()).includes("Results"), "title reads Results");
-await page.click(`${visible} textarea[data-testid="sql-editor"]`);
-await page.keyboard.press("ControlOrMeta+a");
-await page.keyboard.type("SELECT o.id FROM orders o JOIN kiosks k ON k.id = o.id;");
-await page.keyboard.press("Control+Enter");
-await settle();
-check((await page.locator(`${visible} [data-testid="view-switch"]`).count()) === 0, "a join of two tables shows no Structure");
+check((await page.locator(`${visible} [data-testid="ts-card"], ${visible} [class^='ts-']`).count()) === 0, "⌥⌘2 doesn't open a Structure in a query tab");
+await shot("6-query-results-plain");
 
 // 11. Close, reorder and ⌘W still work on table tabs.
 const before = await tabTitles();

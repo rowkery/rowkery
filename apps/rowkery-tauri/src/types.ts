@@ -35,9 +35,6 @@ export interface QueryResultDto {
   sqlstate?: string | null;
   /** 1-based character offset of the error in the statement. */
   error_position?: number | null;
-  /** A cursor page of a free-form read; `more` while rows remain to fetch. */
-  paged?: boolean;
-  more?: boolean;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
 }

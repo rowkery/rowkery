@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 // A tab holds at most 1,000,000 rows (stubbed `invoke`, 1.5 million rows
-// behind every query). On a query tab, All asks `fetch_more` for the rest up
-// to the cap, not for every row; at the cap Load more goes, scrolling asks
-// for nothing more, and a toast says "Stopped at 1,000,000 rows". A new run
-// with All asks `run_query` for a 1,000,000-row page. A run core cut short
-// (its done frame says `capped`) shows the same toast. On a table tab, All
+// behind every query). A query tab asks `run_query` for every row (no page);
+// core stops at the cap and its done frame says `capped`, so a toast says
+// "Stopped at 1,000,000 rows" and there's no Load more. On a table tab, All
 // browses with LIMIT 1000000, not without a limit.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -31,7 +29,6 @@ function stubTauri() {
   const TOTAL = 1_500_000;
   window.__CALLS__ = [];
   let nextId = 0;
-  const cursors = new Map();
   const col = (name, type_name) => ({ name, type_name, nullable: true });
   const tables = [{ name: "big", columns: [col("n", "int8")], primary_key: ["n"], indexes: [], foreign_keys: [], row_estimate: { Approximate: TOTAL }, partition_of: null }];
   const send = (onFrame, rows, from, extra) => {
@@ -49,26 +46,16 @@ function stubTauri() {
     metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
     transformCallback: () => 0,
     invoke: async (cmd, args) => {
-      if (cmd === "run_query" || cmd === "fetch_more" || cmd === "browse_table")
+      if (cmd === "run_query" || cmd === "browse_table")
         window.__CALLS__.push({ cmd, sql: args.sql, page: args.page, rows: args.rows, limit: args.limit });
       switch (cmd) {
         case "list_connections":
           return { connections: [{ kind: "postgres", id: "pg", name: "arcade", host: "127.0.0.1", port: 54329, database: "rowkery", username: "rowkery" }], active_connection_id: null };
         case "open_window":
           return { database: "rowkery", catalog: { databases: [{ name: "rowkery", schemas: [{ name: "public", tables }] }] }, elapsed_ms: 2, cached: false, open_seq: 1 };
-        case "run_query": {
-          // Its own LIMIT runs whole; core cut it at the cap and says so.
-          if (/\blimit\b/i.test(args.sql)) return send(args.onFrame, 50, 0, { capped: true });
-          const n = args.page === 0 ? TOTAL : Math.min(args.page, TOTAL);
-          cursors.set(args.tabId, n);
-          return send(args.onFrame, n, 0, { paged: true, more: n < TOTAL });
-        }
-        case "fetch_more": {
-          const from = cursors.get(args.tabId);
-          const n = args.rows === 0 ? TOTAL - from : Math.min(args.rows, TOTAL - from);
-          cursors.set(args.tabId, from + n);
-          return send(args.onFrame, n, from, { paged: true, more: from + n < TOTAL });
-        }
+        case "run_query":
+          // Core streams the rows and stops at the cap, saying so.
+          return send(args.onFrame, 1_000_000, 0, { capped: true });
         case "browse_table": {
           const n = Math.min(args.limit === 0 ? TOTAL : args.limit, TOTAL);
           const queryId = send(args.onFrame, n, 0, {});
@@ -113,15 +100,12 @@ const run = async (sql) => {
   await page.keyboard.press("Control+Enter");
 };
 
-// Query tab: a page, then All.
+// Query tab: every row, up to the cap.
 await run("SELECT n FROM big");
-await waitRows(1000);
-await settle();
-await page.selectOption(`${ws} [data-page-size]`, "0");
 await waitRows(1_000_000);
 await settle();
 let c = await calls();
-check(c.at(-1).cmd === "fetch_more" && c.at(-1).rows === 999_000, `All asks for the rest up to the cap, 999,000 rows, not 0 (${JSON.stringify(c.at(-1))})`);
+check(c.at(-1).cmd === "run_query" && c.at(-1).page === null, `a query asks for every row, no page (${JSON.stringify(c.at(-1))})`);
 // Text on purpose: the toast's copy is what's under test.
 const said = await toast();
 check(said.includes("Stopped at 1,000,000 rows"), `a toast says where it stopped (${said})`);
@@ -131,22 +115,7 @@ const before = (await calls()).length;
 await page.$eval(`${ws} [data-testid="results-grid-wrap"]`, (el) => (el.scrollTop = el.scrollHeight));
 await page.waitForTimeout(400);
 check((await calls()).length === before, "scrolling to the end at the cap asks for nothing more");
-
-// The next run remembers All: a 1,000,000-row page, then the cap.
 await noToast();
-await run("SELECT n FROM big ORDER BY n");
-await waitRows(1_000_000);
-await settle();
-c = await calls();
-check(c.at(-1).cmd === "run_query" && c.at(-1).page === 1_000_000, `a run with All asks for a 1,000,000-row page (${c.at(-1).page})`);
-check((await toast()).includes("Stopped at 1,000,000 rows"), "and stops there with the toast");
-
-// A run core cut at the cap (no paging: its own LIMIT) says so too.
-await noToast();
-await run("SELECT n FROM big LIMIT 2000000");
-await waitRows(50);
-await settle();
-check((await toast()).includes("Stopped at 1,000,000 rows"), "a capped run from core shows the toast");
 
 // Table tab: All browses with the cap as its LIMIT.
 await page.click(`${ws} [data-table="rowkery.public.big"] [data-testid="sb-row-main"]`);

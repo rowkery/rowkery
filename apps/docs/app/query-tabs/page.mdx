@@ -6,7 +6,7 @@ export const metadata = { title: "Query tabs" };
 
 <p className="lead">A query tab is an editor for SQL with its results underneath. This page covers running and cancelling queries, what each tab keeps between runs, how results load, and what you see when a query fails.</p>
 
-<Shot src="/img/query-tabs-overview.webp" width={1280} height={800} alt="A query tab with two statements. The second one, a SELECT from orders, has an orange bar beside it. The results below read 1,000+ rows in 38 ms, with Load more · 1,000 rows, a 1,000 rows page size menu, Export, and a small profile under each column header." />
+<Shot src="/img/query-tabs-overview.webp" width={1280} height={800} alt="A query tab with two statements. The second one, a SELECT from orders, has an orange bar beside it. The results below read 1,000 rows in 4 ms, with Export and a small profile under each column header." />
 
 ## Write and run
 
@@ -35,9 +35,9 @@ When a statement creates, alters or drops a table, view, schema, type, function,
 
 ## More than one statement
 
-Run all, or a selection holding several statements, runs them one at a time on the tab's session. The run stops at the first statement that fails, is cancelled, or is held by safe mode, and the results show the last statement that ran. If one fails, its error is marked in the editor where it happened.
+Run all, or a selection holding several statements, runs them one at a time on the tab's session, so `BEGIN … COMMIT` works as one transaction. The run stops at the first statement that fails, is cancelled, or is held by safe mode. Each statement keeps its own result: a list beside the grid shows every statement that ran with how it ended (rows, rows changed, or Error), and the results show the last one. Click a statement, or use <kbd>↑</kbd> / <kbd>↓</kbd> in the list, to see its result. If one fails, its error is marked in the editor where it happened.
 
-A statement that returns no rows, such as an `UPDATE` or a `SET`, shows **Query finished with no result set**.
+A statement that returns no rows shows how many it changed, such as **1 row changed** for an `UPDATE`. One that changes no rows, such as a `SET`, shows **Query finished with no result set**.
 
 ## Cancel a query
 
@@ -102,13 +102,11 @@ Your tabs, the SQL in each one and which tab is shown are saved to Rowkery's con
 
 Rows appear as they arrive, so you can read the first ones while the rest load.
 
-### Paging
+### How many rows
 
-A single read (`SELECT`, `WITH`, `VALUES` or `TABLE`) with no `LIMIT`, `OFFSET`, `FETCH` or `INTO` of its own loads 1,000 rows at a time. The header then reads **1,000+ rows** with **Load more · 1,000 rows**, and scrolling to the end of the grid loads the next page too. The page size menu beside it offers **1,000 rows**, **5,000 rows** and **All rows**; it only appears for a result that pages.
+A query tab loads every row its query returns, so a `LIMIT` in the SQL is what decides how many: `LIMIT 2000` shows 2,000 rows. A query with no `LIMIT` on a big table loads all of it, which can take a while. A tab holds at most 1,000,000 rows and says **Stopped at 1,000,000 rows** if a result goes past that; to get more, export it.
 
-Paging reads through a cursor on the tab's session, so the next page continues the same query. It works inside a transaction you opened too. A read inside a transaction that has failed, or one with `FOR UPDATE` or `FOR SHARE`, runs in full instead. SQLite reads page the same way.
-
-A query with its own `LIMIT` returns exactly what it asks for, in one go.
+The results header reads **Results**, with no Data / Structure switch: a query can join several tables, so it has no one table to show the structure of. To see a table's structure, open the table from the schema column.
 
 ### The row limit
 
@@ -122,7 +120,7 @@ A tab holds at most 1,000,000 rows. When a result gets to that many, loading sto
 - JSON and JSONB cells are tinted.
 - Large integers (`int8` beyond 9,007,199,254,740,991) and `numeric` values keep every digit.
 
-When a query reads exactly one table, the results header shows **Data** and **Structure** with the table's name, and the cell menu offers **Open as table tab**. See [Table tabs and filters](/table-tabs-and-filters/).
+When a query reads exactly one table, the cell menu offers **Open as table tab**. See [Table tabs and filters](/table-tabs-and-filters/).
 
 To copy or save results, see [Exporting and copying](/exporting-and-copying/). To see one row in full, see [Quick Look](/quick-look/).
 

@@ -3116,8 +3116,7 @@ body,
 }
 
 /* With no count to push it right, it takes the margin itself. */
-.card-toolbar > .card-title + .results-export,
-.card-toolbar > .card-table + .results-export {
+.card-toolbar > .card-title + .results-export {
   margin-left: auto;
 }
 
@@ -3142,15 +3141,6 @@ body,
   flex-shrink: 0;
   font-size: 11px;
   color: var(--text-dim);
-}
-
-.card-table {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: 4px;
-  color: var(--mute);
-  font: 12px var(--mono);
 }
 
 .rg-header-cell.rg-sortable {
