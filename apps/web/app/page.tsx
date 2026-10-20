@@ -1,32 +1,23 @@
 import { Nav } from "@/components/Nav";
 import { Hero } from "@/components/Hero";
-import { Agents } from "@/components/sections/Agents";
-import { Keys } from "@/components/sections/Keys";
-import { Speed } from "@/components/sections/Speed";
-import { Security } from "@/components/sections/Security";
-import { Get } from "@/components/sections/Get";
-import { Tools } from "@/components/sections/Tools";
-import { Exploring } from "@/components/sections/Exploring";
-import { Reveal } from "@/components/Reveal";
+import { Ticker } from "@/components/Ticker";
+import { AppShot } from "@/components/AppShot";
+import { Footer } from "@/components/Footer";
 
+/** The page (2026-10-16: agent first, then security, then ⌘K). */
 export default function Home() {
   return (
     <>
-      <a className="skip btn white" href="#top">
+      <a className="skip btn ink" href="#top">
         Skip to content
       </a>
       <Nav />
-      <main id="top">
+      <main className="sheet" id="top">
         <Hero />
-        <Agents />
-        <Security />
-        <Keys />
-        <Tools />
-        <Speed />
-        <Exploring />
-        <Get />
+        <Ticker />
+        <AppShot />
+        <Footer />
       </main>
-      <Reveal />
     </>
   );
 }

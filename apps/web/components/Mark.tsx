@@ -6,15 +6,3 @@ export const MARK_VIEW_BOX = "78 66 240 256";
 export function MarkPaths() {
   return <path d={MARK_D} fill="currentColor" fillRule="evenodd" />;
 }
-
-/**
- * The mark, filled with the text colour; `outline` draws only its edge instead, 1.6 units
- * wide in the mark's own coordinates (so it thickens as the mark grows).
- */
-export function Mark({ className, width, height, outline }: { className?: string; width?: number; height?: number; outline?: boolean }) {
-  return (
-    <svg className={className} width={width} height={height} viewBox={MARK_VIEW_BOX} aria-hidden="true">
-      {outline ? <path d={MARK_D} fill="none" stroke="currentColor" strokeWidth={1.6} /> : <MarkPaths />}
-    </svg>
-  );
-}

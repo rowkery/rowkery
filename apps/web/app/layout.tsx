@@ -3,9 +3,9 @@ import { Analytics } from "@vercel/analytics/next";
 import localFont from "next/font/local";
 import "./globals.css";
 
-// IBM Plex Sans for text and IBM Plex Mono for SQL, keys and timings, shipped with the
-// build from app/fonts (SIL OFL). Every face listed here is preloaded, so only the weights
-// the page sets: nothing is 600 (its file stays in app/fonts for when something is).
+// IBM Plex Sans for text, IBM Plex Mono for SQL, keys and numbers, Gabarito for headings, and
+// Caveat for the penguin's speech bubble, shipped with the build from app/fonts (SIL OFL).
+// Every face listed here is preloaded but Caveat, which only the bubble uses.
 const sans = localFont({
   src: [
     { path: "./fonts/ibm-plex-sans-latin-400-normal.woff2", weight: "400" },
@@ -21,6 +21,19 @@ const mono = localFont({
   ],
   variable: "--font-mono",
   display: "swap",
+});
+const display = localFont({
+  src: "./fonts/gabarito-latin-wght-normal.woff2",
+  weight: "400 800",
+  variable: "--font-display",
+  display: "swap",
+});
+const hand = localFont({
+  src: "./fonts/caveat-latin-wght-normal.woff2",
+  weight: "500 700",
+  variable: "--font-hand",
+  display: "swap",
+  preload: false,
 });
 
 const TITLE = "Rowkery · Postgres and SQLite for the Mac";
@@ -59,18 +72,9 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-// Before first paint, where the reveal can run: mark the page .js, which lets the CSS hold
-// back the blocks that rise in as they come into view (Reveal.tsx). Without scripts they
-// simply show, and if the bundle hasn't come alive within 2.5 s the mark comes off again.
-const BOOT =
-  "(function(d){if(!('IntersectionObserver' in window))return;d.classList.add('js');setTimeout(function(){if(!('live' in d.dataset))d.classList.remove('js')},2500)})(document.documentElement)";
-
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: BOOT }} />
-      </head>
+    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable} ${hand.variable}`}>
       <body>
         {children}
         <Analytics />

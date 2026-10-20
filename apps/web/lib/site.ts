@@ -17,3 +17,11 @@ export const DOCS_URL = "https://docs.rowkery.com";
 
 /** The command that lets macOS open the app while it isn't signed. */
 export const UNQUARANTINE = "xattr -dr com.apple.quarantine /Applications/Rowkery.app";
+
+/** The latest release's notes, the issue tracker, and Lucas's own site (the footer's Made by). */
+export const RELEASE_NOTES_URL = `${REPO_URL}/releases/latest`;
+export const ISSUES_URL = `${REPO_URL}/issues`;
+export const MAKER_URL = "https://lucascodes.dev";
+
+/** The app's own binary, which an MCP client runs with --mcp (what Connect an agent sets up). */
+export const APP_EXE = "/Applications/Rowkery.app/Contents/MacOS/Rowkery";
