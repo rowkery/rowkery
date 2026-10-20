@@ -1,5 +1,5 @@
 /* With your agent: the stage on the left stays in view while the steps scroll past. */
-.scene { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 56px; }
+.scene { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 56px; margin-top: 112px; }
 .stage-wrap { position: relative; }
 .stage { position: sticky; top: 150px; }
 .stage .card { position: relative; z-index: 1; padding: 22px; min-height: 404px; display: flex; flex-direction: column; gap: 18px; }
@@ -38,8 +38,9 @@
 .sql { background: var(--bg); border-radius: 12px; padding: 14px 16px; font: 400 13.5px/1.7 var(--mono); white-space: pre-wrap; }
 .sql .k { color: var(--acc); }
 .typing { display: inline-block; overflow: hidden; white-space: nowrap; vertical-align: bottom; max-width: 0; }
-.panel.on .typing { animation: type 1.6s steps(34) 0.3s forwards; }
-@keyframes type { to { max-width: 34ch; } }
+/* The WHERE clause is 38 characters. */
+.panel.on .typing { animation: type 1.6s steps(38) 0.3s forwards; }
+@keyframes type { to { max-width: 38ch; } }
 .why { font-size: 13.5px; color: var(--grey); padding: 0 2px; }
 .muted { color: var(--grey); }
 
@@ -47,7 +48,7 @@
 .check { display: flex; align-items: center; gap: 12px; background: var(--bg); border-radius: 10px; padding: 11px 14px; font-size: 14px; }
 .check code { font-size: 12.5px; color: var(--grey); }
 .check .ok { margin-left: auto; font: 500 12.5px var(--mono); color: var(--ok); opacity: 0; transform: scale(0.8); }
-.check .ok.no { color: var(--no); }
+.check .ok.swap { color: var(--fg); }
 .panel.on .check .ok { animation: pop 0.35s var(--ease) forwards; }
 .panel.on .check:nth-child(2) .ok { animation-delay: 0.35s; }
 .panel.on .check:nth-child(3) .ok { animation-delay: 0.7s; }
@@ -75,14 +76,14 @@
 .step { min-height: 46vh; display: flex; flex-direction: column; justify-content: center; gap: 12px; padding-block: 24px; color: var(--grey); transition: color 0.3s; }
 .step:first-child { min-height: 0; height: 46vh; padding-top: 20px; justify-content: flex-start; }
 .step:last-child { min-height: 44vh; }
-.step .num { font: 500 13px var(--mono); color: var(--grey2); transition: color 0.3s; }
+.step .num { font: 500 13px var(--mono); color: var(--grey); transition: color 0.3s; }
 .step h3 { font-size: clamp(22px, 2.3vw, 30px); letter-spacing: -0.02em; transition: color 0.3s; }
 .step p { max-width: 42ch; font-size: 16.5px; }
 .step.on, .step.on h3, .step.on p { color: var(--fg); }
 .step.on .num { color: var(--acc); }
 
 @media (max-width: 1000px) {
-  .scene { display: block; }
+  .scene { display: block; margin-top: 0; }
   .stage-wrap { display: contents; }
   .stage { top: 64px; z-index: 2; background: var(--bg); padding: 8px 0 12px; }
   .stage .card { min-height: 360px; padding: 16px; }

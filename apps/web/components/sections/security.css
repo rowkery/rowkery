@@ -4,7 +4,6 @@
 .layer h3 { font-size: 21px; margin-bottom: 20px; }
 .flag { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); font-size: 14.5px; }
 .flag code { font-size: 12.5px; padding: 4px 8px; border-radius: 6px; background: var(--card2); white-space: nowrap; }
-.flag code.deny { color: var(--no); }
 .flag code.on { color: var(--ok); }
 .also { margin-top: 28px; font: 400 14px var(--mono); color: var(--grey); text-align: center; }
 .igloo { position: relative; width: 250px; height: 150px; }

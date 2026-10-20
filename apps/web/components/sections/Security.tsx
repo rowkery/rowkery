@@ -7,7 +7,7 @@ import "./security.css";
  * choice (docs/spec.md: neither it nor the environment is preselected), so the third card
  * names the modes rather than tying them to an environment.
  */
-const LAYERS: [title: string, rows: [what: string, value: string, tone?: "deny" | "on"][]][] = [
+const LAYERS: [title: string, rows: [what: string, value: string, tone?: "on"][]][] = [
   [
     "What your agent sees",
     [
@@ -28,7 +28,7 @@ const LAYERS: [title: string, rows: [what: string, value: string, tone?: "deny" 
     "What gets written",
     [
       ["Safe mode", "Confirm writes"],
-      ["Or, for production", "Read-only", "deny"],
+      ["Or, stricter", "Read-only"],
       ["Before Commit", "exact SQL shown", "on"],
     ],
   ],
