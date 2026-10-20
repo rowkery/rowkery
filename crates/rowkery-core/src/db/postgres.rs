@@ -62,7 +62,8 @@ pub enum Route {
     /// Through an SSH tunnel, shared with the window's other sessions (one
     /// SSH connection per window).
     Ssh(Arc<SshTunnel>),
-    /// Through the Cloud SQL connector; one dialer per connection.
+    /// Through the Cloud SQL connector; one dialer per connection, which
+    /// the route keeps alive between sessions.
     CloudSql(Arc<CloudSqlDialer>),
 }
 
@@ -80,7 +81,9 @@ impl Route {
     fn fits(&self, config: &PostgresConnection) -> bool {
         match self {
             Self::Ssh(_) => config.ssh.is_some(),
-            Self::CloudSql(d) => config.cloud_sql.as_ref().is_some_and(|c| d.serves(c)),
+            // Each session asks `dialer_for`, which checks the settings and
+            // the key; the route only keeps the dialer alive.
+            Self::CloudSql(_) => config.cloud_sql.is_some(),
         }
     }
 }
@@ -234,17 +237,14 @@ pub async fn open_session_via(
     }
     let mut dialer = None;
     if let Some(cloud) = config.cloud_sql.clone() {
-        let d = match route.take() {
-            Some(Route::CloudSql(d)) => d,
-            _ => {
-                let key = match cloud.credentials {
-                    CloudSqlCredentials::Key => gcp_key(&connection_id, secrets).await?,
-                    CloudSqlCredentials::Gcloud => None,
-                };
-                dialer_for(&connection_id, &cloud, key.as_deref())
-                    .map_err(|e| DriverError::Message(e.to_string()))?
-            }
+        // The connection's live dialer, unless its settings or key changed
+        // since (a replaced key must not keep serving open windows).
+        let key = match cloud.credentials {
+            CloudSqlCredentials::Key => gcp_key(&connection_id, secrets).await?,
+            CloudSqlCredentials::Gcloud => None,
         };
+        let d = dialer_for(&connection_id, &cloud, key.as_deref())
+            .map_err(|e| DriverError::Message(e.to_string()))?;
         dialer = Some(d.clone());
         route = Some(Route::CloudSql(d));
     }
@@ -303,22 +303,37 @@ pub async fn open_session_via(
         let txn_warnings = txn_warnings.clone();
         async move {
             if let Some(dialer) = dialer {
-                let stream = dialer
-                    .dial()
-                    .await
-                    .map_err(|e| DriverError::Message(e.to_string()))?;
-                let silent = format!(
-                    "Cloud SQL: {} took the connection but Postgres did not answer in {} s",
-                    dialer.instance().name,
-                    CONNECT_TIMEOUT.as_secs()
-                );
-                let started =
-                    tokio::time::timeout(CONNECT_TIMEOUT, pg_config.connect_raw(stream, NoTls))
+                let mut retried = false;
+                loop {
+                    let stream = dialer
+                        .dial()
                         .await
-                        .map_err(|_| DriverError::Message(silent))?;
-                return Ok(started.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings))
-                }));
+                        .map_err(|e| DriverError::Message(e.to_string()))?;
+                    let started =
+                        tokio::time::timeout(CONNECT_TIMEOUT, pg_config.connect_raw(stream, NoTls))
+                            .await
+                            .map_err(|_| {
+                                DriverError::Message(format!(
+                            "Cloud SQL: {} took the connection but Postgres did not answer in {} s",
+                            dialer.instance().name,
+                            CONNECT_TIMEOUT.as_secs()
+                        ))
+                            })?;
+                    match started {
+                        // Dropped before Postgres said anything: under TLS 1.3
+                        // the instance refuses a client certificate only after
+                        // the handshake. A new one, and once more.
+                        Err(e) if !retried && e.as_db_error().is_none() => {
+                            dialer.forget_certificate();
+                            retried = true;
+                        }
+                        started => {
+                            return Ok(started.map(|(client, connection)| {
+                                (client, drive_connection(connection, txn_warnings))
+                            }));
+                        }
+                    }
+                }
             }
             Ok::<_, DriverError>(if let Some(tls) = tls {
                 pg_config.connect(tls).await.map(|(client, connection)| {

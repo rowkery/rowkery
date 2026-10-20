@@ -50,6 +50,9 @@ struct Google {
     moving_calls: AtomicUsize,
     /// `x-goog-user-project` on the last Admin API call.
     quota_project: Mutex<Option<String>>,
+    /// The instance closes the next connection right after the handshake,
+    /// as it does when it refuses a client certificate under TLS 1.3.
+    refuse_next: std::sync::atomic::AtomicBool,
 }
 
 fn json(status: u16, body: serde_json::Value) -> (u16, String) {
@@ -222,7 +225,7 @@ async fn serve_http(google: Arc<Google>) -> SocketAddr {
 type Upstream = Arc<Mutex<Option<SocketAddr>>>;
 
 /// The instance's port: TLS with a client certificate from `client_ca`.
-async fn serve_instance(google: &Google, upstream: Upstream) -> u16 {
+async fn serve_instance(google: Arc<Google>, upstream: Upstream) -> u16 {
     let key = KeyPair::generate().unwrap();
     let mut p = CertificateParams::new(vec![SERVER_DNS.to_string()]).unwrap();
     p.distinguished_name.push(DnType::CommonName, "acme:orders");
@@ -253,10 +256,14 @@ async fn serve_instance(google: &Google, upstream: Upstream) -> u16 {
             let (sock, _) = listener.accept().await.unwrap();
             let acceptor = acceptor.clone();
             let upstream = *upstream.lock().unwrap();
+            let refuse = google.refuse_next.swap(false, Ordering::SeqCst);
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(sock).await else {
                     return;
                 };
+                if refuse {
+                    return;
+                }
                 match upstream {
                     Some(addr) => {
                         let mut pg = TcpStream::connect(addr).await.unwrap();
@@ -314,6 +321,7 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         denied_calls: AtomicUsize::new(0),
         moving_calls: AtomicUsize::new(0),
         quota_project: Mutex::new(None),
+        refuse_next: Default::default(),
     });
     let ca_pem = google.server_ca.pem();
     let imposter_pem = ca("Someone else").pem();
@@ -350,7 +358,7 @@ async fn connector_reaches_only_the_instance_it_was_told_about() {
         format!("{host}:{port}").parse().unwrap()
     });
     let upstream_at = Upstream::default();
-    let instance_port = serve_instance(&google, upstream_at.clone()).await;
+    let instance_port = serve_instance(google.clone(), upstream_at.clone()).await;
     std::env::set_var("ROWKERY_CLOUDSQL_TEST_ADMIN", format!("http://{http}"));
     std::env::set_var("ROWKERY_CLOUDSQL_TEST_PROJECTS", format!("http://{http}"));
     std::env::set_var("ROWKERY_CLOUDSQL_TEST_TOKEN", format!("http://{http}"));
@@ -508,6 +516,14 @@ async fn postgres_through_the_connector(google: &Google) {
         .await
         .expect("second session");
     assert_eq!(google.certs_issued.load(Ordering::SeqCst), issued);
+    // The instance refuses the certificate after the handshake: the session
+    // gets a new one and connects.
+    google.refuse_next.store(true, Ordering::SeqCst);
+    let c = open_session_via(pg.id.clone(), pg.clone(), Some(&secrets), a.route())
+        .await
+        .expect("session after a refused certificate");
+    assert_eq!(google.certs_issued.load(Ordering::SeqCst), issued + 1);
+    drop(c);
     // Cancel reaches the server through a fresh connector stream.
     let (token, via) = (b.cancel_token.clone(), b.cancel_via.clone());
     let sleeper = tokio::spawn(async move {

@@ -333,12 +333,41 @@ fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<
                 }
                 return Ok(());
             }
+            // Too big for the keychain (Windows' Credential Manager holds
+            // about 1,250 characters, less than a service account key): the
+            // file takes them, and the item drops its older copies, which
+            // reads would otherwise find first. The small ones move back
+            // into the item on their next read.
+            if let Ok(mut item) = keychain_item(connection_id) {
+                let before = item.len();
+                for (kind, _) in secrets {
+                    item.remove(kind.label());
+                }
+                if item.len() != before {
+                    let _ = item_save(connection_id, &item);
+                }
+            }
         }
     }
     for (kind, secret) in secrets {
         fallback_set(&entry_account(connection_id, *kind), secret)?;
     }
     Ok(())
+}
+
+/// Removes one of a connection's secrets (a service account key the
+/// connection no longer signs in with).
+pub fn delete_secret(connection_id: &str, kind: SecretKind) -> Result<(), SecretError> {
+    let account = entry_account(connection_id, kind);
+    cache_put(&account, None);
+    if keychain_enabled() {
+        if let Ok(mut item) = keychain_item(connection_id) {
+            if item.remove(kind.label()).is_some() {
+                item_save(connection_id, &item)?;
+            }
+        }
+    }
+    fallback_remove_if_present(&account)
 }
 
 /// Read a connection secret. A secret still in the fallback file is moved into
@@ -502,6 +531,8 @@ mod mock {
         pub deny: bool,
         pub reads: usize,
         pub writes: usize,
+        /// Longer values are refused, as Windows' Credential Manager does.
+        pub max_len: Option<usize>,
     }
 
     pub static KEYCHAIN: Mutex<Option<Keychain>> = Mutex::new(None);
@@ -532,6 +563,9 @@ mod mock {
     pub fn set(account: &str, secret: &str) -> Option<Result<(), SecretError>> {
         with(|k| {
             k.writes += 1;
+            if k.max_len.is_some_and(|max| secret.len() > max) {
+                return Err(SecretError::Keyring("too big".into()));
+            }
             k.items.insert(account.to_string(), secret.to_string());
             Ok(())
         })
@@ -692,6 +726,44 @@ mod tests {
             // The item, then the three old accounts, once for the whole run.
             assert_eq!(k.reads, 4);
         });
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_secret_too_big_for_the_keychain_never_leaves_an_older_one_in_front() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        store_secret("k5", SecretKind::DbPassword, "old").expect("store");
+        mock::KEYCHAIN.lock().unwrap().as_mut().unwrap().max_len = Some(200);
+        let key = format!("{{\"private_key\":\"{}\"}}", "k".repeat(300));
+        ConnectionSecrets {
+            db_password: Some("new".into()),
+            gcp_key: Some(key.clone()),
+            ..Default::default()
+        }
+        .persist("k5")
+        .expect("persist");
+        forget_cached("k5");
+        assert_eq!(
+            get_secret("k5", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("new")
+        );
+        assert_eq!(get_secret("k5", SecretKind::GcpKey).unwrap(), Some(key));
+        mock_state(|k| {
+            // The password moved back into the item on its read; the key
+            // stays in the file.
+            let item: Item = serde_json::from_str(&k.items["k5"]).unwrap();
+            assert_eq!(item.get("db-password").map(String::as_str), Some("new"));
+            assert!(!item.contains_key("gcp-key"));
+        });
+
+        delete_secret("k5", SecretKind::GcpKey).expect("delete");
+        forget_cached("k5");
+        assert_eq!(get_secret("k5", SecretKind::GcpKey).unwrap(), None);
+        assert_eq!(
+            get_secret("k5", SecretKind::DbPassword).unwrap().as_deref(),
+            Some("new")
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 

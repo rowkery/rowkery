@@ -10,8 +10,8 @@ pub struct ConnectExplanation {
     /// `refused`, `timeout`, `dns`, `tls`, `auth`, `database`, `role`,
     /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`, a Cloud SQL
     /// class (`cloudsql_login`, `cloudsql_role`, `cloudsql_instance`,
-    /// `cloudsql_api`, `cloudsql_ip`, `cloudsql_unreachable`, `cloudsql_tls`,
-    /// `cloudsql`) or `unknown`.
+    /// `cloudsql_api`, `cloudsql_ip`, `cloudsql_google`, `cloudsql_unreachable`,
+    /// `cloudsql_tls`, `cloudsql`) or `unknown`.
     pub class: &'static str,
     /// The one-line cause; none for `unknown` (the raw text stands alone).
     pub cause: Option<String>,
@@ -194,6 +194,16 @@ fn explain_cloud_sql(raw: &str, t: &Target) -> Option<ConnectExplanation> {
     let inst = name.as_ref().map_or("the instance", |n| n.name.as_str());
     let project = name.as_ref().map_or("its project", |n| n.project.as_str());
     let lower = raw.to_ascii_lowercase();
+    // Google itself, not the instance: no field of the form is wrong.
+    if lower.contains("couldn't reach the cloud sql admin api")
+        || lower.contains("couldn't reach google")
+    {
+        return e(
+            "cloudsql_google",
+            "Couldn't reach Google. Check the network, and any proxy or firewall in front of googleapis.com.".into(),
+            None,
+        );
+    }
     if let Some(rest) = raw.split_once("Google login: ").map(|(_, r)| r) {
         return e("cloudsql_login", sentence(rest), Some("account"));
     }
@@ -229,7 +239,8 @@ fn explain_cloud_sql(raw: &str, t: &Target) -> Option<ConnectExplanation> {
         return e("cloudsql_ip", sentence(rest), Some("ipType"));
     }
     if rest.contains("did not answer") && !rest.contains("Postgres")
-        || rest.contains("couldn't reach")
+        || lower.contains("couldn't reach")
+        || rest.contains("couldn't be reached")
     {
         return e(
             "cloudsql_unreachable",
@@ -438,6 +449,20 @@ mod tests {
             )
             .2,
             Some("ipType")
+        );
+        for offline in [
+            "Cloud SQL: Couldn't reach the Cloud SQL Admin API: error sending request",
+            "Cloud SQL: Couldn't reach Google to sign in: dns error",
+        ] {
+            assert_eq!(
+                (class(offline, &C).0, class(offline, &C).2),
+                ("cloudsql_google", None),
+                "{offline}"
+            );
+        }
+        assert_eq!(
+            class("Cloud SQL: orders-prd couldn't be reached in 30 s", &C).0,
+            "cloudsql_unreachable"
         );
         // Through the connector, Postgres's own refusals keep their classes.
         assert_eq!(
