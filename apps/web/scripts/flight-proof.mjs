@@ -7,6 +7,8 @@
 //  3. the logo is the plain mark: no props drawn and no hop on it;
 //  4. the held screen sits above the nav (so the logo lands on it) but lets the pointer through:
 //     the nav's links and the hero's own buttons still take a click.
+//  5. one logo at a time: the brand's own mark shows at rest and once the logo lands, never
+//     while it flies.
 // At 390x844, 375x667 and 1440x900; frames at progress 0, 0.25, 0.5, 0.75, 0.95 and 1 at
 // 390x844 and 1440x900. Fails on any page error.
 //
@@ -73,6 +75,14 @@ for (const [w, h] of [[390, 844], [375, 667], [1440, 900]]) {
   if (!land.shows) bad("the logo hid before it landed");
   if (land.onMark > 1) bad(`the logo lands ${land.onMark.toFixed(2)} px off the brand's mark (${land.body})`);
   console.log(`${tag}: screen held at ${tops.length} steps (max ${Math.max(...tops.map(Math.abs)).toFixed(2)} px), lands ${land.onMark.toFixed(2)} px off the brand's mark (its box .nav .brand .mk, view box and all: ${land.onBox.toFixed(2)} px)`);
+
+  // 5. One logo at a time.
+  for (const [p, want] of [[0, true], [0.5, false], [(FLY - 1) / FLY, false], [1, true]]) {
+    await to(FLY * p);
+    await settle(page);
+    const shows = await page.evaluate(() => getComputedStyle(document.querySelector(".nav .brand .mk")).visibility === "visible");
+    if (shows !== want) bad(`the brand's mark ${want ? "hides" : "shows"} at ${p.toFixed(3)} of the flight`);
+  }
 
   // Frames of the flight.
   if (h !== 667)

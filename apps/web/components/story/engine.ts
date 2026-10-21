@@ -493,7 +493,7 @@ export function startStory() {
     const hero = $("[data-hero]"), pin = $(".h-pin", hero), slot = $(".h-slot", hero), mid = $(".h-mid", hero);
     const hpg = $(".hpg", hero), look = $(".look", hpg), svg = $<SVGSVGElement>("svg", hpg), body = $<SVGPathElement>("path", svg);
     const htL = $(".ht-l", hero), htR = $(".ht-r", hero), hFoot = $(".h-foot", hero), now = $(".now-o", hero), cue = $(".cue-o", hero);
-    const brandMark = $<SVGPathElement>(".nav .brand .mk path");
+    const brandMk = $(".nav .brand .mk"), brandMark = $<SVGPathElement>("path", brandMk);
     let FLY = 1, heroS = -1;
     const fl = { x: 0, y: 0, w: 1, h: 1, bx: 0, by: 0, bw: 1, bh: 1 };
     function measureHero() {
@@ -705,6 +705,8 @@ export function startStory() {
         const tx = cx - sc * (fl.x + fl.w / 2), ty = cy - sc * (fl.y + fl.h / 2);
         css(hpg, "transform", `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) scale(${sc.toFixed(5)})`);
         css(hpg, "visibility", hk >= 1 ? "hidden" : "visible");
+        // The brand's own mark steps aside while the logo is on its way, so there is only ever one.
+        css(brandMk, "visibility", hk > 0 && hk < 1 ? "hidden" : "visible");
         // At rest it drifts a little toward the pointer; on the way up it lets go.
         css(look, "transform", `translate(${((1 - he) * px * 24).toFixed(1)}px, ${((1 - he) * py * 14).toFixed(1)}px)`);
       }
