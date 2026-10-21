@@ -8,7 +8,7 @@
  * - pieces move by transform and opacity only, on HTML boxes, never on shapes inside an SVG;
  * - a style is written only when its value changes (`css`, `place`, `setText`);
  * - one requestAnimationFrame loop runs while something is still settling and stops after, and
- *   scroll, resize and the pointer wake it; nothing runs on a timer (the hero's jobs cycle and
+ *   scroll, resize and the pointer wake it; nothing runs on a timer (the hero's line cycles and
  *   the key presses are CSS animations);
  * - so a page sitting still never lays out or paints.
  */
@@ -487,25 +487,41 @@ export function startStory() {
     const scenes: Scene[] = [agent, security, keys, free];
 
     // ── Hero ──
-    const hero = $("[data-hero]"), hpg = $(".hpg", hero), look = $(".look", hpg), props = $(".props", hpg), hop1 = $(".hop1", hpg);
+    // The hero's screen is held (sticky) while the logo flies, and the logo itself is fixed to
+    // the screen (globals.css), so the flight is measured once, in screen px with the hero held:
+    // from the logo at rest in its slot to the brand's mark in the nav. No frame reads the layout.
+    const hero = $("[data-hero]"), pin = $(".h-pin", hero), slot = $(".h-slot", hero), mid = $(".h-mid", hero);
+    const hpg = $(".hpg", hero), look = $(".look", hpg), svg = $<SVGSVGElement>("svg", hpg), body = $<SVGPathElement>("path", svg);
     const htL = $(".ht-l", hero), htR = $(".ht-r", hero), hFoot = $(".h-foot", hero), now = $(".now-o", hero), cue = $(".cue-o", hero);
-    const brandMk = $(".nav .brand .mk");
-    let base = { x: 0, y: 0, w: 1 };
+    const brandMark = $<SVGPathElement>(".nav .brand .mk path");
+    let FLY = 1, heroS = -1;
+    const fl = { x: 0, y: 0, w: 1, h: 1, bx: 0, by: 0, bw: 1, bh: 1 };
     function measureHero() {
-      // The job line sits under the penguin, wherever the words' widths put it.
-      const slot = $(".h-slot", hero).getBoundingClientRect(), mid = $(".h-mid", hero).getBoundingClientRect();
-      css(now, "--nx", (slot.left + slot.width / 2 - (mid.left + mid.width / 2)).toFixed(1) + "px");
-      const prev = hpg.style.transform;
-      hpg.style.transform = "none";
-      const r = hpg.getBoundingClientRect();
-      base = { x: r.left + r.width / 2, y: r.top + r.height / 2 + scrollY, w: r.width };
-      hpg.style.transform = prev;
+      FLY = Math.max(1, hero.offsetHeight - pin.offsetHeight);
+      // The slot's own box (nothing moves it), against the held screen's top.
+      const r = slot.getBoundingClientRect(), top = pin.getBoundingClientRect().top, m = mid.getBoundingClientRect();
+      css(hpg, "--hx", r.left + "px");
+      css(hpg, "--hy", r.top - top + "px");
+      css(hpg, "--hw", r.width + "px");
+      css(hpg, "--hh", r.height + "px");
+      // The line under the logo sits under it, wherever the words' widths put it.
+      css(now, "--nx", (r.left + r.width / 2 - (m.left + m.width / 2)).toFixed(1) + "px");
+      // The mark's body in the box: the SVG meets its view box, centred.
+      const vb = svg.viewBox.baseVal, bb = body.getBBox(), k = Math.min(r.width / vb.width, r.height / vb.height);
+      fl.x = (r.width - vb.width * k) / 2 + (bb.x - vb.x) * k;
+      fl.y = (r.height - vb.height * k) / 2 + (bb.y - vb.y) * k;
+      fl.w = bb.width * k;
+      fl.h = bb.height * k;
+      // The brand's mark, where the logo lands: its body, matched in place and size.
+      const b = brandMark.getBoundingClientRect();
+      Object.assign(fl, { bx: b.left - r.left, by: b.top - (r.top - top), bw: b.width, bh: b.height });
+      if (heroS < 0) heroS = clamp(scrollY / FLY, 0, 1);
       heroKey = "";
     }
-    // The jobs take turns on a CSS cycle (2.6 s each, globals.css); a mouse moving across the hero
+    // The lines take turns on a CSS cycle (2.6 s each, globals.css); a mouse moving across the hero
     // picks one and holds it (.held), and a tap moves on to the next.
     const JOB_MS = 2600, JOBS = 5;
-    const cycle = () => hero.getAnimations({ subtree: true }).filter((a) => a instanceof CSSAnimation && (a.animationName === "job" || a.animationName === "hopc"));
+    const cycle = () => hero.getAnimations({ subtree: true }).filter((a) => a instanceof CSSAnimation && a.animationName === "job");
     let picked = -1;
     hero.addEventListener(
       "pointermove",
@@ -518,7 +534,6 @@ export function startStory() {
         // stylesheet can no longer pause it, and the hero's loops must stop when it scrolls away.
         hero.classList.add("held");
         for (const a of cycle()) a.currentTime = i * JOB_MS + 450;
-        hop(hop1);
       },
       on,
     );
@@ -544,6 +559,12 @@ export function startStory() {
     const dock = $("[data-dock]"), grid = $(".bg-grid"), gridI = $(".bg-grid i");
     const close = $("[data-close]"), colony = $("[data-colony]"), birds = $$(".bird", colony);
     let shownCh = -2, drift = 0;
+    // Where the close and the colony sit on the page, and the nav's middle, so no frame reads the layout.
+    const at = { close: 0, colony: 0, colonyH: 0, navX: 0, navY: 0 };
+    function measurePlaces() {
+      const c = close.getBoundingClientRect(), k = colony.getBoundingClientRect(), n = nav.getBoundingClientRect();
+      Object.assign(at, { close: c.top + scrollY, colony: k.top + scrollY, colonyH: k.height, navX: n.left + n.width / 2, navY: n.top + n.height / 2 });
+    }
     function setChapter(c: number) {
       if (c === shownCh) return;
       shownCh = c;
@@ -572,9 +593,7 @@ export function startStory() {
     );
     io = new IntersectionObserver(
       (en) => {
-        if (!en[0].isIntersecting || close.classList.contains("on")) return;
-        close.classList.add("on");
-        hop($(".hpg2 .hopper", close));
+        if (en[0].isIntersecting) close.classList.add("on");
       },
       { threshold: 0.35 },
     );
@@ -610,20 +629,20 @@ export function startStory() {
       }
       scenes.forEach((s) => s.layout());
       measureHero();
+      measurePlaces();
       layoutColony();
       shownCh = -2;
       wake();
     }
 
-    // ── Pointer: the hero penguin faces it, the keycaps lean toward it ──
-    let tpx = 0, tpy = 0, mx = -1;
+    // ── Pointer: the hero's logo drifts a little toward it, the keycaps lean toward it ──
+    let tpx = 0, tpy = 0;
     addEventListener(
       "pointermove",
       (e) => {
         if (e.pointerType !== "mouse") return;
         tpx = e.clientX / VW - 0.5;
         tpy = e.clientY / VH - 0.5;
-        mx = e.clientX;
         wake();
       },
       on,
@@ -655,34 +674,38 @@ export function startStory() {
       } else busy = true;
       const px = keys.px, py = keys.py;
 
-      // The hero: the words part, and the big penguin flies up into the brand.
-      // Past the hero the scroll is held at its end, so a long jump still lands it there (and pauses its loops).
-      const hy = Math.min(y, VH * 1.2), hk = clamp(hy / (VH * 0.8), 0, 1), he = easeIO(hk);
-      const hKey = `${hy}|${px.toFixed(4)}|${py.toFixed(4)}|${mx >= 0 && mx < base.x - 20}`;
+      // The hero, held on screen through its first stretch of scroll: the words part, the foot
+      // fades and the logo flies into the brand, all on a damped progress, so it glides on after
+      // the finger stops. Nothing here depends on the scroll position itself.
+      const hT = clamp(y / FLY, 0, 1);
+      heroS += (hT - heroS) * (1 - Math.exp(-dt * 6.5));
+      if (Math.abs(hT - heroS) < 0.0006) heroS = hT;
+      else busy = true;
+      const hk = heroS, he = easeIO(hk);
+      const hKey = `${hk}|${px.toFixed(4)}|${py.toFixed(4)}`;
       if (hKey !== heroKey) {
         heroKey = hKey;
+        const fade = (el: HTMLElement, o: number) => {
+          css(el, "opacity", clamp(o, 0, 1).toFixed(3));
+          css(el, "visibility", o <= 0 ? "hidden" : "visible");
+        };
         css(htL, "transform", `translateX(${(-hk * VW * 0.22).toFixed(1)}px)`);
         css(htR, "transform", `translateX(${(hk * VW * 0.22).toFixed(1)}px)`);
-        css(htL, "opacity", clamp(1 - hk * 1.3, 0, 1).toFixed(3));
-        css(htR, "opacity", clamp(1 - hk * 1.3, 0, 1).toFixed(3));
+        fade(htL, 1 - hk * 1.3);
+        fade(htR, 1 - hk * 1.3);
         css(hFoot, "transform", `translateY(${(-hk * 80).toFixed(1)}px)`);
-        css(hFoot, "opacity", clamp(1 - hk * 1.6, 0, 1).toFixed(3));
-        css(now, "opacity", clamp(1 - hk * 3, 0, 1).toFixed(3));
-        css(cue, "opacity", clamp(1 - hk * 4, 0, 1).toFixed(3));
+        fade(hFoot, 1 - hk * 1.6);
+        fade(now, 1 - hk * 3);
+        fade(cue, 1 - hk * 4);
         hero.classList.toggle("away", hk > 0.5);
-        // The body (not the box with room for props) lands exactly on the brand's penguin.
-        const br = brandMk.getBoundingClientRect();
-        const end = br.width / (base.w * 0.727), dx = -0.021 * base.w, dy = 0.072 * base.w;
-        const sc = mix(1, end, easeOut(hk));
-        const tx = (br.left + br.width / 2 - base.x - end * dx) * he;
-        const ty = Math.max((br.top + br.height / 2 - (base.y - y) - end * dy) * he, br.top + br.height / 2 - (base.y - y) - sc * dy);
-        css(hpg, "transform", `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${sc.toFixed(4)})`);
+        // The body's middle travels from its rest to the brand's while it shrinks to the brand's size.
+        const sc = mix(1, fl.bw / fl.w, easeOut(hk));
+        const cx = mix(fl.x + fl.w / 2, fl.bx + fl.bw / 2, he), cy = mix(fl.y + fl.h / 2, fl.by + fl.bh / 2, he);
+        const tx = cx - sc * (fl.x + fl.w / 2), ty = cy - sc * (fl.y + fl.h / 2);
+        css(hpg, "transform", `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) scale(${sc.toFixed(5)})`);
         css(hpg, "visibility", hk >= 1 ? "hidden" : "visible");
-        css(props, "opacity", clamp(1 - he * 2.5, 0, 1).toFixed(3));
-        // It faces the pointer and leans a little toward it; on the way up it straightens out.
-        const face = mx >= 0 && mx < base.x - 20 && he < 0.3 ? -1 : 1;
-        const lean = (1 - he) * clamp(px * 16, -10, 10);
-        css(look, "transform", `translate(${((1 - he) * px * 24).toFixed(1)}px, ${((1 - he) * py * 14).toFixed(1)}px) rotate(${lean.toFixed(2)}deg) scaleX(${face})`);
+        // At rest it drifts a little toward the pointer; on the way up it lets go.
+        css(look, "transform", `translate(${((1 - he) * px * 24).toFixed(1)}px, ${((1 - he) * py * 14).toFixed(1)}px)`);
       }
 
       let ch = -1;
@@ -699,13 +722,12 @@ export function startStory() {
         css(chBar, "transform", `scaleX(${clamp((y - a) / (b - a), 0, 1).toFixed(4)})`);
         css(grid, "opacity", clamp((y - VH * 0.4) / (VH * 0.5), 0, 1).toFixed(3));
         css(gridI, "transform", `translate3d(0, ${(-((y * 0.12) % 40)).toFixed(1)}px, 0)`);
-        dock.classList.toggle("on", y > VH * 0.6 && close.getBoundingClientRect().top > VH * 0.6);
-        const cr = colony.getBoundingClientRect(), p = (innerHeight - cr.top) / (innerHeight + cr.height);
+        dock.classList.toggle("on", y > VH * 0.6 && at.close - y > VH * 0.6);
+        const p = (innerHeight - (at.colony - y)) / (innerHeight + at.colonyH);
         if (p > -0.2 && p < 1.2) birds.forEach((bd) => css(bd, "transform", `translateX(${((clamp(p, 0, 1) - 0.5) * drift * Number(bd.dataset.d)).toFixed(1)}px)`));
       }
       setChapter(ch);
-      const nr = nav.getBoundingClientRect();
-      nav.classList.toggle("inv", free.covers(nr.left + nr.width / 2, nr.top + nr.height / 2));
+      nav.classList.toggle("inv", free.covers(at.navX, at.navY));
       if (busy) raf = requestAnimationFrame(frame);
       else last = 0;
     }
@@ -737,10 +759,13 @@ export function startStory() {
     ro = new ResizeObserver(
       guarded(() => {
         scenes.forEach((s) => s.measure());
+        measureHero();
+        measurePlaces();
         layoutColony();
         wake();
       }),
     );
-    ro.observe(document.body);
+    // The page's height (a question opening), and the hero's own boxes (the words' widths place the slot).
+    for (const el of [document.body, hero, mid]) ro.observe(el);
   }
 }

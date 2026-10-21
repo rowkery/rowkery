@@ -37,3 +37,23 @@ export async function goTo(page, m, settle = 1500) {
   // Then let any entrance still playing (a transition, a hop) finish; the endless loops keep going.
   await page.waitForFunction(() => !document.getAnimations().some((a) => a.playState === "running" && a.effect.getComputedTiming().iterations !== Infinity), null, { timeout: 4000 }).catch(() => {});
 }
+
+// In the page (an init script): counts the frames the page asks for, so a check can wait until
+// the story has settled rather than for a guessed time.
+export const COUNT_FRAMES = `
+  window.__frames = 0;
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => (window.__frames++, raf(cb));
+`;
+
+/** Waits until the story stops asking for frames (needs COUNT_FRAMES), then for any entrance still playing. */
+export async function settle(page) {
+  let last = -1;
+  for (let i = 0; i < 80; i++) {
+    const n = await page.evaluate(() => window.__frames);
+    if (n === last) break;
+    last = n;
+    await page.waitForTimeout(150);
+  }
+  await page.waitForFunction(() => !document.getAnimations().some((a) => a.playState === "running" && a.effect.getComputedTiming().iterations !== Infinity), null, { timeout: 4000 }).catch(() => {});
+}

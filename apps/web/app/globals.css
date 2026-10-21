@@ -149,23 +149,29 @@ a:hover .pg .lid, .pg:hover .lid { animation: blink 0.18s cubic-bezier(0.5, 0, 0
 /* ── Meet Rowkery, and Get Rowkery at the close: two words with the penguin between them ── */
 .h-title { display: flex; justify-content: center; align-items: center; gap: var(--hgap); font: 800 var(--hs)/0.9 var(--display); letter-spacing: -0.05em; white-space: nowrap; pointer-events: none; }
 .ht, .ht > span { display: block; }
+/* Each word slides in from the logo's side but is clipped at its own inner edge, so it never
+   crosses the logo, whose belly and eye are holes (a small allowance keeps the glyphs whole). */
+.h-title .ht-l { clip-path: inset(-0.3em -0.06em -0.3em -100vw); }
+.h-title .ht-r { clip-path: inset(-0.3em -100vw -0.3em -0.06em); }
 .h-slot { position: relative; display: block; flex: none; width: var(--pgw); height: calc(var(--pgw) * 1.07); }
 .hpg, .hpg2 { position: absolute; inset: 0; color: var(--acc); pointer-events: none; }
-.look, .intro, .hop1 { display: block; width: 100%; height: 100%; }
-.intro, .intro .hopper { position: relative; }
-/* A backing in the page's colour behind the penguin, so words passing behind never show through its belly. */
-.back { position: absolute; left: 14%; right: 12%; top: 18%; bottom: 3%; border-radius: 40% 46% 30% 30%; background: var(--bg); }
+.look, .intro { display: block; width: 100%; height: 100%; }
 .h-foot { display: grid; justify-items: center; gap: 22px; text-align: center; min-width: 0; }
 .h-sub { font: 500 clamp(19px, 1.7vw, 24px)/1.3 var(--display); letter-spacing: -0.01em; max-width: 30ch; }
 .h-sub .ln { display: block; }
 
-/* The hero. The penguin flies over the nav into the brand, so nothing around it may form a
-   stacking context: the words and the penguin each move on their own boxes. */
-.hero { position: relative; min-height: max(640px, 100svh); display: flex; flex-direction: column; padding: 84px max(16px, env(safe-area-inset-right, 0px)) max(44px, 6svh) max(16px, env(safe-area-inset-left, 0px)); }
+/* The hero. With the story playing it is a track a screen and a flight long, and its screen
+   holds still (sticky) while the words part and the logo flies into the brand: nothing has to
+   make up for the scroll, which a phone runs off the main thread. The held screen sits above
+   the nav, so the logo can land on it, but lets the pointer through to the nav everywhere but
+   its links. The flying logo is fixed to the screen, so a fast scroll past the hero still lands it. */
+.h-pin { position: relative; min-height: max(640px, 100svh); display: flex; flex-direction: column; padding: 84px max(16px, env(safe-area-inset-right, 0px)) max(44px, 6svh) max(16px, env(safe-area-inset-left, 0px)); }
+[data-motion] .hero { height: calc(max(640px, 100svh) + 70svh); }
+[data-motion] .h-pin { position: sticky; top: 0; z-index: 31; height: max(640px, 100svh); pointer-events: none; }
+[data-motion] .h-pin a, [data-motion] .h-pin button { pointer-events: auto; }
+[data-story] .hpg { position: fixed; left: var(--hx); top: var(--hy); width: var(--hw); height: var(--hh); transform-origin: 0 0; }
 .h-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding-bottom: 6svh; }
-.hpg { z-index: 40; will-change: transform; }
-/* Above the words, which pass behind it as they arrive. */
-.hpg2 { z-index: 1; }
+.hpg { z-index: 1; will-change: transform; }
 .hero .intro { animation: pgin 1s var(--pop) 0.1s both; }
 @keyframes pgin { from { opacity: 0; transform: translateY(14%) scale(0.7); } }
 .ht { will-change: transform, opacity; }
@@ -178,16 +184,12 @@ a:hover .pg .lid, .pg:hover .lid { animation: blink 0.18s cubic-bezier(0.5, 0, 0
 .hero .h-foot > :nth-child(2) { animation-delay: 0.65s; }
 .hero .h-foot > :nth-child(3) { animation-delay: 0.75s; }
 .trust { font: 400 13px/1.4 var(--mono); color: var(--grey); }
-/* The penguin's jobs: the props and the line under it take turns, 2.6 s each, with a hop as each starts. */
-.props, .hp { position: absolute; inset: 0; display: block; }
-.hp, .job { opacity: 0; }
-.hp:first-child, .job:first-child { opacity: 1; }
-[data-motion] .hp, [data-motion] .job { animation: job 13s linear calc(var(--i) * 2.6s) infinite backwards; }
-[data-motion] .hero .hopper { animation: hopc 2.6s linear infinite; }
-.hero.held .hp, .hero.held .job, .hero.held .hopper,
-.hero.away .hp, .hero.away .job, .hero.away .hopper, .hero.away .cue i::after { animation-play-state: paused; }
+/* The line under the logo: what Rowkery is doing, taking turns, 2.6 s each. */
+.job { opacity: 0; }
+.job:first-child { opacity: 1; }
+[data-motion] .job { animation: job 13s linear calc(var(--i) * 2.6s) infinite backwards; }
+.hero.held .job, .hero.away .job, .hero.away .cue i::after { animation-play-state: paused; }
 @keyframes job { 0% { opacity: 0; transform: translateY(6px); } 3%, 18.5% { opacity: 1; transform: none; } 20%, 100% { opacity: 0; } }
-@keyframes hopc { 0%, 24%, 100% { transform: none; } 8% { transform: translateY(-16%) scaleY(1.04); } 15% { transform: scaleY(0.94); } 19% { transform: translateY(-3%); } }
 .now-o { transform: translateX(var(--nx, 0px)); }
 .now { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 14px; border-radius: 999px; background: var(--card); font-size: 14px; white-space: nowrap; animation: fade 0.6s ease 0.9s both; }
 .now > i { width: 7px; height: 7px; border-radius: 2px; background: var(--acc); flex: none; }
@@ -259,6 +261,9 @@ a:hover .pg .lid, .pg:hover .lid { animation: blink 0.18s cubic-bezier(0.5, 0, 0
 @media (max-width: 599px) {
   :root { --hs: min(21vw, 92px); --pgw: calc(var(--hs) * 1.5); --hgap: 0px; }
   .h-title { flex-direction: column; }
+  /* Stacked, the inner edges are the first word's foot and the second word's head. */
+  .h-title .ht-l { clip-path: inset(-100vh -100vw -0.06em -100vw); }
+  .h-title .ht-r { clip-path: inset(-0.12em -100vw -100vh -100vw); }
   .hero .ht-l > span { animation-name: htT; }
   .hero .ht-r > span { animation-name: htB; }
   [data-story] .close:not(.on) .ht-l > span { transform: translateY(42%); }

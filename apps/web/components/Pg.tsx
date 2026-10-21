@@ -90,12 +90,3 @@ export function Pg({
     </svg>
   );
 }
-
-/** One prop on its own, in the penguin's coordinates, for a box laid over a penguin (the hero's, whose props take turns). */
-export function PropArt({ prop }: { prop: PgProp }) {
-  return (
-    <svg className="pg" viewBox={VIEW_BOX} aria-hidden="true">
-      {PROPS[prop]}
-    </svg>
-  );
-}

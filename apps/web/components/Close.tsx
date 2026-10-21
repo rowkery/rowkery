@@ -5,9 +5,9 @@ import { Pg } from "./Pg";
 import { Colony } from "./Colony";
 
 /**
- * The close: the opening move once more (Get, the penguin in a party hat, Rowkery.), the
- * Download, the command the unsigned alpha needs before its first launch, and the colony on
- * the ice at the foot of the same screen.
+ * The close: the opening move once more (Get, the logo, Rowkery.), the Download, the command
+ * the unsigned alpha needs before its first launch, and the colony on the ice at the foot of the
+ * same screen. The logo stays the plain mark, as in the hero; the colony below may play.
  */
 export function Close() {
   return (
@@ -20,10 +20,7 @@ export function Close() {
           <span className="h-slot" aria-hidden="true">
             <span className="hpg2" data-pg="close">
               <span className="intro">
-                <span className="back" />
-                <span className="hopper">
-                  <Pg prop="hat" />
-                </span>
+                <Pg />
               </span>
             </span>
           </span>{" "}

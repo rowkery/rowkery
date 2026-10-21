@@ -68,7 +68,7 @@ for (const [w, h] of SIZES) {
       for (const sel of [".nav", "#hero .h-title", ".hero .btn"])
         for (const e of document.querySelectorAll(sel)) if (R(e).left < -0.5 || R(e).right > innerWidth + 0.5 || R(e).bottom > innerHeight) out.push(`${sel} leaves the screen`);
       const running = new Set(document.getAnimations().filter((a) => a.playState === "running").map((a) => a.animationName));
-      for (const n of ["job", "hopc", "cue"]) if (!running.has(n) && !(n === "cue" && innerWidth <= 860)) out.push(`the ${n} animation isn't running`);
+      for (const n of ["job", "cue"]) if (!running.has(n) && !(n === "cue" && innerWidth <= 860)) out.push(`the ${n} animation isn't running`);
       return out;
     })
   ).forEach(bad);
@@ -111,6 +111,7 @@ for (const [w, h] of SIZES) {
 const STACK = () => {
   const out = [];
   if (document.documentElement.hasAttribute("data-motion")) out.push("the page still asked for motion");
+  if (getComputedStyle(document.querySelector(".h-pin")).position === "sticky") out.push("the hero still holds");
   for (const s of document.querySelectorAll(".scene")) {
     if (getComputedStyle(s.querySelector(".stage")).position === "sticky") out.push(`#${s.id} still pins`);
     for (const c of s.querySelectorAll(".cap, .title, .big, .fcard")) if (!shown(c) || Number(getComputedStyle(c).opacity) < 1) out.push(`#${s.id}: "${label(c)}" is hidden`);
@@ -140,7 +141,7 @@ for (const [w, h] of [[1280, 800], [390, 844]]) {
     if (moving.length) out.push(`${moving.length} animations still run, first ${moving[0].animationName}`);
     const jobs = [...document.querySelectorAll(".job")].filter((j) => getComputedStyle(j).opacity === "1");
     if (jobs.length !== 1) out.push(`${jobs.length} of the penguin's jobs show, not one`);
-    if (getComputedStyle(document.querySelector(".hpg")).transform !== "none") out.push("the hero penguin flew");
+    if (getComputedStyle(document.querySelector(".hpg")).transform !== "none") out.push("the hero's logo flew");
     return out;
   });
   [...(await page.evaluate(STACK)), ...still].forEach((s) => problems.push(`${tag}: ${s}`));

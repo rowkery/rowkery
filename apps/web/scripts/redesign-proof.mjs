@@ -5,7 +5,7 @@
 //     it shows without scripts and gets indexed, and no millisecond figure or offline claim;
 //  3. the sections run hero, agent, security, keyboard, for everyone, the close, connect your
 //     agent, the questions, the signup and the foot;
-//  4. the hero: a mouse across it picks the penguin's job (a tap moves to the next), and See how
+//  4. the hero: a mouse across it picks the line under the logo (a tap moves to the next), and See how
 //     it works lands in the agent scene;
 //  5. the keyboard: each step presses its own chord and the penguin rides the last key;
 //  6. the white page: a disc jumps to its fact;
@@ -81,10 +81,11 @@ for (const [w, h] of [[1440, 900], [390, 844]]) {
   // 4. The hero's jobs, and the way into the story.
   if (phone) {
     const before = await job();
-    await page.tap(".hero .h-mid");
+    // The held hero lets the pointer through to the hero itself (globals.css), so tap its middle.
+    await page.touchscreen.tap(w / 2, h * 0.45);
     await page.waitForTimeout(700);
     const after = await job();
-    if (!after || after === before) bad(`a tap didn't move the penguin to its next job (${before} → ${after})`);
+    if (!after || after === before) bad(`a tap didn't move the hero's line on (${before} → ${after})`);
   } else {
     await page.mouse.move(w - 20, h / 2);
     await page.waitForTimeout(900);
