@@ -103,6 +103,9 @@ pub struct TargetColumn {
     pub type_name: String,
     /// Its DEFAULT expression, as SQL.
     pub default: Option<String>,
+    /// Filled in by the database (generated, or an identity GENERATED
+    /// ALWAYS): it can't be imported into.
+    pub generated: bool,
 }
 
 /// The table's columns and primary key, read on the import's own connection.
@@ -164,8 +167,8 @@ pub fn detect_delimiter(path: &Path, first_line: &[u8]) -> u8 {
         return b'\t';
     }
     let mut best = (b',', 0);
-    let mut quoted = false;
     for d in *b",\t;|" {
+        let mut quoted = false;
         let n = first_line
             .iter()
             .filter(|&&b| {
@@ -328,6 +331,12 @@ impl<'a> Plan<'a> {
                 .iter()
                 .find(|t| t.name == c.column)
                 .ok_or_else(|| format!("{} isn't a column of {}", c.column, spec.table))?;
+            if col.generated {
+                return Err(format!(
+                    "{} is filled in by the database, so it can't be imported. Skip it.",
+                    col.name
+                ));
+            }
             if fields
                 .iter()
                 .any(|(_, t): &(usize, &TargetColumn)| t.name == col.name)
@@ -336,12 +345,7 @@ impl<'a> Plan<'a> {
             }
             fields.push((c.field, col));
         }
-        // `rowid` names no column a conflict can be on.
-        let key: &[String] = if target.key == ["rowid"] {
-            &[]
-        } else {
-            &target.key
-        };
+        let key = &target.key;
         if spec.on_conflict == OnConflict::Update && key.is_empty() {
             return Err(format!(
                 "{} has no primary key, so existing rows can't be updated",
@@ -386,7 +390,9 @@ impl<'a> Plan<'a> {
         self.fields
             .iter()
             .map(|(field, col)| {
-                let raw = record.get(*field).unwrap_or("");
+                let raw = record.get(*field).ok_or_else(|| {
+                    format!("The file has no column {} for {}", field + 1, col.name)
+                })?;
                 if raw.is_empty() {
                     let text = self.empty == EmptyCells::Text
                         && takes_empty_text(self.engine, &col.type_name);
@@ -399,36 +405,55 @@ impl<'a> Plan<'a> {
             .collect()
     }
 
-    /// `ON CONFLICT …` for Skip and Update, after the INSERT's rows.
+    /// `ON CONFLICT …` for Skip, after the INSERT's rows. Update inserts
+    /// only the new rows, after updating the others.
     fn conflict_sql(&self) -> String {
-        let keys = || {
-            self.key
-                .iter()
-                .map(|k| self.ident(k))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         match self.on_conflict {
-            OnConflict::Stop => String::new(),
             OnConflict::Skip if self.key.is_empty() => " ON CONFLICT DO NOTHING".into(),
-            OnConflict::Skip => format!(" ON CONFLICT ({}) DO NOTHING", keys()),
-            OnConflict::Update => {
-                let set: Vec<String> = self
-                    .fields
-                    .iter()
-                    .filter(|(_, c)| !self.key.contains(&c.name))
-                    .map(|(_, c)| {
-                        let name = self.ident(&c.name);
-                        format!("{name} = excluded.{name}")
-                    })
-                    .collect();
-                if set.is_empty() {
-                    format!(" ON CONFLICT ({}) DO NOTHING", keys())
-                } else {
-                    format!(" ON CONFLICT ({}) DO UPDATE SET {}", keys(), set.join(", "))
-                }
-            }
+            OnConflict::Skip => format!(" ON CONFLICT ({}) DO NOTHING", self.idents(self.key)),
+            OnConflict::Stop | OnConflict::Update => String::new(),
         }
+    }
+
+    fn idents(&self, names: &[String]) -> String {
+        names
+            .iter()
+            .map(|n| self.ident(n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Update, when the file carries the whole key: where each key field
+    /// sits among the fields. `None`: every row is new.
+    fn update_key(&self) -> Option<Vec<usize>> {
+        if self.on_conflict != OnConflict::Update {
+            return None;
+        }
+        self.key
+            .iter()
+            .map(|k| self.fields.iter().position(|(_, c)| &c.name == k))
+            .collect()
+    }
+
+    /// The fields an update writes: all but the key's.
+    fn update_fields(&self) -> impl Iterator<Item = (usize, &TargetColumn)> {
+        self.fields
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, c))| !self.key.contains(&c.name))
+            .map(|(i, (_, c))| (i, *c))
+    }
+
+    /// `t.k = s.k AND …` over the key.
+    fn key_match(&self, a: &str, b: &str) -> String {
+        self.key
+            .iter()
+            .map(|k| {
+                let k = self.ident(k);
+                format!("{a}.{k} = {b}.{k}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ")
     }
 
     /// `value`, or the column's DEFAULT when it is NULL and there is one.
@@ -439,29 +464,50 @@ impl<'a> Plan<'a> {
         }
     }
 
-    /// Postgres: the staged rows into the table.
+    /// Postgres, Update: the rows whose key is already there. An empty cell
+    /// keeps the row's value.
+    fn pg_update_sql(&self) -> Option<String> {
+        self.update_key()?;
+        let set: Vec<String> = self
+            .update_fields()
+            .map(|(_, c)| {
+                let name = self.ident(&c.name);
+                format!("{name} = COALESCE(s.{name}, t.{name})")
+            })
+            .collect();
+        if set.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "UPDATE {} AS t SET {} FROM {STAGE} AS s WHERE {}",
+            self.target_sql,
+            set.join(", "),
+            self.key_match("t", "s")
+        ))
+    }
+
+    /// Postgres: the staged rows into the table (on Update, the new ones).
     fn pg_insert_sql(&self) -> String {
         let select: Vec<String> = self
             .fields
             .iter()
-            .map(|(_, c)| self.or_default(self.ident(&c.name), c))
+            .map(|(_, c)| self.or_default(format!("s.{}", self.ident(&c.name)), c))
             .collect();
-        let insert = format!(
-            "INSERT INTO {} ({}) SELECT {} FROM {STAGE}{}",
+        let only_new = match self.update_key() {
+            Some(_) => format!(
+                " WHERE NOT EXISTS (SELECT 1 FROM {} AS t WHERE {})",
+                self.target_sql,
+                self.key_match("t", "s")
+            ),
+            None => String::new(),
+        };
+        format!(
+            "INSERT INTO {} ({}) SELECT {} FROM {STAGE} AS s{only_new}{}",
             self.target_sql,
             self.column_list(),
             select.join(", "),
             self.conflict_sql()
-        );
-        if self.on_conflict == OnConflict::Update {
-            // A row the upsert updated keeps a non-zero xmax.
-            format!(
-                "WITH done AS ({insert} RETURNING (xmax = 0) AS added) \
-                 SELECT count(*) FILTER (WHERE added), count(*) FILTER (WHERE NOT added) FROM done"
-            )
-        } else {
-            insert
-        }
+        )
     }
 
     /// SQLite: one row, its values bound as `?1…`.
@@ -481,14 +527,10 @@ impl<'a> Plan<'a> {
         )
     }
 
-    /// SQLite, Update: whether the row's key is already there. `None` when
-    /// the key isn't imported (the row can only be new).
+    /// SQLite, Update: whether the row's key is already there, with the
+    /// key's fields to bind. `None` when every row is new.
     fn sqlite_exists_sql(&self) -> Option<(String, Vec<usize>)> {
-        let at: Vec<usize> = self
-            .key
-            .iter()
-            .map(|k| self.fields.iter().position(|(_, c)| &c.name == k))
-            .collect::<Option<_>>()?;
+        let at = self.update_key()?;
         let predicate: Vec<String> = at
             .iter()
             .enumerate()
@@ -501,6 +543,32 @@ impl<'a> Plan<'a> {
                 predicate.join(" AND ")
             ),
             at,
+        ))
+    }
+
+    /// SQLite, Update: one existing row, bound like the INSERT. An empty
+    /// cell keeps the row's value. `None` when only the key is imported.
+    fn sqlite_update_sql(&self) -> Option<String> {
+        let at = self.update_key()?;
+        let set: Vec<String> = self
+            .update_fields()
+            .map(|(i, c)| {
+                let name = self.ident(&c.name);
+                format!("{name} = COALESCE(?{}, {name})", i + 1)
+            })
+            .collect();
+        if set.is_empty() {
+            return None;
+        }
+        let predicate: Vec<String> = at
+            .iter()
+            .map(|&f| format!("{} = ?{}", self.ident(&self.fields[f].1.name), f + 1))
+            .collect();
+        Some(format!(
+            "UPDATE {} SET {} WHERE {}",
+            self.target_sql,
+            set.join(", "),
+            predicate.join(" AND ")
         ))
     }
 }
@@ -570,7 +638,11 @@ pub async fn postgres_target(
     let rows = client
         .query(
             "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod), \
-                    CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END \
+                    CASE WHEN a.attgenerated <> '' THEN NULL \
+                         WHEN a.attidentity <> '' THEN \
+                           format('nextval(%L::regclass)', pg_get_serial_sequence($1, a.attname)) \
+                         ELSE pg_get_expr(d.adbin, d.adrelid) END, \
+                    a.attgenerated <> '' OR a.attidentity = 'a' \
              FROM pg_attribute a \
              LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE a.attrelid = $1::text::regclass AND a.attnum > 0 AND NOT a.attisdropped \
@@ -585,6 +657,7 @@ pub async fn postgres_target(
             name: r.get(0),
             type_name: r.get(1),
             default: r.get(2),
+            generated: r.get(3),
         })
         .collect();
     let key = client
@@ -658,11 +731,11 @@ fn spawn_copy_reader(
 
 /// Runs `work` until it ends or `cancel` is set; then the server is asked
 /// to cancel it and `work` ends with its error.
-async fn cancellable<T>(
+async fn cancellable<T, E>(
     session: &PostgresSession,
     cancel: &AtomicBool,
-    work: impl std::future::Future<Output = Result<T, tokio_postgres::Error>>,
-) -> Result<T, tokio_postgres::Error> {
+    work: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
     let mut work = std::pin::pin!(work);
     let mut sent = false;
     loop {
@@ -691,12 +764,25 @@ pub async fn import_postgres(
     if session.txn_state() != TxnState::None {
         return Err("A transaction is open on this connection".into());
     }
-    let target = postgres_target(session, &spec.schema, &spec.table).await?;
+    // Reading the defaults waits on a lock another session holds on the table.
+    let target = cancellable(
+        session,
+        &cancel,
+        postgres_target(session, &spec.schema, &spec.table),
+    )
+    .await
+    .map_err(|e| match cancel.load(Ordering::SeqCst) {
+        true => ImportError::Cancelled,
+        false => ImportError::Failed(e),
+    })?;
     let plan = Plan::new(EngineKind::Postgres, spec, &target)?;
     let client = session.client();
     let username = session.config().username.clone();
     let message = |e: &tokio_postgres::Error| {
-        if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
+        // A statement timeout raises the same code as our cancel.
+        if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+            && cancel.load(Ordering::SeqCst)
+        {
             return ImportError::Cancelled;
         }
         let text = humanize_postgres_error(e, &username);
@@ -715,21 +801,28 @@ pub async fn import_postgres(
         let _ = client.batch_execute("ROLLBACK").await;
     };
     let result: Result<ImportCounts, ImportError> = async {
-        client
-            .batch_execute(&format!(
-                "CREATE TEMP TABLE {STAGE} ON COMMIT DROP AS SELECT {} FROM {} WITH NO DATA",
-                plan.column_list(),
-                plan.target_sql
-            ))
+        // Built from the column types, so it needs no SELECT on the table
+        // and takes no lock on it.
+        let columns: Vec<String> = plan
+            .fields
+            .iter()
+            .map(|(_, c)| format!("{} {}", plan.ident(&c.name), c.type_name))
+            .collect();
+        let create = format!(
+            "CREATE TEMP TABLE {STAGE} ({}) ON COMMIT DROP",
+            columns.join(", ")
+        );
+        cancellable(session, &cancel, client.batch_execute(&create))
             .await
             .map_err(|e| message(&e))?;
-        let copy = client
-            .copy_in::<_, bytes::Bytes>(&format!(
-                "COPY {STAGE} ({}) FROM STDIN",
-                plan.column_list()
-            ))
-            .await
-            .map_err(|e| message(&e))?;
+        let copy_sql = format!("COPY {STAGE} ({}) FROM STDIN", plan.column_list());
+        let copy = cancellable(
+            session,
+            &cancel,
+            client.copy_in::<_, bytes::Bytes>(&copy_sql),
+        )
+        .await
+        .map_err(|e| message(&e))?;
         let mut copy = std::pin::pin!(copy);
         let mut rows = spawn_copy_reader(
             spec.clone(),
@@ -750,19 +843,19 @@ pub async fn import_postgres(
         if cancel.load(Ordering::SeqCst) {
             return Err(ImportError::Cancelled);
         }
-        copy.as_mut().finish().await.map_err(|e| message(&e))?;
-        let sql = plan.pg_insert_sql();
-        let (inserted, updated) = if spec.on_conflict == OnConflict::Update {
-            let row = cancellable(session, &cancel, client.query_one(&sql, &[]))
+        cancellable(session, &cancel, copy.as_mut().finish())
+            .await
+            .map_err(|e| message(&e))?;
+        // Locks on the table are taken from here on, and a cancel ends the wait.
+        let updated = match plan.pg_update_sql() {
+            Some(sql) => cancellable(session, &cancel, client.execute(&sql, &[]))
                 .await
-                .map_err(|e| message(&e))?;
-            (row.get::<_, i64>(0) as u64, row.get::<_, i64>(1) as u64)
-        } else {
-            let n = cancellable(session, &cancel, client.execute(&sql, &[]))
-                .await
-                .map_err(|e| message(&e))?;
-            (n, 0)
+                .map_err(|e| message(&e))?,
+            None => 0,
         };
+        let inserted = cancellable(session, &cancel, client.execute(&plan.pg_insert_sql(), &[]))
+            .await
+            .map_err(|e| message(&e))?;
         if cancel.load(Ordering::SeqCst) {
             return Err(ImportError::Cancelled);
         }
@@ -823,11 +916,11 @@ pub fn sqlite_target(conn: &rusqlite::Connection, table: &str) -> Result<ImportT
     Ok(ImportTarget {
         columns: rows
             .into_iter()
-            .filter(|r| r.4 == 0)
-            .map(|(name, type_name, default, _, _)| TargetColumn {
+            .map(|(name, type_name, default, _, hidden)| TargetColumn {
                 name,
                 type_name,
                 default,
+                generated: hidden != 0,
             })
             .collect(),
         key: pk.into_iter().map(|(_, n)| n).collect(),
@@ -888,6 +981,10 @@ pub fn import_sqlite(
             Some((sql, at)) => Some((conn.prepare(&sql).map_err(|e| e.to_string())?, at)),
             None => None,
         };
+        let mut update = match plan.sqlite_update_sql() {
+            Some(sql) => Some(conn.prepare(&sql).map_err(|e| e.to_string())?),
+            None => None,
+        };
         let mut counts = ImportCounts::default();
         let mut record = csv::StringRecord::new();
         let mut rows = 0u64;
@@ -906,13 +1003,25 @@ pub fn import_sqlite(
                     .map_err(at_line)?,
                 None => false,
             };
-            let n = insert
-                .execute(rusqlite::params_from_iter(values.iter()))
-                .map_err(at_line)?;
-            match (n, existed) {
-                (0, _) => counts.skipped += 1,
-                (_, true) => counts.updated += 1,
-                (_, false) => counts.inserted += 1,
+            if existed {
+                let n = match &mut update {
+                    Some(stmt) => stmt
+                        .execute(rusqlite::params_from_iter(values.iter()))
+                        .map_err(at_line)?,
+                    None => 0,
+                };
+                match n {
+                    0 => counts.skipped += 1,
+                    _ => counts.updated += 1,
+                }
+            } else {
+                let n = insert
+                    .execute(rusqlite::params_from_iter(values.iter()))
+                    .map_err(at_line)?;
+                match n {
+                    0 => counts.skipped += 1,
+                    _ => counts.inserted += 1,
+                }
             }
             rows += 1;
             if rows.is_multiple_of(PROGRESS_EVERY) {
@@ -921,6 +1030,9 @@ pub fn import_sqlite(
                 }
                 progress(rows);
             }
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ImportError::Cancelled);
         }
         Ok(counts)
     })();
@@ -959,6 +1071,7 @@ mod tests {
             name: name.into(),
             type_name: ty.into(),
             default: default.map(str::to_string),
+            generated: false,
         }
     }
 
@@ -1134,22 +1247,25 @@ mod tests {
                 on_conflict: on,
                 ..s.clone()
             };
-            Plan::new(EngineKind::Postgres, &s, &target)
-                .unwrap()
-                .pg_insert_sql()
+            let plan = Plan::new(EngineKind::Postgres, &s, &target).unwrap();
+            (plan.pg_update_sql(), plan.pg_insert_sql())
         };
         assert_eq!(
             sql(OnConflict::Stop),
-            "INSERT INTO public.orders (id, email, status) SELECT id, email, COALESCE(status, 'pending'::text) FROM pg_temp.rowkery_import"
+            (None, "INSERT INTO public.orders (id, email, status) SELECT s.id, s.email, COALESCE(s.status, 'pending'::text) FROM pg_temp.rowkery_import AS s".into())
         );
-        assert!(sql(OnConflict::Skip).ends_with(" ON CONFLICT (id) DO NOTHING"));
-        let update = sql(OnConflict::Update);
-        assert!(update.starts_with("WITH done AS (INSERT INTO public.orders"));
+        assert!(sql(OnConflict::Skip)
+            .1
+            .ends_with(" ON CONFLICT (id) DO NOTHING"));
+        // Update: an empty cell keeps the row's value; only new rows are inserted.
+        let (update, insert) = sql(OnConflict::Update);
+        assert_eq!(
+            update.as_deref(),
+            Some("UPDATE public.orders AS t SET email = COALESCE(s.email, t.email), status = COALESCE(s.status, t.status) FROM pg_temp.rowkery_import AS s WHERE t.id = s.id")
+        );
         assert!(
-            update.contains(
-                " ON CONFLICT (id) DO UPDATE SET email = excluded.email, status = excluded.status RETURNING (xmax = 0) AS added)"
-            ),
-            "{update}"
+            insert.ends_with(" FROM pg_temp.rowkery_import AS s WHERE NOT EXISTS (SELECT 1 FROM public.orders AS t WHERE t.id = s.id)"),
+            "{insert}"
         );
     }
 
@@ -1169,22 +1285,26 @@ mod tests {
         let plan = Plan::new(EngineKind::Sqlite, &s, &target).unwrap();
         assert_eq!(
             plan.sqlite_insert_sql(),
-            r#"INSERT INTO orders ("Note Text", id) VALUES (COALESCE(?1, '-'), ?2) ON CONFLICT (id) DO UPDATE SET "Note Text" = excluded."Note Text""#
+            r#"INSERT INTO orders ("Note Text", id) VALUES (COALESCE(?1, '-'), ?2)"#
         );
         assert_eq!(
             plan.sqlite_exists_sql(),
             Some(("SELECT 1 FROM orders WHERE id = ?1".into(), vec![1]))
         );
-        // rowid is no conflict target.
-        let rowid = ImportTarget {
-            key: vec!["rowid".into()],
+        assert_eq!(
+            plan.sqlite_update_sql().as_deref(),
+            Some(r#"UPDATE orders SET "Note Text" = COALESCE(?1, "Note Text") WHERE id = ?2"#)
+        );
+        // A keyless table skips any conflict.
+        let keyless = ImportTarget {
+            key: vec![],
             ..target
         };
         let s = ImportSpec {
             on_conflict: OnConflict::Skip,
             ..s
         };
-        assert!(Plan::new(EngineKind::Sqlite, &s, &rowid)
+        assert!(Plan::new(EngineKind::Sqlite, &s, &keyless)
             .unwrap()
             .sqlite_insert_sql()
             .ends_with(" ON CONFLICT DO NOTHING"));
@@ -1313,6 +1433,13 @@ mod tests {
                 Some(String::new())
             )
         );
+        // Update with empty cells as NULL: the row keeps its values.
+        let before = all(&conn)[1].clone();
+        std::fs::write(&path, "order_id,mail,amount,state,gift\n2,,,,\n").unwrap();
+        s.empty = EmptyCells::Null;
+        let done = import_sqlite(&conn, &s, &never, &|_| {}).unwrap();
+        assert_eq!((done.inserted, done.updated, done.skipped), (0, 1, 0));
+        assert_eq!(all(&conn)[1], before);
     }
 
     #[test]
@@ -1353,7 +1480,19 @@ mod tests {
         )
         .unwrap();
         let t = sqlite_target(&conn, "g").unwrap();
-        assert_eq!(t.columns, [col("a", "INT", None)]);
+        let b = TargetColumn {
+            generated: true,
+            ..col("b", "INT", None)
+        };
+        assert_eq!(t.columns, [col("a", "INT", None), b]);
+        let s = ImportSpec {
+            table: "g".into(),
+            ..spec("x", &[(0, "b")])
+        };
+        assert_eq!(
+            Plan::new(EngineKind::Sqlite, &s, &t).err().as_deref(),
+            Some("b is filled in by the database, so it can't be imported. Skip it.")
+        );
         assert_eq!(t.key, ["a"]);
         assert!(sqlite_target(&conn, "nope").is_err());
     }
