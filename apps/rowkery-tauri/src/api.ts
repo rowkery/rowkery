@@ -688,6 +688,66 @@ export async function applyChanges(
 }
 const applying = new Set<string>();
 
+/** The top of a CSV file, as core read it (`rowkery_core::import::CsvPreview`). */
+export interface CsvPreview {
+  file_name: string;
+  /** `,`, `;`, `|` or a tab. */
+  delimiter: string;
+  /** The first records, the header (when there is one) first. */
+  rows: string[][];
+  /** Every record in the file, the first row included. */
+  records: number;
+}
+
+/** An import as the panel asks for it (`rowkery_core::import::ImportSpec`). */
+export interface ImportSpec {
+  path: string;
+  schema: string;
+  table: string;
+  delimiter: string;
+  header: boolean;
+  columns: { field: number; column: string }[];
+  on_conflict: "stop" | "skip" | "update";
+  empty: "null" | "text";
+}
+
+export type ImportOutcome =
+  | { status: "imported"; inserted: number; updated: number; skipped: number; elapsed_ms: number }
+  /** Rolled back: nothing was written. */
+  | { status: "cancelled" }
+  | { status: "failed"; message: string }
+  /** Read-only: nothing ran. */
+  | { status: "refused" };
+
+/** Import CSV…'s file: the native open dialog; null when dismissed. */
+export async function chooseCsv(): Promise<string | null> {
+  return invoke("choose_csv");
+}
+
+export async function previewCsv(path: string): Promise<CsvPreview> {
+  return invoke("preview_csv", { path });
+}
+
+/**
+ * Imports a CSV file into a table in one transaction on a connection of its
+ * own (core streams the file; no row passes through here). `onProgress`
+ * hears the rows sent, at most every 100 ms.
+ */
+export async function importCsv(
+  windowId: string,
+  spec: ImportSpec,
+  onProgress: (rows: number) => void,
+): Promise<ImportOutcome> {
+  const channel = new Channel<{ rows: number }>();
+  channel.onmessage = (frame) => onProgress(frame.rows);
+  return invoke("import_csv", { windowId, spec, onProgress: channel });
+}
+
+/** Cancel and roll back the window's running import. */
+export async function cancelImport(windowId: string): Promise<void> {
+  return invoke("cancel_import", { windowId });
+}
+
 /** Incoming counts stop one past this: Quick Look prints `100+`. */
 export const INCOMING_CAP = 100;
 

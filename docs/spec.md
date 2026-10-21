@@ -26,7 +26,7 @@ One opaque paper sheet (DESIGN.md, Layout):
 - **Title bar** (48 px): the traffic lights, one pill per window (engine logo or the penguin, the connection's name, its environment dot, a spinner or ⚠ while it connects, runs out of sight or failed, × on hover and on the shown one), + for a new window (⌘T). Pills drag to reorder; ⌘1–⌘9 follow the order. On the right, the shown window's Safe mode and MCP (only while connected) and the ⌘K search.
 - **Schema column** (left, 264 px, dragged between 240 and 360; ⌘B hides it): a head naming the database in the serif (its chevron opens the database switcher) over a line with the host, latency and environment, the filter box (/), then Pinned, Tables and Views with counts. Its foot is a row of icon buttons: Agents (a green dot while this connection is shared, the count of proposals waiting), Presenting, and Settings (Updates, Appearance, the only theme control, Keyboard with the shortcut sheet, and Agents).
 - **Main column:** the tab row (query tabs and table tabs, ‹ › history, +), then the tab's content.
-- **Inspector column** (right): Quick Look, Review SQL, New connection, a picked session on the Sessions tab, or a proposal. One at a time, beside the data, never over it. Each kind keeps its dragged width.
+- **Inspector column** (right): Quick Look, Review SQL, New connection, a picked session on the Sessions tab, a proposal, or a CSV import. One at a time, beside the data, never over it. Each kind keeps its dragged width.
 - **Edits bar** at the grid's foot while edits are staged, and the **toast** above it.
 
 Each window is one connection and one database. Windows are restored on launch without connecting until one is shown.
@@ -80,6 +80,8 @@ Cells are editable on a table tab whose table has a primary key (or SQLite's row
 Staged edits are marked at the cell's edge and in the gutter, and counted in the **edits bar** at the grid's foot: "3 changes" with edited / deleted / new, Review SQL ⇧⌘P, Discard and Commit ⌘S in ink. Esc with nothing open discards them all, with Undo.
 
 **Review SQL** shows the exact transaction. `crates/rowkery-core/src/edits.rs` builds one INSERT, UPDATE or DELETE per row with typed literals and a predicate on the whole primary key. Commit runs them in one transaction that rolls back unless every statement changed exactly one row; the bar then names the row and offers Retry. Edits never run inside a transaction of yours that is open on the tab, and a COMMIT whose connection dropped is never retried.
+
+**Import CSV** (⌘K "Import CSV into this table…", a table's … menu, or a `.csv` / `.tsv` dropped on a table or its grid) opens in the inspector column. The file's columns match the table's by name (then a near name, when one free column fits); each can be changed or skipped, and the first 20 rows show tinted in the grid as the table will get them. Choices: a taken key Stops (the default), Skips or Updates; an empty cell is NULL (or the DEFAULT) or empty text. `crates/rowkery-core/src/import.rs` streams the file in one transaction on a session of its own (`Slot::Import`), never a tab's: Postgres COPYs into a temp table then `INSERT … SELECT … ON CONFLICT`, SQLite runs one prepared INSERT per row. Values are cast by the grid's rules; a bad one stops the import naming its line and column. Progress arrives on a channel; Cancel rolls back. Confirm writes takes the Import button as the confirmation; Read-only refuses. Not an agent tool.
 
 ## Safe mode and environments
 

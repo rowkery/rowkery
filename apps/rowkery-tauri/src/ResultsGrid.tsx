@@ -54,6 +54,7 @@ const COL_OVERSCAN = 2;
 const EMPTY_ROWS = new ResultRows();
 const EMPTY_COLUMNS: Column[] = [];
 const NO_INSERTS: GridEditing["inserts"] = [];
+const NO_PREVIEW: (Value | null | undefined)[][] = [];
 
 const NUMERIC_TYPE =
   /^(int|integer|bigint|smallint|tinyint|mediumint|real|double|float|numeric|decimal|money|oid|serial|bigserial)/i;
@@ -151,6 +152,11 @@ interface Props {
   result: QueryResultDto | null;
   /** Staged edits and the editors (table tabs); null where rows can't be edited at all. */
   editing?: GridEditing | null;
+  /**
+   * Import CSV's preview: the file's first rows as cells per result column
+   * (undefined: DEFAULT), tinted above the table's rows. Not editable.
+   */
+  importRows?: (Value | null | undefined)[][] | null;
   /** Widths the user dragged, keyed by column name, for this result's columns */
   columnWidths?: Record<string, number>;
   onColumnWidthsChange?: (widths: Record<string, number>) => void;
@@ -686,6 +692,7 @@ export const ResultsGrid = memo(ResultsGridView);
 function ResultsGridView({
   result,
   editing,
+  importRows,
   columnWidths,
   onColumnWidthsChange,
   keyColumns,
@@ -886,7 +893,9 @@ function ResultsGridView({
   // The open cell editor (↵, F2, double-click), over a loaded row or a new one.
   const [editor, setEditor] = useState<{ target: EditTarget; col: number } | null>(null);
   const inserts = editing?.inserts ?? NO_INSERTS;
-  const insertsHeight = inserts.length * ROW_HEIGHT;
+  const preview = importRows ?? NO_PREVIEW;
+  // New rows sit above the loaded ones: the import's preview, then pending inserts.
+  const insertsHeight = (preview.length + inserts.length) * ROW_HEIGHT;
   // A new result closes it; a page appended below (Load more, scrolling) doesn't.
   const editorResult = useRef<QueryResultDto | null>(null);
   useEffect(() => {
@@ -1614,7 +1623,7 @@ function ResultsGridView({
         aria-label={tableName ? `${tableName} rows` : "Results"}
         aria-multiselectable
         // The header row and the row-number column count too.
-        aria-rowcount={rowCount + inserts.length + 1}
+        aria-rowcount={rowCount + preview.length + inserts.length + 1}
         data-row-count={rowCount}
         aria-colcount={columns.length + 1}
         data-col-count={columns.length}
@@ -1812,9 +1821,45 @@ function ResultsGridView({
               </div>
             )}
           </div>
-          {inserts.length > 0 && (
+          {insertsHeight > 0 && (
             <div data-testid="rg-inserts" className="rg-inserts" role="rowgroup" style={{ height: insertsHeight, width: totalWidth }}>
-              {inserts.map((ins, i) => (
+              {preview.map((cells, i) => (
+                <div
+                  key={`import:${i}`}
+                  role="row"
+                  aria-rowindex={i + 2}
+                  data-import-row={i}
+                  data-mark="import"
+                  className="rg-row rg-row-insert"
+                  style={{ transform: `translateY(${i * ROW_HEIGHT}px)`, width: totalWidth }}
+                >
+                  <div data-testid="rg-gutter" className="rg-gutter" role="rowheader" aria-colindex={1} aria-label="Row from the file" style={{ width: gutterWidth }}>
+                    <i className="rg-mark-dot" />
+                  </div>
+                  {colPad > 0 && <span className="rg-colpad" aria-hidden style={{ width: colPad }} />}
+                  {columns.slice(c0, c1 + 1).map((col, j) => {
+                    const ci = c0 + j;
+                    const v = cells[ci];
+                    const isDefault = v === undefined;
+                    return (
+                      <div
+                        key={`${ci}:${col.name}`}
+                        data-col={ci}
+                        role="gridcell"
+                        aria-colindex={ci + 2}
+                        data-default={isDefault ? "" : undefined}
+                        className={`rg-cell${isDefault ? " rg-cell-default" : ""}`}
+                        style={{ width: widths[ci] }}
+                      >
+                        {looks.hidden[ci] ? HIDDEN_TEXT : isDefault ? "default" : !v || "Null" in v ? <span data-testid="rg-null" className="rg-null">NULL</span> : valueText(v)}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+              {inserts.map((ins, k) => {
+                const i = preview.length + k;
+                return (
                 <div
                   key={ins.id}
                   role="row"
@@ -1863,8 +1908,11 @@ function ResultsGridView({
                     );
                   })}
                 </div>
-              ))}
-              {editor && "insert" in editor.target && renderEditor(inserts.findIndex((x) => "insert" in editor.target && x.id === editor.target.insert) * ROW_HEIGHT)}
+                );
+              })}
+              {editor &&
+                "insert" in editor.target &&
+                renderEditor((preview.length + inserts.findIndex((x) => "insert" in editor.target && x.id === editor.target.insert)) * ROW_HEIGHT)}
             </div>
           )}
           <div
@@ -1910,7 +1958,7 @@ function ResultsGridView({
                   findCol={findCurrent?.row === r ? findCurrent.col : -1}
                   edit={editing?.rowState(r)}
                   editVersion={editing?.version}
-                  ariaRow0={inserts.length + 2}
+                  ariaRow0={preview.length + inserts.length + 2}
                   activeId={selected?.row === r ? activeId : undefined}
                   looked={!!qlRow && selected?.row === r}
                 />

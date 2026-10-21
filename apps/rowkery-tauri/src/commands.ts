@@ -730,6 +730,14 @@ export const COMMANDS: Command[] = [
     synonyms: ["export", "csv", "download"],
     canRun: (s) => s.hasRows && !s.running,
   },
+  {
+    // Into the shown table tab's table; the panel opens beside its grid (CsvImport.tsx).
+    id: "import-csv",
+    title: "Import CSV into this table…",
+    menuTitle: "Import CSV…",
+    synonyms: ["import", "csv", "tsv", "upload", "load", "file"],
+    canRun: (s) => s.connected && s.tableTab && s.hasActiveTable && !s.busy,
+  },
   { id: "clear-results", title: "Clear results", menuTitle: "Clear Results", canRun: (s) => s.hasResult },
   {
     id: "timings",
@@ -970,6 +978,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
       null,
       "copy-csv",
       "export",
+      "import-csv",
       "clear-results",
     ],
   },

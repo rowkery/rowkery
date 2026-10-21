@@ -161,6 +161,11 @@
         "accelerator": "CmdOrCtrl+Shift+E"
       },
       {
+        "id": "import-csv",
+        "title": "Import CSV…",
+        "accelerator": null
+      },
+      {
         "id": "clear-results",
         "title": "Clear Results",
         "accelerator": null

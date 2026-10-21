@@ -28,6 +28,7 @@ import { commandTip } from "./commands";
 import {
   filterSchemaTree,
   findTable,
+  isView,
   type SidebarSchema,
   type SidebarTable,
 } from "./schemaTree";
@@ -54,6 +55,8 @@ interface SidebarProps {
   /** A row's menu: its Structure (⌥⌘2), and its name at the editor's caret (⌥↵ on the row too). */
   onTableStructure?: (table: SidebarTable) => void;
   onInsertName?: (table: SidebarTable) => void;
+  /** A table's menu: Import CSV… into it. */
+  onImportCsv?: (table: SidebarTable) => void;
   /** The pointer rests on a row's name (null: it left), for hover prefetch. */
   onHoverTable?: (table: SidebarTable | null) => void;
   /** Reloads the schema (the refresh button at the end of the top row, ⌘R). */
@@ -98,6 +101,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
       onOpenTable,
       onTableStructure,
       onInsertName,
+      onImportCsv,
       onHoverTable,
       onRefresh,
       refreshing = false,
@@ -179,6 +183,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
       else if (id === "open-tab") onOpenTable(t, true);
       else if (id === "structure") onTableStructure?.(t);
       else if (id === "insert") onInsertName?.(t);
+      else if (id === "import-csv") onImportCsv?.(t);
       else if (id === "pin") togglePin(t.key);
       else if (id === "copy-name")
         navigator.clipboard.writeText(t.name).then(
@@ -414,7 +419,11 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
           name="panel-row"
           label="Table"
           at={rowMenu.at}
-          items={panelRowMenu({ pinned: !!rowMenu.target && pins.includes(rowMenu.target.key), mac: isMacPlatform() })}
+          items={panelRowMenu({
+            pinned: !!rowMenu.target && pins.includes(rowMenu.target.key),
+            mac: isMacPlatform(),
+            importable: !!onImportCsv && !!rowMenu.target && !isView(rowMenu.target),
+          })}
           onPick={pickRow}
           onClose={rowMenu.close}
         />

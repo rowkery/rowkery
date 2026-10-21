@@ -14,7 +14,7 @@ import "./Inspector.css";
  * Mount it inside `<Presence>`: it slides in from the right on mount and
  * fades out, shorter, while Presence holds it closing.
  */
-export type InspectorKind = "quicklook" | "connect" | "review" | "session";
+export type InspectorKind = "quicklook" | "connect" | "review" | "session" | "import";
 
 type DataProps = { [data: `data-${string}`]: unknown };
 

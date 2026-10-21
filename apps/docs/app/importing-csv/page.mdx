@@ -1,0 +1,66 @@
+export const metadata = { title: "Importing a CSV" };
+
+<p className="crumb">Working with data</p>
+
+# Importing a CSV
+
+<p className="lead">Load a CSV or TSV file into a table you already have. Rowkery matches the file's columns to the table's, shows its first rows in the grid, and writes every row in one transaction, so a file goes in whole or not at all.</p>
+
+<Shot src="/img/importing-csv-panel.webp" width={1016} height={603} alt="Import into orders beside the orders grid: orders-october.csv, 12,431 rows, 8 columns; If a key already exists set to Skip; Empty cells set to NULL; Columns 7 of 8 matched, with utm_source skipped; the file's first rows tinted in the grid; Cancel and Import 12,431 rows." />
+
+## Starting an import
+
+Any of these opens the file picker for a table, then the import panel beside its grid:
+
+- <kbd>⌘K</kbd> › **Import CSV into this table…**, with a table tab open.
+- **Import CSV…** in the … menu of a table in the schema panel, or right-click it.
+- **Query** › **Import CSV…** in the menu bar.
+- Drop a `.csv`, `.tsv` or `.tab` file onto a table in the schema panel, or onto a table tab's grid. No file picker: the dropped file is the one read.
+
+Views can't be imported into.
+
+## Matching columns
+
+The first row names the file's columns. Each one matches a table column by name, ignoring case, spaces and underscores: `Customer ID` goes to `customer_id`. When a name nearly fits one free column, it goes there too, so `customer` goes to `customer_id` and `order_id` to `id` on the orders table. Anything else is skipped.
+
+Click a column's picker to send it somewhere else or to **skip** it. A table column can take only one of the file's columns; picking one that's **taken** frees the other.
+
+If the first row names none of the table's columns, Rowkery reads it as data and matches the file's columns to the table's in order. **First row: Header / Data** switches between the two.
+
+## What the grid shows
+
+The file's first 20 rows sit at the top of the grid, tinted as new rows, the way the table will get them. A column you haven't mapped shows **default**: it gets the column's DEFAULT, or NULL when it has none. The preview goes when the panel closes.
+
+## Choices
+
+| Choice | What it does |
+| --- | --- |
+| **If a key already exists: Stop** | The import stops at the first row whose key is taken, and nothing is written. The default |
+| **Skip** | Rows whose key is taken are left out; the rest go in |
+| **Update** | Rows whose key is taken update that row. Offered when the table has a primary key |
+| **Empty cells: NULL** | An empty cell is NULL, or the column's DEFAULT when it has one. The default |
+| **Empty text** | An empty cell is empty text in text columns; other columns still get NULL |
+
+## Running it
+
+**Import N rows** writes the file. On a connection in **Confirm writes** safe mode, that button is the confirmation. On a **Read-only** connection the import is refused. See [Environments and safe mode](/environments-and-safe-mode/).
+
+The panel shows the rows sent so far, a clock and **Cancel and roll back**, which stops the import and writes nothing. When it's done, a toast says what went in, such as **Imported 12,000 rows · skipped 431**, and the grid loads again.
+
+The import runs in a session of its own, never in a tab's, so a transaction you have open in a tab isn't part of it and doesn't see its rows until it commits.
+
+## When a value doesn't fit
+
+A value the column can't take stops the import, writes nothing, and keeps the panel open with the line and column it's on:
+
+<Shot src="/img/importing-csv-error.webp" width={360} height={60} alt="Line 4,812, total: 'n/a' isn't a number." />
+
+Fix the file, or skip that column, and import again. Values follow the same rules as typing into a cell: see [Editing rows](/editing-rows/).
+
+## Files it reads
+
+- Comma, tab, semicolon or bar separated, guessed from the first rows; quoted values can hold commas, quotes and line breaks.
+- UTF-8 text, with or without a byte order mark.
+- Every row needs as many values as the first row.
+
+Creating a new table from a file isn't supported yet: create the table first, then import into it.

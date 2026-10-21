@@ -457,6 +457,10 @@
           "keys": "⇧⌘E"
         },
         {
+          "title": "Import CSV…",
+          "keys": ""
+        },
+        {
           "title": "Clear Results",
           "keys": ""
         }
@@ -855,6 +859,10 @@
     {
       "title": "Export results…",
       "keys": "⇧⌘E"
+    },
+    {
+      "title": "Import CSV into this table…",
+      "keys": ""
     },
     {
       "title": "Clear results",
