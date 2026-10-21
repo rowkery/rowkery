@@ -131,7 +131,18 @@ import { bufferChanges, changeCount, editTableOf, savedBuffer, withoutCommitted,
 import { EditTray, type TrayState } from "./EditTray";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
 import { CsvImport, type ImportRun } from "./CsvImport";
-import { draftFor, guessTable, importedText, importSpec, isCsvPath, previewRows, rankTables, type ImportDraft } from "./importDraft";
+import {
+  draftFor,
+  fieldNames,
+  guessTable,
+  importedText,
+  importSampleText,
+  importSpec,
+  isCsvPath,
+  previewRows,
+  rankTables,
+  type ImportDraft,
+} from "./importDraft";
 import { Inspector, type InspectorKind } from "./Inspector";
 import { useRowEdits } from "./useRowEdits";
 import { QueryErrorView } from "./QueryErrorView";
@@ -205,8 +216,11 @@ type SortState = SortKey;
  */
 interface QueryTab {
   id: number;
-  /** "sessions": the server's sessions (SessionsView.tsx), Postgres only. */
-  kind: "query" | "table" | "sessions";
+  /**
+   * "sessions": the server's sessions (SessionsView.tsx), Postgres only.
+   * "import": Import CSV's preview, beside its panel; never saved.
+   */
+  kind: "query" | "table" | "sessions" | "import";
   title: string;
   sql: string;
   view?: ResultsView;
@@ -713,8 +727,10 @@ export function Workspace({
   // typing to pause before writing.
   useEffect(() => {
     if (!onTabsChange) return;
-    const saved: SavedTab[] = tabs.map((t) => ({
-      kind: t.kind,
+    // The import tab goes with its panel: it isn't restored.
+    const kept = tabs.filter((t) => t.kind !== "import");
+    const saved: SavedTab[] = kept.map((t) => ({
+      kind: t.kind as SavedTab["kind"],
       title: t.title,
       sql: t.sql,
       view: t.view,
@@ -732,7 +748,7 @@ export function Workspace({
     onTabsChange(
       session.id,
       saved,
-      Math.max(0, tabs.findIndex((t) => t.id === activeTabId)),
+      Math.max(0, kept.findIndex((t) => t.id === activeTabId)),
     );
   }, [tabs, activeTabId, onTabsChange, session.id]);
   const [runs, setRuns] = useState<Record<number, TabRun>>({});
@@ -789,6 +805,9 @@ export function Workspace({
   const activeSql = activeTab?.sql ?? "";
   const isTableTab = activeTab?.kind === "table";
   const isSessionsTab = activeTab?.kind === "sessions";
+  const isImportTab = activeTab?.kind === "import";
+  /** A tab with its own bar and grid instead of the editor or a table's line. */
+  const ownTab = isSessionsTab || isImportTab;
   const presenting = usePresenting();
   const runsRef = useRef(runs);
   runsRef.current = runs;
@@ -888,6 +907,8 @@ export function Workspace({
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
     const tab = tabs[index];
+    // Closing the import tab is the panel's Cancel (a running import is cancelled first).
+    if (tab.kind === "import") return closeImportRef.current();
     void closeQueryTab(windowId, id).catch(() => {});
     const run = runsRef.current[id];
     const worthKeeping = tab.kind === "table" || !!tab.sql.trim() || !!run?.result;
@@ -1537,7 +1558,8 @@ export function Workspace({
     } catch (e) {
       return showToast("Couldn't read the file", String(e), "error");
     }
-    const shown = isTableTab && activeTable && !isView(activeTable) ? activeTable : undefined;
+    const onImport = isImportTab && csvImportRef.current?.tableKey ? findTable(schemaTree, csvImportRef.current.tableKey) : undefined;
+    const shown = isTableTab && activeTable && !isView(activeTable) ? activeTable : onImport;
     // On a view's tab the user picks the table: a guess elsewhere would surprise.
     const onView = isTableTab && !!activeTable && isView(activeTable);
     const guess = target || shown || onView ? undefined : guessTable(importTargets(preview));
@@ -1552,8 +1574,44 @@ export function Workspace({
       run: null,
       error: null,
     });
-    if (t) openTable(t, { keep: true, view: "data" });
+    openImportTab(t?.name);
   };
+  /**
+   * The import's own tab (2026-10-21, Lucas: the table's tab showed its
+   * query line, filter and "No records" around the file's rows): the file's
+   * first rows as the table will get them, and nothing else. One per window;
+   * where the user was is where Cancel goes back to.
+   */
+  const importReturnRef = useRef<number | null>(null);
+  const openImportTab = (table?: string) => {
+    const title = table ? `Import · ${table}` : "Import CSV";
+    const open = tabsRef.current.find((t) => t.kind === "import");
+    if (open) {
+      setTabs((prev) => prev.map((t) => (t.id === open.id ? { ...t, title } : t)));
+      return setActiveTabId(open.id);
+    }
+    importReturnRef.current = activeTabIdRef.current;
+    const id = nextTabId.current++;
+    setTabs((prev) => [...prev, { id, kind: "import", title, sql: "" }]);
+    setActiveTabId(id);
+  };
+  // The panel gone (Cancel, Esc, done, a switch): its tab goes too, back to where the user was.
+  const importOpen = !!csvImport;
+  useEffect(() => {
+    if (importOpen) return;
+    const tab = tabsRef.current.find((t) => t.kind === "import");
+    if (!tab) return;
+    const rest = tabsRef.current.filter((t) => t.id !== tab.id);
+    const back = rest.find((t) => t.id === importReturnRef.current) ?? rest[rest.length - 1];
+    importReturnRef.current = null;
+    if (!back) {
+      const fresh = nextTabId.current++;
+      setTabs([queryTab(fresh, "Query 1", "")]);
+      return setActiveTabId(fresh);
+    }
+    setTabs(rest);
+    if (activeTabIdRef.current === tab.id) setActiveTabId(back.id);
+  }, [importOpen]);
   /** The panel's Table picker: the file goes into `t` instead. */
   const pickImportTable = (t: SidebarTable) => {
     const cur = csvImportRef.current;
@@ -1566,7 +1624,7 @@ export function Workspace({
       draft: importDraftFor(t, cur.draft.path, cur.draft.preview, cur.tableKey ? cur.draft : undefined),
       error: null,
     });
-    openTable(t, { keep: true, view: "data" });
+    openImportTab(t.name);
   };
   const startImportRef = useRef(startImport);
   startImportRef.current = startImport;
@@ -1589,9 +1647,8 @@ export function Workspace({
   useEffect(() => {
     if (csvImportRef.current && !csvImportRef.current.run) setCsvImport(null);
   }, [activeId, session.database, connState === "connected"]);
-  // With no table picked the panel stays up over any tab; with one, beside its grid.
-  const importShown =
-    csvImport && (csvImport.tableKey === null || (isTableTab && activeTab?.tableKey === csvImport.tableKey)) ? csvImport : null;
+  // The panel sits beside the import tab's grid.
+  const importShown = csvImport && isImportTab ? csvImport : null;
   const importTable = importShown?.tableKey ? findTable(schemaTree, importShown.tableKey) : undefined;
   const runImport = async () => {
     const cur = csvImportRef.current;
@@ -1616,15 +1673,19 @@ export function Workspace({
     setCsvImport((c) => (c && c.tableKey === cur.tableKey ? null : c));
     if (out.status === "refused") return showToast("Read-only connection · Change safe mode…", undefined, "error");
     showToast(importedText(out), `${cur.table} · ${formatMs(out.elapsed_ms)}`);
-    // The rows as the table has them now.
-    const tab = tabsRef.current.find((t) => t.kind === "table" && t.tableKey === cur.tableKey);
+    // The rows as the table has them now, in its tab (the import tab goes).
+    const t = findTable(schemaTreeRef.current, cur.tableKey);
+    const tab = tabsRef.current.find((x) => x.kind === "table" && x.tableKey === cur.tableKey);
     if (tab) void runTable(tab);
+    if (t) openTable(t, { keep: true, view: "data" });
   };
-  /** × or Esc: a running import is cancelled (and rolled back) first. */
+  /** ×, Esc or closing its tab: a running import is cancelled (and rolled back) first. */
   const closeImport = () => {
     if (csvImportRef.current?.run) void cancelImport(windowId);
     else setCsvImport(null);
   };
+  const closeImportRef = useRef(closeImport);
+  closeImportRef.current = closeImport;
   const schemaTreeRef = useRef(schemaTree);
   schemaTreeRef.current = schemaTree;
   // A .csv / .tsv dropped on the window: Import CSV, into the table it was
@@ -3152,12 +3213,23 @@ export function Workspace({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importShown?.draft.preview, schemaTree]);
-  /** The file's first rows, tinted at the top of the table's grid. */
+  /**
+   * The import tab's grid: the table's columns with the file's first rows as
+   * it will get them, or the file as it is until a table is picked.
+   */
+  const importResult = useMemo((): QueryResultDto | null => {
+    if (!importShown) return null;
+    const columns = importTable
+      ? (importTable.table.columns ?? []).map((c) => ({ name: c.name, type_name: c.type_name }))
+      : fieldNames(importShown.draft).map((name) => ({ name, type_name: "" }));
+    return { columns, rows: new ResultRows(), row_count: 0, elapsed_ms: 0, error: null, cancelled: false };
+  }, [importShown?.draft, importTable]);
   const importPreview = useMemo(() => {
-    const names = shownResult?.columns.map((c) => c.name) ?? [];
-    if (!importShown?.tableKey || !names.length) return null;
-    return previewRows(importShown.draft, names, importTable?.table.columns ?? [], activeConnection?.kind === "sqlite");
-  }, [importShown, shownResult, importTable, activeConnection?.kind]);
+    if (!importShown || !importResult) return null;
+    if (!importTable) return importShown.draft.preview.rows.slice(importShown.draft.header ? 1 : 0).map((r) => r.map((v) => ({ Text: v })));
+    const names = importResult.columns.map((c) => c.name);
+    return previewRows(importShown.draft, names, importTable.table.columns ?? [], activeConnection?.kind === "sqlite");
+  }, [importShown, importResult, importTable, activeConnection?.kind]);
 
   /** Applies new sort keys: a table tab reruns its first page, a query tab re-sorts its rows. */
   const applySort = (sort: SortState[]) => {
@@ -3533,7 +3605,8 @@ export function Workspace({
       busy,
       running,
       tableTab: isTableTab,
-      sessionsTab: isSessionsTab,
+      // The import tab runs no SQL either: what a query tab offers isn't for it.
+      sessionsTab: ownTab,
       tabCount: tabs.length,
       hasSchema: !!schema,
       sidebarHidden,
@@ -3583,7 +3656,7 @@ export function Workspace({
       busy,
       running,
       isTableTab,
-      isSessionsTab,
+      ownTab,
       tabs.length,
       schema,
       sidebarHidden,
@@ -4148,8 +4221,8 @@ export function Workspace({
         )}
         <div
           data-testid="editor-card"
-          className={`card editor-card${isTableTab || isSessionsTab ? " table-mode" : ""}`}
-          style={isTableTab || isSessionsTab ? undefined : { flex: `0 0 ${editorSplitPct}%` }}
+          className={`card editor-card${isTableTab || ownTab ? " table-mode" : ""}`}
+          style={isTableTab || ownTab ? undefined : { flex: `0 0 ${editorSplitPct}%` }}
         >
           <div data-testid="editor-header" className="editor-header" data-tauri-drag-region ref={headerRef}>
             {/* The panel is hidden: which connection and database this is,
@@ -4345,6 +4418,15 @@ export function Workspace({
             />
           ) : isSessionsTab ? (
             <SessionsBar model={sessions} />
+          ) : isImportTab ? (
+            <div className="sessions-bar" data-import-bar>
+              <span className="sessions-title">Import</span>
+              {csvImport && (
+                <span className="sessions-count" data-import-sample>
+                  {importSampleText(csvImport.draft)}
+                </span>
+              )}
+            </div>
           ) : (
             <SqlEditor
               key={activeTabId}
@@ -4358,7 +4440,7 @@ export function Workspace({
               onMarkEnter={applySuggestion}
             />
           )}
-          {!isTableTab && !isSessionsTab && (
+          {!isTableTab && !ownTab && (
             // Run sits at the editor's foot, like a composer's send button.
             <div data-testid="composer" className="composer">
               {active && <KeyStrip zone="editor" state={commandState} />}
@@ -4391,16 +4473,16 @@ export function Workspace({
         </div>
         <div
           data-testid="pane-splitter"
-          className={`pane-splitter${running && !isTableTab && !isSessionsTab ? " sweeping" : ""}`}
+          className={`pane-splitter${running && !isTableTab && !ownTab ? " sweeping" : ""}`}
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize the editor and the results"
           onMouseDown={(e) => {
             e.preventDefault();
-            if (!isTableTab && !isSessionsTab) startSplitDrag(e.currentTarget);
+            if (!isTableTab && !ownTab) startSplitDrag(e.currentTarget);
           }}
           onDoubleClick={() => {
-            if (isTableTab || isSessionsTab) return;
+            if (isTableTab || ownTab) return;
             setEditorSplitPct(DEFAULT_EDITOR_SPLIT);
             writeKey(SPLIT_KEY, null);
           }}
@@ -4412,6 +4494,16 @@ export function Workspace({
         >
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
+          ) : isImportTab ? (
+            <RenderErrorBoundary fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}>
+              <ResultsGrid
+                result={importResult}
+                importRows={importPreview}
+                columnWidths={columnWidths}
+                onColumnWidthsChange={setColumnWidths}
+                tableName={importShown?.table || undefined}
+              />
+            </RenderErrorBoundary>
           ) : (
           <>
           {!isTableTab && (
@@ -4607,7 +4699,6 @@ export function Workspace({
                   <ResultsGrid
                     result={shownResult}
                     editing={rowEdits.editing}
-                    importRows={importPreview}
                     columnWidths={columnWidths}
                     onColumnWidthsChange={setColumnWidths}
                     keyColumns={keyColumns}
@@ -4677,7 +4768,7 @@ export function Workspace({
           </>
           )}
           {/* The edits bar sits at the grid's foot, where the strip would; it prints its own keys. */}
-          {active && !trayUp && !isSessionsTab && resultsView !== "map" && <KeyStrip zone="grid" state={commandState} />}
+          {active && !trayUp && !ownTab && resultsView !== "map" && <KeyStrip zone="grid" state={commandState} />}
           <Presence open={trayUp}>
             <EditTray
               count={rowEdits.count}

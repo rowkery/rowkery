@@ -194,6 +194,16 @@ const openTable = async (name) => {
 
 const chip = (name) => page.textContent(`${panel} [data-import-picker="${name}"]`).then((t) => t.trim());
 const rowCount = () => page.getAttribute(`${ws} [data-testid="results-grid-wrap"]`, "data-row-count");
+const activeTabTitle = () => page.textContent(`${ws} [data-testid="query-tab"][aria-selected="true"] [data-testid="query-tab-title"]`).then((t) => t.trim());
+// The import tab shows the file's rows and nothing of a table's or a query's.
+const importTabClean = async (table) => {
+  check((await activeTabTitle()) === `Import · ${table}`, `the import tab is shown (${await activeTabTitle()})`);
+  const leaks = await page.evaluate((ws) => {
+    const w = document.querySelector(ws);
+    return ["[data-empty-rows]", '[data-testid="sql-editor"]', "[data-sql-line]", "[data-add-filter]", '[data-testid="run-btn"]'].filter((sel) => w.querySelector(sel));
+  }, ws);
+  check(leaks.length === 0, `no query line, filter, editor or "No records" (${leaks.join(", ")})`);
+};
 
 // ⌘K Import CSV… from the query tab: the file first, then the table it fits.
 await page.keyboard.press("Control+k");
@@ -205,8 +215,7 @@ await page.waitForSelector(panel);
 check((await page.textContent(`${panel} [data-import-file]`)).trim() === "orders-october.csv · 12,431 rows · 8 columns", "the panel names the file, its rows and columns");
 check((await chip("connection")) === "shop", "Connection is the window's");
 check((await chip("table")) === "orders", `Table is the best fit for the file (${await chip("table")})`);
-await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "14", ws);
-check((await rowCount()) === "14", "the orders tab came forward");
+await importTabClean("orders");
 check(
   JSON.stringify(await mapping()) ===
     JSON.stringify(["id", "customer_id", "email", "status", "skip(skipped)", "note", "skip(skipped)", "skip(skipped)"]),
@@ -255,6 +264,9 @@ check(
   `import_csv gets the mapping and choices (${JSON.stringify(spec)})`,
 );
 check((await page.locator(`${ws} [data-import-row]`).count()) === 0, "the preview rows leave with the panel");
+await page.waitForTimeout(400);
+const tabsAfter = await page.$$eval(`${ws} [data-testid="query-tab"]:not([aria-hidden]) [data-testid="query-tab-title"]`, (els) => els.map((e) => e.textContent.trim()));
+check((await activeTabTitle()) === "orders" && !tabsAfter.some((t) => t.startsWith("Import")), `after Import the import tab gives way to the table's own tab (${tabsAfter.join(", ")} · ${await activeTabTitle()})`);
 await page.waitForFunction(() => !document.querySelector("[data-toast]"), null, { timeout: 6000 });
 
 // The schema panel's table menu: Import CSV… on a table, not on a view.
@@ -303,7 +315,7 @@ await page.evaluate(
 await page.waitForSelector(panel);
 check((await chip("table")) === "customers", "a drop on customers imports into customers");
 check((await calls("preview_csv")).at(-1)?.path === "/home/me/people.csv", "the dropped file is the one read");
-check((await rowCount()) === "14", "the customers tab came forward");
+await importTabClean("customers");
 
 // The Table picker: best fit first with its match count; filter and ↵ moves the import.
 await page.click(`${panel} [data-import-picker="table"]`);
@@ -317,7 +329,7 @@ await page.keyboard.press("Enter");
 await page.waitForSelector('[data-import-popover="table"]', { state: "detached" });
 check((await chip("table")) === "orders", "↵ picks the filtered table");
 check((await page.getAttribute(`${panel} [data-import-matched]`, "data-import-matched")) === "5", "the columns match the new table");
-check((await page.locator(`${ws} [data-import-row]`).count()) === 20, "the preview moves to the orders grid");
+check((await page.locator(`${ws} [data-import-row]`).count()) === 20 && (await activeTabTitle()) === "Import · orders", "the preview follows the table, in the same tab");
 await page.click(`${panel} [data-import-file]`);
 await page.keyboard.press("Escape");
 await page.waitForSelector(panel, { state: "detached" });
