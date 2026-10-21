@@ -185,7 +185,7 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
         : [],
     );
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-  const tipRule = hover ? onDeleteLabel(hover.edge.fk.on_delete) : null;
+  const tipRule = !hover ? null : hover.edge.guessed ? "guessed from the name, no foreign key" : onDeleteLabel(hover.edge.fk.on_delete);
 
   return (
     <div
@@ -252,6 +252,7 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
                   data-testid="sm-edge"
                   data-edge={edge.id}
                   data-far={far ? "" : undefined}
+                  data-guessed={edge.guessed ? "" : undefined}
                   data-on={on ? "" : undefined}
                 >
                   <path data-line className="sm-line" d={d} />
@@ -300,7 +301,7 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
                     data-lit={litCols.has(c.name) ? "" : undefined}
                   >
                     <span className="sm-col-icon">
-                      {c.kind === "pk" ? <KeyIcon size={11} /> : c.kind === "fk" ? <ArrowOutIcon size={11} /> : null}
+                      {c.kind === "pk" ? <KeyIcon size={11} /> : c.kind === "fk" || c.kind === "guess" ? <ArrowOutIcon size={11} /> : null}
                     </span>
                     <span className="sm-col-name">{c.name}</span>
                     <span className="sm-col-type">{c.type}</span>

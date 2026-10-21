@@ -114,6 +114,15 @@
   stroke: var(--line2);
 }
 
+/* No foreign key in the database, only a name that reads like one. */
+[data-testid="sm-edge"][data-guessed] .sm-line {
+  stroke-dasharray: 4 4;
+}
+
+.sm-col[data-kind="guess"] .sm-col-icon {
+  color: var(--faint);
+}
+
 [data-testid="sm-edge"][data-on] .sm-line {
   stroke: var(--text);
   stroke-width: 1.6;
@@ -231,7 +240,7 @@
 .sm-tip {
   position: absolute;
   z-index: 2;
-  max-width: 420px;
+  width: max-content;
   padding: 5px 9px;
   border-radius: 6px;
   background: var(--toast-bg);
