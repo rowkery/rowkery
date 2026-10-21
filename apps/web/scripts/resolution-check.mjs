@@ -3,7 +3,8 @@
 // second line where it must stay on one; the hero's job cycle running. Then Reduce Motion
 // (nothing moves or pins, every scene a plain stack with each step's result showing: the typed
 // SQL whole, every check, the stand-ins, every caption), no scripts (every section and caption
-// in reading order) and the 404. Fails on any page error. Writes one contact sheet per size.
+// in reading order), the story failing to run (its scripts blocked, or the engine throwing: the
+// same stack) and the 404. Fails on any page error. Writes one contact sheet per size.
 // The story's own moments are scripts/story-proof.mjs; the penguins, scripts/penguin-proof.mjs.
 //
 //   npm run build && node scripts/resolution-check.mjs [outDir]
@@ -120,7 +121,7 @@ const STACK = () => {
   for (const v of document.querySelectorAll(".cc, [data-sec]")) if (!/^masked:|\*\*\*|not shared/.test(v.textContent)) out.push(`a stand-in shows its real value: ${v.textContent}`);
   for (const p of document.querySelectorAll(".a-review, .k-win .panel")) if (!shown(p)) out.push("a step's panel is hidden");
   // The words in reading order: each scene's title before its captions, the scenes in story order.
-  const order = ["#hero h1", "#agent .title", "#agent .caps", "#security .title", "#keys .title", "#free .big", "#get h2", "#connect", "[data-follow]", "footer"].map((s) => R(document.querySelector(s)).top);
+  const order = ["#hero h1", "#agents .title", "#agents .caps", "#security .title", "#keys .title", "#free .big", "#get h2", "#connect", "[data-follow]", "footer"].map((s) => R(document.querySelector(s)).top);
   if (order.some((t, i) => i && t <= order[i - 1])) out.push("the sections don't read in order");
   return out;
 };
@@ -157,6 +158,29 @@ for (const [w, h] of [[1280, 800], [390, 844]]) {
   if (sw > 0) problems.push(`${tag}: page scrolls sideways by ${sw}px`);
   await page.screenshot({ path: `${OUT}/no-scripts-${w}x${h}.png`, fullPage: true });
   await ctx.close();
+}
+
+// When the story can't run although the page asked for motion: the page's own scripts fail to
+// load (a flaky network, a blocker), or the engine throws partway through its start. Either way
+// the mark comes off and every scene falls back to the same stack, never an empty black stage.
+for (const [why, setup] of [
+  ["scripts blocked", (page) => page.route(/\/_next\/static\/chunks\/.*\.js/, (r) => r.abort())],
+  ["story throws", (page) => page.addInitScript(() => (window.ResizeObserver = class { constructor() { throw new Error("test: the story fails"); } }))],
+]) {
+  for (const [w, h] of [[1280, 800], [390, 844]]) {
+    const tag = `${why} ${w}x${h}`;
+    const phone = w < 600;
+    const { ctx, page } = await open({ viewport: { width: w, height: h }, isMobile: phone, hasTouch: phone }, tag);
+    await setup(page);
+    await page.goto(url, { waitUntil: "load" });
+    await page.waitForTimeout(1500);
+    const left = await page.evaluate(() => [...document.querySelectorAll("[data-scene] [style]")].filter((e) => /transform|opacity|visibility/.test(e.getAttribute("style"))).length);
+    if (left) problems.push(`${tag}: ${left} pieces keep styles the story wrote`);
+    (await page.evaluate(STACK)).forEach((s) => problems.push(`${tag}: ${s}`));
+    await page.evaluate(() => document.querySelector("[data-scene=agent]").scrollIntoView());
+    await page.screenshot({ path: `${OUT}/${why.replace(" ", "-")}-${w}x${h}.png` });
+    await ctx.close();
+  }
 }
 
 // The 404: the tilted penguin and the way home.

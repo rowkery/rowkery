@@ -75,7 +75,7 @@ for (const [w, h] of [[1440, 900], [390, 844]]) {
   if (!fonts.body.includes("ibm_plex_sans")) bad(`body text isn't IBM Plex Sans (${fonts.body})`);
 
   // 3. The order of the sections.
-  const order = await page.evaluate(() => ["#hero", "#agent", "#security", "#keys", "#free", "#get", "#connect", "#faq", "[data-follow]", "footer"].map((s) => document.querySelector(s)?.getBoundingClientRect().top ?? NaN));
+  const order = await page.evaluate(() => ["#hero", "#agents", "#security", "#keys", "#free", "#get", "#connect", "#faq", "[data-follow]", "footer"].map((s) => document.querySelector(s)?.getBoundingClientRect().top ?? NaN));
   if (order.some((t, i) => Number.isNaN(t) || (i && t < order[i - 1]))) bad(`the sections are out of order (${order.map(Math.round)})`);
 
   // 4. The hero's jobs, and the way into the story.
@@ -97,7 +97,7 @@ for (const [w, h] of [[1440, 900], [390, 844]]) {
   await page.click("[data-jump]");
   await page.waitForTimeout(2500);
   const landed = await page.evaluate(() => {
-    const r = document.querySelector("#agent").getBoundingClientRect();
+    const r = document.querySelector("#agents").getBoundingClientRect();
     return r.top <= 1 && r.bottom >= innerHeight;
   });
   if (!landed) bad("See how it works didn't land in the agent scene");

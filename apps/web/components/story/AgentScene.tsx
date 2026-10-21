@@ -30,7 +30,7 @@ const CHECKS = [
 
 export function AgentScene() {
   return (
-    <section className="scene" id="agent" style={units(6.6)} data-scene="agent">
+    <section className="scene" id="agents" style={units(6.6)} data-scene="agent">
       <div className="stage">
         <Title lines={["Let your AI agent", "read your database"]} />
         <Steps

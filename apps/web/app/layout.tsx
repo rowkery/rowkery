@@ -101,8 +101,11 @@ const STRUCTURED_DATA = {
 
 // The story plays out as you scroll only with scripts and without Reduce Motion. This runs
 // before the first paint and marks the page, so the pinned layout (components/story/story.css)
-// is there from the start; without the mark every scene is a plain stack, fully shown.
-const MOTION = `if(!matchMedia("(prefers-reduced-motion: reduce)").matches)document.documentElement.setAttribute("data-motion","")`;
+// is there from the start; without the mark every scene is a plain stack, fully shown. The
+// pinned scenes need the story engine to show anything, so the mark comes off again if the
+// page's own scripts fail to load, or if the engine hasn't started (data-story) a few seconds
+// after the page has loaded. The engine takes it off itself if it fails (story/engine.ts).
+const MOTION = `(function(){var d=document.documentElement;if(matchMedia("(prefers-reduced-motion: reduce)").matches)return;d.setAttribute("data-motion","");function off(){if(!d.hasAttribute("data-story"))d.removeAttribute("data-motion")}addEventListener("error",function(e){var s=e.target;if(s&&s.tagName==="SCRIPT"&&s.src.indexOf("/_next/")>=0)off()},true);addEventListener("load",function(){setTimeout(off,4000)})})()`;
 
 // Dark only (2026-10-14).
 export const viewport: Viewport = {

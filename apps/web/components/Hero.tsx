@@ -70,7 +70,7 @@ export function Hero() {
         </p>
         <div className="ctas">
           <DownloadButton />
-          <a className="btn soft" href="#agent" data-jump>
+          <a className="btn soft" href="#agents" data-jump>
             See how it works
           </a>
         </div>

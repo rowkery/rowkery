@@ -1,14 +1,19 @@
 // Proves every penguin on the built site (out/) is drawn whole, in Chromium, at nine window
-// sizes: at each of the story's named moments (scripts/story.mjs: the hero, every scene's rest
-// moments, the close, the sections under it and the page end), it samples a grid of points
-// inside each visible penguin's fill (the mark's own path, so the props and the box around it
-// don't count) and hit-tests them with every layer made hittable, decorative ones included
-// (`* { pointer-events: auto !important }`). A point is fine when the topmost element there that
-// shows (not faded to nothing) is the penguin itself or something it holds (its own [data-pg]
-// box). Anything else on top is a covered penguin and fails. A penguin cut by the edge of the screen fails too, unless it sits in
-// the page's normal flow while the moment is about something else (it is scrolling past): a
-// pinned scene, the hero and the close's own penguin must be whole on screen. Then the colony,
-// scrolled in, halfway and out: every bird on the ground line, none touching its neighbour.
+// sizes. A penguin is checked by sampling a grid of points inside its fill (the mark's own path,
+// so the props and the box around it don't count) and hit-testing them with every layer made
+// hittable, decorative ones included (`* { pointer-events: auto !important }`). A point is fine
+// when the topmost element there that shows (not faded to nothing) is the penguin itself or
+// something it holds (its own [data-pg] box). Anything else on top is a covered penguin.
+//
+// 1. The story's named moments (scripts/story.mjs: the hero, every scene's rest moments, the
+//    close and the page end): no penguin covered, and none cut by the edge of the screen unless
+//    it sits in the page's flow while the moment is about something else (it is scrolling past);
+//    a pinned scene's, the hero's, the close's and the nav's penguins must be whole on screen.
+// 2. A sweep through every pinned scene in 0.1-unit steps, since a reader can stop anywhere:
+//    no penguin that shows at all is ever covered, and one in a scene is cut by the screen's edge
+//    only while it is entering or leaving (moving or fading between steps).
+// 3. The colony, scrolled in, halfway and out: every bird on the ground line, none touching its
+//    neighbour.
 //
 //   npm run build && node scripts/penguin-proof.mjs [w h]
 //
@@ -18,6 +23,76 @@ import { MOMENTS, goTo } from "./story.mjs";
 
 const { chromium } = playwright();
 const SIZES = process.argv[3] ? [[Number(process.argv[2]), Number(process.argv[3])]] : [[1440, 900], [1280, 800], [1024, 768], [1920, 1080], [820, 1180], [390, 844], [430, 932], [375, 667], [360, 740]];
+const STEP = 0.1;
+
+// In the page: counts the frames the story asks for, so a step waits exactly until it settles;
+// and measures every penguin showing at least `min` opacity.
+const HELPERS = `
+  window.__frames = 0;
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => (window.__frames++, raf(cb));
+  window.__penguins = (min) => {
+    const out = [];
+    const seen = (el) => {
+      let op = 1;
+      for (let e = el instanceof SVGElement && el.ownerSVGElement ? el.ownerSVGElement : el; e; e = e.parentElement) {
+        const cs = getComputedStyle(e);
+        op *= Number(cs.opacity);
+        if (cs.visibility === "hidden" || op < 0.02) return false;
+      }
+      return true;
+    };
+    for (const path of document.querySelectorAll("svg.pg path")) {
+      if ((path.getAttribute("d") || "").length < 5000) continue;
+      const svg = path.ownerSVGElement;
+      let op = 1;
+      for (let e = svg; e; e = e.parentElement) {
+        const cs = getComputedStyle(e);
+        op *= Number(cs.opacity);
+        if (cs.visibility === "hidden" || cs.display === "none") op = 0;
+      }
+      if (op < min) continue;
+      const r = path.getBoundingClientRect();
+      if (r.width < 4 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+      const own = svg.closest("[data-pg]") ?? svg.closest(".mk") ?? svg;
+      const name = own.dataset?.pg ?? (svg.closest(".nav") ? "nav brand" : svg.closest(".dock") ? "dock brand" : svg.closest("footer") ? "foot brand" : String(own.getAttribute("class")));
+      const inv = path.getScreenCTM().inverse();
+      let inside = 0, hidden = 0, off = 0;
+      const misses = [];
+      for (let i = 1; i < 24; i++)
+        for (let j = 1; j < 24; j++) {
+          const x = r.left + (r.width * i) / 24, y = r.top + (r.height * j) / 24;
+          if (!path.isPointInFill(new DOMPoint(x, y).matrixTransform(inv))) continue;
+          inside++;
+          if (x < 0 || y < 0 || x > innerWidth - 1 || y > innerHeight - 1) {
+            off++;
+            continue;
+          }
+          const top = document.elementsFromPoint(x, y).find(seen);
+          if (top && own.contains(top)) continue;
+          hidden++;
+          if (misses.length < 3) misses.push(Math.round(x) + "," + Math.round(y) + " " + (top ? top.tagName.toLowerCase() + "." + String(top.className.baseVal ?? top.className).split(" ")[0] : "nothing"));
+        }
+      out.push({ name, inScene: !!svg.closest("[data-scene]"), op: Number(op.toFixed(2)), rect: [r.left, r.top, r.width, r.height].map(Math.round), inside, hidden, off, misses });
+    }
+    return out;
+  };
+`;
+
+/** Waits until the story stops asking for frames, then for any entrance still playing. */
+async function settle(page) {
+  let last = -1;
+  for (let i = 0; i < 80; i++) {
+    const n = await page.evaluate(() => window.__frames);
+    if (n === last) break;
+    last = n;
+    await page.waitForTimeout(150);
+  }
+  await page.waitForFunction(() => !document.getAnimations().some((a) => a.playState === "running" && a.effect.getComputedTiming().iterations !== Infinity), null, { timeout: 4000 }).catch(() => {});
+}
+
+const line = (bad, where, r) => `  ${bad ? "BAD " : r.off ? "edge" : "ok  "} ${where.padEnd(18)} ${r.name.padEnd(12)} op ${String(r.op).padEnd(4)} ${JSON.stringify(r.rect)} covered ${r.hidden}/${r.inside} off ${r.off}${r.misses.length ? " under " + r.misses.join("; ") : ""}`;
+
 const server = await serveOut();
 const browser = await chromium.launch();
 let failed = 0;
@@ -27,70 +102,63 @@ for (const [w, h] of SIZES) {
   const page = await browser.newPage({ viewport: { width: w, height: h }, isMobile: phone, hasTouch: phone });
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript(HELPERS);
   await page.goto(server.url, { waitUntil: "networkidle" });
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(2200);
   await page.addStyleTag({ content: "* { pointer-events: auto !important; }" });
-  let bad = 0, checked = 0;
+  let bad = 0, checked = 0, steps = 0;
+
+  // 1. The named moments.
   for (const m of MOMENTS) {
     await goTo(page, m, 1400);
-    const res = await page.evaluate((m) => {
-      const out = [];
-      const pinned = !!m.scene || m.at === "top";
-      // Whether an element shows at all: no box faded to nothing or hidden on the way up.
-      const seen = (el) => {
-        let op = 1;
-        for (let e = el instanceof SVGElement && el.ownerSVGElement ? el.ownerSVGElement : el; e; e = e.parentElement) {
-          const cs = getComputedStyle(e);
-          op *= Number(cs.opacity);
-          if (cs.visibility === "hidden" || op < 0.02) return false;
-        }
-        return true;
-      };
-      for (const path of document.querySelectorAll("svg.pg path")) {
-        if ((path.getAttribute("d") || "").length < 5000) continue;
-        const svg = path.ownerSVGElement;
-        let op = 1;
-        for (let e = svg; e; e = e.parentElement) {
-          const cs = getComputedStyle(e);
-          op *= Number(cs.opacity);
-          if (cs.visibility === "hidden" || cs.display === "none") op = 0;
-        }
-        if (op < 0.5) continue;
-        const r = path.getBoundingClientRect();
-        if (r.width < 4 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
-        const own = svg.closest("[data-pg]") ?? svg.closest(".mk") ?? svg;
-        const name = own.dataset?.pg ?? (svg.closest(".nav") ? "nav brand" : svg.closest(".dock") ? "dock brand" : svg.closest("footer") ? "foot brand" : String(own.getAttribute("class")));
-        const inv = path.getScreenCTM().inverse();
-        let inside = 0, hidden = 0, off = 0;
-        const misses = [];
-        for (let i = 1; i < 24; i++)
-          for (let j = 1; j < 24; j++) {
-            const x = r.left + (r.width * i) / 24, y = r.top + (r.height * j) / 24;
-            if (!path.isPointInFill(new DOMPoint(x, y).matrixTransform(inv))) continue;
-            inside++;
-            if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) {
-              off++;
-              continue;
-            }
-            const top = document.elementsFromPoint(x, y).find(seen);
-            if (top && own.contains(top)) continue;
-            hidden++;
-            if (misses.length < 3) misses.push(`${Math.round(x)},${Math.round(y)} ${top ? top.tagName.toLowerCase() + "." + String(top.className.baseVal ?? top.className).split(" ")[0] : "nothing"}`);
-          }
-        // Off the edge only counts as scrolling past for a penguin in the page's flow at a moment about something else.
-        const atRest = pinned || name === "close" || name.startsWith("nav") || name.startsWith("dock");
-        out.push({ name, rect: [r.left, r.top, r.width, r.height].map(Math.round), inside, hidden, off, bad: hidden > 0 || (off > 0 && atRest), misses });
-      }
-      return out;
-    }, m);
-    for (const r of res) {
+    const pinned = !!m.scene || m.at === "top";
+    for (const r of await page.evaluate(() => window.__penguins(0.5))) {
+      // Off the edge only counts as scrolling past for a penguin in the page's flow at a moment about something else.
+      const atRest = pinned || r.name === "close" || r.name.startsWith("nav") || r.name.startsWith("dock");
+      const no = r.hidden > 0 || (r.off > 0 && atRest);
       checked++;
-      if (r.bad) bad++;
-      if (r.bad || process.env.VERBOSE) console.log(`  ${r.bad ? "BAD " : r.off ? "edge" : "ok  "} ${m.name.padEnd(18)} ${r.name.padEnd(12)} ${JSON.stringify(r.rect)} covered ${r.hidden}/${r.inside} off ${r.off}${r.misses.length ? " under " + r.misses.join("; ") : ""}`);
+      if (no) bad++;
+      if (no || process.env.VERBOSE) console.log(line(no, m.name, r));
     }
   }
-  // The colony: as it scrolls in and out (its drift at either end), every bird stands on the
+
+  // 2. Every pinned scene, a tenth of a unit at a time.
+  const scenes = await page.evaluate(() =>
+    [...document.querySelectorAll("[data-scene]")].map((el) => {
+      const n = parseFloat(el.style.getPropertyValue("--n"));
+      return { name: el.dataset.scene, n, top: el.offsetTop, unit: (el.offsetHeight - el.querySelector(".stage").offsetHeight) / n };
+    }),
+  );
+  for (const sc of scenes) {
+    const seq = [];
+    for (let i = 0; i * STEP <= sc.n + 1e-6; i++) {
+      const s = i * STEP;
+      await page.evaluate((y) => scrollTo({ top: y, behavior: "instant" }), Math.round(sc.top + s * sc.unit));
+      await settle(page);
+      seq.push([s, await page.evaluate(() => window.__penguins(0.1))]);
+      steps++;
+    }
+    const at = (i, name) => seq[i]?.[1].find((r) => r.name === name);
+    // Entering or leaving: fading, or moved since the step before or by the step after.
+    const moving = (i, r) => {
+      if (r.op < 0.98) return true;
+      return [i - 1, i + 1].some((k) => {
+        const o = at(k, r.name);
+        return k >= 0 && k < seq.length && (!o || o.rect.some((v, j) => Math.abs(v - r.rect[j]) > 1));
+      });
+    };
+    seq.forEach(([s, res], i) => {
+      for (const r of res) {
+        const no = r.hidden > 0 || (r.off > 0 && r.inScene && !moving(i, r));
+        checked++;
+        if (no) bad++;
+        if (no || process.env.VERBOSE) console.log(line(no, `${sc.name} ${s.toFixed(1)}`, r));
+      }
+    });
+  }
+
+  // 3. The colony: as it scrolls in and out (its drift at either end), every bird stands on the
   // ground line and none touches its neighbour.
   for (const p of [0, 0.5, 1]) {
     await page.evaluate((p) => {
@@ -114,7 +182,7 @@ for (const [w, h] of SIZES) {
     console.log(`  page error: ${e}`);
     bad++;
   }
-  console.log(`${w}x${h}: ${checked} penguins at ${MOMENTS.length} moments, ${bad ? `${bad} not whole` : "all penguins whole"}`);
+  console.log(`${w}x${h}: ${checked} penguin checks at ${MOMENTS.length} moments and ${steps} scene steps, ${bad ? `${bad} not whole` : "all penguins whole"}`);
   failed += bad;
   await page.close();
 }

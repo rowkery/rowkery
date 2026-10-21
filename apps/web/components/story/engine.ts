@@ -26,7 +26,9 @@ const $ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = docu
 const $$ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document) => [...root.querySelectorAll(sel)] as T[];
 
 // ── Writing styles only when they change ───────────────────────────────────
-const written = new WeakMap<HTMLElement, Record<string, string>>();
+// Everything written is remembered, so a story that fails can hand the page back as it came.
+const written = new Map<HTMLElement, Record<string, string>>();
+const markup = new Map<HTMLElement, string>();
 function css(el: HTMLElement, prop: string, value: string) {
   let w = written.get(el);
   if (!w) written.set(el, (w = {}));
@@ -34,8 +36,21 @@ function css(el: HTMLElement, prop: string, value: string) {
   w[prop] = value;
   el.style.setProperty(prop, value);
 }
+function setHTML(el: HTMLElement, html: string) {
+  if (!markup.has(el)) markup.set(el, el.innerHTML);
+  el.innerHTML = html;
+}
 function setText(el: HTMLElement, t: string) {
-  if (el.textContent !== t) el.textContent = t;
+  if (el.textContent === t) return;
+  if (!markup.has(el)) markup.set(el, el.innerHTML);
+  el.textContent = t;
+}
+/** Takes back every style and text the story wrote, leaving the markup's finished state. */
+function undoWrites() {
+  for (const [el, w] of written) for (const prop in w) el.style.removeProperty(prop);
+  for (const [el, html] of markup) el.innerHTML = html;
+  written.clear();
+  markup.clear();
 }
 /** Places a piece (design px), with its scale and opacity; hidden outright once it fades out. */
 function place(el: HTMLElement, v: { x: number; y: number; s?: number; o?: number }) {
@@ -227,7 +242,7 @@ class AgentScene extends Scene {
       if (part) html += typeof p === "string" ? part.replace(/</g, "&lt;") : `<span class="k">${part}</span>`;
     }
     if (left < 0 || s < 2.2) html += '<span class="caret"></span>';
-    if (this.html !== html) this.sql.innerHTML = this.html = html;
+    if (this.html !== html) setHTML(this.sql, (this.html = html));
     // Step 2: the checks lift out to the right and tick one by one.
     const ch = L(2.15, 2.5) * (1 - L(3.05, 3.35));
     place(this.checks, phone ? { x: 30, y: mix(260, 190, ch), o: ch } : { x: inX(mix(W - 330, W - 210, ch), 332), y: mix(210, 150, ch), o: ch });
@@ -254,8 +269,9 @@ class AgentScene extends Scene {
     place(this.toast, phone ? { x: 70, y: mix(450, 400, ts) - leave * 120, o: ts } : { x: mix(230, 260, ts), y: mix(500, 440, ts) - leave * 120, o: ts });
     // The penguin stands on the window's top edge and carries what fits the step.
     if (setProp(this.peek, ["letter", "magnifier", "shades", "sign"][this.steps.at(s)])) hop($(".hopper", this.peek));
-    const pk = seg(s, 1.05, 1.4, easeOut);
-    place(this.peek, { x: phone ? 260 : 560, y: mix(20, -78, pk) - leave * 120 + mix(160, 0, enter), o: Math.min(pk, 1 - leave) });
+    // It leaves with the window but is gone in its first stretch, long before the nav.
+    const pk = seg(s, 1.05, 1.4, easeOut), gone = seg(s, 5.6, 5.9, linear);
+    place(this.peek, { x: phone ? 260 : 560, y: mix(20, -78, pk) - leave * 120 + mix(160, 0, enter), o: Math.min(pk, 1 - gone) });
   }
 }
 
@@ -279,9 +295,19 @@ class SecurityScene extends Scene {
     this.title.update(seg(s, -0.9, 0.35, linear), seg(s, 0.55, 1.05, linear));
     this.steps.update(s);
     const enter = seg(s, 0.7, 1.35), leave = seg(s, 4.35, 5.1), card = seg(s, 0.95, 1.4), cardO = seg(s, 0.95, 1.35) * (1 - leave);
-    // The penguin rises from below the stage and sinks back at the end, faster than it came.
-    place(this.gpg, phone ? { x: 44, y: mix(660, 0, enter) + leave * 900, o: 1 - leave } : { x: 345, y: mix(620, 68, enter) + leave * 900, o: 1 - leave });
-    place(this.card, phone ? { x: 0, y: mix(420, 292, card) - leave * 80, o: cardO } : { x: 0, y: mix(330, 200, card) - leave * 80, o: cardO });
+    if (wide) {
+      // The penguin rises from below the stage beside the card and sinks back at the end, faster
+      // than it came; it shows only once it is on its way.
+      place(this.gpg, { x: 345, y: mix(620, 68, enter) + leave * 900, o: seg(s, 0.7, 0.9, linear) * (1 - leave) });
+      place(this.card, { x: 0, y: mix(330, 200, card) - leave * 80, o: cardO });
+    } else {
+      // Narrower screens have the dock at the foot and, on a phone, the card right under the
+      // penguin, so it never travels: it grows from its feet once the title has gone and shrinks
+      // back to them at the end.
+      const grow = seg(s, 1.05, 1.45, easeOut), shrink = seg(s, 4.35, 4.7);
+      place(this.gpg, { x: phone ? 44 : 345, y: phone ? 0 : 68, s: mix(0.6, 1, grow) - shrink * 0.4, o: grow * (1 - shrink) });
+      place(this.card, phone ? { x: 0, y: mix(420, 292, card), s: 1 - leave * 0.04, o: cardO } : { x: 0, y: mix(330, 200, card) - leave * 80, o: cardO });
+    }
     const step = this.steps.at(s);
     this.panes.forEach((p, i) => p.classList.toggle("off", i !== step));
     // Step 1: three tables switch on.
@@ -306,7 +332,7 @@ class SecurityScene extends Scene {
       css(this.beams[i], "transform", `translateX(${(118 + p * 165).toFixed(1)}px)`);
     });
     // The big penguin picks up a magnifier, then orange shades, then a key.
-    if (s > 0.9 && setProp(this.gpg, ["magnifier", "shades", "key"][step])) hop($(".hopper", this.gpg));
+    if (s > 0.6 && setProp(this.gpg, ["magnifier", "shades", "key"][step])) hop($(".hopper", this.gpg));
   }
 }
 
@@ -420,262 +446,301 @@ const CHAPTERS = [
   ["04", "For everyone"],
 ];
 
+/**
+ * Starts the story and returns its stop. If it fails, now or on any later frame, it stops, takes
+ * back what it wrote and drops `data-motion`, so the scenes fall back to the plain stack instead
+ * of standing empty. (app/layout.tsx drops it too when the page's scripts never arrive.)
+ */
 export function startStory() {
   root = document.documentElement;
   const ac = new AbortController();
-  const on = { signal: ac.signal, passive: true } as const;
-  root.setAttribute("data-story", "");
-
-  const agent = new AgentScene($("[data-scene=agent]"), 6.6);
-  const security = new SecurityScene($("[data-scene=security]"), 5.2);
-  const keys = new KeysScene($("[data-scene=keys]"), 5.2);
-  const free = new FreeScene($("[data-scene=free]"), 5.4);
-  const scenes: Scene[] = [agent, security, keys, free];
-
-  // ── Hero ──
-  const hero = $("[data-hero]"), hpg = $(".hpg", hero), look = $(".look", hpg), props = $(".props", hpg), hop1 = $(".hop1", hpg);
-  const htL = $(".ht-l", hero), htR = $(".ht-r", hero), hFoot = $(".h-foot", hero), now = $(".now-o", hero), cue = $(".cue-o", hero);
-  const brandMk = $(".nav .brand .mk");
-  let base = { x: 0, y: 0, w: 1 };
-  function measureHero() {
-    // The job line sits under the penguin, wherever the words' widths put it.
-    const slot = $(".h-slot", hero).getBoundingClientRect(), mid = $(".h-mid", hero).getBoundingClientRect();
-    css(now, "--nx", (slot.left + slot.width / 2 - (mid.left + mid.width / 2)).toFixed(1) + "px");
-    const prev = hpg.style.transform;
-    hpg.style.transform = "none";
-    const r = hpg.getBoundingClientRect();
-    base = { x: r.left + r.width / 2, y: r.top + r.height / 2 + scrollY, w: r.width };
-    hpg.style.transform = prev;
-    heroKey = "";
-  }
-  // The jobs take turns on a CSS cycle (2.6 s each, globals.css); a mouse moving across the hero
-  // picks one and holds it (.held), and a tap moves on to the next.
-  const JOB_MS = 2600, JOBS = 5;
-  const cycle = () => hero.getAnimations({ subtree: true }).filter((a) => a instanceof CSSAnimation && (a.animationName === "job" || a.animationName === "hopc"));
-  let picked = -1;
-  hero.addEventListener(
-    "pointermove",
-    (e) => {
-      if (e.pointerType !== "mouse") return;
-      const i = clamp(Math.floor((e.clientX / VW) * JOBS), 0, JOBS - 1);
-      if (i === picked) return;
-      picked = i;
-      // Held by a class, not pause(): once a script pauses or plays a CSS animation, the
-      // stylesheet can no longer pause it, and the hero's loops must stop when it scrolls away.
-      hero.classList.add("held");
-      for (const a of cycle()) a.currentTime = i * JOB_MS + 450;
-      hop(hop1);
-    },
-    on,
-  );
-  hero.addEventListener(
-    "pointerleave",
-    () => {
-      picked = -1;
-      hero.classList.remove("held");
-    },
-    on,
-  );
-  hero.addEventListener(
-    "pointerdown",
-    (e) => {
-      if (e.pointerType === "mouse") return;
-      for (const a of cycle()) a.currentTime = (Math.floor(Number(a.currentTime ?? 0) / JOB_MS) + 1) * JOB_MS;
-    },
-    on,
-  );
-
-  // ── Nav, dock, grid, the close and the colony ──
-  const nav = $("[data-nav]"), chapter = $(".chapter", nav), chIn = $(".ch-in", nav), chN = $(".ch-n", nav), chT = $(".ch-t", nav), chBar = $(".ch-bar i", nav);
-  const dock = $("[data-dock]"), grid = $(".bg-grid"), gridI = $(".bg-grid i");
-  const close = $("[data-close]"), colony = $("[data-colony]"), birds = $$(".bird", colony);
-  let shownCh = -2, drift = 0;
-  function setChapter(c: number) {
-    if (c === shownCh) return;
-    shownCh = c;
-    chapter.classList.toggle("on", c >= 0);
-    if (c < 0) return;
-    setText(chN, CHAPTERS[c][0]);
-    setText(chT, CHAPTERS[c][1]);
-    replay(chIn, "sa", "sb");
-    css(chapter, "width", chIn.scrollWidth + "px");
-  }
-  function layoutColony() {
-    // Even gaps between the birds standing now; the drift stays under the gap, so neighbours never touch.
-    const shown = birds.filter((b) => b.offsetWidth > 0);
-    const sum = shown.reduce((a, b) => a + b.offsetWidth, 0);
-    drift = Math.max(0, ((colony.clientWidth - sum) / (shown.length + 1)) * 0.9);
-  }
-  $$("[data-jump]").forEach((a) =>
-    a.addEventListener(
-      "click",
-      (e) => {
-        e.preventDefault();
-        scrollTo({ top: agent.top + 0.2 * UNIT, behavior: "smooth" });
-      },
-      { signal: ac.signal },
-    ),
-  );
-  const io = new IntersectionObserver(
-    (en) => {
-      if (!en[0].isIntersecting || close.classList.contains("on")) return;
-      close.classList.add("on");
-      hop($(".hpg2 .hopper", close));
-    },
-    { threshold: 0.35 },
-  );
-  io.observe(close);
-
-  // ── Layout ──
-  function layout() {
-    VW = innerWidth;
-    VH = agent.stage.offsetHeight;
-    wide = VW >= 1000;
-    phone = VW < 600;
-    // The scenes' heights come from CSS (--unit); read it back rather than set it.
-    UNIT = (agent.el.offsetHeight - VH) / agent.n;
-    // Stages: captions left and the object right, or the object over a caption zone.
-    if (wide) {
-      const capx = Math.max(72, VW * 0.075), capw = Math.min(380, VW * 0.27);
-      const left = capx + capw + 40, right = VW - Math.max(40, VW * 0.04);
-      css(root, "--capx", capx + "px");
-      css(root, "--capw", capw + "px");
-      css(root, "--capy", NAV + (VH - NAV) / 2 + "px");
-      css(root, "--ax", (left + right) / 2 + "px");
-      css(root, "--ay", NAV + (VH - NAV) / 2 + "px");
-      AREA = { w: right - left, h: VH - NAV - 50 };
-    } else {
-      const CAP = phone ? 150 : 140, BOT = phone ? 84 : 92;
-      const top = NAV + 6, bottom = VH - CAP - BOT;
-      css(root, "--capx", "24px");
-      css(root, "--capw", VW - 48 + "px");
-      css(root, "--capy", bottom + 22 + CAP / 2 + "px");
-      css(root, "--ax", VW / 2 + "px");
-      css(root, "--ay", (top + bottom) / 2 + "px");
-      AREA = { w: VW - 28, h: bottom - top };
-    }
-    scenes.forEach((s) => s.layout());
-    measureHero();
-    layoutColony();
-    shownCh = -2;
-    wake();
-  }
-
-  // ── Pointer: the hero penguin faces it, the keycaps lean toward it ──
-  let tpx = 0, tpy = 0, mx = -1;
-  addEventListener(
-    "pointermove",
-    (e) => {
-      if (e.pointerType !== "mouse") return;
-      tpx = e.clientX / VW - 0.5;
-      tpy = e.clientY / VH - 0.5;
-      mx = e.clientX;
-      wake();
-    },
-    on,
-  );
-
-  // ── The frame: runs while anything is settling, then stops ──
-  let raf = 0, last = 0, heroKey = "", lastY = -1;
-  function wake() {
-    if (!raf) raf = requestAnimationFrame(frame);
-  }
-  function frame(t: number) {
-    raf = 0;
-    const dt = last ? Math.min(0.05, (t - last) / 1000) : 0.016;
-    last = t;
-    const y = scrollY;
-    let busy = false;
-    keys.px += (tpx - keys.px) * 0.08;
-    keys.py += (tpy - keys.py) * 0.08;
-    if (Math.abs(tpx - keys.px) < 0.0005 && Math.abs(tpy - keys.py) < 0.0005) {
-      keys.px = tpx;
-      keys.py = tpy;
-    } else busy = true;
-    const px = keys.px, py = keys.py;
-
-    // The hero: the words part, and the big penguin flies up into the brand.
-    // Past the hero the scroll is held at its end, so a long jump still lands it there (and pauses its loops).
-    const hy = Math.min(y, VH * 1.2), hk = clamp(hy / (VH * 0.8), 0, 1), he = easeIO(hk);
-    const hKey = `${hy}|${px.toFixed(4)}|${py.toFixed(4)}|${mx >= 0 && mx < base.x - 20}`;
-    if (hKey !== heroKey) {
-      heroKey = hKey;
-      css(htL, "transform", `translateX(${(-hk * VW * 0.22).toFixed(1)}px)`);
-      css(htR, "transform", `translateX(${(hk * VW * 0.22).toFixed(1)}px)`);
-      css(htL, "opacity", clamp(1 - hk * 1.3, 0, 1).toFixed(3));
-      css(htR, "opacity", clamp(1 - hk * 1.3, 0, 1).toFixed(3));
-      css(hFoot, "transform", `translateY(${(-hk * 80).toFixed(1)}px)`);
-      css(hFoot, "opacity", clamp(1 - hk * 1.6, 0, 1).toFixed(3));
-      css(now, "opacity", clamp(1 - hk * 3, 0, 1).toFixed(3));
-      css(cue, "opacity", clamp(1 - hk * 4, 0, 1).toFixed(3));
-      hero.classList.toggle("away", hk > 0.5);
-      // The body (not the box with room for props) lands exactly on the brand's penguin.
-      const br = brandMk.getBoundingClientRect();
-      const end = br.width / (base.w * 0.727), dx = -0.021 * base.w, dy = 0.072 * base.w;
-      const sc = mix(1, end, easeOut(hk));
-      const tx = (br.left + br.width / 2 - base.x - end * dx) * he;
-      const ty = Math.max((br.top + br.height / 2 - (base.y - y) - end * dy) * he, br.top + br.height / 2 - (base.y - y) - sc * dy);
-      css(hpg, "transform", `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${sc.toFixed(4)})`);
-      css(hpg, "visibility", hk >= 1 ? "hidden" : "visible");
-      css(props, "opacity", clamp(1 - he * 2.5, 0, 1).toFixed(3));
-      // It faces the pointer and leans a little toward it; on the way up it straightens out.
-      const face = mx >= 0 && mx < base.x - 20 && he < 0.3 ? -1 : 1;
-      const lean = (1 - he) * clamp(px * 16, -10, 10);
-      css(look, "transform", `translate(${((1 - he) * px * 24).toFixed(1)}px, ${((1 - he) * py * 14).toFixed(1)}px) rotate(${lean.toFixed(2)}deg) scaleX(${face})`);
-    }
-
-    let ch = -1;
-    for (const sc of scenes) {
-      sc.read(y);
-      if (sc.step(dt)) busy = true;
-      if (sc.visible) sc.frame();
-      if (sc.visible && y + VH * 0.5 >= sc.top && y + VH * 0.5 < sc.top + sc.h) ch = scenes.indexOf(sc);
-    }
-    if (keys.visible) keys.lean();
-    if (y !== lastY) {
-      lastY = y;
-      const a = agent.top, b = free.top + free.h - VH;
-      css(chBar, "transform", `scaleX(${clamp((y - a) / (b - a), 0, 1).toFixed(4)})`);
-      css(grid, "opacity", clamp((y - VH * 0.4) / (VH * 0.5), 0, 1).toFixed(3));
-      css(gridI, "transform", `translate3d(0, ${(-((y * 0.12) % 40)).toFixed(1)}px, 0)`);
-      dock.classList.toggle("on", y > VH * 0.6 && close.getBoundingClientRect().top > VH * 0.6);
-      const cr = colony.getBoundingClientRect(), p = (innerHeight - cr.top) / (innerHeight + cr.height);
-      if (p > -0.2 && p < 1.2) birds.forEach((bd) => css(bd, "transform", `translateX(${((clamp(p, 0, 1) - 0.5) * drift * Number(bd.dataset.d)).toFixed(1)}px)`));
-    }
-    setChapter(ch);
-    const nr = nav.getBoundingClientRect();
-    nav.classList.toggle("inv", free.covers(nr.left + nr.width / 2, nr.top + nr.height / 2));
-    if (busy) raf = requestAnimationFrame(frame);
-    else last = 0;
-  }
-
-  layout();
-  let lastW = innerWidth, lastH = innerHeight;
-  addEventListener(
-    "resize",
-    () => {
-      // A phone's address bar showing or hiding changes only the height a little: keep the layout.
-      if (innerWidth === lastW && Math.abs(innerHeight - lastH) < 160 && matchMedia("(pointer: coarse)").matches) return;
-      lastW = innerWidth;
-      lastH = innerHeight;
-      layout();
-    },
-    on,
-  );
-  addEventListener("scroll", wake, on);
-  document.fonts?.ready.then(() => !ac.signal.aborted && layout());
-  const ro = new ResizeObserver(() => {
-    scenes.forEach((s) => s.measure());
-    layoutColony();
-    wake();
-  });
-  ro.observe(document.body);
-
-  return () => {
+  let io: IntersectionObserver | undefined, ro: ResizeObserver | undefined, raf = 0;
+  const stop = () => {
     ac.abort();
-    io.disconnect();
-    ro.disconnect();
+    io?.disconnect();
+    ro?.disconnect();
     cancelAnimationFrame(raf);
     root.removeAttribute("data-story");
   };
+  const fail = (e: unknown) => {
+    stop();
+    undoWrites();
+    $$(".nav.inv, .chapter.on").forEach((el) => el.classList.remove("inv", "on"));
+    root.removeAttribute("data-motion");
+    console.error("The scroll story stopped and the page fell back to the plain layout:", e);
+  };
+  try {
+    run();
+  } catch (e) {
+    fail(e);
+  }
+  return stop;
+
+  function run() {
+    const on = { signal: ac.signal, passive: true } as const;
+    root.setAttribute("data-story", "");
+
+    const agent = new AgentScene($("[data-scene=agent]"), 6.6);
+    const security = new SecurityScene($("[data-scene=security]"), 5.2);
+    const keys = new KeysScene($("[data-scene=keys]"), 5.2);
+    const free = new FreeScene($("[data-scene=free]"), 5.4);
+    const scenes: Scene[] = [agent, security, keys, free];
+
+    // ── Hero ──
+    const hero = $("[data-hero]"), hpg = $(".hpg", hero), look = $(".look", hpg), props = $(".props", hpg), hop1 = $(".hop1", hpg);
+    const htL = $(".ht-l", hero), htR = $(".ht-r", hero), hFoot = $(".h-foot", hero), now = $(".now-o", hero), cue = $(".cue-o", hero);
+    const brandMk = $(".nav .brand .mk");
+    let base = { x: 0, y: 0, w: 1 };
+    function measureHero() {
+      // The job line sits under the penguin, wherever the words' widths put it.
+      const slot = $(".h-slot", hero).getBoundingClientRect(), mid = $(".h-mid", hero).getBoundingClientRect();
+      css(now, "--nx", (slot.left + slot.width / 2 - (mid.left + mid.width / 2)).toFixed(1) + "px");
+      const prev = hpg.style.transform;
+      hpg.style.transform = "none";
+      const r = hpg.getBoundingClientRect();
+      base = { x: r.left + r.width / 2, y: r.top + r.height / 2 + scrollY, w: r.width };
+      hpg.style.transform = prev;
+      heroKey = "";
+    }
+    // The jobs take turns on a CSS cycle (2.6 s each, globals.css); a mouse moving across the hero
+    // picks one and holds it (.held), and a tap moves on to the next.
+    const JOB_MS = 2600, JOBS = 5;
+    const cycle = () => hero.getAnimations({ subtree: true }).filter((a) => a instanceof CSSAnimation && (a.animationName === "job" || a.animationName === "hopc"));
+    let picked = -1;
+    hero.addEventListener(
+      "pointermove",
+      (e) => {
+        if (e.pointerType !== "mouse") return;
+        const i = clamp(Math.floor((e.clientX / VW) * JOBS), 0, JOBS - 1);
+        if (i === picked) return;
+        picked = i;
+        // Held by a class, not pause(): once a script pauses or plays a CSS animation, the
+        // stylesheet can no longer pause it, and the hero's loops must stop when it scrolls away.
+        hero.classList.add("held");
+        for (const a of cycle()) a.currentTime = i * JOB_MS + 450;
+        hop(hop1);
+      },
+      on,
+    );
+    hero.addEventListener(
+      "pointerleave",
+      () => {
+        picked = -1;
+        hero.classList.remove("held");
+      },
+      on,
+    );
+    hero.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (e.pointerType === "mouse") return;
+        for (const a of cycle()) a.currentTime = (Math.floor(Number(a.currentTime ?? 0) / JOB_MS) + 1) * JOB_MS;
+      },
+      on,
+    );
+
+    // ── Nav, dock, grid, the close and the colony ──
+    const nav = $("[data-nav]"), chapter = $(".chapter", nav), chIn = $(".ch-in", nav), chN = $(".ch-n", nav), chT = $(".ch-t", nav), chBar = $(".ch-bar i", nav);
+    const dock = $("[data-dock]"), grid = $(".bg-grid"), gridI = $(".bg-grid i");
+    const close = $("[data-close]"), colony = $("[data-colony]"), birds = $$(".bird", colony);
+    let shownCh = -2, drift = 0;
+    function setChapter(c: number) {
+      if (c === shownCh) return;
+      shownCh = c;
+      chapter.classList.toggle("on", c >= 0);
+      if (c < 0) return;
+      setText(chN, CHAPTERS[c][0]);
+      setText(chT, CHAPTERS[c][1]);
+      replay(chIn, "sa", "sb");
+      css(chapter, "width", chIn.scrollWidth + "px");
+    }
+    function layoutColony() {
+      // Even gaps between the birds standing now; the drift stays under the gap, so neighbours never touch.
+      const shown = birds.filter((b) => b.offsetWidth > 0);
+      const sum = shown.reduce((a, b) => a + b.offsetWidth, 0);
+      drift = Math.max(0, ((colony.clientWidth - sum) / (shown.length + 1)) * 0.9);
+    }
+    $$("[data-jump]").forEach((a) =>
+      a.addEventListener(
+        "click",
+        (e) => {
+          e.preventDefault();
+          scrollTo({ top: agent.top + 0.2 * UNIT, behavior: "smooth" });
+        },
+        { signal: ac.signal },
+      ),
+    );
+    io = new IntersectionObserver(
+      (en) => {
+        if (!en[0].isIntersecting || close.classList.contains("on")) return;
+        close.classList.add("on");
+        hop($(".hpg2 .hopper", close));
+      },
+      { threshold: 0.35 },
+    );
+    io.observe(close);
+
+    // ── Layout ──
+    function layout() {
+      VW = innerWidth;
+      VH = agent.stage.offsetHeight;
+      wide = VW >= 1000;
+      phone = VW < 600;
+      // The scenes' heights come from CSS (--unit); read it back rather than set it.
+      UNIT = (agent.el.offsetHeight - VH) / agent.n;
+      // Stages: captions left and the object right, or the object over a caption zone.
+      if (wide) {
+        const capx = Math.max(72, VW * 0.075), capw = Math.min(380, VW * 0.27);
+        const left = capx + capw + 40, right = VW - Math.max(40, VW * 0.04);
+        css(root, "--capx", capx + "px");
+        css(root, "--capw", capw + "px");
+        css(root, "--capy", NAV + (VH - NAV) / 2 + "px");
+        css(root, "--ax", (left + right) / 2 + "px");
+        css(root, "--ay", NAV + (VH - NAV) / 2 + "px");
+        AREA = { w: right - left, h: VH - NAV - 50 };
+      } else {
+        const CAP = phone ? 150 : 140, BOT = phone ? 84 : 92;
+        const top = NAV + 6, bottom = VH - CAP - BOT;
+        css(root, "--capx", "24px");
+        css(root, "--capw", VW - 48 + "px");
+        css(root, "--capy", bottom + 22 + CAP / 2 + "px");
+        css(root, "--ax", VW / 2 + "px");
+        css(root, "--ay", (top + bottom) / 2 + "px");
+        AREA = { w: VW - 28, h: bottom - top };
+      }
+      scenes.forEach((s) => s.layout());
+      measureHero();
+      layoutColony();
+      shownCh = -2;
+      wake();
+    }
+
+    // ── Pointer: the hero penguin faces it, the keycaps lean toward it ──
+    let tpx = 0, tpy = 0, mx = -1;
+    addEventListener(
+      "pointermove",
+      (e) => {
+        if (e.pointerType !== "mouse") return;
+        tpx = e.clientX / VW - 0.5;
+        tpy = e.clientY / VH - 0.5;
+        mx = e.clientX;
+        wake();
+      },
+      on,
+    );
+
+    // ── The frame: runs while anything is settling, then stops ──
+    let last = 0, heroKey = "", lastY = -1;
+    function wake() {
+      if (!raf && !ac.signal.aborted) raf = requestAnimationFrame(frame);
+    }
+    function frame(t: number) {
+      raf = 0;
+      try {
+        tick(t);
+      } catch (e) {
+        fail(e);
+      }
+    }
+    function tick(t: number) {
+      const dt = last ? Math.min(0.05, (t - last) / 1000) : 0.016;
+      last = t;
+      const y = scrollY;
+      let busy = false;
+      keys.px += (tpx - keys.px) * 0.08;
+      keys.py += (tpy - keys.py) * 0.08;
+      if (Math.abs(tpx - keys.px) < 0.0005 && Math.abs(tpy - keys.py) < 0.0005) {
+        keys.px = tpx;
+        keys.py = tpy;
+      } else busy = true;
+      const px = keys.px, py = keys.py;
+
+      // The hero: the words part, and the big penguin flies up into the brand.
+      // Past the hero the scroll is held at its end, so a long jump still lands it there (and pauses its loops).
+      const hy = Math.min(y, VH * 1.2), hk = clamp(hy / (VH * 0.8), 0, 1), he = easeIO(hk);
+      const hKey = `${hy}|${px.toFixed(4)}|${py.toFixed(4)}|${mx >= 0 && mx < base.x - 20}`;
+      if (hKey !== heroKey) {
+        heroKey = hKey;
+        css(htL, "transform", `translateX(${(-hk * VW * 0.22).toFixed(1)}px)`);
+        css(htR, "transform", `translateX(${(hk * VW * 0.22).toFixed(1)}px)`);
+        css(htL, "opacity", clamp(1 - hk * 1.3, 0, 1).toFixed(3));
+        css(htR, "opacity", clamp(1 - hk * 1.3, 0, 1).toFixed(3));
+        css(hFoot, "transform", `translateY(${(-hk * 80).toFixed(1)}px)`);
+        css(hFoot, "opacity", clamp(1 - hk * 1.6, 0, 1).toFixed(3));
+        css(now, "opacity", clamp(1 - hk * 3, 0, 1).toFixed(3));
+        css(cue, "opacity", clamp(1 - hk * 4, 0, 1).toFixed(3));
+        hero.classList.toggle("away", hk > 0.5);
+        // The body (not the box with room for props) lands exactly on the brand's penguin.
+        const br = brandMk.getBoundingClientRect();
+        const end = br.width / (base.w * 0.727), dx = -0.021 * base.w, dy = 0.072 * base.w;
+        const sc = mix(1, end, easeOut(hk));
+        const tx = (br.left + br.width / 2 - base.x - end * dx) * he;
+        const ty = Math.max((br.top + br.height / 2 - (base.y - y) - end * dy) * he, br.top + br.height / 2 - (base.y - y) - sc * dy);
+        css(hpg, "transform", `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${sc.toFixed(4)})`);
+        css(hpg, "visibility", hk >= 1 ? "hidden" : "visible");
+        css(props, "opacity", clamp(1 - he * 2.5, 0, 1).toFixed(3));
+        // It faces the pointer and leans a little toward it; on the way up it straightens out.
+        const face = mx >= 0 && mx < base.x - 20 && he < 0.3 ? -1 : 1;
+        const lean = (1 - he) * clamp(px * 16, -10, 10);
+        css(look, "transform", `translate(${((1 - he) * px * 24).toFixed(1)}px, ${((1 - he) * py * 14).toFixed(1)}px) rotate(${lean.toFixed(2)}deg) scaleX(${face})`);
+      }
+
+      let ch = -1;
+      for (const sc of scenes) {
+        sc.read(y);
+        if (sc.step(dt)) busy = true;
+        if (sc.visible) sc.frame();
+        if (sc.visible && y + VH * 0.5 >= sc.top && y + VH * 0.5 < sc.top + sc.h) ch = scenes.indexOf(sc);
+      }
+      if (keys.visible) keys.lean();
+      if (y !== lastY) {
+        lastY = y;
+        const a = agent.top, b = free.top + free.h - VH;
+        css(chBar, "transform", `scaleX(${clamp((y - a) / (b - a), 0, 1).toFixed(4)})`);
+        css(grid, "opacity", clamp((y - VH * 0.4) / (VH * 0.5), 0, 1).toFixed(3));
+        css(gridI, "transform", `translate3d(0, ${(-((y * 0.12) % 40)).toFixed(1)}px, 0)`);
+        dock.classList.toggle("on", y > VH * 0.6 && close.getBoundingClientRect().top > VH * 0.6);
+        const cr = colony.getBoundingClientRect(), p = (innerHeight - cr.top) / (innerHeight + cr.height);
+        if (p > -0.2 && p < 1.2) birds.forEach((bd) => css(bd, "transform", `translateX(${((clamp(p, 0, 1) - 0.5) * drift * Number(bd.dataset.d)).toFixed(1)}px)`));
+      }
+      setChapter(ch);
+      const nr = nav.getBoundingClientRect();
+      nav.classList.toggle("inv", free.covers(nr.left + nr.width / 2, nr.top + nr.height / 2));
+      if (busy) raf = requestAnimationFrame(frame);
+      else last = 0;
+    }
+
+    layout();
+    // What runs later fails the same way as the start.
+    const guarded = (f: () => void) => () => {
+      if (ac.signal.aborted) return;
+      try {
+        f();
+      } catch (e) {
+        fail(e);
+      }
+    };
+    let lastW = innerWidth, lastH = innerHeight;
+    addEventListener(
+      "resize",
+      guarded(() => {
+        // A phone's address bar showing or hiding changes only the height a little: keep the layout.
+        if (innerWidth === lastW && Math.abs(innerHeight - lastH) < 160 && matchMedia("(pointer: coarse)").matches) return;
+        lastW = innerWidth;
+        lastH = innerHeight;
+        layout();
+      }),
+      on,
+    );
+    addEventListener("scroll", wake, on);
+    document.fonts?.ready.then(guarded(layout));
+    ro = new ResizeObserver(
+      guarded(() => {
+        scenes.forEach((s) => s.measure());
+        layoutColony();
+        wake();
+      }),
+    );
+    ro.observe(document.body);
+  }
 }

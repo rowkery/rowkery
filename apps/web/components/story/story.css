@@ -202,7 +202,7 @@ html:not([data-motion]) .fact { display: grid; justify-items: center; gap: 28px;
 [data-motion] .k-win .panel.on { opacity: 1; transform: none; visibility: visible; transition: opacity 0.35s, transform 0.45s var(--ease), visibility 0s; }
 [data-motion] .pal { position: absolute; left: 50%; top: 58px; width: 420px; margin: 0; transform: translateX(-50%); }
 [data-motion] .res { transition: opacity 0.25s; }
-[data-motion] .gpg { width: 430px; height: 443px; }
+[data-motion] .gpg { width: 430px; height: 443px; transform-origin: 50% 100%; }
 [data-motion] .box { height: 296px; }
 [data-motion] .spane { position: absolute; left: 0; right: 0; top: 0; transition: opacity 0.4s ease, transform 0.5s var(--ease); }
 [data-motion] .spane.off { opacity: 0; transform: translateY(10px); visibility: hidden; pointer-events: none; transition: opacity 0.25s, transform 0.3s, visibility 0s 0.3s; }
