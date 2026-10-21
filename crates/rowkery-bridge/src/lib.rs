@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,6 +29,7 @@ use rowkery_core::db::{SchemaCatalog, TableIndexes};
 use rowkery_core::edits::{
     build_row_changes, transaction_sql, ApplyCounts, ApplyFailure, Change, EditTable, RowStatement,
 };
+use rowkery_core::import::{ImportCounts, ImportError, ImportSpec};
 use rowkery_core::plan::{self, Plan, PlanFacts};
 use rowkery_core::query_util::apply_browse_limit;
 use rowkery_core::safety::{
@@ -151,6 +152,14 @@ enum Command {
         changes: Vec<Change>,
         confirmed: Option<String>,
         respond_to: oneshot::Sender<Result<ApplyOutcome, String>>,
+    },
+    /// CSV import into a table, on a session (or SQLite connection) of its own.
+    ImportCsv {
+        window_id: String,
+        spec: ImportSpec,
+        cancel: Arc<AtomicBool>,
+        progress: ImportProgress,
+        respond_to: oneshot::Sender<Result<ImportOutcome, String>>,
     },
     /// Hover prefetch: the first page of `sql` on the window's prefetch session.
     Prefetch {
@@ -334,6 +343,44 @@ pub enum ApplyOutcome {
         failure: ApplyFailure,
         elapsed_ms: u64,
     },
+}
+
+/// Hears how many rows of an import were sent so far.
+#[derive(Clone)]
+pub struct ImportProgress(pub Arc<dyn Fn(u64) + Send + Sync>);
+
+impl std::fmt::Debug for ImportProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ImportProgress")
+    }
+}
+
+/// How a CSV import ended.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ImportOutcome {
+    /// Every row went in, in one transaction.
+    Imported {
+        #[serde(flatten)]
+        counts: ImportCounts,
+    },
+    /// Rolled back: nothing was written.
+    Cancelled,
+    Failed {
+        message: String,
+    },
+    /// Read-only: nothing ran.
+    Refused,
+}
+
+impl From<Result<ImportCounts, ImportError>> for ImportOutcome {
+    fn from(result: Result<ImportCounts, ImportError>) -> Self {
+        match result {
+            Ok(counts) => ImportOutcome::Imported { counts },
+            Err(ImportError::Cancelled) => ImportOutcome::Cancelled,
+            Err(ImportError::Failed(message)) => ImportOutcome::Failed { message },
+        }
+    }
 }
 
 /// The statements Review SQL shows for `changes`, and their transaction text.
@@ -1522,6 +1569,78 @@ fn apply_changes_now(
     }
 }
 
+/// Imports a CSV file in one transaction on a connection of the import's
+/// own (never a tab's session, so never inside the user's transaction).
+/// Read-only refuses; under Confirm writes the panel's Import button was
+/// the confirmation.
+fn import_csv_now(
+    state: &mut CoreState,
+    window_id: String,
+    spec: ImportSpec,
+    cancel: Arc<AtomicBool>,
+    progress: ImportProgress,
+    respond_to: oneshot::Sender<Result<ImportOutcome, String>>,
+) {
+    let Some(target) = state.windows.get(&window_id).cloned() else {
+        let _ = respond_to.send(Err("This window is not connected".into()));
+        return;
+    };
+    let safe_mode = match &target {
+        WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
+        WindowTarget::Postgres { config, .. } => config.safe_mode,
+    };
+    if safe_mode == SafeMode::ReadOnly {
+        let _ = respond_to.send(Ok(ImportOutcome::Refused));
+        return;
+    }
+    invalidate_prefetch(&state.pool, &window_id, &state.runtime);
+    match target {
+        WindowTarget::Sqlite { path, .. } => {
+            thread::spawn(move || {
+                let result = with_catch(|| {
+                    rowkery_core::import::import_sqlite_file(&path, &spec, &cancel, &*progress.0)
+                });
+                let _ = respond_to.send(result.map(ImportOutcome::from));
+            });
+        }
+        WindowTarget::Postgres {
+            connection_id,
+            config,
+        } => {
+            let pool = state.pool.clone();
+            let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
+            let runtime = state.runtime.clone();
+            state.runtime.spawn(async move {
+                let Lease { session, .. } = match pool::lease(
+                    &pool,
+                    &window_id,
+                    Slot::Import,
+                    generation,
+                    connection_id,
+                    config,
+                )
+                .await
+                {
+                    Ok(lease) => lease,
+                    Err(err) => {
+                        let _ = respond_to.send(Err(err.into_message()));
+                        return;
+                    }
+                };
+                let result =
+                    rowkery_core::import::import_postgres(&session, &spec, cancel, &*progress.0)
+                        .await;
+                // Written (or not): a page prefetched meanwhile read the rows from before.
+                invalidate_prefetch(&pool, &window_id, &runtime);
+                if !session.is_closed() {
+                    pool::give_back(&pool, &window_id, Slot::Import, generation, session);
+                }
+                let _ = respond_to.send(Ok(result.into()));
+            });
+        }
+    }
+}
+
 fn finish_query_worker<S: EventSink + ?Sized>(
     result: QueryResult,
     query_id: u64,
@@ -2674,6 +2793,13 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
         } => apply_changes_now(
             state, window_id, tab_id, table, changes, confirmed, respond_to,
         ),
+        Command::ImportCsv {
+            window_id,
+            spec,
+            cancel,
+            progress,
+            respond_to,
+        } => import_csv_now(state, window_id, spec, cancel, progress, respond_to),
         Command::CloseWindowTab { window_id, tab_id } => {
             if let Ok(mut pages) = state.sqlite_pages.lock() {
                 pages.forget_tab(&(window_id.clone(), tab_id));
@@ -3393,6 +3519,27 @@ impl CoreBridge {
             table,
             changes,
             confirmed,
+            respond_to,
+        })
+        .ok_or_else(|| "core thread stopped".to_string())?
+    }
+
+    /// Imports a CSV file into a table (see `rowkery_core::import`): one
+    /// transaction on a connection of its own, rolled back whole on any
+    /// error or once `cancel` is set. `progress` hears the rows sent so far.
+    /// Read-only refuses. Blocks until it ends.
+    pub fn import_csv(
+        &self,
+        window_id: &str,
+        spec: ImportSpec,
+        cancel: Arc<AtomicBool>,
+        progress: ImportProgress,
+    ) -> Result<ImportOutcome, String> {
+        self.send_command(|respond_to| Command::ImportCsv {
+            window_id: window_id.to_string(),
+            spec,
+            cancel,
+            progress,
             respond_to,
         })
         .ok_or_else(|| "core thread stopped".to_string())?
@@ -8330,6 +8477,382 @@ mod tests {
             started(tab);
             assert_eq!(window_query(&bridge, "w", tab, "ROLLBACK").1, None);
         }
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    fn import_spec(path: &str, schema: &str, columns: &[(usize, &str)]) -> ImportSpec {
+        ImportSpec {
+            path: path.into(),
+            schema: schema.into(),
+            table: "it_import".into(),
+            delimiter: ",".into(),
+            header: true,
+            columns: columns
+                .iter()
+                .map(|(field, column)| rowkery_core::import::ImportColumn {
+                    field: *field,
+                    column: column.to_string(),
+                })
+                .collect(),
+            on_conflict: rowkery_core::import::OnConflict::Stop,
+            empty: rowkery_core::import::EmptyCells::Null,
+        }
+    }
+
+    fn quiet() -> ImportProgress {
+        ImportProgress(Arc::new(|_| {}))
+    }
+
+    #[test]
+    fn sqlite_import_csv_writes_once_and_read_only_refuses() {
+        let (_guard, _file, path) = test_guard();
+        Connection::open(&path)
+            .expect("open")
+            .execute_batch("CREATE TABLE it_import (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .expect("seed");
+        let csv = std::env::temp_dir().join(format!("it-import-{}.csv", std::process::id()));
+        fs::write(&csv, "id,name\n1,one\n2,two\n").expect("csv");
+        let bridge = super::CoreBridge::spawn();
+        for (id, safe_mode) in [("confirm", SafeMode::Confirm), ("ro", SafeMode::ReadOnly)] {
+            CoreBridge::upsert_connection(
+                &bridge,
+                ConnectionRecord::Sqlite(SqliteConnection {
+                    allow_mcp: false,
+                    mcp_hidden_tables: Vec::new(),
+                    mcp_until: None,
+                    mcp_samples_off: false,
+                    mcp_access: None,
+                    masked_columns: Default::default(),
+                    environment: None,
+                    safe_mode,
+                    id: id.into(),
+                    name: id.into(),
+                    path: path.clone(),
+                    sample: false,
+                }),
+                ConnectionSecrets::default(),
+            )
+            .expect("save");
+            bridge.open_window(id, id, None).expect("open");
+        }
+        let spec = import_spec(&csv.to_string_lossy(), "main", &[(0, "id"), (1, "name")]);
+        let never = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            bridge.import_csv("ro", spec.clone(), never.clone(), quiet()),
+            Ok(ImportOutcome::Refused)
+        );
+        // Confirm writes: the panel's Import button was the confirmation.
+        let out = bridge
+            .import_csv("confirm", spec.clone(), never.clone(), quiet())
+            .expect("import");
+        assert!(
+            matches!(out, ImportOutcome::Imported { counts } if counts.inserted == 2),
+            "{out:?}"
+        );
+        let count = |sql: &str| window_query(&bridge, "confirm", 1, sql).0;
+        assert_eq!(count("SELECT count(*) FROM it_import"), Some(Value::Int(2)));
+        // Again: both keys exist, Stop names the line and keeps nothing new.
+        let out = bridge
+            .import_csv("confirm", spec, never, quiet())
+            .expect("import");
+        assert!(
+            matches!(&out, ImportOutcome::Failed { message } if message.starts_with("Line 2: UNIQUE")),
+            "{out:?}"
+        );
+        let _ = fs::remove_file(&csv);
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn postgres_import_csv() {
+        use rowkery_core::import::{EmptyCells, OnConflict};
+        let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+            eprintln!("skip postgres_import_csv (set ROWKERY_PG_HOST)");
+            return;
+        };
+        let (_guard, _file, _path) = test_guard();
+        let bridge = super::CoreBridge::spawn();
+        for (id, safe_mode) in [("off", SafeMode::Off), ("ro", SafeMode::ReadOnly)] {
+            CoreBridge::upsert_connection(
+                &bridge,
+                ConnectionRecord::Postgres(PostgresConnection {
+                    allow_mcp: false,
+                    mcp_hidden_tables: Vec::new(),
+                    mcp_until: None,
+                    mcp_samples_off: false,
+                    mcp_access: None,
+                    masked_columns: Default::default(),
+                    environment: None,
+                    safe_mode,
+                    id: id.into(),
+                    name: id.into(),
+                    host: host.clone(),
+                    port: std::env::var("ROWKERY_PG_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(54329),
+                    database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+                    username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+                    ssl_mode: PostgresSslMode::Disable,
+                    ssl_root_cert: None,
+                    ssh: None,
+                    cloud_sql: None,
+                }),
+                ConnectionSecrets {
+                    db_password: Some(
+                        std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("save");
+            bridge.open_window(id, id, None).expect("open");
+        }
+        let run = |sql: &str| window_query(&bridge, "off", 1, sql);
+        for sql in [
+            "DROP TABLE IF EXISTS public.it_import",
+            "CREATE TABLE public.it_import (id int PRIMARY KEY, email text NOT NULL, \
+             total numeric(10,2), status text DEFAULT 'pending', note text, \
+             placed timestamptz DEFAULT '2026-01-01', meta jsonb)",
+            "INSERT INTO public.it_import (id, email) VALUES (1, 'old@x.com')",
+        ] {
+            assert_eq!(run(sql).1, None, "{sql}");
+        }
+        let one = |sql: &str| run(sql).0;
+        let dir = tempfile::tempdir().expect("dir");
+        let write = |name: &str, text: &str| {
+            let p = dir.path().join(name);
+            fs::write(&p, text).expect("csv");
+            p.to_string_lossy().to_string()
+        };
+        let small = write(
+            "small.csv",
+            "order_id,mail,amount,state,gift,placed,meta\n\
+             1,new@x.com,5,paid,,2026-10-20 14:10,\n\
+             2,b@x.com,7.50,,\"tab\there, back\\slash\",,\"{\"\"a\"\": 1}\"\n\
+             3,c@x.com,,shipped,,,\n",
+        );
+        let cols = [
+            (0, "id"),
+            (1, "email"),
+            (2, "total"),
+            (3, "status"),
+            (4, "note"),
+            (5, "placed"),
+            (6, "meta"),
+        ];
+        let never = Arc::new(AtomicBool::new(false));
+        let import = |spec: ImportSpec| {
+            bridge
+                .import_csv("off", spec, never.clone(), quiet())
+                .expect("import")
+        };
+        let mut spec = import_spec(&small, "public", &cols);
+
+        // Read-only refuses before anything runs.
+        assert_eq!(
+            bridge.import_csv("ro", spec.clone(), never.clone(), quiet()),
+            Ok(ImportOutcome::Refused)
+        );
+        // Stop: id 1 is there, so nothing is kept.
+        let out = import(spec.clone());
+        assert!(
+            matches!(&out, ImportOutcome::Failed { message } if message.contains("Key (id)=(1) already exists")),
+            "{out:?}"
+        );
+        assert_eq!(one("SELECT count(*) FROM it_import"), Some(Value::Int(1)));
+        // Skip: two new rows; empty cells take the DEFAULT, text keeps its tab and backslash.
+        spec.on_conflict = OnConflict::Skip;
+        let out = import(spec.clone());
+        assert!(
+            matches!(out, ImportOutcome::Imported { counts } if (counts.inserted, counts.updated, counts.skipped) == (2, 0, 1)),
+            "{out:?}"
+        );
+        assert_eq!(
+            one("SELECT status || '|' || note || '|' || placed::date || '|' || (meta->>'a') FROM it_import WHERE id = 2"),
+            Some(Value::Text("pending|tab\there, back\\slash|2026-01-01|1".into()))
+        );
+        assert_eq!(
+            one("SELECT total IS NULL AND note IS NULL FROM it_import WHERE id = 3"),
+            Some(Value::Bool(true))
+        );
+        // Update: all three exist; Empty text gives note ''.
+        spec.on_conflict = OnConflict::Update;
+        spec.empty = EmptyCells::Text;
+        let out = import(spec.clone());
+        assert!(
+            matches!(out, ImportOutcome::Imported { counts } if (counts.inserted, counts.updated, counts.skipped) == (0, 3, 0)),
+            "{out:?}"
+        );
+        assert_eq!(
+            one("SELECT email || '|' || total || '|' || note FROM it_import WHERE id = 1"),
+            Some(Value::Text("new@x.com|5.00|".into()))
+        );
+
+        // A value the server refuses names the file's line and the column.
+        let bad = write(
+            "bad.csv",
+            "id,email,placed\n10,a@x.com,2026-01-01\n11,\"multi\nline\",soon\n",
+        );
+        let out = import(import_spec(
+            &bad,
+            "public",
+            &[(0, "id"), (1, "email"), (2, "placed")],
+        ));
+        assert!(
+            matches!(&out, ImportOutcome::Failed { message } if message.starts_with("Line 3, placed: invalid input syntax for type timestamp with time zone")),
+            "{out:?}"
+        );
+        // A value the grid's rules refuse is caught before it is sent.
+        let bad = write("bad2.csv", "id,email,total\n12,a@x.com,n/a\n");
+        let out = import(import_spec(
+            &bad,
+            "public",
+            &[(0, "id"), (1, "email"), (2, "total")],
+        ));
+        assert_eq!(
+            out,
+            ImportOutcome::Failed {
+                message: "Line 2, total: 'n/a' isn't a number".into()
+            }
+        );
+        assert_eq!(one("SELECT count(*) FROM it_import"), Some(Value::Int(3)));
+
+        // The tab's open transaction is untouched: the import runs beside it.
+        assert_eq!(run("BEGIN").1, None);
+        assert_eq!(
+            run("INSERT INTO it_import (id, email) VALUES (500, 'mine')").1,
+            None
+        );
+        let side = write("side.csv", "id,email\n600,side@x.com\n");
+        let out = import(import_spec(&side, "public", &[(0, "id"), (1, "email")]));
+        assert!(matches!(out, ImportOutcome::Imported { .. }), "{out:?}");
+        assert_eq!(run("ROLLBACK").1, None);
+        assert_eq!(
+            one("SELECT count(*) FROM it_import WHERE id IN (500, 600)"),
+            Some(Value::Int(1))
+        );
+
+        // 100k rows, timed; then a cancel rolls the same file back.
+        let mut big = String::from("id,email,total,status,note,placed,meta\n");
+        for i in 0..100_000 {
+            big.push_str(&format!(
+                "{},user{i}@mail.com,{}.{:02},{},\"note, {i}\",2026-10-{:02} 14:{:02},\n",
+                1000 + i,
+                i % 500,
+                i % 100,
+                ["pending", "paid", "shipped"][i % 3],
+                1 + i % 28,
+                i % 60
+            ));
+        }
+        let big = write("big.csv", &big);
+        let start = Instant::now();
+        let out = import(import_spec(&big, "public", &cols));
+        let took = start.elapsed();
+        assert!(
+            matches!(out, ImportOutcome::Imported { counts } if counts.inserted == 100_000),
+            "{out:?}"
+        );
+        eprintln!(
+            "postgres_import_csv: 100,000 rows in {} ms",
+            took.as_millis()
+        );
+        assert_eq!(run("DELETE FROM it_import WHERE id >= 1000").1, None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicU64::new(0));
+        let (c, s) = (cancel.clone(), seen.clone());
+        let out = bridge
+            .import_csv(
+                "off",
+                import_spec(&big, "public", &cols),
+                cancel,
+                ImportProgress(Arc::new(move |n| {
+                    s.store(n, Ordering::SeqCst);
+                    c.store(true, Ordering::SeqCst);
+                })),
+            )
+            .expect("import");
+        assert_eq!(out, ImportOutcome::Cancelled);
+        assert!(seen.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            one("SELECT count(*) FROM it_import WHERE id >= 1000"),
+            Some(Value::Int(0))
+        );
+
+        // Update with empty cells as NULL: the row keeps its values.
+        let blank = write("blank.csv", "id,email,total,status,note\n3,,,,\n");
+        let mut keep = import_spec(
+            &blank,
+            "public",
+            &[
+                (0, "id"),
+                (1, "email"),
+                (2, "total"),
+                (3, "status"),
+                (4, "note"),
+            ],
+        );
+        keep.on_conflict = OnConflict::Update;
+        let out = import(keep);
+        assert!(
+            matches!(out, ImportOutcome::Imported { counts } if (counts.inserted, counts.updated) == (0, 1)),
+            "{out:?}"
+        );
+        assert_eq!(
+            one("SELECT email || '|' || status FROM it_import WHERE id = 3"),
+            Some(Value::Text("c@x.com|shipped".into()))
+        );
+
+        // Waiting on a lock a tab holds: Cancel ends the wait.
+        assert_eq!(run("BEGIN").1, None);
+        assert_eq!(run("LOCK TABLE it_import IN ACCESS EXCLUSIVE MODE").1, None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let later = cancel.clone();
+        let timer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            later.store(true, Ordering::SeqCst);
+        });
+        let out = bridge
+            .import_csv(
+                "off",
+                import_spec(&side, "public", &[(0, "id"), (1, "email")]),
+                cancel,
+                quiet(),
+            )
+            .expect("import");
+        timer.join().unwrap();
+        assert_eq!(out, ImportOutcome::Cancelled);
+        assert_eq!(run("ROLLBACK").1, None);
+
+        // Identity columns: BY DEFAULT fills an empty cell; ALWAYS can't be imported into.
+        for sql in [
+            "DROP TABLE IF EXISTS public.it_ident",
+            "CREATE TABLE public.it_ident (id int GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, \
+             name text, n int GENERATED ALWAYS AS IDENTITY)",
+        ] {
+            assert_eq!(run(sql).1, None, "{sql}");
+        }
+        let ident = write("ident.csv", "id,name,n\n,a,\n5,b,\n");
+        let ident_spec = |columns: &[(usize, &str)]| ImportSpec {
+            table: "it_ident".into(),
+            ..import_spec(&ident, "public", columns)
+        };
+        let out = import(ident_spec(&[(0, "id"), (1, "name")]));
+        assert!(matches!(out, ImportOutcome::Imported { .. }), "{out:?}");
+        assert_eq!(
+            one("SELECT string_agg(id::text, ',' ORDER BY id) FROM it_ident"),
+            Some(Value::Text("1,5".into()))
+        );
+        let out = import(ident_spec(&[(1, "name"), (2, "n")]));
+        assert_eq!(
+            out,
+            ImportOutcome::Failed {
+                message: "n is filled in by the database, so it can't be imported. Skip it.".into()
+            }
+        );
+        assert_eq!(run("DROP TABLE public.it_ident").1, None);
+        assert_eq!(run("DROP TABLE public.it_import").1, None);
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 }

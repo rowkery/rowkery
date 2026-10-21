@@ -106,6 +106,8 @@ pub(crate) enum Slot {
     QuickLook,
     /// The Sessions tab's reads and stops: never a tab's session, nor the spare.
     Monitor,
+    /// CSV import: its own transaction, never a tab's session or transaction.
+    Import,
 }
 
 type Key = (String, Slot);

@@ -160,6 +160,11 @@ impl PostgresSession {
         &self.config
     }
 
+    /// The client, for work that lives beside this module (CSV import).
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
     /// True once the socket is gone (server restart, network drop).
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
