@@ -1,0 +1,241 @@
+/* Map (2026-10-21): the table in the middle, what it points to on the left,
+   what points to it on the right. Boxes are 220 px wide, a 34 px head and
+   22 px rows (mapLayout.ts lays them out with the same numbers). */
+.sm-root {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: fade 0.2s ease;
+}
+
+/* The box with the ring shows where the keys are; the root needs none. */
+.sm-root:focus-visible {
+  outline: none;
+}
+
+.sm-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px 4px 30px;
+}
+
+.sm-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--mute);
+}
+
+.sm-summary-name {
+  color: var(--text);
+}
+
+/* 1 step | 2 steps | All: the Data | Structure segment. */
+.sm-depths {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--hover);
+}
+
+.sm-depths button {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  font: 500 12px var(--sans);
+  cursor: default;
+  transition: color 0.18s ease;
+}
+
+.sm-depths button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.sm-depths button[aria-checked="true"] {
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  color: var(--text);
+}
+
+.sm-depths button:disabled {
+  color: var(--faint);
+}
+
+.sm-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  padding: 24px 30px 32px;
+}
+
+/* Centred while it fits; scrolls from its edge once it doesn't. */
+.sm-canvas {
+  position: relative;
+  flex-shrink: 0;
+  margin: auto;
+}
+
+.sm-lines {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.sm-line {
+  fill: none;
+  stroke: var(--faint);
+  stroke-width: 1.2;
+}
+
+.sm-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+}
+
+.sm-end {
+  font: 11px var(--mono);
+  fill: var(--dim);
+}
+
+[data-testid="sm-edge"][data-far] .sm-line {
+  stroke: var(--line2);
+}
+
+[data-testid="sm-edge"][data-on] .sm-line {
+  stroke: var(--text);
+  stroke-width: 1.6;
+}
+
+[data-testid="sm-edge"][data-on] .sm-end {
+  fill: var(--text);
+}
+
+.sm-box {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: default;
+}
+
+.sm-box[data-far] > * {
+  opacity: 0.55;
+}
+
+.sm-box[data-lit] {
+  border-color: var(--line2);
+}
+
+.sm-box[data-sel] {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 1px var(--acc);
+}
+
+.sm-box-head {
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.sm-box-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 12.5px var(--mono);
+  color: var(--text);
+}
+
+.sm-box-schema {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.sm-box-rows,
+.sm-col-type {
+  flex-shrink: 0;
+  font: 11.5px var(--mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.sm-col {
+  flex: 0 0 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font: 12px var(--mono);
+  color: var(--text2);
+}
+
+.sm-col:last-child {
+  margin-bottom: 6px;
+}
+
+.sm-col[data-lit] {
+  background: var(--hover);
+}
+
+.sm-col-icon {
+  flex: 0 0 12px;
+  display: inline-flex;
+  color: var(--dim);
+}
+
+.sm-col-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sm-col-type {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The foreign key under the pointer: an ink card, like a toast. */
+.sm-tip {
+  position: absolute;
+  z-index: 2;
+  max-width: 420px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  font: 11.5px var(--mono);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.sm-tip-rule {
+  opacity: 0.75;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sm-root {
+    animation: none;
+  }
+}

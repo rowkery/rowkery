@@ -267,6 +267,18 @@ export function BlocksIcon(p: IconProps) {
   );
 }
 
+/** A table and its neighbours: the Map view. */
+export function MapIcon(p: IconProps) {
+  return (
+    <Svg {...p} viewBox="0 0 24 24" strokeWidth={1.9}>
+      <rect x="8.5" y="9" width="7" height="6" rx="1.8" />
+      <rect x="2.5" y="3.5" width="5" height="4.5" rx="1.5" />
+      <rect x="16.5" y="16" width="5" height="4.5" rx="1.5" />
+      <path d="M7.5 5.8c2.5 0 2.5 3.2 2.5 3.2M14 15s0 3.3 2.5 3.3" />
+    </Svg>
+  );
+}
+
 export function KeyIcon(p: IconProps) {
   return (
     <Svg {...p} viewBox="0 0 24 24" strokeWidth={2.2}>

@@ -191,6 +191,10 @@
         {
           "title": "Show structure",
           "keys": "⌥⌘2"
+        },
+        {
+          "title": "Show map",
+          "keys": "⌥⌘3"
         }
       ]
     },
@@ -451,6 +455,10 @@
         {
           "title": "Structure",
           "keys": "⌥⌘2"
+        },
+        {
+          "title": "Map",
+          "keys": "⌥⌘3"
         },
         {
           "title": "Sessions",
@@ -838,6 +846,10 @@
     {
       "title": "Show structure",
       "keys": "⌥⌘2"
+    },
+    {
+      "title": "Show map",
+      "keys": "⌥⌘3"
     },
     {
       "title": "Quick Look",

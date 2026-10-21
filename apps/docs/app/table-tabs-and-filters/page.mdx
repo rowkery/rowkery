@@ -4,7 +4,7 @@ export const metadata = { title: "Table tabs and filters" };
 
 # Table tabs and filters
 
-<p className="lead">Clicking a table opens it in a table tab: its rows in a grid, the exact SQL that fetched them, and a WHERE line where you build filters without writing SQL. This page covers opening tables, filtering, sorting, columns, paging and the Structure view.</p>
+<p className="lead">Clicking a table opens it in a table tab: its rows in a grid, the exact SQL that fetched them, and a WHERE line where you build filters without writing SQL. This page covers opening tables, filtering, sorting, columns, paging, and the Structure and Map views.</p>
 
 <Shot src="/img/table-tabs-and-filters-window.webp" width={1280} height={800} alt="The orders table tab, sorted by placed_at newest first and filtered to status = 'paid'. The QUERY line shows the SELECT with WHERE, ORDER BY and LIMIT 1000; the WHERE line shows one filter and reads 168 of 168 rows." />
 
@@ -35,7 +35,7 @@ To keep a preview tab without changing anything, double-click its tab or right-c
 
 ### Going back and forward
 
-<kbd>⌘[</kbd> and <kbd>⌘]</kbd>, or the ‹ and › buttons at the left of the tab row, walk back and forward through the tables and Structure views you opened in this window. Each step comes back with the filters, sort and page size it had. Right-click ‹ to see the list and jump to any entry. The history keeps the last 50 places and lasts until you close the window.
+<kbd>⌘[</kbd> and <kbd>⌘]</kbd>, or the ‹ and › buttons at the left of the tab row, walk back and forward through the tables, Structure and Map views you opened in this window (re-centring a map is a step too). Each step comes back with the filters, sort and page size it had. Right-click ‹ to see the list and jump to any entry. The history keeps the last 50 places and lasts until you close the window.
 
 ### The tab's menu
 
@@ -185,7 +185,7 @@ A tab stops at 1,000,000 rows and tells you **Stopped at 1,000,000 rows**. To wo
 
 ## Structure
 
-Switch a table tab between **Data** and **Structure** with the buttons at the right of the tab row, <kbd>⌥⌘1</kbd> and <kbd>⌥⌘2</kbd>. With the TablePlus keymap the keys are <kbd>⌃⌘[</kbd> and <kbd>⌃⌘]</kbd> (see [Shortcuts and keymaps](/shortcuts-and-keymaps/)).
+Switch a table tab between **Data**, **Structure** and **Map** with the buttons at the right of the tab row, <kbd>⌥⌘1</kbd>, <kbd>⌥⌘2</kbd> and <kbd>⌥⌘3</kbd>. With the TablePlus keymap the keys are <kbd>⌃⌘[</kbd> and <kbd>⌃⌘]</kbd> (see [Shortcuts and keymaps](/shortcuts-and-keymaps/)).
 
 <Shot src="/img/table-tabs-and-filters-structure.webp" width={1280} height={800} alt="The Structure view of public.orders: its comment, about 84,000 rows, 13.5 MB of data and 4.9 MB of indexes; the columns with types, defaults, nullability and keys; two btree indexes with their size and scan counts; the foreign key to customers and order_items referencing it with on delete cascade." />
 
@@ -200,6 +200,25 @@ Structure shows:
 
 SQLite doesn't report index methods, sizes or scan counts, so those are left out there.
 
+## Map
+
+**Map** (<kbd>⌥⌘3</kbd>, or **Show map** in <kbd>⌘K</kbd>) draws the table with its neighbours: the tables it points to on the left, the tables that point to it on the right. It is built from the foreign keys Rowkery already knows, so it opens at once and runs no query.
+
+- Each box lists the table's row estimate and its key columns only: the primary key, foreign keys, and columns another table points at. A composite key lists every column.
+- Each line is marked **1** at the table pointed to and **n** at the table pointing (**1** when the key is that table's whole primary key). Hover a line to see the key, such as `orders.customer_id → customers.id · on delete cascade`.
+- **1 step** is the default. **2 steps** reaches one table further on each side and dims the second step; **All** follows the keys as far as they go, and is off when the database has more than 150 tables.
+- A table that points to itself, such as `parent_id`, loops back into its own box. A line between two tables in the same column is left out; Structure lists it.
+
+| Do this | What happens |
+| --- | --- |
+| Click a box | Centres the map on that table |
+| Double-click a box, or <kbd>↵</kbd> | Opens the table |
+| <kbd>⌘↵</kbd> | Opens the table in a tab of its own |
+| Arrow keys | Move between boxes |
+| <kbd>Space</kbd> | Centres the map on the box with the ring |
+| <kbd>Esc</kbd> | Goes back to Data |
+| <kbd>⌘[</kbd> / <kbd>⌘]</kbd> | Steps back and forward through the tables you centred on |
+
 ## Following a foreign key
 
 On a foreign key cell, press <kbd>⌘↵</kbd> or right-click and choose **Follow** with the column's name, such as **Follow customer_id**. The table it points at opens in the preview tab, filtered to that one row, with Quick Look open on it. See [Quick Look](/quick-look/) for following keys from the row itself.
@@ -212,4 +231,4 @@ It's off by default. Turn it on for one connection under **Advanced** › **Pref
 
 ## What a table tab remembers
 
-Each table tab keeps its filters, sort, page size, hidden columns, Data or Structure view, and any edits you haven't committed. They're saved with the window, so after you quit and reopen Rowkery the tab comes back as you left it.
+Each table tab keeps its filters, sort, page size, hidden columns, Data, Structure or Map view, and any edits you haven't committed. They're saved with the window, so after you quit and reopen Rowkery the tab comes back as you left it.

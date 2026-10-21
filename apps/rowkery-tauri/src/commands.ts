@@ -41,9 +41,9 @@ export interface CommandState {
   windowCount: number;
   hasResult: boolean;
   hasRows: boolean;
-  /** The shown tab was opened from a table (Data | Structure applies). */
+  /** The shown tab was opened from a table (Data | Structure | Map applies). */
   hasActiveTable: boolean;
-  resultsView: "data" | "structure";
+  resultsView: "data" | "structure" | "map";
   /** The window's connection failed (⌘R retries, ⌘E edits it). */
   failed: boolean;
   /** Rows the shown result has loaded, and whether more remain unloaded. */
@@ -737,7 +737,7 @@ export const COMMANDS: Command[] = [
     title: "Show data",
     menuTitle: "Data",
     chord: { mac: "Alt+Mod+1" },
-    canRun: (s) => s.hasActiveTable && s.resultsView === "structure",
+    canRun: (s) => s.hasActiveTable && s.resultsView !== "data",
   },
   {
     id: "show-structure",
@@ -745,6 +745,14 @@ export const COMMANDS: Command[] = [
     menuTitle: "Structure",
     chord: { mac: "Alt+Mod+2" },
     canRun: (s) => s.hasActiveTable && s.resultsView !== "structure",
+  },
+  {
+    id: "show-map",
+    title: "Show map",
+    menuTitle: "Map",
+    chord: { mac: "Alt+Mod+3" },
+    synonyms: ["map", "diagram", "erd", "relations", "foreign keys", "references"],
+    canRun: (s) => s.hasActiveTable && s.resultsView !== "map",
   },
   ...zoneCommands(),
   ...editCommands(),
@@ -954,7 +962,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   },
   {
     submenu: "View",
-    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-sessions", null, "theme:auto", "theme:light", "theme:dark"],
+    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-map", "show-sessions", null, "theme:auto", "theme:light", "theme:dark"],
   },
   {
     submenu: "Go",

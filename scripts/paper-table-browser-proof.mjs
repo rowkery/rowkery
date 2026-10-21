@@ -310,7 +310,7 @@ const row900 = await page.evaluate((ws) => {
   return { tabIn: on.left >= tabs.left - 0.5 && on.right <= tabs.right + 0.5, clear: sw.left >= on.right, labels };
 }, ws);
 check(row900.tabIn && row900.clear, `900 px: the active tab is whole and clear of the switch (${JSON.stringify(row900)})`);
-check(row900.labels.join("|") === "Data|Structure", "the switch's buttons keep their names (aria-label)");
+check(row900.labels.join("|") === "Data|Structure|Map", "the switch's buttons keep their names (aria-label)");
 await shot("wrap-900");
 await page.setViewportSize({ width: 1280, height: 800 });
 
