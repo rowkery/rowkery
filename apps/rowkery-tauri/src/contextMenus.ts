@@ -119,13 +119,14 @@ export function headerMenu(o: {
   return [...rows, ...more];
 }
 
-/** Right-click a table or view in the schema panel. */
-export function panelRowMenu(o: { pinned: boolean; mac: boolean }): MenuRow[] {
+/** Right-click a table or view in the schema panel. `importable`: a table (not a view) a CSV can go into. */
+export function panelRowMenu(o: { pinned: boolean; mac: boolean; importable?: boolean }): MenuRow[] {
   return [
     { id: "open", label: "Open", hint: "click" },
     { id: "open-tab", label: "Open in a new tab", hint: modClick(o.mac) },
     // No chord: ⌥⌘2 acts on the shown tab, not on the row under the pointer.
     { id: "structure", label: "Structure" },
+    ...(o.importable ? [{ id: "import-csv", label: "Import CSV…" }] : []),
     { id: "insert", label: "Insert name", command: "insert-name", separated: true },
     { id: "copy-name", label: "Copy name" },
     { id: "pin", label: o.pinned ? "Unpin" : "Pin to top", separated: true },

@@ -66,16 +66,23 @@ if ("__TAURI_INTERNALS__" in window) {
 }
 
 // Files dragged onto the window (Tauri gives paths; an HTML drop doesn't)
-// arrive as `rowkery:file-drag` with `{ type, paths }`; stubbed proofs
-// dispatch it directly.
+// arrive as `rowkery:file-drag` with `{ type, paths, x, y }` (CSS pixels in
+// the page, where the drop landed); stubbed proofs dispatch it directly.
 if ("__TAURI_INTERNALS__" in window) {
   void import("@tauri-apps/api/webview")
     .then(({ getCurrentWebview }) =>
       getCurrentWebview().onDragDropEvent((e) => {
         const p = e.payload;
+        const at = "position" in p ? p.position : null;
+        const scale = window.devicePixelRatio || 1;
         window.dispatchEvent(
           new CustomEvent("rowkery:file-drag", {
-            detail: { type: p.type, paths: "paths" in p ? p.paths : [] },
+            detail: {
+              type: p.type,
+              paths: "paths" in p ? p.paths : [],
+              x: at ? at.x / scale : null,
+              y: at ? at.y / scale : null,
+            },
           }),
         );
       }),

@@ -1332,6 +1332,87 @@ async fn apply_changes(
     .await?
 }
 
+/// Import CSV…: the native open dialog for a .csv / .tsv file. `None` when
+/// dismissed.
+#[tauri::command]
+async fn choose_csv(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("CSV or TSV", &["csv", "tsv", "tab", "txt"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(picked
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// The import panel's first look at a file: its first rows, delimiter and
+/// row count, read off the main thread.
+#[tauri::command]
+async fn preview_csv(path: String) -> Result<rowkery_core::import::CsvPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || rowkery_core::import::preview(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The running import's cancel flag, per window (one import at a time).
+#[derive(Default)]
+struct Imports(Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>);
+
+/// Imports a CSV file into a table in one transaction, sending
+/// `{"rows": n}` on `on_progress` at most every 100 ms.
+#[tauri::command]
+async fn import_csv(
+    app: AppHandle,
+    imports: State<'_, Imports>,
+    window_id: String,
+    spec: rowkery_core::import::ImportSpec,
+    on_progress: Channel<InvokeResponseBody>,
+) -> Result<rowkery_bridge::ImportOutcome, String> {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut running = imports.0.lock().map_err(|e| e.to_string())?;
+        if running.contains_key(&window_id) {
+            return Err("An import is already running in this window".into());
+        }
+        running.insert(window_id.clone(), cancel.clone());
+    }
+    let last = Mutex::new(std::time::Instant::now());
+    let progress = rowkery_bridge::ImportProgress(Arc::new(move |rows| {
+        let Ok(mut last) = last.lock() else { return };
+        if last.elapsed() >= Duration::from_millis(100) {
+            *last = std::time::Instant::now();
+            let _ = on_progress.send(InvokeResponseBody::Json(format!("{{\"rows\":{rows}}}")));
+        }
+    }));
+    let id = window_id.clone();
+    let done = on_blocking_pool(app.clone(), move |bridge| {
+        bridge.import_csv(&id, spec, cancel, progress)
+    })
+    .await;
+    if let Ok(mut running) = app.state::<Imports>().0.lock() {
+        running.remove(&window_id);
+    }
+    done?
+}
+
+/// Cancel and roll back: the window's running import stops and writes nothing.
+#[tauri::command]
+fn cancel_import(imports: State<'_, Imports>, window_id: String) {
+    if let Some(cancel) = imports
+        .0
+        .lock()
+        .ok()
+        .and_then(|r| r.get(&window_id).cloned())
+    {
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// SQL to browse a table: `filter` is a `WHERE` body, `order` the sort, and
 /// `offset` pages past rows already loaded (by keyset after `after` when
 /// `key` names the primary key).
@@ -1914,6 +1995,7 @@ pub fn run(mut timings: Timings) {
         .manage(timings)
         .manage(chrome)
         .manage(updates::Updates::default())
+        .manage(Imports::default())
         .manage(rowkery_mcp::picker::Picker::default())
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
@@ -2010,6 +2092,10 @@ pub fn run(mut timings: Timings) {
             count_incoming,
             review_changes,
             apply_changes,
+            choose_csv,
+            preview_csv,
+            import_csv,
+            cancel_import,
             prefetch_table,
             cancel_prefetch,
             ping_idle,

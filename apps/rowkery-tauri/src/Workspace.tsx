@@ -2,6 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import {
   applyChanges,
   browseTable,
+  cancelImport,
+  chooseCsv,
+  importCsv,
+  previewCsv,
   copyAllResults,
   reviewChanges,
   exportResults,
@@ -22,6 +26,7 @@ import {
   type BrowseOptions,
   type BrowseRequest,
   type ConnectExplanation,
+  type CsvPreview,
   type FollowLookup,
   type LocalServer,
   type QueryPlan,
@@ -125,6 +130,20 @@ import { tabMenu as tabMenuRows } from "./contextMenus";
 import { bufferChanges, changeCount, editTableOf, savedBuffer, withoutCommitted, type EditBuffer } from "./editBuffer";
 import { EditTray, type TrayState } from "./EditTray";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
+import { CsvImport, type ImportRun } from "./CsvImport";
+import {
+  draftFor,
+  fieldNames,
+  guessTable,
+  IMPORT_SAMPLE,
+  importedText,
+  importSampleText,
+  importSpec,
+  isCsvPath,
+  previewRows,
+  rankTables,
+  type ImportDraft,
+} from "./importDraft";
 import { Inspector, type InspectorKind } from "./Inspector";
 import { useRowEdits } from "./useRowEdits";
 import { QueryErrorView } from "./QueryErrorView";
@@ -198,8 +217,11 @@ type SortState = SortKey;
  */
 interface QueryTab {
   id: number;
-  /** "sessions": the server's sessions (SessionsView.tsx), Postgres only. */
-  kind: "query" | "table" | "sessions";
+  /**
+   * "sessions": the server's sessions (SessionsView.tsx), Postgres only.
+   * "import": Import CSV's preview, beside its panel; never saved.
+   */
+  kind: "query" | "table" | "sessions" | "import";
   title: string;
   sql: string;
   view?: ResultsView;
@@ -448,15 +470,18 @@ function TabStatus({
   run,
   table,
   active,
+  spinning = false,
   children,
 }: {
   run?: TabRun;
+  /** The import tab while its import runs (it has no query run). */
+  spinning?: boolean;
   table: boolean;
   /** The window is shown: a running tab's time ticks. */
   active: boolean;
   children: ReactNode;
 }) {
-  const running = run?.startedAt != null;
+  const running = spinning || run?.startedAt != null;
   const outcome = running ? null : run?.outcome;
   const ms = outcome ? (run?.elapsedMs ?? null) : null;
   return (
@@ -474,11 +499,11 @@ function TabStatus({
         table && <TableIcon size={12} className="query-tab-icon" />
       )}
       <span data-testid="query-tab-title" className="query-tab-title">{children}</span>
-      {running ? (
+      {running && run?.startedAt != null ? (
         <span data-testid="query-tab-time" className="query-tab-time">
-          <Elapsed since={run!.startedAt!} active={active} format={formatRunningTab} />
+          <Elapsed since={run.startedAt} active={active} format={formatRunningTab} />
         </span>
-      ) : (
+      ) : running ? null : (
         ms !== null && <span data-testid="query-tab-time" className="query-tab-time">{formatTabTime(ms, true)}</span>
       )}
     </>
@@ -563,6 +588,8 @@ export interface WindowActions {
   pasteConnection: (text?: string, openAnyway?: boolean) => void;
   /** A Found on this Mac row: connect with libpq's defaults, or open the sheet on failure. */
   connectFound: (server: LocalServer) => void;
+  /** The import panel's Connection picker: Import CSV `path` in a window on that connection. */
+  importInConnection: (id: string, path: string) => void;
 }
 
 /** Menu picks that open a sheet, menu or setting over the Agents page, so the page stays. */
@@ -629,6 +656,9 @@ interface WorkspaceProps {
   onRunningChange?: (windowId: string, running: number) => void;
   /** Called when the window's tabs or their SQL change, to be saved. */
   onTabsChange?: (windowId: string, tabs: SavedTab[], active: number) => void;
+  /** A file to Import CSV… once connected (another window's Connection picker). */
+  importFile?: string;
+  onImportFileTaken?: () => void;
 }
 
 /**
@@ -661,6 +691,8 @@ export function Workspace({
   runOnConnect,
   onRunningChange,
   onTabsChange,
+  importFile,
+  onImportFileTaken,
 }: WorkspaceProps) {
   const windowId = session.id;
   const activeId = session.connectionId;
@@ -699,8 +731,10 @@ export function Workspace({
   // typing to pause before writing.
   useEffect(() => {
     if (!onTabsChange) return;
-    const saved: SavedTab[] = tabs.map((t) => ({
-      kind: t.kind,
+    // The import tab goes with its panel: it isn't restored.
+    const kept = tabs.filter((t) => t.kind !== "import");
+    const saved: SavedTab[] = kept.map((t) => ({
+      kind: t.kind as SavedTab["kind"],
       title: t.title,
       sql: t.sql,
       view: t.view,
@@ -718,7 +752,8 @@ export function Workspace({
     onTabsChange(
       session.id,
       saved,
-      Math.max(0, tabs.findIndex((t) => t.id === activeTabId)),
+      // From the import tab, the tab it was opened from.
+      Math.max(0, kept.findIndex((t) => t.id === (tabs.find((x) => x.id === activeTabId)?.kind === "import" ? importReturnRef.current : activeTabId))),
     );
   }, [tabs, activeTabId, onTabsChange, session.id]);
   const [runs, setRuns] = useState<Record<number, TabRun>>({});
@@ -775,6 +810,9 @@ export function Workspace({
   const activeSql = activeTab?.sql ?? "";
   const isTableTab = activeTab?.kind === "table";
   const isSessionsTab = activeTab?.kind === "sessions";
+  const isImportTab = activeTab?.kind === "import";
+  /** A tab with its own bar and grid instead of the editor or a table's line. */
+  const ownTab = isSessionsTab || isImportTab;
   const presenting = usePresenting();
   const runsRef = useRef(runs);
   runsRef.current = runs;
@@ -874,6 +912,16 @@ export function Workspace({
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
     const tab = tabs[index];
+    // Closing the import tab is the panel's Cancel (a running import is
+    // cancelled first); it never goes to Recently closed.
+    if (tab.kind === "import" && csvImportRef.current) return closeImportRef.current(true);
+    if (tab.kind === "import") {
+      const rest = tabs.filter((t) => t.id !== id);
+      if (!rest.length) return;
+      setTabs(rest);
+      if (id === activeTabId) setActiveTabId(rest[Math.min(index, rest.length - 1)].id);
+      return;
+    }
     void closeQueryTab(windowId, id).catch(() => {});
     const run = runsRef.current[id];
     const worthKeeping = tab.kind === "table" || !!tab.sql.trim() || !!run?.result;
@@ -914,6 +962,8 @@ export function Workspace({
     const entries: ClosedTab[] = [];
     tabs.forEach((tab, index) => {
       if (tab.id === keepId) return;
+      // The import tab closes as its Cancel does, not into Recently closed.
+      if (tab.kind === "import") return closeImportRef.current(true);
       void closeQueryTab(windowId, tab.id).catch(() => {});
       entries.push({ tab, run: runsRef.current[tab.id], index });
     });
@@ -921,7 +971,7 @@ export function Workspace({
     closedTabs.current = [...closedTabs.current, ...entries].slice(-MAX_CLOSED_TABS);
     setClosedCount(closedTabs.current.length);
     setRuns((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => Number(id) === keepId)));
-    setTabs((prev) => prev.filter((t) => t.id === keepId));
+    setTabs((prev) => prev.filter((t) => t.id === keepId || t.kind === "import"));
     setActiveTabId(keepId);
     showUndoToast(`Closed ${entries.length} ${entries.length === 1 ? "tab" : "tabs"}`, undefined, {
       undo: () => entries.forEach((e) => reopenTabRef.current(e)),
@@ -1333,7 +1383,8 @@ export function Workspace({
   // Quick Look opening takes the column from Review SQL.
   const qlOpen = !!qlView;
   useEffect(() => {
-    if (qlOpen) setReview(null);
+    if (!qlOpen) return;
+    setReview(null);
   }, [qlOpen]);
   const setTabEdits = (
     tabId: number,
@@ -1424,7 +1475,8 @@ export function Workspace({
     const target = editTarget();
     if (!target || !activeConnection) return;
     const tabId = target.tab.id;
-    // One inspector: Review SQL takes the column from Quick Look.
+    // One inspector: Review SQL takes the column from Quick Look. (The
+    // import panel lives on its own tab, so the two never meet.)
     qlViewRef.current?.close();
     setReview({ tabId, sql: null, error: null, cards: null });
     const buffer = target.buffer;
@@ -1462,6 +1514,233 @@ export function Workspace({
   };
   const reviewKeysRef = useRef({ open: false, close: () => {}, commit: () => {} });
   reviewKeysRef.current = { open: !!reviewShown, close: () => setReview(null), commit: commitReview };
+
+  // ---- Import CSV (2026-10-21) -----------------------------------------
+
+  /**
+   * The import panel's file, table (null until one is picked: nothing fits
+   * the file) and choices, and its run while one goes.
+   */
+  const [csvImport, setCsvImport] = useState<{
+    tableKey: string | null;
+    schema: string;
+    table: string;
+    draft: ImportDraft;
+    run: ImportRun | null;
+    error: string | null;
+  } | null>(null);
+  const csvImportRef = useRef(csvImport);
+  csvImportRef.current = csvImport;
+  /** A draft of `file` for `t`, keeping the choices that still fit it. */
+  const importDraftFor = (t: SidebarTable, path: string, preview: CsvPreview, prev?: ImportDraft): ImportDraft => {
+    const key = t.table.primary_key ?? [];
+    const d = draftFor(path, preview, (t.table.columns ?? []).map((c) => c.name), { name: t.name, key });
+    if (!prev) return d;
+    return { ...d, empty: prev.empty, onConflict: prev.onConflict === "update" && !key.length ? "stop" : prev.onConflict };
+  };
+  /** Tables the file can go into, best fit first (views are left out). */
+  const importTargets = (preview: CsvPreview) =>
+    rankTables(
+      preview.rows[0] ?? [],
+      preview.file_name,
+      allTables(schemaTree)
+        .filter((t) => !isView(t))
+        .map((t) => ({ key: t.key, name: t.name, columns: (t.table.columns ?? []).map((c) => c.name), primaryKey: t.table.primary_key ?? [] })),
+    );
+  /**
+   * Import CSV… from anywhere (2026-10-21, Lucas's "file first"): the file
+   * (`path`, a dropped one, else the open dialog) comes first, then the
+   * table: `target`, else the shown table tab's, else the one the file fits
+   * best. Its tab comes forward and the panel opens beside its grid; with
+   * no table the panel asks for one.
+   */
+  const startImport = async (target?: SidebarTable, path?: string) => {
+    if (!activeConnection || connState !== "connected") return;
+    if (target && isView(target)) return showToast("Views can't be imported into", target.name, "error");
+    if (activeConnection.safe_mode === "read_only")
+      return showToast("Read-only connection · Change safe mode…", undefined, "error");
+    if (csvImportRef.current?.run) return showToast("An import is already running", csvImportRef.current.table, "error");
+    const file = path ?? (await chooseCsv().catch((e) => (showToast("Couldn't open the file", String(e), "error"), null)));
+    if (!file) return;
+    let preview;
+    try {
+      preview = await previewCsv(file);
+    } catch (e) {
+      return showToast("Couldn't read the file", String(e), "error");
+    }
+    const onImport = isImportTab && csvImportRef.current?.tableKey ? findTable(schemaTree, csvImportRef.current.tableKey) : undefined;
+    const shown = isTableTab && activeTable && !isView(activeTable) ? activeTable : onImport;
+    // On a view's tab the user picks the table: a guess elsewhere would surprise.
+    const onView = isTableTab && !!activeTable && isView(activeTable);
+    const guess = target || shown || onView ? undefined : guessTable(importTargets(preview));
+    const t = target ?? shown ?? (guess ? findTable(schemaTree, guess.key) : undefined);
+    qlViewRef.current?.close();
+    setReview(null);
+    setCsvImport({
+      tableKey: t?.key ?? null,
+      schema: t?.schema ?? "",
+      table: t?.name ?? "",
+      draft: t ? importDraftFor(t, file, preview) : draftFor(file, preview, []),
+      run: null,
+      error: null,
+    });
+    openImportTab(t?.name);
+  };
+  /**
+   * The import's own tab (2026-10-21, Lucas: the table's tab showed its
+   * query line, filter and "No records" around the file's rows): the file's
+   * first rows as the table will get them, and nothing else. One per window;
+   * where the user was is where Cancel goes back to.
+   */
+  const importReturnRef = useRef<number | null>(null);
+  const openImportTab = (table?: string) => {
+    const title = table ? `Import · ${table}` : "Import CSV";
+    const open = tabsRef.current.find((t) => t.kind === "import");
+    if (activeTabIdRef.current !== open?.id) importReturnRef.current = activeTabIdRef.current;
+    if (open) {
+      setTabs((prev) => prev.map((t) => (t.id === open.id ? { ...t, title } : t)));
+      return setActiveTabId(open.id);
+    }
+    const id = nextTabId.current++;
+    setTabs((prev) => [...prev, { id, kind: "import", title, sql: "" }]);
+    setActiveTabId(id);
+  };
+  // The panel gone (Cancel, Esc, done, a switch): its tab goes too, back to where the user was.
+  const strayImportTab = !csvImport && tabs.some((t) => t.kind === "import");
+  useEffect(() => {
+    if (!strayImportTab) return;
+    const tab = tabsRef.current.find((t) => t.kind === "import");
+    if (!tab) return;
+    const rest = tabsRef.current.filter((t) => t.id !== tab.id);
+    const back = rest.find((t) => t.id === importReturnRef.current) ?? rest[rest.length - 1];
+    importReturnRef.current = null;
+    if (!back) {
+      const fresh = nextTabId.current++;
+      setTabs([queryTab(fresh, "Query 1", "")]);
+      return setActiveTabId(fresh);
+    }
+    setTabs(rest);
+    if (activeTabIdRef.current === tab.id) setActiveTabId(back.id);
+  }, [strayImportTab]);
+  /** The panel's Table picker: the file goes into `t` instead. */
+  const pickImportTable = (t: SidebarTable) => {
+    const cur = csvImportRef.current;
+    if (!cur || cur.run) return;
+    setCsvImport({
+      ...cur,
+      tableKey: t.key,
+      schema: t.schema,
+      table: t.name,
+      draft: importDraftFor(t, cur.draft.path, cur.draft.preview, cur.tableKey ? cur.draft : undefined),
+      error: null,
+    });
+    openImportTab(t.name);
+  };
+  const startImportRef = useRef(startImport);
+  startImportRef.current = startImport;
+  // Picked in another window's Connection picker (App): the file, once this
+  // window is connected and has its schema.
+  const schemaLoaded = connState === "connected" && !!schema;
+  useEffect(() => {
+    if (!importFile) return;
+    if (connState === "error") {
+      onImportFileTaken?.();
+      return showToast("Couldn't import the file", "The connection failed", "error");
+    }
+    if (!schemaLoaded) return;
+    onImportFileTaken?.();
+    void startImportRef.current(undefined, importFile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importFile, schemaLoaded, connState]);
+  // The panel belongs to this connection and database: a switch (or a lost
+  // connection) closes it, unless an import is running (it cancels on its own session).
+  useEffect(() => {
+    if (csvImportRef.current && !csvImportRef.current.run) setCsvImport(null);
+  }, [activeId, session.database, connState === "connected"]);
+  // The panel sits beside the import tab's grid.
+  const importShown = csvImport && isImportTab ? csvImport : null;
+  const importTable = importShown?.tableKey ? findTable(schemaTree, importShown.tableKey) : undefined;
+  /** Where the window is now: an import that ends after a switch leaves the new place alone. */
+  const placeRef = useRef("");
+  placeRef.current = `${activeId}\0${session.database ?? ""}`;
+  /** The import tab was closed while its import ran: it goes once the run ends. */
+  const closeWhenDoneRef = useRef(false);
+  const runImport = async () => {
+    const cur = csvImportRef.current;
+    if (!cur || cur.run || !cur.tableKey) return;
+    const startedAt = Date.now();
+    const place = placeRef.current;
+    closeWhenDoneRef.current = false;
+    setCsvImport({ ...cur, run: { rows: 0, startedAt }, error: null });
+    const onRun = (patch: (c: NonNullable<typeof cur>) => Partial<NonNullable<typeof cur>>) =>
+      setCsvImport((c) => (c && c.tableKey === cur.tableKey ? { ...c, ...patch(c) } : c));
+    const onImportTab = () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.kind === "import";
+    /** A failure keeps the panel with the message; off its tab, a toast says so too. */
+    const failed = (message: string) => {
+      if (closeWhenDoneRef.current) setCsvImport(null);
+      else onRun(() => ({ run: null, error: message }));
+      if (!onImportTab() || closeWhenDoneRef.current) showToast("Import failed · nothing was written", message, "error");
+    };
+    let out;
+    try {
+      out = await importCsv(windowId, importSpec(cur.draft, cur.schema, cur.table), (rows) =>
+        onRun(() => ({ run: { rows, startedAt } })),
+      );
+    } catch (e) {
+      return failed(String(e));
+    }
+    if (out.status === "failed") return failed(out.message);
+    if (out.status === "cancelled") {
+      if (closeWhenDoneRef.current) setCsvImport(null);
+      else onRun(() => ({ run: null }));
+      return showToast("Import cancelled", "Nothing was written");
+    }
+    // Read before the import tab goes: only from it does the table's tab come forward.
+    const fromTab = onImportTab();
+    setCsvImport((c) => (c && c.tableKey === cur.tableKey ? null : c));
+    if (out.status === "refused") return showToast("Read-only connection · Change safe mode…", undefined, "error");
+    showToast(importedText(out), `${cur.table} · ${formatMs(out.elapsed_ms)}`);
+    if (placeRef.current !== place) return;
+    // The rows as the table has them now, in its tab.
+    const t = findTable(schemaTreeRef.current, cur.tableKey);
+    const tab = tabsRef.current.find((x) => x.kind === "table" && x.tableKey === cur.tableKey);
+    if (tab) void runTable(tab);
+    if (t && fromTab) openTable(t, { keep: true, view: "data" });
+  };
+  /**
+   * ×, Esc or closing its tab: a running import is cancelled (and rolled
+   * back) first; closing the tab (`andTab`) takes the panel with it once
+   * the run ends.
+   */
+  const closeImport = (andTab = false) => {
+    if (csvImportRef.current?.run) {
+      closeWhenDoneRef.current ||= andTab;
+      void cancelImport(windowId);
+    } else setCsvImport(null);
+  };
+  const closeImportRef = useRef(closeImport);
+  closeImportRef.current = closeImport;
+  const schemaTreeRef = useRef(schemaTree);
+  schemaTreeRef.current = schemaTree;
+  // A .csv / .tsv dropped on the window: Import CSV, into the table it was
+  // dropped on in the schema panel, else as Import CSV… picks.
+  useEffect(() => {
+    if (!active) return;
+    const onDrag = (e: Event) => {
+      const { type, paths, x, y } = (e as CustomEvent<{ type: string; paths: string[]; x?: number | null; y?: number | null }>).detail;
+      const file = type === "drop" ? paths.find(isCsvPath) : undefined;
+      if (!file || x == null || y == null) return;
+      const at = document.elementFromPoint(x, y);
+      const workspace = workspaceRef.current;
+      if (!at || !workspace?.contains(at)) return;
+      const row = at.closest<HTMLElement>(".sidebar [data-table]")?.dataset.table;
+      void startImportRef.current(row ? findTable(schemaTreeRef.current, row) : undefined, file);
+    };
+    window.addEventListener("rowkery:file-drag", onDrag);
+    return () => window.removeEventListener("rowkery:file-drag", onDrag);
+  }, [active]);
+  const importKeysRef = useRef({ open: false, close: () => {} });
+  importKeysRef.current = { open: !!importShown, close: () => closeImport() };
 
   /** COMMENT ON COLUMN of the table the result reads: header tooltips, Quick Look. */
   const commentsByColumn = useMemo(
@@ -1776,6 +2055,12 @@ export function Workspace({
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyE" && !isTableTabRef.current) {
         e.preventDefault();
         runCommandRef.current("explain");
+        return;
+      }
+      // The import panel: Esc closes it (a running import is cancelled first).
+      if (importKeysRef.current.open && e.key === "Escape" && !e.defaultPrevented && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        importKeysRef.current.close();
         return;
       }
       // The inspector's Review SQL: ⌘S or ⇧⌘↵ commits the text it shows, Esc closes it
@@ -2947,6 +3232,43 @@ export function Workspace({
     () => (result && activeClientSort?.length && !result.error ? sortResult(result, activeClientSort) : result),
     [result, activeClientSort],
   );
+  /** The panel's Table picker: best fit first, with how many of the file's fields each matches. */
+  const importChoices = useMemo(() => {
+    if (!importShown) return [];
+    // Qualified only where there's more than one schema to tell apart.
+    const qualify = schemaTree.length > 1;
+    return importTargets(importShown.draft.preview).map((m) => {
+      const t = findTable(schemaTree, m.key);
+      return {
+        id: m.key,
+        name: t ? (qualify ? `${t.schema}.${t.name}` : t.name) : m.key,
+        gloss: m.matched ? `${m.matched} of ${m.total} columns` : undefined,
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importShown?.draft.preview, schemaTree]);
+  /**
+   * The import tab's grid: the table's columns with the file's first rows as
+   * it will get them, or the file as it is until a table is picked.
+   */
+  const importResult = useMemo((): QueryResultDto | null => {
+    if (!importShown) return null;
+    const columns = importTable
+      ? (importTable.table.columns ?? []).map((c) => ({ name: c.name, type_name: c.type_name }))
+      : fieldNames(importShown.draft).map((name) => ({ name, type_name: "" }));
+    return { columns, rows: new ResultRows(), row_count: 0, elapsed_ms: 0, error: null, cancelled: false };
+  }, [importShown?.draft, importTable]);
+  const [importWidths, setImportWidths] = useState<Record<string, number> | undefined>(undefined);
+  useEffect(() => setImportWidths(undefined), [importShown?.tableKey]);
+  const importPreview = useMemo(() => {
+    if (!importShown || !importResult) return null;
+    if (!importTable) {
+      const from = importShown.draft.header ? 1 : 0;
+      return importShown.draft.preview.rows.slice(from, from + IMPORT_SAMPLE).map((r) => r.map((v) => ({ Text: v })));
+    }
+    const names = importResult.columns.map((c) => c.name);
+    return previewRows(importShown.draft, names, importTable.table.columns ?? [], activeConnection?.kind === "sqlite", IMPORT_SAMPLE);
+  }, [importShown, importResult, importTable, activeConnection?.kind]);
 
   /** Applies new sort keys: a table tab reruns its first page, a query tab re-sorts its rows. */
   const applySort = (sort: SortState[]) => {
@@ -3322,7 +3644,8 @@ export function Workspace({
       busy,
       running,
       tableTab: isTableTab,
-      sessionsTab: isSessionsTab,
+      // The import tab runs no SQL either: what a query tab offers isn't for it.
+      sessionsTab: ownTab,
       tabCount: tabs.length,
       hasSchema: !!schema,
       sidebarHidden,
@@ -3372,7 +3695,7 @@ export function Workspace({
       busy,
       running,
       isTableTab,
-      isSessionsTab,
+      ownTab,
       tabs.length,
       schema,
       sidebarHidden,
@@ -3669,6 +3992,8 @@ export function Workspace({
         return void exportWhole("tsv");
       case "export":
         return void exportWhole("file");
+      case "import-csv":
+        return void startImport();
       // A keymap's swapped chord or a menu pick does what the tip teaches too.
       case "show-data":
         retireTip("view-keys");
@@ -3816,7 +4141,9 @@ export function Workspace({
   // column gives it its width (App.css, --inspector-right).
   const inspectorKind: InspectorKind | null = emptyPose
     ? null
-    : reviewShown
+    : importShown
+      ? "import"
+      : reviewShown
       ? "review"
       : isSessionsTab && sessions.picked
         ? "session"
@@ -3849,6 +4176,7 @@ export function Workspace({
           onOpenTable={(t, keep) => openTable(t, { keep })}
           onTableStructure={(t) => openTable(t, { view: "structure" })}
           onInsertName={(t) => insertAtCaret(tableIdent(t.schema, t.name))}
+          onImportCsv={(t) => void startImportRef.current(t)}
           onHoverTable={hoverTable}
           onRefresh={connState === "connected" ? () => refreshSchemaRef.current() : undefined}
           refreshing={session.refreshing}
@@ -3932,8 +4260,8 @@ export function Workspace({
         )}
         <div
           data-testid="editor-card"
-          className={`card editor-card${isTableTab || isSessionsTab ? " table-mode" : ""}`}
-          style={isTableTab || isSessionsTab ? undefined : { flex: `0 0 ${editorSplitPct}%` }}
+          className={`card editor-card${isTableTab || ownTab ? " table-mode" : ""}`}
+          style={isTableTab || ownTab ? undefined : { flex: `0 0 ${editorSplitPct}%` }}
         >
           <div data-testid="editor-header" className="editor-header" data-tauri-drag-region ref={headerRef}>
             {/* The panel is hidden: which connection and database this is,
@@ -4033,6 +4361,7 @@ export function Workspace({
                       run={runs[tab.id]}
                       table={tab.kind === "table"}
                       active={active}
+                      spinning={tab.kind === "import" && !!csvImport?.run}
                     >
                       {tab.title}
                     </TabStatus>
@@ -4129,6 +4458,15 @@ export function Workspace({
             />
           ) : isSessionsTab ? (
             <SessionsBar model={sessions} />
+          ) : isImportTab ? (
+            <div className="sessions-bar" data-import-bar>
+              <span className="sessions-title">Import</span>
+              {csvImport && (
+                <span className="sessions-count" data-import-sample>
+                  {importSampleText(csvImport.draft)}
+                </span>
+              )}
+            </div>
           ) : (
             <SqlEditor
               key={activeTabId}
@@ -4142,7 +4480,7 @@ export function Workspace({
               onMarkEnter={applySuggestion}
             />
           )}
-          {!isTableTab && !isSessionsTab && (
+          {!isTableTab && !ownTab && (
             // Run sits at the editor's foot, like a composer's send button.
             <div data-testid="composer" className="composer">
               {active && <KeyStrip zone="editor" state={commandState} />}
@@ -4175,16 +4513,16 @@ export function Workspace({
         </div>
         <div
           data-testid="pane-splitter"
-          className={`pane-splitter${running && !isTableTab && !isSessionsTab ? " sweeping" : ""}`}
+          className={`pane-splitter${running && !isTableTab && !ownTab ? " sweeping" : ""}`}
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize the editor and the results"
           onMouseDown={(e) => {
             e.preventDefault();
-            if (!isTableTab && !isSessionsTab) startSplitDrag(e.currentTarget);
+            if (!isTableTab && !ownTab) startSplitDrag(e.currentTarget);
           }}
           onDoubleClick={() => {
-            if (isTableTab || isSessionsTab) return;
+            if (isTableTab || ownTab) return;
             setEditorSplitPct(DEFAULT_EDITOR_SPLIT);
             writeKey(SPLIT_KEY, null);
           }}
@@ -4196,6 +4534,17 @@ export function Workspace({
         >
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
+          ) : isImportTab ? (
+            <RenderErrorBoundary fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}>
+              <ResultsGrid
+                result={importResult}
+                importRows={importPreview}
+                // Its own widths, not saved: a preview's shape isn't a result's.
+                columnWidths={importWidths}
+                onColumnWidthsChange={setImportWidths}
+                tableName={importShown?.table || undefined}
+              />
+            </RenderErrorBoundary>
           ) : (
           <>
           {!isTableTab && (
@@ -4460,7 +4809,7 @@ export function Workspace({
           </>
           )}
           {/* The edits bar sits at the grid's foot, where the strip would; it prints its own keys. */}
-          {active && !trayUp && !isSessionsTab && resultsView !== "map" && <KeyStrip zone="grid" state={commandState} />}
+          {active && !trayUp && !ownTab && resultsView !== "map" && <KeyStrip zone="grid" state={commandState} />}
           <Presence open={trayUp}>
             <EditTray
               count={rowEdits.count}
@@ -4488,12 +4837,42 @@ export function Workspace({
       <Presence open={!!inspectorKind}>
         <Inspector
           kind={inspectorKind ?? "quicklook"}
-          aria-label={inspectorKind === "review" ? "Review SQL" : inspectorKind === "session" ? "Session" : "Quick Look"}
+          aria-label={
+            inspectorKind === "import" ? "Import CSV" : inspectorKind === "review" ? "Review SQL" : inspectorKind === "session" ? "Session" : "Quick Look"
+          }
           data-quicklook={inspectorKind === "quicklook" ? "" : undefined}
           data-review-sql={inspectorKind === "review" ? "" : undefined}
           data-deleted={inspectorKind === "quicklook" && qlView?.edit?.mark === "delete" ? "" : undefined}
         >
-          {inspectorKind === "review" && reviewShown ? (
+          {inspectorKind === "import" && importShown ? (
+            <CsvImport
+              connectionId={activeConnection?.id ?? ""}
+              active={active}
+              // Read-only connections can't take an import.
+              connections={connections.filter((c) => c.safe_mode !== "read_only").map((c) => ({ id: c.id, name: c.name }))}
+              onPickConnection={(id) => {
+                const path = importShown.draft.path;
+                setCsvImport(null);
+                actions.importInConnection(id, path);
+              }}
+              tableKey={importShown.tableKey}
+              tables={importChoices}
+              onPickTable={(key) => {
+                const t = findTable(schemaTree, key);
+                if (t) pickImportTable(t);
+              }}
+              table={importShown.table}
+              columns={(importTable?.table.columns ?? []).map((c) => c.name)}
+              keyColumns={importTable?.table.primary_key ?? []}
+              draft={importShown.draft}
+              run={importShown.run}
+              error={importShown.error}
+              onChange={(draft) => setCsvImport((c) => (c ? { ...c, draft, error: null } : c))}
+              onImport={() => void runImport()}
+              onCancelRun={() => void cancelImport(windowId)}
+              onClose={() => closeImport()}
+            />
+          ) : inspectorKind === "review" && reviewShown ? (
             <ReviewSql
               sql={reviewShown.sql}
               cards={reviewShown.cards}

@@ -33,6 +33,7 @@ export const GROUPS: DocGroup[] = [
       { href: "/quick-look/", title: "Quick Look", file: "quick-look/page.mdx" },
       { href: "/editing-rows/", title: "Editing rows", file: "editing-rows/page.mdx" },
       { href: "/exporting-and-copying/", title: "Exporting and copying", file: "exporting-and-copying/page.mdx" },
+      { href: "/importing-csv/", title: "Importing a CSV", file: "importing-csv/page.mdx" },
       { href: "/query-plans/", title: "Query plans", file: "query-plans/page.mdx" },
       { href: "/sessions/", title: "Sessions", file: "sessions/page.mdx" },
     ],

@@ -139,7 +139,7 @@ await page.waitForSelector(menu("panel-row"));
 const panelRows = await rows("panel-row");
 check(
   panelRows.join("|") ===
-    "open=Open:~click|open-tab=Open in a new tab:~Ctrl-click|structure=Structure:|insert=Insert name:Alt+↵|copy-name=Copy name:|pin=Pin to top:",
+    "open=Open:~click|open-tab=Open in a new tab:~Ctrl-click|structure=Structure:|import-csv=Import CSV…:|insert=Insert name:Alt+↵|copy-name=Copy name:|pin=Pin to top:",
   `panel row menu: ${panelRows.join(" · ")}`,
 );
 check((await page.$$(`${menu("panel-row")} [data-testid="grid-menu-sep"]`)).length === 2, "panel row menu: two groups ruled off");

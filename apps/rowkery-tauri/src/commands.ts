@@ -730,6 +730,15 @@ export const COMMANDS: Command[] = [
     synonyms: ["export", "csv", "download"],
     canRun: (s) => s.hasRows && !s.running,
   },
+  {
+    // From anywhere: the file first, then the table (the shown table tab's,
+    // else the best fit); the panel opens beside its grid (CsvImport.tsx).
+    id: "import-csv",
+    title: "Import CSV…",
+    menuTitle: "Import CSV…",
+    synonyms: ["import", "csv", "tsv", "upload", "load", "file"],
+    canRun: (s) => s.connected && !s.busy,
+  },
   { id: "clear-results", title: "Clear results", menuTitle: "Clear Results", canRun: (s) => s.hasResult },
   {
     id: "timings",
@@ -938,7 +947,7 @@ export function availableCommands(s: CommandState, mac: boolean): AvailableComma
  */
 export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   { submenu: "Rowkery", items: ["check-updates", null, "settings"] },
-  { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "close-tab"] },
+  { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "import-csv", null, "close-tab"] },
   { submenu: "Edit", items: ["format-sql"] },
   {
     submenu: "Connection",

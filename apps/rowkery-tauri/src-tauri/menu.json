@@ -34,6 +34,14 @@
         "separator": true
       },
       {
+        "id": "import-csv",
+        "title": "Import CSV…",
+        "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
         "id": "close-tab",
         "title": "Close Tab",
         "accelerator": "CmdOrCtrl+W"
