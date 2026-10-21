@@ -800,8 +800,9 @@ export function Workspace({
   );
 
   // The map's Guess links switch, per connection (mapGuess.ts).
-  const [mapGuess, setMapGuessState] = useState(() => mapGuessOn(activeId));
-  useEffect(() => setMapGuessState(mapGuessOn(activeId)), [activeId]);
+  // Read in render so a connection switch never shows the last one's value.
+  const [mapGuessFlip, setMapGuessFlip] = useState(0);
+  const mapGuess = useMemo(() => mapGuessOn(activeId), [activeId, mapGuessFlip]);
 
   /** Re-centring the map is a step in history too; its own table clears the centre. */
   const centreMap = (key: string) => {
@@ -4335,7 +4336,7 @@ export function Workspace({
                   onGuess={(on) => {
                     if (!activeConnection) return;
                     setMapGuess(activeConnection.id, on);
-                    setMapGuessState(on);
+                    setMapGuessFlip((n) => n + 1);
                   }}
                   onCentre={centreMap}
                   onOpen={(key, newTab) => {
