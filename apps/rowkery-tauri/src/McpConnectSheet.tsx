@@ -147,7 +147,7 @@ export function McpConnectSheet({
 
   const shared =
     sharedCount === 0
-      ? "No connection is shared yet: turn on Allow MCP for one."
+      ? "No connection is shared yet: turn on Share with agents for one."
       : `${sharedCount} ${sharedCount === 1 ? "connection is" : "connections are"} shared right now.`;
   const restart =
     shown === "claude-code"

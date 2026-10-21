@@ -455,7 +455,7 @@ fn list_connections(config: &AppConfig) -> Json {
     let mut out = json!({ "connections": shared });
     if hidden > 0 {
         out["not_shared"] = json!(format!(
-            "{hidden} more saved connection(s) are not shared. The user can turn on \"Allow MCP\" in a connection's sheet in Rowkery."
+            "{hidden} more saved connection(s) are not shared. The user can share one in Rowkery, under Settings › Agents."
         ));
     }
     out

@@ -209,7 +209,8 @@ const GROUP_BIAS: Record<PaletteGroup, number> = {
 /**
  * The label's score, or a synonym's when that is better: `help` finds
  * Keyboard shortcuts. A synonym counts only as a substring (its scattered
- * letters would match nearly anything) and scores as if it were the label.
+ * letters would match nearly anything) and scores a little under the same
+ * hit on a label, so `copy` puts the Copy… commands above Duplicate row.
  */
 function scoreItem(it: PaletteItem, q: string): { score: number; viaSynonym: boolean } {
   const score = scoreMatch(it.hay, q);
@@ -217,12 +218,15 @@ function scoreItem(it: PaletteItem, q: string): { score: number; viaSynonym: boo
   if (it.syn) {
     for (const s of it.syn) {
       if (s.indexOf(q) < 0) continue;
-      const alt = scoreMatch(s, q);
+      const alt = scoreMatch(s, q) * SYNONYM_WEIGHT;
       if (alt > best) best = alt;
     }
   }
   return { score: best, viaSynonym: best > score };
 }
+
+/** A synonym hit's share of the same hit on a label: just outside a tie (`TIE`). */
+const SYNONYM_WEIGHT = 0.85;
 
 /** Command scores within this fraction of each other tie, and use decides. */
 const TIE = 0.1;

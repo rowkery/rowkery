@@ -599,7 +599,7 @@ function AccessCard({
           role="switch"
           className="nc-switch"
           data-mcp-allow={c.id}
-          aria-label={`Allow MCP for ${c.name}`}
+          aria-label={`Share ${c.name} with agents`}
           checked={shared}
           onChange={(e) => {
             if (!e.target.checked && editing) onEdit(null);

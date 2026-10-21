@@ -59,7 +59,7 @@ pub fn resolve(
         .ok_or_else(|| {
             format!(
                 "No shared connection called \"{wanted}\". list_connections shows the ones \
-                 shared; a connection is shared when \"Allow MCP\" is on in its sheet in Rowkery."
+                 shared; the user shares one in Rowkery, under Settings › Agents."
             )
         })?;
     let asked = database.map(str::trim).filter(|d| !d.is_empty());
