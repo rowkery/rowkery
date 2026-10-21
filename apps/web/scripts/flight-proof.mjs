@@ -7,8 +7,8 @@
 //  3. the logo is the plain mark: no props drawn and no hop on it;
 //  4. the held screen sits above the nav (so the logo lands on it) but lets the pointer through:
 //     the nav's links and the hero's own buttons still take a click.
-//  5. one logo at a time: the brand's own mark shows at rest and once the logo lands, never
-//     while it flies.
+//  5. one logo at a time: the brand's own mark shows at rest, fades out while the logo flies,
+//     and is there at full strength in the very frame the logo lands and hides.
 // At 390x844, 375x667 and 1440x900; frames at progress 0, 0.25, 0.5, 0.75, 0.95 and 1 at
 // 390x844 and 1440x900. Fails on any page error.
 //
@@ -80,9 +80,21 @@ for (const [w, h] of [[390, 844], [375, 667], [1440, 900]]) {
   for (const [p, want] of [[0, true], [0.5, false], [(FLY - 1) / FLY, false], [1, true]]) {
     await to(FLY * p);
     await settle(page);
-    const shows = await page.evaluate(() => getComputedStyle(document.querySelector(".nav .brand .mk")).visibility === "visible");
-    if (shows !== want) bad(`the brand's mark ${want ? "hides" : "shows"} at ${p.toFixed(3)} of the flight`);
+    const o = await page.evaluate(() => +getComputedStyle(document.querySelector(".nav .brand .mk")).opacity);
+    if (want ? o < 0.99 : o > 0.01) bad(`the brand's mark is at opacity ${o} at ${p.toFixed(3)} of the flight`);
   }
+  await to(FLY - 1);
+  await settle(page);
+  await to(FLY);
+  const swap = await page.evaluate(
+    () =>
+      new Promise((done) => {
+        const hpg = document.querySelector(".hpg"), mk = document.querySelector(".nav .brand .mk");
+        const look = () => (getComputedStyle(hpg).visibility === "hidden" ? done(+getComputedStyle(mk).opacity) : requestAnimationFrame(look));
+        look();
+      }),
+  );
+  if (swap < 0.99) bad(`the brand's mark fades in after the landing (opacity ${swap} as the logo hides)`);
 
   // Frames of the flight.
   if (h !== 667)

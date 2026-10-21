@@ -705,8 +705,10 @@ export function startStory() {
         const tx = cx - sc * (fl.x + fl.w / 2), ty = cy - sc * (fl.y + fl.h / 2);
         css(hpg, "transform", `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) scale(${sc.toFixed(5)})`);
         css(hpg, "visibility", hk >= 1 ? "hidden" : "visible");
-        // The brand's own mark steps aside while the logo is on its way, so there is only ever one.
-        css(brandMk, "visibility", hk > 0 && hk < 1 ? "hidden" : "visible");
+        // The brand's own mark fades out as the logo sets off, so there is only ever one, and is
+        // simply there again the moment it lands (the two coincide, so the swap can't be seen).
+        css(brandMk, "transition", hk >= 1 ? "none" : hk > 0 ? "opacity 0.25s ease" : "opacity 0.35s ease");
+        css(brandMk, "opacity", hk > 0 && hk < 1 ? "0" : "1");
         // At rest it drifts a little toward the pointer; on the way up it lets go.
         css(look, "transform", `translate(${((1 - he) * px * 24).toFixed(1)}px, ${((1 - he) * py * 14).toFixed(1)}px)`);
       }
