@@ -41,9 +41,9 @@ export interface CommandState {
   windowCount: number;
   hasResult: boolean;
   hasRows: boolean;
-  /** The shown tab was opened from a table (Data | Structure applies). */
+  /** The shown tab was opened from a table (Data | Structure | Map applies). */
   hasActiveTable: boolean;
-  resultsView: "data" | "structure";
+  resultsView: "data" | "structure" | "map";
   /** The window's connection failed (⌘R retries, ⌘E edits it). */
   failed: boolean;
   /** Rows the shown result has loaded, and whether more remain unloaded. */
@@ -748,7 +748,7 @@ export const COMMANDS: Command[] = [
     title: "Show data",
     menuTitle: "Data",
     chord: { mac: "Alt+Mod+1" },
-    canRun: (s) => s.hasActiveTable && s.resultsView === "structure",
+    canRun: (s) => s.hasActiveTable && s.resultsView !== "data",
   },
   {
     id: "show-structure",
@@ -756,6 +756,14 @@ export const COMMANDS: Command[] = [
     menuTitle: "Structure",
     chord: { mac: "Alt+Mod+2" },
     canRun: (s) => s.hasActiveTable && s.resultsView !== "structure",
+  },
+  {
+    id: "show-map",
+    title: "Show map",
+    menuTitle: "Map",
+    chord: { mac: "Alt+Mod+3" },
+    synonyms: ["map", "diagram", "erd", "relations", "foreign keys", "references"],
+    canRun: (s) => s.hasActiveTable && s.resultsView !== "map",
   },
   ...zoneCommands(),
   ...editCommands(),
@@ -967,7 +975,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   },
   {
     submenu: "View",
-    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-sessions", null, "theme:auto", "theme:light", "theme:dark"],
+    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-map", "show-sessions", null, "theme:auto", "theme:light", "theme:dark"],
   },
   {
     submenu: "Go",
@@ -1072,6 +1080,9 @@ export const GESTURES: Gesture[] = [
   { id: "grid-extend", title: "Extend the selection", section: "Grid", keys: { mac: "⇧-click · ⇧↑↓←→", other: "Shift+click/arrows" } },
   { id: "grid-rows", title: "Select whole rows", section: "Grid", keys: { mac: "drag row numbers", other: "drag row numbers" } },
   { id: "grid-count", title: "Count the rows exactly", section: "Grid", keys: { mac: "#", other: "#" } },
+  { id: "map-move", title: "Map: move between tables", section: "View", keys: { mac: "↑↓←→", other: "Arrows" } },
+  { id: "map-centre", title: "Map: centre on the table", section: "View", keys: { mac: "Space", other: "Space" } },
+  { id: "map-open", title: "Map: open the table (⌘↵ in its own tab)", section: "View", keys: { mac: "↵ · ⌘↵", other: "Enter · Ctrl+Enter" } },
   { id: "panel-open", title: "Browse the table", section: "Schema panel", chord: { mac: "Enter" } },
   { id: "panel-own-tab", title: "Open a table in its own tab", section: "Schema panel", keys: { mac: "⌘-click", other: "Ctrl-click" } },
   { id: "switch-window-n", title: "Switch to window 1–9", section: "Windows", keys: { mac: "⌘1–9", other: "Ctrl+1–9" } },

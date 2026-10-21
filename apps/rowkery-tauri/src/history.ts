@@ -2,15 +2,18 @@ import type { FilterChip } from "./filterChips";
 
 /**
  * A window's history of where its Preview tab has been: browsed tables (with
- * their filter, sort and page size) and Structure views. ‹ › and ⌘[ ⌘] walk
- * it; a new step from the middle drops the steps ahead. Session only.
+ * their filter, sort and page size), Structure and Map views (a map's
+ * re-centring is a step too). ‹ › and ⌘[ ⌘] walk it; a new step from the
+ * middle drops the steps ahead. Session only.
  */
 
 export interface HistoryEntry {
   tableKey: string;
   /** The table's name, for tooltips and the list. */
   name: string;
-  view: "data" | "structure";
+  view: "data" | "structure" | "map";
+  /** Map: the table it is centred on, when not this tab's own. */
+  centre?: { key: string; name: string };
   filter: string;
   /** The filter's chips, so ‹ › bring them back as chips. */
   chips?: FilterChip[];
@@ -31,6 +34,7 @@ export const MAX_HISTORY = 50;
 const same = (a: HistoryEntry, b: HistoryEntry) =>
   a.tableKey === b.tableKey &&
   a.view === b.view &&
+  a.centre?.key === b.centre?.key &&
   a.filter === b.filter &&
   a.sort.length === b.sort.length &&
   a.sort.every((k, i) => k.column === b.sort[i]?.column && k.desc === b.sort[i]?.desc);
@@ -62,9 +66,10 @@ export function goHistory(h: History, delta: number, now: HistoryEntry | null = 
   return { entries: withCurrent(h, now), index };
 }
 
-/** "wallet_tx · status = 'pending' · amount ↓", "wallets · Structure". */
+/** "wallet_tx · status = 'pending' · amount ↓", "wallets · Structure", "users · Map". */
 export function historyLabel(e: HistoryEntry): string {
   if (e.view === "structure") return `${e.name} · Structure`;
+  if (e.view === "map") return `${e.centre?.name ?? e.name} · Map`;
   const parts = [e.name];
   if (e.filter.trim()) parts.push(e.filter.trim());
   if (e.sort.length) parts.push(e.sort.map((k) => `${k.column} ${k.desc ? "↓" : "↑"}`).join(", "));

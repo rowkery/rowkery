@@ -51,4 +51,14 @@ describe("history", () => {
     );
     expect(historyLabel(e("db.public.wallets", { view: "structure" }))).toBe("wallets · Structure");
   });
+
+  it("steps through a map's re-centring", () => {
+    let h = pushHistory(EMPTY_HISTORY, e("db.public.orders", { view: "map" }));
+    h = pushHistory(h, e("db.public.orders", { view: "map", centre: { key: "db.public.order_items", name: "order_items" } }));
+    expect(h.entries).toHaveLength(2);
+    expect(historyLabel(h.entries[0])).toBe("orders · Map");
+    expect(historyLabel(h.entries[1])).toBe("order_items · Map");
+    h = goHistory(h, -1)!;
+    expect(h.entries[h.index].centre).toBeUndefined();
+  });
 });

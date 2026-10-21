@@ -5,7 +5,7 @@ export interface SavedTab {
   kind: "query" | "table" | "sessions";
   title: string;
   sql: string;
-  view?: "data" | "structure";
+  view?: "data" | "structure" | "map";
   tableKey?: string;
   schema?: string;
   table?: string;

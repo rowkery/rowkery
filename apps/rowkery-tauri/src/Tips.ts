@@ -46,9 +46,9 @@ export const TIPS: Record<TipId, TipDef> = {
     where: "sql-line",
     after: 1,
   },
-  // The third click on the Data | Structure thumb; either chord retires it.
+  // The third click on the Data | Structure | Map thumb; any of the chords retires it.
   "view-keys": {
-    text: (mac) => `${keys("show-data", mac)} / ${keys("show-structure", mac)} switch Data and Structure`,
+    text: (mac) => `${keys("show-data", mac)} / ${keys("show-structure", mac)} / ${keys("show-map", mac)} switch Data, Structure and Map`,
     where: "view-switch",
     after: 3,
   },

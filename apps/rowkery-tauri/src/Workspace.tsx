@@ -48,6 +48,7 @@ import {
   BlocksIcon,
   CloseIcon,
   GridIcon,
+  MapIcon,
   PlayIcon,
   PlusIcon,
   ShieldModeIcon,
@@ -76,6 +77,8 @@ import { allTables, buildSchemaTree, findTable, isView, tableKey, type SidebarTa
 import { prefetchOn } from "./prefetchSwitch";
 import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
+import { SchemaMap } from "./SchemaMap";
+import type { MapDepth } from "./mapLayout";
 import { Sidebar, SidebarFoot } from "./Sidebar";
 import type { SettingsSection } from "./SettingsPage";
 import { createPortal } from "react-dom";
@@ -153,7 +156,14 @@ import { StatementList, type StatementResult } from "./StatementList";
 import { instanceShortName } from "./CloudSqlFields";
 import { SessionDetail, SessionsBar, SessionsGrid, useSessions } from "./SessionsView";
 
-type ResultsView = "data" | "structure";
+type ResultsView = "data" | "structure" | "map";
+
+/** Data | Structure | Map on a table tab. */
+const VIEWS = [
+  { view: "data", label: "Data", command: "show-data", tip: "Show the rows", Icon: GridIcon },
+  { view: "structure", label: "Structure", command: "show-structure", tip: "Show columns, indexes and keys", Icon: BlocksIcon },
+  { view: "map", label: "Map", command: "show-map", tip: "Show the tables it points to and that point to it", Icon: MapIcon },
+] as const;
 
 const NO_ENUMS: NonNullable<SchemaCatalog["enums"]> = [];
 
@@ -209,6 +219,10 @@ interface QueryTab {
   preview?: boolean;
   /** Table tabs: staged row edits, saved with the tab until Commit or Discard. */
   edits?: EditBuffer;
+  /** Map: the table it is centred on, when not the tab's own (session only). */
+  mapCentre?: { key: string; name: string };
+  /** Map: how far it reaches (session only; 1 step by default). */
+  mapDepth?: MapDepth;
 }
 
 /** Where a table tab is, as a history entry (null for query tabs). */
@@ -217,7 +231,8 @@ function entryOf(tab: QueryTab | undefined): NavEntry | null {
   return {
     tableKey: tab.tableKey,
     name: tab.table ?? tab.title,
-    view: tab.view === "structure" ? "structure" : "data",
+    view: tab.view === "structure" || tab.view === "map" ? tab.view : "data",
+    centre: tab.view === "map" ? tab.mapCentre : undefined,
     filter: tab.filter ?? "",
     chips: tab.chips,
     sort: tab.sort ?? [],
@@ -768,8 +783,11 @@ export function Workspace({
   const navRef = useRef(navHistory);
   navRef.current = navHistory;
 
+  /** Set when the user asks for the map (switch, ⌥⌘3, ⌘K): it takes the keys then, not when a tab merely shows it. */
+  const mapWantsFocus = useRef(false);
   const setActiveView = useCallback(
     (view: ResultsView) => {
+      if (view === "map") mapWantsFocus.current = true;
       const before = entryOf(tabsRef.current.find((t) => t.id === activeTabId));
       setTabs((prev) =>
         prev.map((t) => (t.id === activeTabId ? { ...t, view } : t)),
@@ -779,6 +797,17 @@ export function Workspace({
     },
     [activeTabId],
   );
+
+  /** Re-centring the map is a step in history too; its own table clears the centre. */
+  const centreMap = (key: string) => {
+    const tab = tabsRef.current.find((t) => t.id === activeTabId);
+    const item = findTable(schemaTree, key);
+    const before = entryOf(tab);
+    if (!tab || !item || !before) return;
+    const mapCentre = key === tab.tableKey ? undefined : { key, name: item.name };
+    patchTab(tab.id, { mapCentre });
+    setNavHistory((h) => pushHistory(h, { ...before, view: "map", centre: mapCentre }, before));
+  };
 
   const setActiveSql = useCallback(
     (sql: string) => {
@@ -1248,7 +1277,9 @@ export function Workspace({
   const activeTableKey = isTableTab ? activeTab?.tableKey : activeRun.tableKey;
   const activeTable = activeTableKey ? findTable(schemaTree, activeTableKey) : undefined;
   const resultsView: ResultsView =
-    isTableTab && activeTable && activeTab?.view === "structure" ? "structure" : "data";
+    isTableTab && activeTable && (activeTab?.view === "structure" || activeTab?.view === "map")
+      ? activeTab.view
+      : "data";
 
   // Memoised on the table, so the grid only re-sizes columns for a new result.
   const keyColumns: KeyColumns | null = useMemo(() => {
@@ -1661,10 +1692,10 @@ export function Workspace({
         runCommandRef.current("run-all");
         return;
       }
-      // ⌥⌘1 / ⌥⌘2 (Ctrl+Alt elsewhere): Data / Structure. e.code, since ⌥ changes e.key.
-      if (mod && e.altKey && !e.shiftKey && /^Digit[12]$/.test(e.code)) {
+      // ⌥⌘1 / ⌥⌘2 / ⌥⌘3 (Ctrl+Alt elsewhere): Data / Structure / Map. e.code, since ⌥ changes e.key.
+      if (mod && e.altKey && !e.shiftKey && /^Digit[123]$/.test(e.code)) {
         e.preventDefault();
-        setActiveViewRef.current(e.code === "Digit1" ? "data" : "structure");
+        setActiveViewRef.current(e.code === "Digit1" ? "data" : e.code === "Digit2" ? "structure" : "map");
         retireTip("view-keys");
         return;
       }
@@ -1856,6 +1887,20 @@ export function Workspace({
           e.preventDefault();
           confirmHeldRef.current();
         }
+      }
+      // Esc on the map, once nothing above wanted it: back to Data, keys to the grid.
+      if (
+        e.key === "Escape" &&
+        !paletteOpen &&
+        !e.defaultPrevented &&
+        (e.target as Element | null)?.closest?.('[data-testid="schema-map"]')
+      ) {
+        e.preventDefault();
+        setActiveViewRef.current("data");
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => mainRef.current?.querySelector<HTMLElement>('[data-testid="results-grid-wrap"]')?.focus()),
+        );
+        return;
       }
       // Esc, last (2026-10-13): with no cell open, no query running
       // and nothing else to dismiss, it discards the tab's pending edits; the
@@ -2580,6 +2625,8 @@ export function Workspace({
       state?: { filter: string; chips?: FilterChip[]; sort: SortState[]; pageSize?: number };
       /** Record the step in history (not when history itself moves). */
       history?: boolean;
+      /** Map: the table to centre on, when not this one. */
+      mapCentre?: { key: string; name: string };
     } = {},
   ) => {
     if (!activeConnection) return;
@@ -2597,6 +2644,7 @@ export function Workspace({
       setActiveTabId(existing.id);
       const patch: Partial<QueryTab> = {};
       if (o.view) patch.view = o.view;
+      if (o.view === "map" || existing.mapCentre) patch.mapCentre = o.mapCentre;
       if (o.keep) patch.preview = false;
       const st = o.state;
       const changed =
@@ -2630,6 +2678,7 @@ export function Workspace({
       sort: o.state?.sort ?? [],
       pageSize: o.state?.pageSize,
       view: o.view ?? "data",
+      mapCentre: o.mapCentre,
       preview: !o.keep,
     };
     // A preview tab still loading is kept instead: it can't be retargeted mid-run.
@@ -2675,6 +2724,7 @@ export function Workspace({
       view: entry.view,
       state: { filter: entry.filter, chips: entry.chips, sort: entry.sort, pageSize: entry.pageSize },
       history: false,
+      mapCentre: entry.centre,
     });
   };
   const goHistoryRef = useRef(goHistoryBy);
@@ -3095,11 +3145,11 @@ export function Workspace({
   const queryThumbRef = useRef<HTMLSpanElement>(null);
   useSlidingThumb(queryTabsRef, queryThumbRef, [activeTabId, tabs.map((t) => t.id).join(" ")]);
   // The tab row folds by need, whatever took the room (an inspector, a
-  // narrow window): Data | Structure drops its words (2), tabs may shrink
+  // narrow window): Data | Structure | Map drops its words (2), tabs may shrink
   // (3). The fold is the least that lets every tab show whole; App.css
   // styles `.app-frame[data-fold]`.
   const headerRef = useRef<HTMLDivElement>(null);
-  const switchWidths = useRef({ words: 190, icons: 72 });
+  const switchWidths = useRef({ words: 250, icons: 104 });
   // Which tabs there are and their titles, not their SQL: measuring forces a
   // layout, and on every keystroke that laid out a 5,000-line editor inside
   // the key's own commit. A tab that changes width (status, time) is the
@@ -3166,7 +3216,7 @@ export function Workspace({
   // While the shown tab runs: the time and Cancel (Force stop). In the
   // results header on a query tab, at the SQL line's end on a table tab.
   // ⌘E's plan shows in place of the results on a query tab.
-  const shownPlan = !isTableTab && resultsView !== "structure" ? (activeRun.plan ?? null) : null;
+  const shownPlan = !isTableTab ? (activeRun.plan ?? null) : null;
   // A plan stands in for the results, so the statements they came from go too.
   const statementList =
     !isTableTab && !shownPlan && (activeRun.statements?.length ?? 0) > 1
@@ -3222,27 +3272,23 @@ export function Workspace({
           {viewTip.text}
         </span>
       )}
-      {(["data", "structure"] as const).map((v) => (
+      {VIEWS.map((v) => (
         <button
-          key={v}
+          key={v.view}
           type="button"
           role="tab"
-          aria-selected={resultsView === v}
-          aria-label={v === "data" ? "Data" : "Structure"}
-          data-on={resultsView === v ? "" : undefined}
-          data-view={v}
-          title={
-            v === "data"
-              ? commandTip("show-data", "Show the rows", macOverlay)
-              : commandTip("show-structure", "Show columns, indexes and keys", macOverlay)
-          }
+          aria-selected={resultsView === v.view}
+          aria-label={v.label}
+          data-on={resultsView === v.view ? "" : undefined}
+          data-view={v.view}
+          title={commandTip(v.command, v.tip, macOverlay)}
           onClick={() => {
-            setActiveView(v);
+            setActiveView(v.view);
             noteTrigger("view-keys");
           }}
         >
-          {v === "data" ? <GridIcon size={13} /> : <BlocksIcon size={13} />}
-          <span className="view-switch-label">{v === "data" ? "Data" : "Structure"}</span>
+          <v.Icon size={13} />
+          <span className="view-switch-label">{v.label}</span>
         </button>
       ))}
     </div>
@@ -3626,6 +3672,9 @@ export function Workspace({
       case "show-structure":
         retireTip("view-keys");
         return setActiveView("structure");
+      case "show-map":
+        retireTip("view-keys");
+        return setActiveView("map");
       case "commit-edits":
         return void commitEdits();
       case "review-sql":
@@ -4138,8 +4187,8 @@ export function Workspace({
         />
         <div
           data-testid="results-card"
-          className={`card results-card${held?.hold.action === "confirm" && resultsView !== "structure" ? " held" : ""}`}
-          data-held={held?.hold.action === "confirm" && resultsView !== "structure" ? "" : undefined}
+          className={`card results-card${held?.hold.action === "confirm" && resultsView === "data" ? " held" : ""}`}
+          data-held={held?.hold.action === "confirm" && resultsView === "data" ? "" : undefined}
         >
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
@@ -4177,7 +4226,7 @@ export function Workspace({
               </span>
             )}
             {notice && <span className="card-notice">{notice}</span>}
-            {resultsView === "structure" ? null : held && runStartedAt === null ? (
+            {resultsView !== "data" ? null : held && runStartedAt === null ? (
               <span data-testid="card-meta" className="card-meta">Not run</span>
             ) : runStartedAt !== null ? (
               runningMeta
@@ -4228,7 +4277,7 @@ export function Workspace({
             )}
             {/* Paper: Export as a bordered button ahead of
                 the zone's …, running the registry's export command. */}
-            {resultsView !== "structure" && !shownPlan && result && result.columns.length > 0 && (
+            {resultsView === "data" && !shownPlan && result && result.columns.length > 0 && (
               <button
                 type="button"
                 data-testid="results-export"
@@ -4243,7 +4292,7 @@ export function Workspace({
             {active && <ZoneMenu zone="results" state={commandState} onRun={runCommand} />}
           </div>
           )}
-          {held?.hold.action === "confirm" && resultsView !== "structure" && (
+          {held?.hold.action === "confirm" && resultsView === "data" && (
             <SafetyBar
               hold={held.hold}
               connection={activeConnection}
@@ -4254,7 +4303,7 @@ export function Workspace({
               onCancel={() => dropHeldRef.current()}
             />
           )}
-          {heldEdit && isTableTab && resultsView !== "structure" && (
+          {heldEdit && isTableTab && resultsView === "data" && (
             <SafetyBar
               hold={heldEdit.hold}
               connection={activeConnection}
@@ -4284,6 +4333,24 @@ export function Workspace({
                   schemas={schemaTree}
                   onOpenTable={openTableByKey}
                   loadIndexes={loadIndexes}
+                />
+              ) : resultsView === "map" && activeTable && activeTab ? (
+                <SchemaMap
+                  key={activeTab.id}
+                  schemas={schemaTree}
+                  centre={activeTab.mapCentre && findTable(schemaTree, activeTab.mapCentre.key) ? activeTab.mapCentre.key : activeTable.key}
+                  depth={activeTab.mapDepth ?? 1}
+                  onDepth={(mapDepth) => patchTab(activeTab.id, { mapDepth })}
+                  onCentre={centreMap}
+                  onOpen={(key, newTab) => {
+                    const item = findTable(schemaTree, key);
+                    if (item) openTable(item, { keep: newTab });
+                  }}
+                  claimFocus={() => {
+                    const want = mapWantsFocus.current;
+                    mapWantsFocus.current = false;
+                    return want;
+                  }}
                 />
               ) : held?.hold.action === "refuse" ? (
                 <SafetyRefusal
@@ -4384,7 +4451,7 @@ export function Workspace({
           </>
           )}
           {/* The edits bar sits at the grid's foot, where the strip would; it prints its own keys. */}
-          {active && !trayUp && !isSessionsTab && <KeyStrip zone="grid" state={commandState} />}
+          {active && !trayUp && !isSessionsTab && resultsView !== "map" && <KeyStrip zone="grid" state={commandState} />}
           <Presence open={trayUp}>
             <EditTray
               count={rowEdits.count}
@@ -4468,7 +4535,7 @@ export function Workspace({
           items={navHistory.entries
             .map((entry, i) => ({
               id: String(i),
-              label: `${entry.view === "structure" ? "⌗" : "▦"}  ${historyLabel(entry)}`,
+              label: `${entry.view === "structure" ? "⌗" : entry.view === "map" ? "⇄" : "▦"}  ${historyLabel(entry)}`,
               checked: i === navHistory.index,
             }))
             .reverse()}

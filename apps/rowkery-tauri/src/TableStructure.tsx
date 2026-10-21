@@ -4,6 +4,7 @@ import type { ForeignKeyNode, TableIndexes } from "./types";
 import { formatBytes } from "./types";
 import { firstLine } from "./comments";
 import { ArrowInIcon, ArrowOutIcon, IndexIcon } from "./icons";
+import { onDeleteLabel, refColumnsOf as refCols, shortType } from "./mapLayout";
 import "./TableStructure.css";
 
 interface TableStructureProps {
@@ -27,32 +28,6 @@ function sum(values: (number | null | undefined)[]): number | null {
 
 function cols(list: string[]): string {
   return `(${list.join(", ")})`;
-}
-
-/** SQLite leaves the target column blank when it is the parent's primary key. */
-function refCols(
-  fk: ForeignKeyNode,
-  target: SidebarTable | undefined,
-): string[] {
-  if (fk.ref_columns.every((c) => c)) return fk.ref_columns;
-  return target?.table.primary_key?.length ? target.table.primary_key : [];
-}
-
-/** Postgres spells some types long-hand; show the names people type. */
-function shortType(type: string): string {
-  return type
-    .replace(/^timestamp(\(\d+\))? with time zone/, "timestamptz$1")
-    .replace(/^timestamp(\(\d+\))? without time zone/, "timestamp$1")
-    .replace(/^time(\(\d+\))? with time zone/, "timetz$1")
-    .replace(/^time(\(\d+\))? without time zone/, "time$1")
-    .replace(/^character varying/, "varchar")
-    .replace(/^character\b/, "char");
-}
-
-function onDeleteLabel(action: string): string | null {
-  return action && action !== "NO ACTION"
-    ? `on delete ${action.toLowerCase()}`
-    : null;
 }
 
 export function TableStructure({

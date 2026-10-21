@@ -194,6 +194,11 @@
         "accelerator": "CmdOrCtrl+Alt+2"
       },
       {
+        "id": "show-map",
+        "title": "Map",
+        "accelerator": "CmdOrCtrl+Alt+3"
+      },
+      {
         "id": "show-sessions",
         "title": "Sessions",
         "accelerator": null
