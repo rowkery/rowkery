@@ -207,3 +207,30 @@
     transition: none;
   }
 }
+
+/* Connection and Table: the picked name on a chip, its list under it. */
+.ci-picker {
+  position: relative;
+  flex: 0 1 190px;
+  min-width: 0;
+}
+
+.ci-picker .ci-pick {
+  width: 100%;
+}
+
+.ci-pick-empty {
+  color: var(--mute);
+}
+
+.floating .conn-popover.ci-popover {
+  left: auto;
+  right: -4px;
+  width: 300px;
+  min-width: 0;
+  transform-origin: calc(100% - 24px) -6px;
+}
+
+.ci-pick[data-import-picker="connection"] {
+  font-family: var(--sans);
+}

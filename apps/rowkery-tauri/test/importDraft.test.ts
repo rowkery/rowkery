@@ -13,6 +13,8 @@ import {
   remap,
   takesEmptyText,
   withHeader,
+  guessTable,
+  rankTables,
 } from "../src/importDraft";
 import type { ColumnNode } from "../src/types";
 
@@ -144,5 +146,36 @@ describe("CSV import draft", () => {
     expect(isCsvPath("/a/Orders.CSV")).toBe(true);
     expect(isCsvPath("/a/b.tsv")).toBe(true);
     expect(isCsvPath("/a/b.sqlite")).toBe(false);
+  });
+});
+
+describe("rankTables", () => {
+  const tables = [
+    { key: "public.customers", name: "customers", columns: ["id", "name", "email"], primaryKey: ["id"] },
+    { key: "public.orders", name: "orders", columns: ["id", "customer_id", "total", "placed_at"], primaryKey: ["id"] },
+    { key: "public.order_items", name: "order_items", columns: ["order_id", "sku", "qty"], primaryKey: [] },
+  ];
+
+  it("puts the table most fields match first", () => {
+    const ranked = rankTables(["order_id", "customer", "total", "placed_at"], "export.csv", tables);
+    expect(ranked[0]).toEqual({ key: "public.orders", matched: 4, total: 4, named: false });
+    expect(guessTable(ranked)?.key).toBe("public.orders");
+  });
+
+  it("breaks a tie by the file's name, the longer table name first", () => {
+    const ranked = rankTables(["a", "b"], "order_items-2026.csv", tables);
+    expect(ranked.map((m) => m.key)).toEqual(["public.order_items", "public.orders", "public.customers"]);
+    expect(guessTable(ranked)?.key).toBe("public.order_items");
+    expect(rankTables(["a"], "Customer.csv", tables)[0].key).toBe("public.customers");
+  });
+
+  it("guesses nothing when nothing fits", () => {
+    expect(guessTable(rankTables(["a", "b"], "data.csv", tables))).toBeUndefined();
+    expect(guessTable([])).toBeUndefined();
+  });
+
+  it("counts a header-less file as matching nothing", () => {
+    const ranked = rankTables(["1", "Ada", "ada@example.com"], "people.csv", tables);
+    expect(ranked.every((m) => m.matched === 0)).toBe(true);
   });
 });

@@ -11,7 +11,7 @@ const ZONE_COMMANDS: Record<MenuZone, string[]> = {
   // Insert row: a table tab's way to a new row besides ⌘I (no foot button: the grid pages as it scrolls).
   results: ["insert-row", "find-results", "copy-csv", "copy-tsv", "copy-all-csv", "copy-all-tsv", "export", "import-csv", "clear-results", "timings"],
   editor: ["run-all", "format-sql", "cancel", "stop-all-queries", "reopen-closed-tab", "clear-results", "timings"],
-  panel: ["refresh-schema", "reconnect", "edit-connection", "switch-database", "switch-connection", "all-tables", "agents"],
+  panel: ["refresh-schema", "reconnect", "edit-connection", "switch-database", "switch-connection", "all-tables", "import-csv", "agents"],
 };
 
 const LABEL: Record<MenuZone, string> = {

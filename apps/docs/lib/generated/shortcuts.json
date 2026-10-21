@@ -362,6 +362,10 @@
           "keys": "⇧⌘T"
         },
         {
+          "title": "Import CSV…",
+          "keys": ""
+        },
+        {
           "title": "Close Tab",
           "keys": "⌘W"
         }
@@ -455,10 +459,6 @@
         {
           "title": "Export Results…",
           "keys": "⇧⌘E"
-        },
-        {
-          "title": "Import CSV…",
-          "keys": ""
         },
         {
           "title": "Clear Results",
@@ -861,7 +861,7 @@
       "keys": "⇧⌘E"
     },
     {
-      "title": "Import CSV into this table…",
+      "title": "Import CSV…",
       "keys": ""
     },
     {

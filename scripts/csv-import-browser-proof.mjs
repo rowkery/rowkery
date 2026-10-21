@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // Import CSV (stubbed `invoke`; the open dialog, the file's preview and the
 // import itself are core's, so `choose_csv`, `preview_csv` and `import_csv`
-// stand in for them): ⌘K "Import CSV into this table…" opens the panel in the
-// inspector beside the table's grid, with columns matched by name and the
-// file's first rows tinted at the top of the grid; a field is remapped from
+// stand in for them): ⌘K "Import CSV…" from a query tab picks the table the
+// file fits best, brings its tab forward and opens the panel in the
+// inspector beside its grid, with columns matched by name and the file's
+// first rows tinted at the top of the grid; a field is remapped from
 // its picker; Import sends exactly the mapping and choices, shows progress
 // with Cancel and roll back, and a toast says what went in. A failure keeps
 // the panel open with the line and column; Cancel and roll back cancels; the
 // schema panel's table menu offers Import CSV… (not on views); a .csv dropped
-// on a table row opens the panel for that table.
+// on a table row opens the panel for that table, and anywhere else for the
+// best fit; the Table picker moves the import to another table, and the
+// Connection picker to a window on another connection.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/csv-import-browser-proof.mjs [outDir]
@@ -95,7 +98,13 @@ function stubTauri() {
       window.__CALLS__.push([cmd, rest]);
       switch (cmd) {
         case "list_connections":
-          return { connections: [{ kind: "postgres", id: "pg", name: "shop", host: "db", port: 5432, database: "shop", username: "rowkery" }], active_connection_id: null };
+          return {
+            connections: [
+              { kind: "postgres", id: "pg", name: "shop", host: "db", port: 5432, database: "shop", username: "rowkery" },
+              { kind: "postgres", id: "wh", name: "warehouse", host: "wh", port: 5432, database: "shop", username: "rowkery" },
+            ],
+            active_connection_id: null,
+          };
         case "open_window":
           return { database: "shop", catalog: { databases: [{ name: "shop", schemas: [{ name: "public", tables }] }] }, elapsed_ms: 2, cached: false, open_seq: 1 };
         case "browse_table": {
@@ -183,9 +192,10 @@ const openTable = async (name) => {
   await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "14", ws);
 };
 
-await openTable("orders");
+const chip = (name) => page.textContent(`${panel} [data-import-picker="${name}"]`).then((t) => t.trim());
+const rowCount = () => page.getAttribute(`${ws} [data-testid="results-grid-wrap"]`, "data-row-count");
 
-// ⌘K: Import CSV into this table…
+// ⌘K Import CSV… from the query tab: the file first, then the table it fits.
 await page.keyboard.press("Control+k");
 await page.waitForSelector('[data-testid="cp-row"]');
 await page.keyboard.type("import csv");
@@ -193,6 +203,10 @@ await page.waitForSelector('[data-testid="cp-row"][data-item="cmd:import-csv"]')
 await page.click('[data-testid="cp-row"][data-item="cmd:import-csv"]');
 await page.waitForSelector(panel);
 check((await page.textContent(`${panel} [data-import-file]`)).trim() === "orders-october.csv · 12,431 rows · 8 columns", "the panel names the file, its rows and columns");
+check((await chip("connection")) === "shop", "Connection is the window's");
+check((await chip("table")) === "orders", `Table is the best fit for the file (${await chip("table")})`);
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "14", ws);
+check((await rowCount()) === "14", "the orders tab came forward");
 check(
   JSON.stringify(await mapping()) ===
     JSON.stringify(["id", "customer_id", "email", "status", "skip(skipped)", "note", "skip(skipped)", "skip(skipped)"]),
@@ -279,6 +293,7 @@ await page.waitForSelector(panel, { state: "detached" });
 check(true, "Esc closes the panel");
 
 // A .csv dropped on a table row opens the panel for that table.
+await openTable("orders");
 const box = await page.locator(`${ws} [data-table="shop.public.customers"]`).boundingBox();
 await page.evaluate(
   ([x, y]) =>
@@ -286,9 +301,49 @@ await page.evaluate(
   [box.x + box.width / 2, box.y + box.height / 2],
 );
 await page.waitForSelector(panel);
-check((await page.textContent(`${panel} .insp-title`)).trim() === "Import into customers", "a drop on customers imports into customers"); // Class on purpose: the head's title is the text under test.
+check((await chip("table")) === "customers", "a drop on customers imports into customers");
 check((await calls("preview_csv")).at(-1)?.path === "/home/me/people.csv", "the dropped file is the one read");
-check((await page.getAttribute(`${ws} [data-testid="results-grid-wrap"]`, "data-row-count")) === "14", "the customers tab came forward");
+check((await rowCount()) === "14", "the customers tab came forward");
+
+// The Table picker: best fit first with its match count; filter and ↵ moves the import.
+await page.click(`${panel} [data-import-picker="table"]`);
+await page.waitForSelector('[data-import-popover="table"]');
+const choices = await page.$$eval('[data-import-popover="table"] [data-import-choice]', (els) => els.map((e) => e.textContent.replace(/\s+/g, " ").trim()));
+check(JSON.stringify(choices) === JSON.stringify(["orders5 of 8 columns", "✓customers1 of 8 columns"]), `tables ranked by fit, no views (${choices.join(" | ")})`);
+await page.waitForTimeout(300);
+await shot("5-table-picker");
+await page.keyboard.type("ord");
+await page.keyboard.press("Enter");
+await page.waitForSelector('[data-import-popover="table"]', { state: "detached" });
+check((await chip("table")) === "orders", "↵ picks the filtered table");
+check((await page.getAttribute(`${panel} [data-import-matched]`, "data-import-matched")) === "5", "the columns match the new table");
+check((await page.locator(`${ws} [data-import-row]`).count()) === 20, "the preview moves to the orders grid");
+await page.click(`${panel} [data-import-file]`);
+await page.keyboard.press("Escape");
+await page.waitForSelector(panel, { state: "detached" });
+
+// Dropped anywhere else (here the editor of a query tab): the best fit.
+await page.keyboard.press("Control+k");
+await page.keyboard.type("new query tab");
+await page.click('[data-testid="cp-row"][data-item="cmd:new-tab"]');
+const editor = await page.locator(`${ws} [data-testid="sql-editor"]`).boundingBox();
+await page.evaluate(
+  ([x, y]) =>
+    window.dispatchEvent(new CustomEvent("rowkery:file-drag", { detail: { type: "drop", paths: ["/home/me/orders-october.csv"], x, y } })),
+  [editor.x + 40, editor.y + 20],
+);
+await page.waitForSelector(panel);
+check((await chip("table")) === "orders", "a drop on the editor imports into the best fit");
+
+// The Connection picker: the import moves to a window on warehouse.
+await page.click(`${panel} [data-import-picker="connection"]`);
+await page.waitForSelector('[data-import-popover="connection"]');
+await page.click('[data-import-popover="connection"] [data-import-choice="wh"]');
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="workspace"]').length === 2);
+await page.waitForSelector(panel);
+check((await chip("connection")) === "warehouse", "the panel opens again on warehouse");
+check((await chip("table")) === "orders", "with the table the file fits there");
+check((await calls("preview_csv")).at(-1)?.path === "/home/me/orders-october.csv", "the same file is read");
 
 // Dark.
 await page.emulateMedia({ colorScheme: "dark" });

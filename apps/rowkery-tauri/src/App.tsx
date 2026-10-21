@@ -872,6 +872,22 @@ function App() {
     void connectWindow(id, connectionId, wantDb);
   };
 
+  /** Import CSV moved to a connection (the panel's picker): the window it opens in, and the file. */
+  const [pendingImport, setPendingImport] = useState<{ windowId: string; path: string } | null>(null);
+  /** A window already on the connection, else a new one, connected; it takes the file once it has its schema. */
+  const importInConnection = (connectionId: string, path: string) => {
+    const on = windowsRef.current.find((w) => w.connectionId === connectionId);
+    if (on) {
+      switchWindow(on.id);
+      return setPendingImport({ windowId: on.id, path });
+    }
+    const id = `w${nextWindowNo.current++}`;
+    setWindows((prev) => [...prev, blankWindow(id)]);
+    setActiveWindowId(id);
+    setPendingImport({ windowId: id, path });
+    void connectWindow(id, connectionId);
+  };
+
   /** The edit sheet; from a failed connection with the field to mark. */
   const [markField, setMarkField] = useState<{ field: string; message: string } | null>(null);
   /** A new connection's starting point (a pasted string, a Found row). */
@@ -1047,6 +1063,7 @@ function App() {
         if (path) void openSqlitePath(path);
       }),
     openSqlitePath: (path) => void openSqlitePath(path, true),
+    importInConnection,
     pasteConnection: (text, openAnyway) => void pasteConnection(text, openAnyway),
     openShortcuts: () => {
       setPopover(null);
@@ -1408,6 +1425,8 @@ function App() {
           key={w.id}
           session={w}
           active={w.id === activeWindow.id}
+          importFile={pendingImport?.windowId === w.id ? pendingImport.path : undefined}
+          onImportFileTaken={() => setPendingImport(null)}
           connections={connections}
           windowCount={windows.length}
           connectionForm={newConnOpen}

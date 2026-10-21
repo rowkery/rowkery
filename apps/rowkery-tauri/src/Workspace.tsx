@@ -26,6 +26,7 @@ import {
   type BrowseOptions,
   type BrowseRequest,
   type ConnectExplanation,
+  type CsvPreview,
   type FollowLookup,
   type LocalServer,
   type QueryPlan,
@@ -130,7 +131,7 @@ import { bufferChanges, changeCount, editTableOf, savedBuffer, withoutCommitted,
 import { EditTray, type TrayState } from "./EditTray";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
 import { CsvImport, type ImportRun } from "./CsvImport";
-import { draftFor, importedText, importSpec, isCsvPath, previewRows, type ImportDraft } from "./importDraft";
+import { draftFor, guessTable, importedText, importSpec, isCsvPath, previewRows, rankTables, type ImportDraft } from "./importDraft";
 import { Inspector, type InspectorKind } from "./Inspector";
 import { useRowEdits } from "./useRowEdits";
 import { QueryErrorView } from "./QueryErrorView";
@@ -569,6 +570,8 @@ export interface WindowActions {
   pasteConnection: (text?: string, openAnyway?: boolean) => void;
   /** A Found on this Mac row: connect with libpq's defaults, or open the sheet on failure. */
   connectFound: (server: LocalServer) => void;
+  /** The import panel's Connection picker: Import CSV `path` in a window on that connection. */
+  importInConnection: (id: string, path: string) => void;
 }
 
 /** Menu picks that open a sheet, menu or setting over the Agents page, so the page stays. */
@@ -635,6 +638,9 @@ interface WorkspaceProps {
   onRunningChange?: (windowId: string, running: number) => void;
   /** Called when the window's tabs or their SQL change, to be saved. */
   onTabsChange?: (windowId: string, tabs: SavedTab[], active: number) => void;
+  /** A file to Import CSV… once connected (another window's Connection picker). */
+  importFile?: string;
+  onImportFileTaken?: () => void;
 }
 
 /**
@@ -667,6 +673,8 @@ export function Workspace({
   runOnConnect,
   onRunningChange,
   onTabsChange,
+  importFile,
+  onImportFileTaken,
 }: WorkspaceProps) {
   const windowId = session.id;
   const activeId = session.connectionId;
@@ -1478,9 +1486,12 @@ export function Workspace({
 
   // ---- Import CSV (2026-10-21) -----------------------------------------
 
-  /** The import panel's table, file and choices, and its run while one goes. */
+  /**
+   * The import panel's file, table (null until one is picked: nothing fits
+   * the file) and choices, and its run while one goes.
+   */
   const [csvImport, setCsvImport] = useState<{
-    tableKey: string;
+    tableKey: string | null;
     schema: string;
     table: string;
     draft: ImportDraft;
@@ -1489,15 +1500,32 @@ export function Workspace({
   } | null>(null);
   const csvImportRef = useRef(csvImport);
   csvImportRef.current = csvImport;
+  /** A draft of `file` for `t`, keeping the choices that still fit it. */
+  const importDraftFor = (t: SidebarTable, path: string, preview: CsvPreview, prev?: ImportDraft): ImportDraft => {
+    const key = t.table.primary_key ?? [];
+    const d = draftFor(path, preview, (t.table.columns ?? []).map((c) => c.name), { name: t.name, key });
+    if (!prev) return d;
+    return { ...d, empty: prev.empty, onConflict: prev.onConflict === "update" && !key.length ? "stop" : prev.onConflict };
+  };
+  /** Tables the file can go into, best fit first (views are left out). */
+  const importTargets = (preview: CsvPreview) =>
+    rankTables(
+      preview.rows[0] ?? [],
+      preview.file_name,
+      allTables(schemaTree)
+        .filter((t) => !isView(t))
+        .map((t) => ({ key: t.key, name: t.name, columns: (t.table.columns ?? []).map((c) => c.name), primaryKey: t.table.primary_key ?? [] })),
+    );
   /**
-   * Import CSV…: into `target` (the shown table tab's table by default),
-   * from `path` (a dropped file) or the open dialog. The table's tab comes
-   * forward and the panel opens beside its grid.
+   * Import CSV… from anywhere (2026-10-21, Lucas's "file first"): the file
+   * (`path`, a dropped one, else the open dialog) comes first, then the
+   * table: `target`, else the shown table tab's, else the one the file fits
+   * best. Its tab comes forward and the panel opens beside its grid; with
+   * no table the panel asks for one.
    */
   const startImport = async (target?: SidebarTable, path?: string) => {
-    const t = target ?? (isTableTab ? activeTable : undefined);
-    if (!t || !activeConnection) return;
-    if (isView(t)) return showToast("Views can't be imported into", t.name, "error");
+    if (!activeConnection || connState !== "connected") return;
+    if (target && isView(target)) return showToast("Views can't be imported into", target.name, "error");
     if (activeConnection.safe_mode === "read_only")
       return showToast("Read-only connection · Change safe mode…", undefined, "error");
     if (csvImportRef.current?.run) return showToast("An import is already running", csvImportRef.current.table, "error");
@@ -1509,26 +1537,53 @@ export function Workspace({
     } catch (e) {
       return showToast("Couldn't read the file", String(e), "error");
     }
-    const columns = (t.table.columns ?? []).map((c) => c.name);
+    const shown = isTableTab && activeTable && !isView(activeTable) ? activeTable : undefined;
+    const guess = target || shown ? undefined : guessTable(importTargets(preview));
+    const t = target ?? shown ?? (guess ? findTable(schemaTree, guess.key) : undefined);
     qlViewRef.current?.close();
     setReview(null);
     setCsvImport({
+      tableKey: t?.key ?? null,
+      schema: t?.schema ?? "",
+      table: t?.name ?? "",
+      draft: t ? importDraftFor(t, file, preview) : draftFor(file, preview, []),
+      run: null,
+      error: null,
+    });
+    if (t) openTable(t, { keep: true, view: "data" });
+  };
+  /** The panel's Table picker: the file goes into `t` instead. */
+  const pickImportTable = (t: SidebarTable) => {
+    const cur = csvImportRef.current;
+    if (!cur || cur.run) return;
+    setCsvImport({
+      ...cur,
       tableKey: t.key,
       schema: t.schema,
       table: t.name,
-      draft: draftFor(file, preview, columns, { name: t.name, key: t.table.primary_key ?? [] }),
-      run: null,
+      draft: importDraftFor(t, cur.draft.path, cur.draft.preview, cur.tableKey ? cur.draft : undefined),
       error: null,
     });
     openTable(t, { keep: true, view: "data" });
   };
   const startImportRef = useRef(startImport);
   startImportRef.current = startImport;
-  const importShown = csvImport && isTableTab && activeTab?.tableKey === csvImport.tableKey ? csvImport : null;
-  const importTable = importShown ? findTable(schemaTree, importShown.tableKey) : undefined;
+  // Picked in another window's Connection picker (App): the file, once this
+  // window is connected and has its schema.
+  const schemaLoaded = connState === "connected" && !!schema;
+  useEffect(() => {
+    if (!importFile || !schemaLoaded) return;
+    onImportFileTaken?.();
+    void startImportRef.current(undefined, importFile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importFile, schemaLoaded]);
+  // With no table picked the panel stays up over any tab; with one, beside its grid.
+  const importShown =
+    csvImport && (csvImport.tableKey === null || (isTableTab && activeTab?.tableKey === csvImport.tableKey)) ? csvImport : null;
+  const importTable = importShown?.tableKey ? findTable(schemaTree, importShown.tableKey) : undefined;
   const runImport = async () => {
     const cur = csvImportRef.current;
-    if (!cur || cur.run) return;
+    if (!cur || cur.run || !cur.tableKey) return;
     const startedAt = Date.now();
     setCsvImport({ ...cur, run: { rows: 0, startedAt }, error: null });
     const onRun = (patch: (c: NonNullable<typeof cur>) => Partial<NonNullable<typeof cur>>) =>
@@ -1560,10 +1615,8 @@ export function Workspace({
   };
   const schemaTreeRef = useRef(schemaTree);
   schemaTreeRef.current = schemaTree;
-  const activeTableRef = useRef(activeTable);
-  activeTableRef.current = activeTable;
-  // A .csv / .tsv dropped on a table in the schema panel, or on a table
-  // tab's grid: Import CSV into that table.
+  // A .csv / .tsv dropped on the window: Import CSV, into the table it was
+  // dropped on in the schema panel, else as Import CSV… picks.
   useEffect(() => {
     if (!active) return;
     const onDrag = (e: Event) => {
@@ -1574,9 +1627,7 @@ export function Workspace({
       const workspace = workspaceRef.current;
       if (!at || !workspace?.contains(at)) return;
       const row = at.closest<HTMLElement>(".sidebar [data-table]")?.dataset.table;
-      const onGrid = !!at.closest(".results-grid-wrap") && isTableTabRef.current;
-      const target = row ? findTable(schemaTreeRef.current, row) : onGrid ? activeTableRef.current : undefined;
-      if (target) void startImportRef.current(target, file);
+      void startImportRef.current(row ? findTable(schemaTreeRef.current, row) : undefined, file);
     };
     window.addEventListener("rowkery:file-drag", onDrag);
     return () => window.removeEventListener("rowkery:file-drag", onDrag);
@@ -3074,10 +3125,25 @@ export function Workspace({
     () => (result && activeClientSort?.length && !result.error ? sortResult(result, activeClientSort) : result),
     [result, activeClientSort],
   );
+  /** The panel's Table picker: best fit first, with how many of the file's fields each matches. */
+  const importChoices = useMemo(() => {
+    if (!importShown) return [];
+    // Qualified only where there's more than one schema to tell apart.
+    const qualify = schemaTree.length > 1;
+    return importTargets(importShown.draft.preview).map((m) => {
+      const t = findTable(schemaTree, m.key);
+      return {
+        id: m.key,
+        name: t ? (qualify ? `${t.schema}.${t.name}` : t.name) : m.key,
+        gloss: m.matched ? `${m.matched} of ${m.total} columns` : undefined,
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importShown?.draft.preview, schemaTree]);
   /** The file's first rows, tinted at the top of the table's grid. */
   const importPreview = useMemo(() => {
     const names = shownResult?.columns.map((c) => c.name) ?? [];
-    if (!importShown || !names.length) return null;
+    if (!importShown?.tableKey || !names.length) return null;
     return previewRows(importShown.draft, names, importTable?.table.columns ?? [], activeConnection?.kind === "sqlite");
   }, [importShown, shownResult, importTable, activeConnection?.kind]);
 
@@ -4636,6 +4702,19 @@ export function Workspace({
         >
           {inspectorKind === "import" && importShown ? (
             <CsvImport
+              connectionId={activeConnection?.id ?? ""}
+              connections={connections.map((c) => ({ id: c.id, name: c.name }))}
+              onPickConnection={(id) => {
+                const path = importShown.draft.path;
+                setCsvImport(null);
+                actions.importInConnection(id, path);
+              }}
+              tableKey={importShown.tableKey}
+              tables={importChoices}
+              onPickTable={(key) => {
+                const t = findTable(schemaTree, key);
+                if (t) pickImportTable(t);
+              }}
               table={importShown.table}
               columns={(importTable?.table.columns ?? []).map((c) => c.name)}
               keyColumns={importTable?.table.primary_key ?? []}

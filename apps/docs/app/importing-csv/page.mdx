@@ -6,16 +6,29 @@ export const metadata = { title: "Importing a CSV" };
 
 <p className="lead">Load a CSV or TSV file into a table you already have. Rowkery matches the file's columns to the table's, shows its first rows in the grid, and writes every row in one transaction, so a file goes in whole or not at all.</p>
 
-<Shot src="/img/importing-csv-panel.webp" width={1016} height={603} alt="Import into orders beside the orders grid: orders-october.csv, 12,431 rows, 8 columns; If a key already exists set to Skip; Empty cells set to NULL; First row set to Header; Columns 7 of 8 matched, with utm_source skipped; the file's first rows tinted in the grid; Cancel and Import 12,431 rows." />
+<Shot src="/img/importing-csv-panel.webp" width={1016} height={603} alt="Import CSV beside the orders grid: orders-october.csv, 12,431 rows, 8 columns; Connection shop; Table orders; If a key already exists set to Skip; Empty cells set to NULL; First row set to Header; Columns 7 of 8 matched, with utm_source skipped; the file's first rows tinted in the grid; Cancel and Import 12,431 rows." />
 
 ## Starting an import
 
-Any of these opens the file picker for a table, then the import panel beside its grid:
+**Import CSV…** works from anywhere on a connection. Pick the file, and the panel opens beside the grid of the table it's going into:
 
-- <kbd>⌘K</kbd> › **Import CSV into this table…**, with a table tab open.
-- **Import CSV…** in the … menu of a table in the schema panel, or right-click it.
-- **Query** › **Import CSV…** in the menu bar.
-- Drop a `.csv`, `.tsv` or `.tab` file onto a table in the schema panel, or onto a table tab's grid. No file picker: the dropped file is the one read.
+- <kbd>⌘K</kbd> › **Import CSV…**
+- **File** › **Import CSV…** in the menu bar.
+- **Import CSV…** in the … menu at the top of the schema panel or under the results.
+- **Import CSV…** in the … menu of a table in the schema panel, or right-click it: into that table.
+- Drop a `.csv`, `.tsv` or `.tab` file onto the window. No file picker: the dropped file is the one read. Dropped onto a table in the schema panel, it goes into that table.
+
+## Picking the table
+
+The panel starts with **Connection** set to the window's and **Table** set to:
+
+1. the table you picked it from or dropped the file on,
+2. else the table tab you're on,
+3. else the table the file fits best: the most of its columns matched, then a file named after the table, so `orders-october.csv` goes to `orders`.
+
+Click **Table** to pick another; the list puts the best fits first and says how many of the file's columns each one matches, such as **5 of 8 columns**. Type to filter it and press <kbd>↵</kbd>. When nothing fits, **Table** says **Choose…** and the rest waits for one.
+
+Click **Connection** to import into another connection instead. The import moves to a window on it, opening one if none is, and picks the table there the same way.
 
 Views can't be imported into, and neither can a generated column or an identity column the database always fills in: skip those.
 

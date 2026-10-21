@@ -79,6 +79,59 @@ export function looksLikeData(first: string[], columns: string[]): boolean {
   return !first.some((f) => names.has(normalName(f)));
 }
 
+/** A table the file could go into: how many of its fields match, and whether the file is named after it. */
+export interface TableMatch {
+  key: string;
+  matched: number;
+  /** The file's fields. */
+  total: number;
+  named: boolean;
+}
+
+/** `orders-october.csv` is named after `orders` (or `order`). */
+function namedAfter(fileName: string, table: string): boolean {
+  const base = normalName(fileName.replace(/\.[^.]*$/, ""));
+  const name = normalName(table);
+  if (name.length < 3) return false;
+  return base.includes(name) || (name.endsWith("s") && name.length > 3 && base.includes(name.slice(0, -1)));
+}
+
+/**
+ * Import CSV… from anywhere: the tables best fit for the file first, by
+ * fields matched, then the file being named after the table (the longer
+ * name wins: `order_items` over `orders` for `order_items.csv`), then name.
+ */
+export function rankTables(
+  first: string[],
+  fileName: string,
+  tables: { key: string; name: string; columns: string[]; primaryKey: string[] }[],
+): TableMatch[] {
+  return tables
+    .map((t) => ({
+      key: t.key,
+      name: t.name,
+      matched: looksLikeData(first, t.columns)
+        ? 0
+        : matchColumns(first, t.columns, { name: t.name, key: t.primaryKey }).filter(Boolean).length,
+      total: first.length,
+      named: namedAfter(fileName, t.name),
+    }))
+    .sort(
+      (a, b) =>
+        b.matched - a.matched ||
+        Number(b.named) - Number(a.named) ||
+        (a.named ? b.name.length - a.name.length : 0) ||
+        a.name.localeCompare(b.name),
+    )
+    .map(({ name: _, ...m }) => m);
+}
+
+/** The table Import CSV… picks by itself: the best fit, if anything fits at all. */
+export const guessTable = (ranked: TableMatch[]) => {
+  const top = ranked[0];
+  return top && (top.matched > 0 || top.named) ? top : undefined;
+};
+
 /** Without a header, fields go to the table's columns in order. */
 function byPosition(width: number, columns: string[]): (string | null)[] {
   return Array.from({ length: width }, (_, i) => columns[i] ?? null);
