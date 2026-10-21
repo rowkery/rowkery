@@ -436,8 +436,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
       const selected = ta.selectionStart !== ta.selectionEnd;
       const done = await formatSql(value, range, dialect);
       if (!done.ok) return done.error;
-      // The first call waits for the formatter to load: typing meanwhile wins.
-      if (live.current.value !== value || ta.readOnly) return null;
+      // The first call waits for the formatter to load: typing or a tab switch
+      // (which unmounts this editor) meanwhile wins.
+      if (!ta.isConnected || live.current.value !== value || ta.readOnly) return null;
       if (done.sql === value.slice(range.start, range.end)) return null;
       replaceRange(range.start, range.end, done.sql);
       // A selection stays on what it formatted; a caret ends its statement.

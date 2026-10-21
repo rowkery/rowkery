@@ -49,7 +49,7 @@ Each window is one connection and one database. Windows are restored on launch w
 
 ## Query tabs
 
-- **Editor:** SQL with syntax colour, the statement under the caret marked by an orange bar, completion from the catalog (⌃Space, or as you type), ranked by your keyword habits. ⌘↵ runs the statement under the caret, ⌥⌘↵ runs them all; ⌘. or Esc cancels. Tab right after `*` in a SELECT list spells out the columns.
+- **Editor:** SQL with syntax colour, the statement under the caret marked by an orange bar, completion from the catalog (⌃Space, or as you type), ranked by your keyword habits. ⌘↵ runs the statement under the caret, ⌥⌘↵ runs them all; ⌘. or Esc cancels. ⌘I (Format SQL) lays out the statement under the caret, or every statement a selection touches, in the tabular style (sql-formatter, loaded on first use) as one undo step; SQL that doesn't parse stays as typed. Tab right after `*` in a SELECT list spells out the columns.
 - **Results:** the Results card with the count and time, Export… ⇧⌘E (CSV, TSV, JSON or SQL INSERTs, streamed to a file through the native save dialog) and the zone's `…` menu. A free-form read pages through a SQL cursor on the tab's own session (1,000 rows a page; 5,000 or All in the page-size control) and Load more fetches the next page. Inside a transaction of yours the cursor sits between a savepoint and its release, so your transaction stays open and as it was; a failed transaction or a read with a locking clause runs plainly. ⌘K "Copy all results as CSV / TSV" streams the whole result with a count and Cancel. A query with its own LIMIT is left alone.
 - **In the grid:** a header click sorts the loaded rows; ⌘F finds in the loaded rows (↵ / ⇧↵ step). A block of cells shows count · sum · avg. ⌘C copies the cell or the block as CSV, ⇧⌘C with column names. When a query reads one table, the cell menu offers Open as table tab.
 - **A failed run** shows the server's sentence, the name it probably meant ("Did you mean name?", within two edits, from the completion index) with Replace and run, and the raw text with its SQLSTATE; the editor jumps to the error's position.
@@ -75,7 +75,7 @@ Space on a row opens it in the inspector column (`QuickLook.tsx`): titled by its
 
 ## Editing data
 
-Cells are editable on a table tab whose table has a primary key (or SQLite's rowid), on a connection that isn't Read-only. ↵, F2 or a double-click edits a cell with an editor for its type; ⌥⇧N sets NULL; ⌘I inserts a row; ⌘D duplicates one; ⌫ on selected rows marks them for delete. A cell left by a click elsewhere keeps its value as a staged edit; Esc in the cell reverts it.
+Cells are editable on a table tab whose table has a primary key (or SQLite's rowid), on a connection that isn't Read-only. ↵, F2 or a double-click edits a cell with an editor for its type; ⌥⇧N sets NULL; ⌘I inserts a row (on a query tab ⌘I is Format SQL); ⌘D duplicates one; ⌫ on selected rows marks them for delete. A cell left by a click elsewhere keeps its value as a staged edit; Esc in the cell reverts it.
 
 Staged edits are marked at the cell's edge and in the gutter, and counted in the **edits bar** at the grid's foot: "3 changes" with edited / deleted / new, Review SQL ⇧⌘P, Discard and Commit ⌘S in ink. Esc with nothing open discards them all, with Undo.
 

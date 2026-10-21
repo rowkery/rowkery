@@ -437,7 +437,8 @@ export const COMMANDS: Command[] = [
     chord: { mac: "Mod+I" },
     synonyms: ["beautify", "prettify"],
     section: "Editor",
-    canRun: (s) => s.hasConnectionId && !s.failed && !s.tableTab && !s.sessionsTab && !s.running,
+    // A running tab's editor is read-only and formats nothing; other tabs still can.
+    canRun: (s) => s.hasConnectionId && !s.failed && !s.tableTab && !s.sessionsTab,
   },
   {
     id: "explain",

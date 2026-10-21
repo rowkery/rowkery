@@ -292,9 +292,6 @@ describe("menu bar", () => {
     const b = menuState({ ...base, running: true });
     expect(menuDiff(a, {})).toHaveLength(MENU_IDS.length);
     expect(menuDiff(a, a)).toEqual([]);
-    expect(menuDiff(b, a)).toEqual([
-      { id: "format-sql", enabled: false, title: null, accelerator: "CmdOrCtrl+I" },
-      { id: "cancel", enabled: true, title: null, accelerator: "CmdOrCtrl+." },
-    ]);
+    expect(menuDiff(b, a)).toEqual([{ id: "cancel", enabled: true, title: null, accelerator: "CmdOrCtrl+." }]);
   });
 });

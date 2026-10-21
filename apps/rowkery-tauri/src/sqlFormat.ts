@@ -31,8 +31,8 @@ export type FormatResult = { ok: true; sql: string } | { ok: false; error: strin
  * bodies come back as written. An error names the editor's line.
  */
 export async function formatSql(text: string, range: CharRange, dialect: FormatDialect): Promise<FormatResult> {
-  const f = await import("sql-formatter");
   try {
+    const f = await import("sql-formatter");
     const out = f.formatDialect(text.slice(range.start, range.end), {
       dialect: dialect === "sqlite" ? f.sqlite : f.postgresql,
       indentStyle: "tabularLeft",
