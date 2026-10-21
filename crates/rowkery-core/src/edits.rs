@@ -426,45 +426,74 @@ fn pg_literal(kind: Kind, value: &Value) -> Result<String, String> {
         Value::Float(f) if quoted_kind && f.is_finite() => cast(quote(&float(*f))?),
         Value::Float(f) => float(*f),
         Value::Bytes(b) => format!("'\\x{}'::bytea", hex(b)),
-        Value::Text(t) => match kind {
-            Kind::Text => quote(t)?,
-            Kind::Int => {
-                let t = t.trim();
-                if !is_integer(t) {
-                    return Err(format!("{} isn't a whole number", quote(t)?));
-                }
-                t.to_string()
+        Value::Text(t) => {
+            let raw = pg_text(kind, t)?;
+            match kind {
+                Kind::Text => quote(&raw)?,
+                Kind::Int => raw,
+                Kind::Number => match raw.as_str() {
+                    "NaN" | "Infinity" | "-Infinity" => quote(&raw)?,
+                    _ => raw,
+                },
+                Kind::Bool => raw.to_ascii_uppercase(),
+                Kind::Json | Kind::Jsonb => cast(quote(&raw)?),
+                Kind::Bytes => format!("'{raw}'::bytea"),
             }
-            Kind::Number => {
-                let t = t.trim();
-                match t.to_ascii_lowercase().as_str() {
-                    "nan" => "'NaN'".into(),
-                    "infinity" | "+infinity" | "inf" => "'Infinity'".into(),
-                    "-infinity" | "-inf" => "'-Infinity'".into(),
-                    _ if is_number(t) => t.to_string(),
-                    _ => return Err(format!("{} isn't a number", quote(t)?)),
-                }
+        }
+    })
+}
+
+/// `text` as a column of `type_name` takes it, unquoted: the same checks and
+/// spelling as [`literal`] (CSV import sends it this way, not as SQL).
+pub fn typed_text(engine: EngineKind, type_name: &str, text: &str) -> Result<String, String> {
+    if text.contains('\0') {
+        return Err("text can't hold a NUL character".into());
+    }
+    match engine {
+        EngineKind::Postgres => pg_text(pg_kind(type_name), text),
+        EngineKind::Sqlite => Ok(text.to_string()),
+    }
+}
+
+fn pg_text(kind: Kind, t: &str) -> Result<String, String> {
+    Ok(match kind {
+        Kind::Text => t.to_string(),
+        Kind::Int => {
+            let t = t.trim();
+            if !is_integer(t) {
+                return Err(format!("{} isn't a whole number", quote(t)?));
             }
-            Kind::Bool => match t.trim().to_ascii_lowercase().as_str() {
-                "true" | "t" | "yes" | "y" | "on" | "1" => "TRUE".into(),
-                "false" | "f" | "no" | "n" | "off" | "0" => "FALSE".into(),
-                _ => return Err(format!("{} isn't true or false", quote(t)?)),
-            },
-            Kind::Json | Kind::Jsonb => {
-                if serde_json::from_str::<serde_json::Value>(t).is_err() {
-                    return Err("not valid JSON".into());
-                }
-                cast(quote(t)?)
+            t.to_string()
+        }
+        Kind::Number => {
+            let t = t.trim();
+            match t.to_ascii_lowercase().as_str() {
+                "nan" => "NaN".into(),
+                "infinity" | "+infinity" | "inf" => "Infinity".into(),
+                "-infinity" | "-inf" => "-Infinity".into(),
+                _ if is_number(t) => t.to_string(),
+                _ => return Err(format!("{} isn't a number", quote(t)?)),
             }
-            Kind::Bytes => {
-                // As the grid shows it: `\x` and hex digits.
-                let digits = t.trim().strip_prefix("\\x").unwrap_or(t.trim());
-                if digits.len() % 2 != 0 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    return Err("bytea is written as \\x and hex digits".into());
-                }
-                format!("'\\x{}'::bytea", digits.to_ascii_lowercase())
-            }
+        }
+        Kind::Bool => match t.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "on" | "1" => "true".into(),
+            "false" | "f" | "no" | "n" | "off" | "0" => "false".into(),
+            _ => return Err(format!("{} isn't true or false", quote(t)?)),
         },
+        Kind::Json | Kind::Jsonb => {
+            if serde_json::from_str::<serde_json::Value>(t).is_err() {
+                return Err("not valid JSON".into());
+            }
+            t.to_string()
+        }
+        Kind::Bytes => {
+            // As the grid shows it: `\x` and hex digits.
+            let digits = t.trim().strip_prefix("\\x").unwrap_or(t.trim());
+            if !digits.len().is_multiple_of(2) || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("bytea is written as \\x and hex digits".into());
+            }
+            format!("\\x{}", digits.to_ascii_lowercase())
+        }
     })
 }
 

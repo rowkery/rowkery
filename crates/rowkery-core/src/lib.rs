@@ -9,6 +9,7 @@ pub mod edits;
 pub mod explain;
 pub mod export;
 pub mod frames;
+pub mod import;
 pub mod local;
 pub mod plan;
 pub mod profile;
