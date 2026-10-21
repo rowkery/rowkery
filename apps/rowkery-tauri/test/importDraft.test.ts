@@ -169,6 +169,13 @@ describe("rankTables", () => {
     expect(rankTables(["a"], "Customer.csv", tables)[0].key).toBe("public.customers");
   });
 
+  it("needs more than a lone id to guess, and whole words of a name", () => {
+    expect(guessTable(rankTables(["id", "a", "b", "c"], "data.csv", tables))).toBeUndefined();
+    const logs = [{ key: "public.log", name: "log", columns: ["at"], primaryKey: [] }];
+    expect(guessTable(rankTables(["x"], "catalog.csv", logs))).toBeUndefined();
+    expect(guessTable(rankTables(["x"], "log-2026.csv", logs))?.key).toBe("public.log");
+  });
+
   it("guesses nothing when nothing fits", () => {
     expect(guessTable(rankTables(["a", "b"], "data.csv", tables))).toBeUndefined();
     expect(guessTable([])).toBeUndefined();

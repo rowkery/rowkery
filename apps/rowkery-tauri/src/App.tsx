@@ -876,7 +876,9 @@ function App() {
   const [pendingImport, setPendingImport] = useState<{ windowId: string; path: string } | null>(null);
   /** A window already on the connection, else a new one, connected; it takes the file once it has its schema. */
   const importInConnection = (connectionId: string, path: string) => {
-    const on = windowsRef.current.find((w) => w.connectionId === connectionId);
+    const on = (["connected", "connecting"] as const)
+      .map((state) => windowsRef.current.find((w) => w.connectionId === connectionId && w.state === state))
+      .find(Boolean);
     if (on) {
       switchWindow(on.id);
       return setPendingImport({ windowId: on.id, path });
@@ -1426,7 +1428,7 @@ function App() {
           session={w}
           active={w.id === activeWindow.id}
           importFile={pendingImport?.windowId === w.id ? pendingImport.path : undefined}
-          onImportFileTaken={() => setPendingImport(null)}
+          onImportFileTaken={() => setPendingImport((p) => (p?.windowId === w.id ? null : p))}
           connections={connections}
           windowCount={windows.length}
           connectionForm={newConnOpen}

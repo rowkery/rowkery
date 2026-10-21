@@ -76,8 +76,11 @@ function Picker({
   placeholder,
   choices,
   disabled,
+  active,
   onPick,
 }: {
+  /** The window is shown: a hidden one's list closes (it's portalled above every window). */
+  active: boolean;
   name: string;
   label: string;
   value: string | null;
@@ -89,7 +92,24 @@ function Picker({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   useOutsideClose(rootRef, open, () => setOpen(false), layerRef);
+  useEffect(() => {
+    if (!active) setOpen(false);
+  }, [active]);
+  // The list is placed once; the panel scrolling under it closes it rather than leave it adrift.
+  useEffect(() => {
+    if (!open) return;
+    const body = rootRef.current?.closest(".ci-body");
+    const close = () => setOpen(false);
+    body?.addEventListener("scroll", close);
+    return () => body?.removeEventListener("scroll", close);
+  }, [open]);
+  /** Esc or a pick: back to the chip, so the keyboard carries on from it. */
+  const close = () => {
+    setOpen(false);
+    buttonRef.current?.focus({ preventScroll: true });
+  };
   const current = choices.find((c) => c.id === value);
   return (
     <div className="ci-opt" data-import-option={name}>
@@ -101,7 +121,8 @@ function Picker({
           data-import-picker={name}
           aria-haspopup="dialog"
           aria-expanded={open}
-          aria-label={label}
+          aria-label={`${label}: ${current?.name ?? placeholder}`}
+          ref={buttonRef}
           disabled={disabled}
           onClick={() => setOpen((o) => !o)}
         >
@@ -115,9 +136,9 @@ function Picker({
               label={label}
               value={value}
               choices={choices}
-              onClose={() => setOpen(false)}
+              onClose={close}
               onPick={(id) => {
-                setOpen(false);
+                close();
                 if (id !== value) onPick(id);
               }}
             />
@@ -240,6 +261,7 @@ function clock(ms: number): string {
  * confirmation. While it runs: progress and Cancel and roll back.
  */
 export function CsvImport({
+  active,
   connectionId,
   connections,
   onPickConnection,
@@ -257,6 +279,7 @@ export function CsvImport({
   onCancelRun,
   onClose,
 }: {
+  active: boolean;
   connectionId: string;
   connections: PickChoice[];
   /** Another connection: the import moves to a window on it. */
@@ -323,9 +346,10 @@ export function CsvImport({
           placeholder="Connection"
           choices={connections}
           disabled={busy}
+          active={active}
           onPick={onPickConnection}
         />
-        <Picker name="table" label="Table" value={tableKey} placeholder="Choose…" choices={tables} disabled={busy} onPick={onPickTable} />
+        <Picker name="table" label="Table" value={tableKey} placeholder="Choose…" choices={tables} disabled={busy} active={active} onPick={onPickTable} />
         {tableKey && (
           <>
             <Segment

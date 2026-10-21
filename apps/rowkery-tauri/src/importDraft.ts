@@ -88,12 +88,17 @@ export interface TableMatch {
   named: boolean;
 }
 
-/** `orders-october.csv` is named after `orders` (or `order`). */
+/**
+ * `orders-october.csv` is named after `orders` (or `order`): the table's
+ * words run whole in the file's (`catalog.csv` isn't named after `log`).
+ */
 function namedAfter(fileName: string, table: string): boolean {
-  const base = normalName(fileName.replace(/\.[^.]*$/, ""));
-  const name = normalName(table);
-  if (name.length < 3) return false;
-  return base.includes(name) || (name.endsWith("s") && name.length > 3 && base.includes(name.slice(0, -1)));
+  const file = words(fileName.replace(/\.[^.]*$/, "").replace(/\./g, " "));
+  const name = words(table);
+  if (!name.length) return false;
+  const singular = [...name.slice(0, -1), name[name.length - 1].replace(/s$/, "")];
+  const runs = (w: string[]) => file.some((_, i) => w.every((x, j) => file[i + j] === x));
+  return runs(name) || runs(singular);
 }
 
 /**
@@ -126,10 +131,16 @@ export function rankTables(
     .map(({ name: _, ...m }) => m);
 }
 
-/** The table Import CSV… picks by itself: the best fit, if anything fits at all. */
+/**
+ * The table Import CSV… picks by itself: the best fit, when the file is
+ * named after it or it takes at least half the file's fields (two or more,
+ * so a lone `id` isn't a fit).
+ */
 export const guessTable = (ranked: TableMatch[]) => {
   const top = ranked[0];
-  return top && (top.matched > 0 || top.named) ? top : undefined;
+  if (!top) return undefined;
+  const enough = Math.min(top.total, Math.max(2, Math.ceil(top.total / 2)));
+  return top.named || (top.matched > 0 && top.matched >= enough) ? top : undefined;
 };
 
 /** Without a header, fields go to the table's columns in order. */

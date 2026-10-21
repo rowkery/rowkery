@@ -1538,7 +1538,9 @@ export function Workspace({
       return showToast("Couldn't read the file", String(e), "error");
     }
     const shown = isTableTab && activeTable && !isView(activeTable) ? activeTable : undefined;
-    const guess = target || shown ? undefined : guessTable(importTargets(preview));
+    // On a view's tab the user picks the table: a guess elsewhere would surprise.
+    const onView = isTableTab && !!activeTable && isView(activeTable);
+    const guess = target || shown || onView ? undefined : guessTable(importTargets(preview));
     const t = target ?? shown ?? (guess ? findTable(schemaTree, guess.key) : undefined);
     qlViewRef.current?.close();
     setReview(null);
@@ -1572,11 +1574,21 @@ export function Workspace({
   // window is connected and has its schema.
   const schemaLoaded = connState === "connected" && !!schema;
   useEffect(() => {
-    if (!importFile || !schemaLoaded) return;
+    if (!importFile) return;
+    if (connState === "error") {
+      onImportFileTaken?.();
+      return showToast("Couldn't import the file", "The connection failed", "error");
+    }
+    if (!schemaLoaded) return;
     onImportFileTaken?.();
     void startImportRef.current(undefined, importFile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [importFile, schemaLoaded]);
+  }, [importFile, schemaLoaded, connState]);
+  // The panel belongs to this connection and database: a switch (or a lost
+  // connection) closes it, unless an import is running (it cancels on its own session).
+  useEffect(() => {
+    if (csvImportRef.current && !csvImportRef.current.run) setCsvImport(null);
+  }, [activeId, session.database, connState === "connected"]);
   // With no table picked the panel stays up over any tab; with one, beside its grid.
   const importShown =
     csvImport && (csvImport.tableKey === null || (isTableTab && activeTab?.tableKey === csvImport.tableKey)) ? csvImport : null;
@@ -4703,7 +4715,9 @@ export function Workspace({
           {inspectorKind === "import" && importShown ? (
             <CsvImport
               connectionId={activeConnection?.id ?? ""}
-              connections={connections.map((c) => ({ id: c.id, name: c.name }))}
+              active={active}
+              // Read-only connections can't take an import.
+              connections={connections.filter((c) => c.safe_mode !== "read_only").map((c) => ({ id: c.id, name: c.name }))}
               onPickConnection={(id) => {
                 const path = importShown.draft.path;
                 setCsvImport(null);
