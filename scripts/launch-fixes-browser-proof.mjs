@@ -21,7 +21,8 @@
 //     on double-click: the schema column (240–360), the inspector column
 //     (320 px to 60% of the window) and a query tab's editor / results
 //     split (the editor keeps 80 px).
-//  7. Esc with pending edits, no cell open and nothing running, discards
+//  7. Esc on a selected cell only leaves the selection; Esc again with
+//     pending edits, no cell open and nothing running, discards
 //     them all with "Discarded N edits" and Undo, which brings them back;
 //     Esc inside a cell only reverts that cell (checked in 5).
 //  8. The schema head names the database in Plex with its chevron
@@ -590,6 +591,10 @@ const bar7 = () => page.getAttribute(`${ws} [data-edit-tray]`, "data-changes").c
 await edit5(10, 1, "Kiosk 011 (moved)", () => page.keyboard.press("Enter"));
 const n7 = await bar7();
 await page.click(cell5(15, 3)); // a cell with nothing staged
+await page.keyboard.press("Escape"); // leaves the selection only
+await page.waitForTimeout(200);
+const kept7 = await page.evaluate((ws) => !document.querySelector(`${ws} [data-testid="rg-body"] [data-active]`), ws);
+check((await bar7()) === n7 && kept7, `the first Esc only leaves the selection; the ${await bar7()} edits stay`);
 await page.keyboard.press("Escape");
 await page.waitForSelector("[data-toast]");
 const toast7 = await page.$eval("[data-toast]", (e) => e.textContent);

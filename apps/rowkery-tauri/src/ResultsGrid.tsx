@@ -62,6 +62,13 @@ const TIMESTAMP_TYPE = /^timestamp/i;
 /** `2026-09-27 06:12:44.201+00` → date, time, then fraction and zone. */
 const TIMESTAMP_PARTS = /^(\d{4}-\d{2}-\d{2})([ T])(\d{2}:\d{2}:\d{2})(.*)$/;
 
+/**
+ * Esc presses that only left the grid's selection: they still close what sits
+ * above (Review SQL, a held write) but never cancel the query or discard the
+ * tab's edits; the next Esc does.
+ */
+export const escLeftSelection = new WeakSet<Event>();
+
 /** Results of a fresh run, waiting to cascade in the first time they show. */
 const pendingReveal = new WeakSet<object>();
 
@@ -1398,6 +1405,7 @@ function ResultsGridView({
         return;
       }
       if (e.key === "Escape") {
+        escLeftSelection.add(e.nativeEvent);
         setSel(null);
         return;
       }
