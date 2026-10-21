@@ -185,7 +185,7 @@ A tab stops at 1,000,000 rows and tells you **Stopped at 1,000,000 rows**. To wo
 
 ## Structure
 
-Switch a table tab between **Data**, **Structure** and **Map** with the buttons at the right of the tab row, <kbd>⌥⌘1</kbd>, <kbd>⌥⌘2</kbd> and <kbd>⌥⌘3</kbd>. With the TablePlus keymap Data and Structure are <kbd>⌃⌘[</kbd> and <kbd>⌃⌘]</kbd>, and Map stays <kbd>⌥⌘3</kbd> (see [Shortcuts and keymaps](/shortcuts-and-keymaps/)).
+Switch a table tab between **Data**, **Structure** and **Map** with the buttons at the right of the tab row, <kbd>⌥⌘1</kbd>, <kbd>⌥⌘2</kbd> and <kbd>⌥⌘3</kbd>. With the TablePlus keymap Data and Structure are <kbd>⌃⌘[</kbd> and <kbd>⌃⌘]</kbd>, and Map stays <kbd>⌥⌘3</kbd> (see [Shortcuts and keymaps](/shortcuts-and-keymaps/)). A table you open from the sidebar starts in the view the last table showed, so after looking at one table's Structure the next one opens in Structure too.
 
 <Shot src="/img/table-tabs-and-filters-structure.webp" width={1280} height={800} alt="The Structure view of public.orders: its comment, about 84,000 rows, 13.5 MB of data and 4.9 MB of indexes; the columns with types, defaults, nullability and keys; two btree indexes with their size and scan counts; the foreign key to customers and order_items referencing it with on delete cascade." />
 
@@ -206,7 +206,7 @@ SQLite doesn't report index methods, sizes or scan counts, so those are left out
 
 - Each box lists the table's row estimate and its key columns only: the primary key, foreign keys, and columns another table points at. A composite key lists every column.
 - Each line is marked **1** at the table pointed to and **n** at the table pointing (**1** when the key is that table's whole primary key). Hover a line to see the key, such as `orders.customer_id → customers.id · on delete cascade`.
-- **1 step** is the default. **2 steps** reaches one table further on each side and dims the second step; **All** follows the keys as far as they go, and is off when the database has more than 150 tables.
+- **1 step** is the default. **2 steps** reaches one table further on each side and dims the second step; **All** follows the keys as far as they go, and is off when the database has more than 150 tables. The choice is kept for the database: every table of it, and a tab you close and reopen, shows the same reach.
 - A table that points to itself, such as `parent_id`, loops back into its own box. A line within one column, or one that would cross the centre, is left out; Structure lists it.
 - **Guess links** draws keys your app keeps only in its models, such as Laravel's `belongsTo`, where the database has no foreign key. A column like `customer_id` is linked to `customers` (or `customer`) in the same schema when that table has a one-column primary key; plurals follow simple English rules, so `person_id` won't find `people`. Guessed lines are dashed, and hovering one says it was guessed from the name. A polymorphic pair (`commentable_id` with `commentable_type`) is left alone. The switch is off by default and the same for every connection. The **?** next to it says what it does.
 

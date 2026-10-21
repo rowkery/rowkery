@@ -78,7 +78,7 @@ import { prefetchOn } from "./prefetchSwitch";
 import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
 import { SchemaMap } from "./SchemaMap";
-import type { MapDepth } from "./mapLayout";
+import { depthKey, lastTableView, mapDepthFor, setLastTableView, setMapDepth } from "./viewMemory";
 import { mapGuessOn, setMapGuess } from "./mapGuess";
 import { Sidebar, SidebarFoot } from "./Sidebar";
 import type { SettingsSection } from "./SettingsPage";
@@ -222,8 +222,6 @@ interface QueryTab {
   edits?: EditBuffer;
   /** Map: the table it is centred on, when not the tab's own (session only). */
   mapCentre?: { key: string; name: string };
-  /** Map: how far it reaches (session only; 1 step by default). */
-  mapDepth?: MapDepth;
 }
 
 /** Where a table tab is, as a history entry (null for query tabs). */
@@ -801,6 +799,8 @@ export function Workspace({
 
   // The map's Guess links switch, one for every connection (mapGuess.ts).
   const [mapGuess, setMapGuessState] = useState(mapGuessOn);
+  // The map's reach is kept per database (viewMemory.ts); this re-renders on a change.
+  const [, setDepthVersion] = useState(0);
 
   /** Re-centring the map is a step in history too; its own table clears the centre. */
   const centreMap = (key: string) => {
@@ -1284,6 +1284,10 @@ export function Workspace({
     isTableTab && activeTable && (activeTab?.view === "structure" || activeTab?.view === "map")
       ? activeTab.view
       : "data";
+  // A table opened from the sidebar starts in the view the last table showed.
+  useEffect(() => {
+    if (isTableTab && activeTable) setLastTableView(resultsView);
+  }, [isTableTab, activeTable, resultsView]);
 
   // Memoised on the table, so the grid only re-sizes columns for a new result.
   const keyColumns: KeyColumns | null = useMemo(() => {
@@ -1489,6 +1493,8 @@ export function Workspace({
       : "main"
     : null;
   const allMarks = activeConnection?.masked_columns;
+  // The map's reach is kept for this database.
+  const mapDb = depthKey(activeId ?? "", marksDb ?? "");
   const dbMarks = marksDb ? allMarks?.[marksDb] : undefined;
   const markTable = isTableTab && resultTableItem ? resultTableItem : null;
   const markedSet = useMemo(
@@ -2631,6 +2637,8 @@ export function Workspace({
       history?: boolean;
       /** Map: the table to centre on, when not this one. */
       mapCentre?: { key: string; name: string };
+      /** The view a table without a tab yet starts in (`view` wins). */
+      startView?: ResultsView;
     } = {},
   ) => {
     if (!activeConnection) return;
@@ -2681,7 +2689,7 @@ export function Workspace({
       chips: o.state?.chips ?? chipsFromFilter(o.state?.filter),
       sort: o.state?.sort ?? [],
       pageSize: o.state?.pageSize,
-      view: o.view ?? "data",
+      view: o.view ?? o.startView ?? "data",
       mapCentre: o.mapCentre,
       preview: !o.keep,
     };
@@ -3846,7 +3854,7 @@ export function Workspace({
           connecting={connState === "connecting"}
           failed={!!failure}
           selectedKey={activeTable?.key ?? null}
-          onOpenTable={(t, keep) => openTable(t, { keep })}
+          onOpenTable={(t, keep) => openTable(t, { keep, startView: lastTableView() })}
           onTableStructure={(t) => openTable(t, { view: "structure" })}
           onInsertName={(t) => insertAtCaret(tableIdent(t.schema, t.name))}
           onHoverTable={hoverTable}
@@ -4343,8 +4351,11 @@ export function Workspace({
                   key={activeTab.id}
                   schemas={schemaTree}
                   centre={activeTab.mapCentre && findTable(schemaTree, activeTab.mapCentre.key) ? activeTab.mapCentre.key : activeTable.key}
-                  depth={activeTab.mapDepth ?? 1}
-                  onDepth={(mapDepth) => patchTab(activeTab.id, { mapDepth })}
+                  depth={mapDepthFor(mapDb)}
+                  onDepth={(depth) => {
+                    setMapDepth(mapDb, depth);
+                    setDepthVersion((v) => v + 1);
+                  }}
                   guess={mapGuess}
                   onGuess={(on) => {
                     setMapGuess(on);
