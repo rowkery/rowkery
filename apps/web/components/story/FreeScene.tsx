@@ -15,7 +15,7 @@ const FACTS: [word: string, icon: ReactNode, title: string, text: string][] = [
 
 export function FreeScene() {
   return (
-    <section className="scene free" id="free" style={units(5.4)} data-scene="free">
+    <section className="scene free" id="free" style={units(4.2)} data-scene="free">
       <div className="stage">
         <div className="flood" />
         {FACTS.map(([word, icon, title, text]) => (

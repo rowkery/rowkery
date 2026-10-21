@@ -20,7 +20,7 @@ const Masked = ({ k }: { k: SecKey }) => (
 
 export function SecurityScene() {
   return (
-    <section className="scene" id="security" style={units(5.2)} data-scene="security">
+    <section className="scene" id="security" style={units(4.15)} data-scene="security">
       <div className="stage">
         <Title lines={["Security first"]} />
         <Steps

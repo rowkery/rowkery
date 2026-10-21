@@ -164,8 +164,12 @@ html:not([data-motion]) .fact { display: grid; justify-items: center; gap: 28px;
 
 /* ── The story: a tall section, one pinned stage ── */
 [data-motion] .scene { height: calc(var(--n) * var(--unit) + 100svh); }
+/* The scenes overlap, so the next stage is already scrolling in (its title rising, its stage still
+   empty) as the last one's pieces leave, and pins half a unit after they've gone; the stages are
+   see-through, so the empty one scrolling out underneath never shows. */
+[data-motion] .scene + .scene { margin-top: calc(0.5 * var(--unit) - 100svh); }
 [data-motion] .stage { position: sticky; top: 0; height: 100svh; overflow: hidden; }
-:root { --unit: 72svh; }
+:root { --unit: 58svh; }
 [data-motion] .title { position: absolute; left: 50%; top: 50%; width: min(1100px, calc(100% - 40px)); transform: translate(-50%, -50%); text-align: center; font: 800 clamp(46px, 7.4vw, 116px)/0.98 var(--display); letter-spacing: -0.045em; text-wrap: balance; pointer-events: none; }
 [data-motion] .title .w, [data-motion] .big .w { display: inline-block; opacity: 0; will-change: transform, opacity; }
 [data-motion] .obj { position: absolute; left: var(--ax); top: var(--ay); width: var(--dw); height: var(--dh); margin: calc(var(--dh) / -2) 0 0 calc(var(--dw) / -2); }
@@ -230,7 +234,7 @@ html:not([data-motion]) .fact { display: grid; justify-items: center; gap: 28px;
   [data-motion] .rail b { height: 22px; }
 }
 @media (max-width: 599px) {
-  :root { --unit: 62svh; }
+  :root { --unit: 50svh; }
   .a-win { --ww: 360px; --wh: 420px; }
   .k-win { --ww: 360px; --wh: 380px; }
   [data-motion] .side { display: none; }

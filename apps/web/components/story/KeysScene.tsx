@@ -35,7 +35,7 @@ const STAGED = [
 
 export function KeysScene() {
   return (
-    <section className="scene" id="keys" style={units(5.2)} data-scene="keys">
+    <section className="scene" id="keys" style={units(4.1)} data-scene="keys">
       <div className="stage">
         <Title lines={["Built for the keyboard"]} />
         <Steps

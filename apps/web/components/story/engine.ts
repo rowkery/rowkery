@@ -202,7 +202,7 @@ abstract class Scene {
 const SQL_LEN = AGENT_SQL.reduce<number>((n, p) => n + (typeof p === "string" ? p : p[0]).length, 0);
 class AgentScene extends Scene {
   title = new TitleFx($(".title", this.stage));
-  steps = new Steps(this.stage, [1.2, 2.2, 3.2, 4.2]);
+  steps = new Steps(this.stage, [0.6, 1.6, 2.6, 3.6]);
   obj = $(".obj", this.stage);
   win = $(".a-win", this.stage);
   ask = $(".a-ask", this.stage);
@@ -223,54 +223,55 @@ class AgentScene extends Scene {
     else fit(this.obj, 700, 470, wide ? 1.36 : 1.06, 1.22);
   }
   update(s: number) {
-    this.title.update(seg(s, -0.9, 0.35, linear), seg(s, 0.55, 1.05, linear));
+    // The first scene has the hero's empty screen above it, so its title can start sooner.
+    this.title.update(seg(s, -0.9, -0.05, linear), seg(s, 0.1, 0.4, linear));
     this.steps.update(s);
     const W = phone ? 360 : 700;
-    const enter = seg(s, 0.75, 1.3), leave = seg(s, 5.6, 6.5);
+    const enter = seg(s, 0.15, 0.7), leave = seg(s, 4.75, 5.25);
     const L = (a: number, b: number) => seg(s, a, b);
     // Wide screens have room beside the window for the cards; narrower ones keep them over it.
     const inX = (x: number, w: number) => (wide ? x : clamp(x, 16, W - w - 16));
     place(this.win, { x: 0, y: mix(160, 0, enter) - leave * 120, s: mix(0.9, 1, enter) - leave * 0.06, o: enter * (1 - leave) });
     // Step 1: the question lifts out to the left, and the query types itself as you scroll.
-    const ask = L(1.15, 1.5) * (1 - L(2.05, 2.35));
+    const ask = L(0.55, 0.9) * (1 - L(1.45, 1.75));
     place(this.ask, phone ? { x: 20, y: mix(120, 60, ask), o: ask } : { x: inX(mix(80, -150, ask), 322), y: mix(110, 70, ask), o: ask });
-    let left = Math.round(SQL_LEN * seg(s, 1.3, 2.0, linear)), html = "";
+    let left = Math.round(SQL_LEN * seg(s, 0.7, 1.4, linear)), html = "";
     for (const p of AGENT_SQL) {
       const t = typeof p === "string" ? p : p[0];
       const part = t.slice(0, Math.max(0, left));
       left -= t.length;
       if (part) html += typeof p === "string" ? part.replace(/</g, "&lt;") : `<span class="k">${part}</span>`;
     }
-    if (left < 0 || s < 2.2) html += '<span class="caret"></span>';
+    if (left < 0 || s < 1.6) html += '<span class="caret"></span>';
     if (this.html !== html) setHTML(this.sql, (this.html = html));
     // Step 2: the checks lift out to the right and tick one by one.
-    const ch = L(2.15, 2.5) * (1 - L(3.05, 3.35));
+    const ch = L(1.55, 1.9) * (1 - L(2.45, 2.75));
     place(this.checks, phone ? { x: 30, y: mix(260, 190, ch), o: ch } : { x: inX(mix(W - 330, W - 210, ch), 332), y: mix(210, 150, ch), o: ch });
-    this.checkEls.forEach((c, i) => c.classList.toggle("done", s > 2.35 + i * 0.16));
+    this.checkEls.forEach((c, i) => c.classList.toggle("done", s > 1.75 + i * 0.16));
     // Step 3: the rows arrive, and card_number turns into its stand-in row by row.
-    css(this.grid, "opacity", s > 3.1 ? "1" : "0");
+    css(this.grid, "opacity", s > 2.5 ? "1" : "0");
     this.rows.forEach((r, i) => {
-      const e = seg(s, 3.15 + i * 0.07, 3.45 + i * 0.07);
+      const e = seg(s, 2.55 + i * 0.07, 2.85 + i * 0.07);
       place(r, { x: 0, y: (1 - e) * 10, o: e });
     });
-    const m = seg(s, 3.5, 4.0, linear) * CARDS.length;
+    const m = seg(s, 2.9, 3.4, linear) * CARDS.length;
     this.cc.forEach((el, i) => {
       const [real, masked] = CARDS[i];
       const k = clamp(m - i, 0, 1) * (Math.max(real.length, masked.length) + 2);
       setText(el, morph(real, masked, k, Math.floor(s * 60)));
       el.classList.toggle("mask", k >= masked.length);
     });
-    const lg = L(3.55, 3.85) * (1 - L(4.1, 4.35));
+    const lg = L(2.95, 3.25) * (1 - L(3.5, 3.75));
     place(this.legend, phone ? { x: 40, y: mix(400, 350, lg), o: lg } : { x: inX(mix(40, -150, lg), 302), y: mix(360, 330, lg), o: lg });
     // Step 4: the change Claude proposed slides in; Commit presses; a note says it's done.
-    css(this.review, "transform", `translateX(${((1 - seg(s, 4.2, 4.55)) * 102).toFixed(2)}%)`);
-    this.commit.classList.toggle("press", s > 4.78 && s < 4.9);
-    const ts = L(4.85, 5.05) * (1 - leave);
+    css(this.review, "transform", `translateX(${((1 - seg(s, 3.6, 3.95)) * 102).toFixed(2)}%)`);
+    this.commit.classList.toggle("press", s > 4.18 && s < 4.3);
+    const ts = L(4.25, 4.45) * (1 - leave);
     place(this.toast, phone ? { x: 70, y: mix(450, 400, ts) - leave * 120, o: ts } : { x: mix(230, 260, ts), y: mix(500, 440, ts) - leave * 120, o: ts });
     // The penguin stands on the window's top edge and carries what fits the step.
     if (setProp(this.peek, ["letter", "magnifier", "shades", "sign"][this.steps.at(s)])) hop($(".hopper", this.peek));
     // It leaves with the window but is gone in its first stretch, long before the nav.
-    const pk = seg(s, 1.05, 1.4, easeOut), gone = seg(s, 5.6, 5.9, linear);
+    const pk = seg(s, 0.45, 0.8, easeOut), gone = seg(s, 4.75, 4.92, linear);
     place(this.peek, { x: phone ? 260 : 560, y: mix(20, -78, pk) - leave * 120 + mix(160, 0, enter), o: Math.min(pk, 1 - gone) });
   }
 }
@@ -278,7 +279,7 @@ class AgentScene extends Scene {
 // ── 02 · Security ─────────────────────────────────────────────────────────
 class SecurityScene extends Scene {
   title = new TitleFx($(".title", this.stage));
-  steps = new Steps(this.stage, [1.2, 2.2, 3.2]);
+  steps = new Steps(this.stage, [0.6, 1.6, 2.6]);
   obj = $(".obj", this.stage);
   gpg = $(".gpg", this.stage);
   card = $(".scard", this.stage);
@@ -292,28 +293,28 @@ class SecurityScene extends Scene {
     else fit(this.obj, 760, 540, wide ? 1 : 1.04, 1.04);
   }
   update(s: number) {
-    this.title.update(seg(s, -0.9, 0.35, linear), seg(s, 0.55, 1.05, linear));
+    this.title.update(seg(s, -0.5, -0.05, linear), seg(s, 0.1, 0.4, linear));
     this.steps.update(s);
-    const enter = seg(s, 0.7, 1.35), leave = seg(s, 4.35, 5.1), card = seg(s, 0.95, 1.4), cardO = seg(s, 0.95, 1.35) * (1 - leave);
+    const enter = seg(s, 0.1, 0.75), leave = seg(s, 3.65, 4.15), card = seg(s, 0.35, 0.8), cardO = seg(s, 0.35, 0.75) * (1 - leave);
     if (wide) {
       // The penguin rises from below the stage beside the card and sinks back at the end, faster
       // than it came; it shows only once it is on its way.
-      place(this.gpg, { x: 345, y: mix(620, 68, enter) + leave * 900, o: seg(s, 0.7, 0.9, linear) * (1 - leave) });
+      place(this.gpg, { x: 345, y: mix(620, 68, enter) + leave * 900, o: seg(s, 0.1, 0.3, linear) * (1 - leave) });
       place(this.card, { x: 0, y: mix(330, 200, card) - leave * 80, o: cardO });
     } else {
       // Narrower screens have the dock at the foot and, on a phone, the card right under the
       // penguin, so it never travels: it grows from its feet once the title has gone and shrinks
       // back to them at the end.
-      const grow = seg(s, 1.05, 1.45, easeOut), shrink = seg(s, 4.35, 4.7);
+      const grow = seg(s, 0.45, 0.85, easeOut), shrink = seg(s, 3.65, 3.95);
       place(this.gpg, { x: phone ? 44 : 345, y: phone ? 0 : 68, s: mix(0.6, 1, grow) - shrink * 0.4, o: grow * (1 - shrink) });
       place(this.card, phone ? { x: 0, y: mix(420, 292, card), s: 1 - leave * 0.04, o: cardO } : { x: 0, y: mix(330, 200, card) - leave * 80, o: cardO });
     }
     const step = this.steps.at(s);
     this.panes.forEach((p, i) => p.classList.toggle("off", i !== step));
     // Step 1: three tables switch on.
-    this.tl.forEach((t, i) => t.classList.toggle("on", i < 3 && s > 1.35 + i * 0.15));
+    this.tl.forEach((t, i) => t.classList.toggle("on", i < 3 && s > 0.75 + i * 0.15));
     // Steps 2 and 3: a beam sweeps across and the values turn into stand-ins behind it.
-    const p1 = seg(s, 2.35, 2.95, linear), p2 = seg(s, 3.35, 3.95, linear);
+    const p1 = seg(s, 1.75, 2.35, linear), p2 = seg(s, 2.75, 3.35, linear);
     const at: Record<SecKey, number> = {
       card: p1,
       phone: clamp(p1 * 1.15 - 0.15, 0, 1),
@@ -332,14 +333,14 @@ class SecurityScene extends Scene {
       css(this.beams[i], "transform", `translateX(${(118 + p * 165).toFixed(1)}px)`);
     });
     // The big penguin picks up a magnifier, then orange shades, then a key.
-    if (s > 0.6 && setProp(this.gpg, ["magnifier", "shades", "key"][step])) hop($(".hopper", this.gpg));
+    if (s > 0 && setProp(this.gpg, ["magnifier", "shades", "key"][step])) hop($(".hopper", this.gpg));
   }
 }
 
 // ── 03 · On your own ──────────────────────────────────────────────────────
 class KeysScene extends Scene {
   title = new TitleFx($(".title", this.stage));
-  steps = new Steps(this.stage, [1.2, 2.2, 3.2]);
+  steps = new Steps(this.stage, [0.6, 1.6, 2.6]);
   obj = $(".obj", this.stage);
   win = $(".k-win", this.stage);
   keys = $(".keys", this.stage);
@@ -361,13 +362,13 @@ class KeysScene extends Scene {
     else fit(this.obj, 640, 430, 1.55, 1.32);
   }
   update(s: number) {
-    this.title.update(seg(s, -0.9, 0.35, linear), seg(s, 0.55, 1.05, linear));
+    this.title.update(seg(s, -0.5, -0.05, linear), seg(s, 0.1, 0.4, linear));
     this.steps.update(s);
-    const enter = seg(s, 0.75, 1.3), leave = seg(s, 4.35, 5.1);
+    const enter = seg(s, 0.15, 0.7), leave = seg(s, 3.6, 4.1);
     place(this.win, { x: phone ? 0 : 150, y: mix(140, 0, enter) - leave * 120, s: mix(0.92, 1, enter), o: enter * (1 - leave) });
     this.lean(s);
     const step = this.steps.at(s);
-    if (step !== this.chord && s > 1.1) {
+    if (step !== this.chord && s > 0.5) {
       this.chord = step;
       const [shift, , key] = CHORDS[step];
       this.shift.classList.toggle("gone", !shift);
@@ -377,18 +378,18 @@ class KeysScene extends Scene {
       hop(this.peek);
     }
     this.panels.forEach((p, i) => p.classList.toggle("on", i === step));
-    const q = "ord", n = Math.round(q.length * seg(s, 1.35, 1.75, linear));
+    const q = "ord", n = Math.round(q.length * seg(s, 0.75, 1.15, linear));
     setText(this.typed, q.slice(0, n));
     this.res.forEach((r, i) => r.classList.toggle("hide", n >= 2 && i >= 3));
     this.rows.forEach((r, i) => {
-      const e = seg(s, 2.35 + i * 0.08, 2.6 + i * 0.08);
+      const e = seg(s, 1.75 + i * 0.08, 2.0 + i * 0.08);
       place(r, { x: 0, y: (1 - e) * 10, o: e });
     });
-    this.commit.classList.toggle("press", s > 3.75 && s < 3.9);
+    this.commit.classList.toggle("press", s > 3.15 && s < 3.3);
   }
   /** The keycaps come up from below and lean toward the pointer. */
   lean(s = this.s) {
-    const ke = seg(s, 0.95, 1.45), leave = seg(s, 4.35, 5.1), o = ke * (1 - leave);
+    const ke = seg(s, 0.35, 0.85), leave = seg(s, 3.6, 4.1), o = ke * (1 - leave);
     // On a phone the keys sit under the window, with room for the penguin between them.
     const kx = phone ? 12 : -170, ky = phone ? 470 : 300;
     css(this.keys, "transform", `translate3d(${kx}px, ${(mix(ky + 200, ky, ke) + leave * 300).toFixed(1)}px, 0) perspective(900px) rotateX(${(14 - this.py * 18).toFixed(2)}deg) rotateY(${(-10 + this.px * 22).toFixed(2)}deg)`);
@@ -404,7 +405,7 @@ class FreeScene extends Scene {
   cards = $$(".fcard", this.stage);
   discs = $(".discs", this.stage);
   btns = $$("[data-disc]", this.stage);
-  starts = [0.55, 1.85, 3.15];
+  starts = [0.35, 1.55, 2.75];
   R = 0;
   cx = 0;
   cy = 0;
@@ -413,7 +414,7 @@ class FreeScene extends Scene {
     this.btns.forEach((b, i) => b.addEventListener("click", () => scrollTo({ top: this.top + (this.starts[i] + 0.6) * UNIT, behavior: "smooth" })));
   }
   update(s: number) {
-    const din = seg(s, -0.7, 0.55), dout = seg(s, 4.4, 5.3);
+    const din = seg(s, -0.6, 0.35), dout = seg(s, 3.6, 4.2);
     const diag = Math.hypot(VW, VH);
     const R = dout > 0 ? mix(diag * 0.62, VW * 0.22, dout) : mix(VW * 0.24, diag * 0.62, din);
     const cy = dout > 0 ? mix(VH / 2, -R * 0.75, dout) : mix(VH + R * 0.62, VH / 2, din);
@@ -424,7 +425,7 @@ class FreeScene extends Scene {
     css(this.flood, "visibility", din > 0 && dout < 1 ? "visible" : "hidden");
     let on = -1;
     this.bigs.forEach((b, i) => {
-      const a = this.starts[i], end = i < 2 ? this.starts[i + 1] : 4.8;
+      const a = this.starts[i], end = i < 2 ? this.starts[i + 1] : 4.0;
       b.update(seg(s, a, a + 0.5, linear), seg(s, end - 0.32, end, linear));
       const c = seg(s, a + 0.2, a + 0.55) * (1 - seg(s, end - 0.3, end));
       place(this.cards[i], { x: 0, y: (1 - c) * 18, o: c });
@@ -480,10 +481,11 @@ export function startStory() {
     const on = { signal: ac.signal, passive: true } as const;
     root.setAttribute("data-story", "");
 
-    const agent = new AgentScene($("[data-scene=agent]"), 6.6);
-    const security = new SecurityScene($("[data-scene=security]"), 5.2);
-    const keys = new KeysScene($("[data-scene=keys]"), 5.2);
-    const free = new FreeScene($("[data-scene=free]"), 5.4);
+    // Each scene ends where its pieces have left (story.css: the next one is already scrolling in).
+    const agent = new AgentScene($("[data-scene=agent]"), 5.25);
+    const security = new SecurityScene($("[data-scene=security]"), 4.15);
+    const keys = new KeysScene($("[data-scene=keys]"), 4.1);
+    const free = new FreeScene($("[data-scene=free]"), 4.2);
     const scenes: Scene[] = [agent, security, keys, free];
 
     // ── Hero ──
@@ -586,7 +588,7 @@ export function startStory() {
         "click",
         (e) => {
           e.preventDefault();
-          scrollTo({ top: agent.top + 0.2 * UNIT, behavior: "smooth" });
+          scrollTo({ top: agent.top, behavior: "smooth" });
         },
         { signal: ac.signal },
       ),
