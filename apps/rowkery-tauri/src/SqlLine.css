@@ -503,6 +503,11 @@
   color: var(--acc);
 }
 
+/* The ⋯ glyph, not its hover fill, ends on the card's 16 px edge like Edit SQL. */
+.sql-line-end > .zone-menu-btn {
+  margin-right: -8px;
+}
+
 .sql-line-refresh {
   display: grid;
   place-items: center;

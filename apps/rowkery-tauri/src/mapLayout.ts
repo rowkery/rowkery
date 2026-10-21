@@ -36,8 +36,8 @@ export function rowY(box: MapBox, column: string | undefined): number {
 export interface MapKeyColumn {
   name: string;
   type: string;
-  /** "pk", "fk" (it points somewhere) or "ref" (only pointed at). */
-  kind: "pk" | "fk" | "ref";
+  /** "pk", "fk" (it points somewhere), "guess" (it seems to, by its name) or "ref" (only pointed at). */
+  kind: "pk" | "fk" | "guess" | "ref";
 }
 
 export interface MapBox {
@@ -63,6 +63,8 @@ export interface MapEdge {
   refColumns: string[];
   /** "1" when the foreign key is also the child's whole primary key. */
   childEnd: "1" | "n";
+  /** No foreign key in the database: guessed from the column's name (`customer_id` → `customers`). */
+  guessed?: boolean;
 }
 
 export interface SchemaMapLayout {
@@ -101,21 +103,56 @@ interface Link {
   from: SidebarTable;
   to: SidebarTable;
   fk: ForeignKeyNode;
+  guessed?: boolean;
+}
+
+/** "category" → "categories", "address" → "addresses", "order_item" → "order_items". */
+export function plural(word: string): string {
+  if (/[^aeiou]y$/.test(word)) return `${word.slice(0, -1)}ies`;
+  if (/(s|x|z|ch|sh)$/.test(word)) return `${word}es`;
+  return `${word}s`;
+}
+
+/**
+ * Keys an app keeps in its models (Laravel's `belongsTo`, Rails' `belongs_to`)
+ * with no constraint in the database: `customer_id` is taken to point at
+ * `customers` (or `customer`) in the same schema, at its one-column primary
+ * key. A column a real key covers, or a polymorphic pair (`commentable_id`
+ * with `commentable_type`), is left alone.
+ */
+function guessedLinks(t: SidebarTable, byKey: Map<string, SidebarTable>): Link[] {
+  const cols = t.table.columns ?? [];
+  const names = new Set(cols.map((c) => c.name));
+  const keyed = new Set((t.table.foreign_keys ?? []).flatMap((f) => f.columns));
+  const out: Link[] = [];
+  for (const c of cols) {
+    const m = /^(.+)_id$/.exec(c.name);
+    if (!m || keyed.has(c.name) || names.has(`${m[1]}_type`)) continue;
+    const to = [plural(m[1]), m[1]]
+      .map((n) => byKey.get(tableKey(t.database, t.schema, n)))
+      .find((x) => x && x.table.primary_key?.length === 1);
+    if (!to || to.key === t.key) continue;
+    const fk = { name: `guess:${c.name}`, columns: [c.name], ref_schema: to.schema, ref_table: to.name, ref_columns: [to.table.primary_key![0]], on_delete: "" };
+    out.push({ from: t, to, fk, guessed: true });
+  }
+  return out;
 }
 
 /** Every foreign key between two tables of the catalog, by table key both ways. */
-function linksOf(schemas: SidebarSchema[]) {
+function linksOf(schemas: SidebarSchema[], guess: boolean) {
   const byKey = new Map<string, SidebarTable>();
   for (const t of allTables(schemas)) byKey.set(t.key, t);
   const out = new Map<string, Link[]>();
   const into = new Map<string, Link[]>();
   for (const t of byKey.values()) {
+    const links: Link[] = [];
     for (const fk of t.table.foreign_keys ?? []) {
       const to = byKey.get(tableKey(t.database, fk.ref_schema, fk.ref_table));
-      if (!to) continue;
-      const link = { from: t, to, fk };
+      if (to) links.push({ from: t, to, fk });
+    }
+    for (const link of guess ? [...links, ...guessedLinks(t, byKey)] : links) {
       out.set(t.key, [...(out.get(t.key) ?? []), link]);
-      into.set(to.key, [...(into.get(to.key) ?? []), link]);
+      into.set(link.to.key, [...(into.get(link.to.key) ?? []), link]);
     }
   }
   return { byKey, out, into };
@@ -131,8 +168,10 @@ export function layoutSchemaMap(
   schemas: SidebarSchema[],
   centreKey: string,
   depth: MapDepth,
+  /** Also draw links guessed from column names (the map's "Guess links" switch). */
+  guess = false,
 ): SchemaMapLayout | null {
-  const { byKey, out, into } = linksOf(schemas);
+  const { byKey, out, into } = linksOf(schemas, guess);
   const centre = byKey.get(centreKey);
   if (!centre) return null;
   const max = depth === "all" ? Infinity : depth;
@@ -175,7 +214,7 @@ export function layoutSchemaMap(
       const refColumns = refColumnsOf(l.fk, l.to);
       const pk = l.from.table.primary_key ?? [];
       const whole = pk.length > 0 && pk.length === l.fk.columns.length && pk.every((c) => l.fk.columns.includes(c));
-      edges.push({ id: `${l.from.key}:${l.fk.name}`, from: l.from.key, to: l.to.key, fk: l.fk, refColumns, childEnd: whole ? "1" : "n" });
+      edges.push({ id: `${l.from.key}:${l.fk.name}`, from: l.from.key, to: l.to.key, fk: l.fk, refColumns, childEnd: whole ? "1" : "n", guessed: l.guessed });
       want(l.to.key, refColumns);
     }
   }
@@ -213,7 +252,7 @@ export function layoutSchemaMap(
     }
     keys.forEach((k, i) => {
       rank.set(k, i);
-      boxColumns.set(k, keyColumnsOf(byKey.get(k)!, keyCols.get(k)));
+      boxColumns.set(k, keyColumnsOf(byKey.get(k)!, keyCols.get(k), out.get(k)));
     });
   }
 
@@ -255,12 +294,21 @@ export function layoutSchemaMap(
 }
 
 /** Primary key, foreign key and pointed-at columns, in the table's column order. */
-function keyColumnsOf(t: SidebarTable, pointedAt: Set<string> | undefined): MapKeyColumn[] {
+function keyColumnsOf(t: SidebarTable, pointedAt: Set<string> | undefined, links: Link[] | undefined): MapKeyColumn[] {
   const pk = new Set(t.table.primary_key ?? []);
   const fk = new Set((t.table.foreign_keys ?? []).flatMap((f) => f.columns));
+  const guessed = new Set((links ?? []).filter((l) => l.guessed).flatMap((l) => l.fk.columns));
   const out: MapKeyColumn[] = [];
   for (const c of t.table.columns ?? []) {
-    const kind = pk.has(c.name) ? "pk" : fk.has(c.name) ? "fk" : pointedAt?.has(c.name) ? "ref" : null;
+    const kind = pk.has(c.name)
+      ? "pk"
+      : fk.has(c.name)
+        ? "fk"
+        : guessed.has(c.name)
+          ? "guess"
+          : pointedAt?.has(c.name)
+            ? "ref"
+            : null;
     if (kind) out.push({ name: c.name, type: shortType(c.type_name), kind });
   }
   return out;

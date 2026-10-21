@@ -391,10 +391,11 @@ button.ts-badge.fk:hover {
   color: var(--text);
 }
 
-/* In the tab row: bottom-aligned with the tabs, 7 px off the rule. */
+/* In the tab row: bottom-aligned with the tabs, 7 px off the rule; its
+   right edge lines up with Edit SQL and the map's controls below. */
 .editor-header > .view-switch {
   align-self: flex-end;
-  margin: 0 16px 7px auto;
+  margin: 0 0 7px auto;
 }
 
 .view-switch svg {

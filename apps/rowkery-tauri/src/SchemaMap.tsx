@@ -22,6 +22,9 @@ interface SchemaMapProps {
   centre: string;
   depth: MapDepth;
   onDepth: (depth: MapDepth) => void;
+  /** "Guess links": draw `customer_id` → `customers` where no foreign key says so. */
+  guess: boolean;
+  onGuess: (on: boolean) => void;
   onCentre: (key: string) => void;
   /** ↵ / double-click opens the table; ⌘↵ in a tab of its own. */
   onOpen: (key: string, newTab: boolean) => void;
@@ -83,10 +86,10 @@ function side(table: string, columns: string[]): string {
   return columns.length === 1 ? `${table}.${columns[0]}` : `${table}.(${columns.join(", ")})`;
 }
 
-export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, claimFocus }: SchemaMapProps) {
+export function SchemaMap({ schemas, centre, depth, onDepth, guess, onGuess, onCentre, onOpen, claimFocus }: SchemaMapProps) {
   const tooMany = useMemo(() => allTables(schemas).length > MAP_ALL_LIMIT, [schemas]);
   const shownDepth: MapDepth = depth === "all" && tooMany ? 2 : depth;
-  const layout = useMemo(() => layoutSchemaMap(schemas, centre, shownDepth), [schemas, centre, shownDepth]);
+  const layout = useMemo(() => layoutSchemaMap(schemas, centre, shownDepth, guess), [schemas, centre, shownDepth, guess]);
   const boxes = useMemo(() => new Map(layout?.boxes.map((b) => [b.key, b]) ?? []), [layout]);
   const drawn = useMemo(
     () => (layout?.edges ?? []).map((e) => draw(e, boxes)).filter((d): d is Drawn => !!d),
@@ -102,6 +105,18 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
   const canvasRef = useRef<HTMLDivElement>(null);
   /** The box a first click re-centred on, and when: a quick second click opens it. */
   const clicked = useRef<{ key: string; at: number } | null>(null);
+  const [help, setHelp] = useState(false);
+  const helpRef = useRef<HTMLSpanElement>(null);
+
+  // The (?) card closes on a click anywhere else.
+  useEffect(() => {
+    if (!help) return;
+    const away = (e: PointerEvent) => {
+      if (!helpRef.current?.contains(e.target as Node)) setHelp(false);
+    };
+    window.addEventListener("pointerdown", away);
+    return () => window.removeEventListener("pointerdown", away);
+  }, [help]);
 
   useEffect(() => {
     if (claimFocus()) rootRef.current?.focus({ preventScroll: true });
@@ -185,7 +200,7 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
         : [],
     );
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-  const tipRule = hover ? onDeleteLabel(hover.edge.fk.on_delete) : null;
+  const tipRule = !hover ? null : hover.edge.guessed ? "guessed from the name, no foreign key" : onDeleteLabel(hover.edge.fk.on_delete);
 
   return (
     <div
@@ -205,6 +220,44 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
           {plural(layout.pointsTo, "table it points to", "tables it points to")}
           {" · "}
           {plural(layout.pointedFrom, "points to it", "point to it")}
+        </span>
+        <span ref={helpRef} className="sm-guess-wrap">
+          <button
+            type="button"
+            data-testid="sm-guess-help"
+            className="sm-help"
+            aria-label="What Guess links does"
+            aria-expanded={help}
+            onClick={() => setHelp((h) => !h)}
+            onKeyDown={(e) => {
+              if (e.key !== "Escape" || !help) return;
+              e.nativeEvent.stopPropagation();
+              setHelp(false);
+            }}
+          >
+            ?
+          </button>
+          {help && (
+            <span data-testid="sm-guess-card" className="sm-help-card" role="note">
+              Some apps keep their links in code, like Laravel&rsquo;s <code>belongsTo</code>, with no foreign key in the
+              database. With this on, a column like <code>customer_id</code> gets a dashed line to <code>customers</code>.
+              It&rsquo;s a guess from the name, so check it before you rely on it.
+            </span>
+          )}
+          <label className="sm-guess">
+            Guess links
+            <button
+              type="button"
+              role="switch"
+              aria-checked={guess}
+              data-testid="sm-guess"
+              className="sm-switch"
+              onClick={() => {
+                onGuess(!guess);
+                rootRef.current?.focus({ preventScroll: true });
+              }}
+            />
+          </label>
         </span>
         <div data-testid="sm-depths" className="sm-depths" role="radiogroup" aria-label="How far to reach">
           {DEPTHS.map((d) => {
@@ -252,6 +305,7 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
                   data-testid="sm-edge"
                   data-edge={edge.id}
                   data-far={far ? "" : undefined}
+                  data-guessed={edge.guessed ? "" : undefined}
                   data-on={on ? "" : undefined}
                 >
                   <path data-line className="sm-line" d={d} />
@@ -300,7 +354,7 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
                     data-lit={litCols.has(c.name) ? "" : undefined}
                   >
                     <span className="sm-col-icon">
-                      {c.kind === "pk" ? <KeyIcon size={11} /> : c.kind === "fk" ? <ArrowOutIcon size={11} /> : null}
+                      {c.kind === "pk" ? <KeyIcon size={11} /> : c.kind === "fk" || c.kind === "guess" ? <ArrowOutIcon size={11} /> : null}
                     </span>
                     <span className="sm-col-name">{c.name}</span>
                     <span className="sm-col-type">{c.type}</span>
