@@ -1848,6 +1848,8 @@ function ResultsGridView({
                         role="gridcell"
                         aria-colindex={ci + 2}
                         data-default={isDefault ? "" : undefined}
+                        // Preview cells can't be selected or opened: a cut-off value reads on hover.
+                        title={!looks.hidden[ci] && v && !("Null" in v) ? valueText(v) : undefined}
                         className={`rg-cell${isDefault ? " rg-cell-default" : ""}`}
                         style={{ width: widths[ci] }}
                       >

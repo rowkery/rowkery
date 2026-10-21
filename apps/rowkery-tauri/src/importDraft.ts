@@ -182,10 +182,13 @@ export function fieldNames(d: ImportDraft): string[] {
 /** Rows the import writes. */
 export const importRows = (d: ImportDraft) => Math.max(0, d.preview.records - (d.header ? 1 : 0));
 
+/** Rows the import tab shows (core reads one more, for a header). */
+export const IMPORT_SAMPLE = 20;
+
 /** The import tab's bar: `First 20 of 12,431 rows`. */
 export function importSampleText(d: ImportDraft): string {
   const total = importRows(d);
-  const shown = Math.min(total, d.preview.rows.length - (d.header ? 1 : 0));
+  const shown = Math.min(total, IMPORT_SAMPLE, d.preview.rows.length - (d.header ? 1 : 0));
   const n = (x: number) => x.toLocaleString("en-US");
   return shown >= total ? `${n(total)} ${total === 1 ? "row" : "rows"}` : `First ${n(shown)} of ${n(total)} rows`;
 }

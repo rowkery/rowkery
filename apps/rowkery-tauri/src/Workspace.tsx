@@ -135,6 +135,7 @@ import {
   draftFor,
   fieldNames,
   guessTable,
+  IMPORT_SAMPLE,
   importedText,
   importSampleText,
   importSpec,
@@ -469,15 +470,18 @@ function TabStatus({
   run,
   table,
   active,
+  spinning = false,
   children,
 }: {
   run?: TabRun;
+  /** The import tab while its import runs (it has no query run). */
+  spinning?: boolean;
   table: boolean;
   /** The window is shown: a running tab's time ticks. */
   active: boolean;
   children: ReactNode;
 }) {
-  const running = run?.startedAt != null;
+  const running = spinning || run?.startedAt != null;
   const outcome = running ? null : run?.outcome;
   const ms = outcome ? (run?.elapsedMs ?? null) : null;
   return (
@@ -495,11 +499,11 @@ function TabStatus({
         table && <TableIcon size={12} className="query-tab-icon" />
       )}
       <span data-testid="query-tab-title" className="query-tab-title">{children}</span>
-      {running ? (
+      {running && run?.startedAt != null ? (
         <span data-testid="query-tab-time" className="query-tab-time">
-          <Elapsed since={run!.startedAt!} active={active} format={formatRunningTab} />
+          <Elapsed since={run.startedAt} active={active} format={formatRunningTab} />
         </span>
-      ) : (
+      ) : running ? null : (
         ms !== null && <span data-testid="query-tab-time" className="query-tab-time">{formatTabTime(ms, true)}</span>
       )}
     </>
@@ -748,7 +752,8 @@ export function Workspace({
     onTabsChange(
       session.id,
       saved,
-      Math.max(0, kept.findIndex((t) => t.id === activeTabId)),
+      // From the import tab, the tab it was opened from.
+      Math.max(0, kept.findIndex((t) => t.id === (tabs.find((x) => x.id === activeTabId)?.kind === "import" ? importReturnRef.current : activeTabId))),
     );
   }, [tabs, activeTabId, onTabsChange, session.id]);
   const [runs, setRuns] = useState<Record<number, TabRun>>({});
@@ -907,8 +912,16 @@ export function Workspace({
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
     const tab = tabs[index];
-    // Closing the import tab is the panel's Cancel (a running import is cancelled first).
-    if (tab.kind === "import") return closeImportRef.current();
+    // Closing the import tab is the panel's Cancel (a running import is
+    // cancelled first); it never goes to Recently closed.
+    if (tab.kind === "import" && csvImportRef.current) return closeImportRef.current(true);
+    if (tab.kind === "import") {
+      const rest = tabs.filter((t) => t.id !== id);
+      if (!rest.length) return;
+      setTabs(rest);
+      if (id === activeTabId) setActiveTabId(rest[Math.min(index, rest.length - 1)].id);
+      return;
+    }
     void closeQueryTab(windowId, id).catch(() => {});
     const run = runsRef.current[id];
     const worthKeeping = tab.kind === "table" || !!tab.sql.trim() || !!run?.result;
@@ -949,6 +962,8 @@ export function Workspace({
     const entries: ClosedTab[] = [];
     tabs.forEach((tab, index) => {
       if (tab.id === keepId) return;
+      // The import tab closes as its Cancel does, not into Recently closed.
+      if (tab.kind === "import") return closeImportRef.current(true);
       void closeQueryTab(windowId, tab.id).catch(() => {});
       entries.push({ tab, run: runsRef.current[tab.id], index });
     });
@@ -956,7 +971,7 @@ export function Workspace({
     closedTabs.current = [...closedTabs.current, ...entries].slice(-MAX_CLOSED_TABS);
     setClosedCount(closedTabs.current.length);
     setRuns((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => Number(id) === keepId)));
-    setTabs((prev) => prev.filter((t) => t.id === keepId));
+    setTabs((prev) => prev.filter((t) => t.id === keepId || t.kind === "import"));
     setActiveTabId(keepId);
     showUndoToast(`Closed ${entries.length} ${entries.length === 1 ? "tab" : "tabs"}`, undefined, {
       undo: () => entries.forEach((e) => reopenTabRef.current(e)),
@@ -1370,8 +1385,6 @@ export function Workspace({
   useEffect(() => {
     if (!qlOpen) return;
     setReview(null);
-    // …and from an import panel that isn't running.
-    if (csvImportRef.current && !csvImportRef.current.run) setCsvImport(null);
   }, [qlOpen]);
   const setTabEdits = (
     tabId: number,
@@ -1462,11 +1475,8 @@ export function Workspace({
     const target = editTarget();
     if (!target || !activeConnection) return;
     const tabId = target.tab.id;
-    // One inspector: Review SQL takes the column from Quick Look and an
-    // import panel, but never hides behind a running import.
-    const imp = csvImportRef.current;
-    if (imp?.run) return showToast("An import is running", imp.table, "error");
-    if (imp) setCsvImport(null);
+    // One inspector: Review SQL takes the column from Quick Look. (The
+    // import panel lives on its own tab, so the two never meet.)
     qlViewRef.current?.close();
     setReview({ tabId, sql: null, error: null, cards: null });
     const buffer = target.buffer;
@@ -1586,19 +1596,19 @@ export function Workspace({
   const openImportTab = (table?: string) => {
     const title = table ? `Import · ${table}` : "Import CSV";
     const open = tabsRef.current.find((t) => t.kind === "import");
+    if (activeTabIdRef.current !== open?.id) importReturnRef.current = activeTabIdRef.current;
     if (open) {
       setTabs((prev) => prev.map((t) => (t.id === open.id ? { ...t, title } : t)));
       return setActiveTabId(open.id);
     }
-    importReturnRef.current = activeTabIdRef.current;
     const id = nextTabId.current++;
     setTabs((prev) => [...prev, { id, kind: "import", title, sql: "" }]);
     setActiveTabId(id);
   };
   // The panel gone (Cancel, Esc, done, a switch): its tab goes too, back to where the user was.
-  const importOpen = !!csvImport;
+  const strayImportTab = !csvImport && tabs.some((t) => t.kind === "import");
   useEffect(() => {
-    if (importOpen) return;
+    if (!strayImportTab) return;
     const tab = tabsRef.current.find((t) => t.kind === "import");
     if (!tab) return;
     const rest = tabsRef.current.filter((t) => t.id !== tab.id);
@@ -1611,7 +1621,7 @@ export function Workspace({
     }
     setTabs(rest);
     if (activeTabIdRef.current === tab.id) setActiveTabId(back.id);
-  }, [importOpen]);
+  }, [strayImportTab]);
   /** The panel's Table picker: the file goes into `t` instead. */
   const pickImportTable = (t: SidebarTable) => {
     const cur = csvImportRef.current;
@@ -1650,39 +1660,63 @@ export function Workspace({
   // The panel sits beside the import tab's grid.
   const importShown = csvImport && isImportTab ? csvImport : null;
   const importTable = importShown?.tableKey ? findTable(schemaTree, importShown.tableKey) : undefined;
+  /** Where the window is now: an import that ends after a switch leaves the new place alone. */
+  const placeRef = useRef("");
+  placeRef.current = `${activeId}\0${session.database ?? ""}`;
+  /** The import tab was closed while its import ran: it goes once the run ends. */
+  const closeWhenDoneRef = useRef(false);
   const runImport = async () => {
     const cur = csvImportRef.current;
     if (!cur || cur.run || !cur.tableKey) return;
     const startedAt = Date.now();
+    const place = placeRef.current;
+    closeWhenDoneRef.current = false;
     setCsvImport({ ...cur, run: { rows: 0, startedAt }, error: null });
     const onRun = (patch: (c: NonNullable<typeof cur>) => Partial<NonNullable<typeof cur>>) =>
       setCsvImport((c) => (c && c.tableKey === cur.tableKey ? { ...c, ...patch(c) } : c));
+    const onImportTab = () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.kind === "import";
+    /** A failure keeps the panel with the message; off its tab, a toast says so too. */
+    const failed = (message: string) => {
+      if (closeWhenDoneRef.current) setCsvImport(null);
+      else onRun(() => ({ run: null, error: message }));
+      if (!onImportTab() || closeWhenDoneRef.current) showToast("Import failed · nothing was written", message, "error");
+    };
     let out;
     try {
       out = await importCsv(windowId, importSpec(cur.draft, cur.schema, cur.table), (rows) =>
         onRun(() => ({ run: { rows, startedAt } })),
       );
     } catch (e) {
-      return onRun(() => ({ run: null, error: String(e) }));
+      return failed(String(e));
     }
-    if (out.status === "failed") return onRun(() => ({ run: null, error: out.message }));
+    if (out.status === "failed") return failed(out.message);
     if (out.status === "cancelled") {
-      onRun(() => ({ run: null }));
+      if (closeWhenDoneRef.current) setCsvImport(null);
+      else onRun(() => ({ run: null }));
       return showToast("Import cancelled", "Nothing was written");
     }
+    // Read before the import tab goes: only from it does the table's tab come forward.
+    const fromTab = onImportTab();
     setCsvImport((c) => (c && c.tableKey === cur.tableKey ? null : c));
     if (out.status === "refused") return showToast("Read-only connection · Change safe mode…", undefined, "error");
     showToast(importedText(out), `${cur.table} · ${formatMs(out.elapsed_ms)}`);
-    // The rows as the table has them now, in its tab (the import tab goes).
+    if (placeRef.current !== place) return;
+    // The rows as the table has them now, in its tab.
     const t = findTable(schemaTreeRef.current, cur.tableKey);
     const tab = tabsRef.current.find((x) => x.kind === "table" && x.tableKey === cur.tableKey);
     if (tab) void runTable(tab);
-    if (t) openTable(t, { keep: true, view: "data" });
+    if (t && fromTab) openTable(t, { keep: true, view: "data" });
   };
-  /** ×, Esc or closing its tab: a running import is cancelled (and rolled back) first. */
-  const closeImport = () => {
-    if (csvImportRef.current?.run) void cancelImport(windowId);
-    else setCsvImport(null);
+  /**
+   * ×, Esc or closing its tab: a running import is cancelled (and rolled
+   * back) first; closing the tab (`andTab`) takes the panel with it once
+   * the run ends.
+   */
+  const closeImport = (andTab = false) => {
+    if (csvImportRef.current?.run) {
+      closeWhenDoneRef.current ||= andTab;
+      void cancelImport(windowId);
+    } else setCsvImport(null);
   };
   const closeImportRef = useRef(closeImport);
   closeImportRef.current = closeImport;
@@ -1706,7 +1740,7 @@ export function Workspace({
     return () => window.removeEventListener("rowkery:file-drag", onDrag);
   }, [active]);
   const importKeysRef = useRef({ open: false, close: () => {} });
-  importKeysRef.current = { open: !!importShown, close: closeImport };
+  importKeysRef.current = { open: !!importShown, close: () => closeImport() };
 
   /** COMMENT ON COLUMN of the table the result reads: header tooltips, Quick Look. */
   const commentsByColumn = useMemo(
@@ -3224,11 +3258,16 @@ export function Workspace({
       : fieldNames(importShown.draft).map((name) => ({ name, type_name: "" }));
     return { columns, rows: new ResultRows(), row_count: 0, elapsed_ms: 0, error: null, cancelled: false };
   }, [importShown?.draft, importTable]);
+  const [importWidths, setImportWidths] = useState<Record<string, number> | undefined>(undefined);
+  useEffect(() => setImportWidths(undefined), [importShown?.tableKey]);
   const importPreview = useMemo(() => {
     if (!importShown || !importResult) return null;
-    if (!importTable) return importShown.draft.preview.rows.slice(importShown.draft.header ? 1 : 0).map((r) => r.map((v) => ({ Text: v })));
+    if (!importTable) {
+      const from = importShown.draft.header ? 1 : 0;
+      return importShown.draft.preview.rows.slice(from, from + IMPORT_SAMPLE).map((r) => r.map((v) => ({ Text: v })));
+    }
     const names = importResult.columns.map((c) => c.name);
-    return previewRows(importShown.draft, names, importTable.table.columns ?? [], activeConnection?.kind === "sqlite");
+    return previewRows(importShown.draft, names, importTable.table.columns ?? [], activeConnection?.kind === "sqlite", IMPORT_SAMPLE);
   }, [importShown, importResult, importTable, activeConnection?.kind]);
 
   /** Applies new sort keys: a table tab reruns its first page, a query tab re-sorts its rows. */
@@ -4322,6 +4361,7 @@ export function Workspace({
                       run={runs[tab.id]}
                       table={tab.kind === "table"}
                       active={active}
+                      spinning={tab.kind === "import" && !!csvImport?.run}
                     >
                       {tab.title}
                     </TabStatus>
@@ -4499,8 +4539,9 @@ export function Workspace({
               <ResultsGrid
                 result={importResult}
                 importRows={importPreview}
-                columnWidths={columnWidths}
-                onColumnWidthsChange={setColumnWidths}
+                // Its own widths, not saved: a preview's shape isn't a result's.
+                columnWidths={importWidths}
+                onColumnWidthsChange={setImportWidths}
                 tableName={importShown?.table || undefined}
               />
             </RenderErrorBoundary>
@@ -4829,7 +4870,7 @@ export function Workspace({
               onChange={(draft) => setCsvImport((c) => (c ? { ...c, draft, error: null } : c))}
               onImport={() => void runImport()}
               onCancelRun={() => void cancelImport(windowId)}
-              onClose={closeImport}
+              onClose={() => closeImport()}
             />
           ) : inspectorKind === "review" && reviewShown ? (
             <ReviewSql
