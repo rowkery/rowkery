@@ -1284,10 +1284,10 @@ export function Workspace({
     isTableTab && activeTable && (activeTab?.view === "structure" || activeTab?.view === "map")
       ? activeTab.view
       : "data";
-  // A table opened from the sidebar starts in the view the last table showed.
+  // A table opened from the sidebar starts in the view the last table showed (in the window in front).
   useEffect(() => {
-    if (isTableTab && activeTable) setLastTableView(resultsView);
-  }, [isTableTab, activeTable, resultsView]);
+    if (active && isTableTab && activeTable) setLastTableView(resultsView);
+  }, [active, isTableTab, activeTable, resultsView]);
 
   // Memoised on the table, so the grid only re-sizes columns for a new result.
   const keyColumns: KeyColumns | null = useMemo(() => {

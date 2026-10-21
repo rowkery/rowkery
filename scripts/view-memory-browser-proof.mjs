@@ -161,8 +161,6 @@ await settle();
 await page.click(row("shipments"));
 await page.waitForSelector(map);
 check((await page.getAttribute(map, "data-depth")) === "2", "2 steps carries to another table of the database");
-const saved = await page.evaluate(() => [localStorage.getItem("rowkery.mapDepth"), localStorage.getItem("rowkery.tableView")]);
-console.log(`saved: ${saved.join(" ")}`);
 
 // 3. Back to Data, and the next table opens in Data again.
 await page.click(`${ws} [data-testid="view-switch"] [data-view="data"]`);
