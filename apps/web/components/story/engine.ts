@@ -691,7 +691,8 @@ export function startStory() {
         };
         css(htL, "transform", `translateX(${(-hk * VW * 0.22).toFixed(1)}px)`);
         css(htR, "transform", `translateX(${(hk * VW * 0.22).toFixed(1)}px)`);
-        fade(htL, 1 - hk * 1.3);
+        // On a phone the words stack and the logo flies up through the first one, so it goes sooner.
+        fade(htL, 1 - hk * (phone ? 2.2 : 1.3));
         fade(htR, 1 - hk * 1.3);
         css(hFoot, "transform", `translateY(${(-hk * 80).toFixed(1)}px)`);
         fade(hFoot, 1 - hk * 1.6);
