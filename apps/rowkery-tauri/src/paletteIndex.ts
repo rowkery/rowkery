@@ -209,8 +209,7 @@ const GROUP_BIAS: Record<PaletteGroup, number> = {
 /**
  * The label's score, or a synonym's when that is better: `help` finds
  * Keyboard shortcuts. A synonym counts only as a substring (its scattered
- * letters would match nearly anything) and scores a little under the same
- * hit on a label, so `copy` puts the Copy… commands above Duplicate row.
+ * letters would match nearly anything) and scores as if it were the label.
  */
 function scoreItem(it: PaletteItem, q: string): { score: number; viaSynonym: boolean } {
   const score = scoreMatch(it.hay, q);
@@ -218,15 +217,12 @@ function scoreItem(it: PaletteItem, q: string): { score: number; viaSynonym: boo
   if (it.syn) {
     for (const s of it.syn) {
       if (s.indexOf(q) < 0) continue;
-      const alt = scoreMatch(s, q) * SYNONYM_WEIGHT;
+      const alt = scoreMatch(s, q);
       if (alt > best) best = alt;
     }
   }
   return { score: best, viaSynonym: best > score };
 }
-
-/** A synonym hit's share of the same hit on a label: just outside a tie (`TIE`). */
-const SYNONYM_WEIGHT = 0.85;
 
 /** Command scores within this fraction of each other tie, and use decides. */
 const TIE = 0.1;
@@ -239,8 +235,10 @@ interface Ranked {
 
 /**
  * Commands (a few dozen) are ranked whole: by score, then each run of scores
- * within `TIE` of the run's best is reordered by use (stable, so registry
- * order breaks equal use). With no query the most used come first.
+ * within `TIE` of the run's best puts label hits before synonym hits (`copy`:
+ * the Copy… commands before Duplicate row's "copy row"), then orders by use
+ * (stable, so registry order breaks equal use). With no query the most used
+ * come first.
  */
 function rankCommands(items: PaletteItem[], q: string, limit: number): Ranked[] {
   const hits: Ranked[] = [];
@@ -249,7 +247,8 @@ function rankCommands(items: PaletteItem[], q: string, limit: number): Ranked[] 
     if (s.score !== MISS) hits.push({ it, ...s });
   }
   hits.sort((a, b) => b.score - a.score);
-  const byUse = (a: Ranked, b: Ranked) => (b.it.uses ?? 0) - (a.it.uses ?? 0);
+  const byUse = (a: Ranked, b: Ranked) =>
+    Number(a.viaSynonym) - Number(b.viaSynonym) || (b.it.uses ?? 0) - (a.it.uses ?? 0);
   const out: Ranked[] = [];
   for (let i = 0; i < hits.length && out.length < limit; ) {
     const head = hits[i].score;

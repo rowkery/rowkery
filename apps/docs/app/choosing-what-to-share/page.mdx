@@ -29,7 +29,7 @@ In a narrow window the two columns stack, and an **Access** | **Activity** switc
 | MCP activity | Opens the page at the log |
 | MCP access: what agents can reach | Opens the page at the connection cards |
 | Share this connection with agents | Shares the window's connection |
-| Stop sharing this connection with MCP | Stops sharing it |
+| Stop sharing this connection with agents | Stops sharing it |
 | Edit MCP access: databases and tables | Opens Edit access for the window's connection, once it is shared |
 | Connect Claude Code or Claude Desktop | Opens Connect an agent |
 | Review proposed changes | Opens the review, while a change waits (see [Proposed changes](/proposed-changes/)) |
@@ -45,7 +45,7 @@ You can also share from:
 - the connection's sheet (**Connection › Edit Connection…**): turn on **Share with agents (MCP)** and save;
 - ⌘K **Share this connection with agents**.
 
-A toast confirms each change, such as "Shared with MCP · storefront". The MCP server reads your settings again on every call, so a change applies to the agent's next call, with no restart.
+A toast confirms each change, such as "Shared with agents · storefront". The MCP server reads your settings again on every call, so a change applies to the agent's next call, with no restart.
 
 ### What each card shows
 
@@ -66,7 +66,7 @@ Click a shared card, or press <kbd>↵</kbd> or <kbd>Space</kbd> on it, to open 
 | 1 hour | An hour from when you choose it |
 | Today | At midnight, your Mac's time |
 
-Choosing **1 hour** again starts a fresh hour. When the time is up, Rowkery shows "Stopped sharing with MCP" with the connection's name, and the card says "Sharing ended" with the time. The agent's next call finds the connection gone.
+Choosing **1 hour** again starts a fresh hour. When the time is up, Rowkery shows "Stopped sharing with agents" with the connection's name, and the card says "Sharing ended" with the time. The agent's next call finds the connection gone.
 
 ## Edit access
 
@@ -211,7 +211,7 @@ Any of these stops sharing a connection:
 
 - turn off its switch on the Agents page;
 - **Stop all sharing**, above the cards, for every shared connection at once;
-- ⌘K **Stop sharing this connection with MCP**;
+- ⌘K **Stop sharing this connection with agents**;
 - **Share with agents (MCP)** in the connection's sheet, once you save it.
 
 It takes effect on the agent's next call, which then finds no such connection. Your database and table picks are kept for the next time you share it. A change that agent proposed can't be committed until the connection is shared again.

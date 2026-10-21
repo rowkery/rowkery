@@ -162,7 +162,7 @@ describe("synonyms", () => {
     expect(label[0].hits[0].marks.length).toBeGreaterThan(0);
   });
 
-  test("a label hit outranks the same hit on a synonym", () => {
+  test("among tied commands a label hit comes before a synonym hit", () => {
     // "copy row" is Duplicate row's synonym; the Copy … commands come first.
     const editable = availableCommands({ ...anything, cellEditable: true }, true).map((c) =>
       item("commands", `cmd:${c.id}`, c.title, { kind: "command", id: c.id }, { syn: c.synonyms?.map((w) => w.toLowerCase()) }),

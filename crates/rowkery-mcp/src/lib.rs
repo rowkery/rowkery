@@ -3,7 +3,7 @@
 //! guarded, read-only queries on them.
 //!
 //! It reads the same `config.json` and keychain as the app, on every call, so
-//! turning "Allow MCP" on or off in a connection's sheet takes effect at once.
+//! turning sharing on or off in Rowkery takes effect at once.
 //! Only connections with `allow_mcp` set are visible. Every query is one
 //! SELECT (safe mode's classifier), runs in a read-only session with a 10 s
 //! statement timeout, is capped by wrapping it in `LIMIT`, and is refused
