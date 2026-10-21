@@ -223,10 +223,19 @@ export function AgentsInbox({
 
   const dryRun = () => {
     if (!id || state === "running" || busy) return;
+    // The button disables while it runs, which would drop focus to the body and
+    // leave ⇧⌘↵ (Commit) with nowhere to land; the page keeps it instead.
+    // Once it settles, the button takes focus back if nothing else took it.
+    const button = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    rootRef.current?.focus({ preventScroll: true });
     setRun(id, { state: "running", dry: null, error: null });
+    const settle = (run: Parameters<typeof setRun>[1]) => {
+      setRun(id, run);
+      if (button && document.activeElement === rootRef.current) requestAnimationFrame(() => button.focus({ preventScroll: true }));
+    };
     dryRunProposal(id).then(
-      (dry) => setRun(id, { state: "done", dry, error: null }),
-      (e) => setRun(id, { state: "error", dry: null, error: String(e) }),
+      (dry) => settle({ state: "done", dry, error: null }),
+      (e) => settle({ state: "error", dry: null, error: String(e) }),
     );
   };
 

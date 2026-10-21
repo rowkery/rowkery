@@ -134,7 +134,7 @@ A refusal is the guard working: the agent gets the reason as a sentence and usua
 | `Refused: this reads a table the user hasn't shared with agents in Rowkery. …` | The query reads a table you didn't tick, maybe through a view or a join. Tick every table it needs in Edit access, or leave it hidden |
 | `Refused: the plan reads public.events (~4100000 rows; indexed: …) end to end. …` | The query would read a table of over 100,000 rows from start to end. The agent should filter on one of the indexed columns the message lists |
 | `Refused: pg_read_file() reads or writes files on the database server. …` | Functions that touch files, other hosts, other sessions or settings are refused, as are functions defined in your database |
-| `Refused: players.email is masked. …` | You marked the column as sensitive. The agent can return or count it, but not filter, sort, group or join on it |
+| `Refused: players.email is masked. …` | You marked the column as sensitive. The agent can return or count it (on SQLite only return it), but not filter, sort, group or join on it |
 | `Stopped after 10 s (statement timeout). …` | The query ran past 10 seconds |
 | `No shared connection called "NAME". …` | The connection isn't shared now (see above) |
 

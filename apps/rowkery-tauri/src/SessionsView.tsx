@@ -245,7 +245,7 @@ export function SessionsBar({ model }: { model: SessionsModel }) {
 }
 
 /** The list itself. */
-export function SessionsGrid({ model, tabs }: { model: SessionsModel; tabs: TabLabel[] }) {
+export function SessionsGrid({ model, tabs, windowId }: { model: SessionsModel; tabs: TabLabel[]; windowId: string }) {
   const { rows, shown, picked, pick, setHovering, secsLater } = model;
   const blocking = useMemo(() => blockingCounts(rows ?? []), [rows]);
   const titleOf = useMemo(() => new Map(tabs.map((t) => [t.id, t.title])), [tabs]);
@@ -292,7 +292,8 @@ export function SessionsGrid({ model, tabs }: { model: SessionsModel; tabs: TabL
           </thead>
           <tbody>
             {shown.map((r) => {
-              const ours = r.tab ? titleOf.get(r.tab.tab_id) : undefined;
+              // Tab ids are per window: another window's session is never "You".
+              const ours = r.tab?.window_id === windowId ? titleOf.get(r.tab.tab_id) : undefined;
               const blocks = blocking.get(r.pid) ?? 0;
               const state = r.state ?? "";
               return (

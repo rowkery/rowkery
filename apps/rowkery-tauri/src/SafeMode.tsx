@@ -48,6 +48,7 @@ function confirmLabel(hold: SafetyHold): string {
   if (only.verb === "UPDATE") return "Update all rows";
   if (only.verb === "TRUNCATE") return "Truncate";
   if (only.verb.startsWith("DROP")) return "Drop";
+  if (only.verb === "PG_TERMINATE_BACKEND") return "End session";
   return "Run";
 }
 
@@ -59,6 +60,7 @@ function destructiveNote(s: StatementCheck, catalog: SchemaCatalog | null): stri
     return `No WHERE: this ${verb} every row in ${table}${rows ? ` (${rows})` : ""}.`;
   }
   if (s.verb === "TRUNCATE") return `This empties ${table}${rows ? ` (${rows} rows)` : ""}.`;
+  if (s.verb === "PG_TERMINATE_BACKEND") return "This ends another session: its open transaction rolls back.";
   return `This drops ${table} and everything in it. It can't be undone.`;
 }
 

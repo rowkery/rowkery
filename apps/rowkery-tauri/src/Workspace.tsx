@@ -4127,7 +4127,7 @@ export function Workspace({
           data-held={held?.hold.action === "confirm" && resultsView !== "structure" ? "" : undefined}
         >
           {isSessionsTab ? (
-            <SessionsGrid model={sessions} tabs={tabLabels} />
+            <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
           ) : (
           <>
           {!isTableTab && (

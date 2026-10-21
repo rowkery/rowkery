@@ -245,6 +245,12 @@ export function shareUntil(choice: "hour" | "today", now = Date.now()): number {
   return d.getTime();
 }
 
+/** Which duration set `until`: Today ends where `shareUntil` puts the next midnight (even across a DST jump). */
+export function shareDuration(until: number | null | undefined): "off" | "hour" | "today" {
+  if (until == null) return "off";
+  return until === shareUntil("today", until - 1) ? "today" : "hour";
+}
+
 /** The host as the agent sees it (rowkery-mcp `guard::mask_host`). */
 export function maskHost(raw: string): string {
   const host = raw.trim();

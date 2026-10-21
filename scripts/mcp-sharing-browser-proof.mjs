@@ -220,10 +220,16 @@ check(
   /until \d|until midnight/.test((await page.textContent('[data-mcp-conn="local"] [data-testid="mcp-cn-sub"]')) ?? ""),
   "the row says until when",
 );
+const picked = () => page.$$eval('[data-mcp-conn="local"] [data-mcp-duration][aria-checked="true"]', (els) => els.map((e) => e.dataset.mcpDuration).join());
+check((await picked()) === "hour", `1 hour shows as picked (${await picked()})`);
+await page.click('[data-mcp-conn="local"] [data-mcp-duration="today"]');
+await page.waitForFunction(() => document.querySelector('[data-mcp-conn="local"] [data-mcp-duration="today"]')?.getAttribute("aria-checked") === "true", null, { timeout: 2000 }).catch(() => {});
+check((await picked()) === "today", `Today shows as picked (${await picked()})`);
 await page.click('[data-mcp-conn="local"] [data-mcp-duration="off"]');
 await page.waitForTimeout(300);
 saved = await lastSave();
 check(saved?.mcp_until == null && saved?.allow_mcp === true, "Until turned off clears the limit");
+check((await picked()) === "off", `Until turned off shows as picked (${await picked()})`);
 
 // 2. Which tables are shared is picked in Edit access (agents-access-browser-proof.mjs).
 await shot("1-access-controls");

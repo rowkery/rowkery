@@ -21,6 +21,7 @@ import {
   mcpSample,
   mcpShared,
   mcpStats,
+  shareDuration,
   shareUntil,
   sinceLabel,
   useMcpEntries,
@@ -565,7 +566,7 @@ function AccessCard({
 }) {
   const shared = mcpShared(c);
   const ended = !!c.allow_mcp && !shared;
-  const duration = c.mcp_until == null ? "off" : null;
+  const duration = shareDuration(c.mcp_until);
   const summary = accessSummary(c);
   // A shared card opens its Edit access; its switch and durations keep their own clicks.
   const open = (e: MouseEvent | KeyboardEvent) => {

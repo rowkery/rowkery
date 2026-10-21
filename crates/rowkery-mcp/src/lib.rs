@@ -53,8 +53,8 @@ pulling rows, and ask for no more rows than you will read. Queries are single SE
 results are capped (200 rows by default, 1000 at most) and a plan that reads a table of more than \
 100,000 rows end to end is refused, so rewrite it with an indexed WHERE. explain shows the plan \
 without running the query. Columns the user marked sensitive come back masked (masked: and ten hex \
-digits; the same value always gives the same stand-in). You can return or count a masked column but not \
-filter, sort, group or join on it; describe_table lists them. For a slow or stuck database, sessions shows \
+digits; the same value always gives the same stand-in). You can return or count a masked column (on SQLite \
+only return it) but not filter, sort, group or join on it; describe_table lists them. For a slow or stuck database, sessions shows \
 what's running, what each session waits on and who blocks whom. Queries never change data: the session is \
 read-only. To change data, call propose_change with the INSERT, UPDATE or DELETE statements and why: \
 the user reviews a dry run in Rowkery and commits or rejects it, and check_proposal tells you which. \
@@ -408,7 +408,8 @@ async fn propose(
     client: Option<String>,
 ) -> Outcome {
     let sql = required(args, "sql")?;
-    let reason = required(args, "reason")?;
+    // A blank reason gets validate_input's "say why", not a bare "Missing".
+    let reason = arg(args, "reason").unwrap_or_default();
     proposals::validate_input(sql, reason)?;
     let changes = change::check(store, target, sql).await?;
     let expect_rows = args.get("expect_rows").and_then(Json::as_u64);
