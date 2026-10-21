@@ -594,7 +594,8 @@ await page.click(cell5(15, 3)); // a cell with nothing staged
 await page.keyboard.press("Escape"); // leaves the selection only
 await page.waitForTimeout(200);
 const kept7 = await page.evaluate((ws) => !document.querySelector(`${ws} [data-testid="rg-body"] [data-active]`), ws);
-check((await bar7()) === n7 && kept7, `the first Esc only leaves the selection; the ${await bar7()} edits stay`);
+const toastAfter7 = await page.$("[data-toast]");
+check((await bar7()) === n7 && kept7 && !toastAfter7, `the first Esc only leaves the selection; the ${await bar7()} edits stay, no toast`);
 await page.keyboard.press("Escape");
 await page.waitForSelector("[data-toast]");
 const toast7 = await page.$eval("[data-toast]", (e) => e.textContent);

@@ -63,9 +63,9 @@ const TIMESTAMP_TYPE = /^timestamp/i;
 const TIMESTAMP_PARTS = /^(\d{4}-\d{2}-\d{2})([ T])(\d{2}:\d{2}:\d{2})(.*)$/;
 
 /**
- * Esc presses that only left the grid's selection: they still close what sits
- * above (Review SQL, a held write) but never cancel the query or discard the
- * tab's edits; the next Esc does.
+ * Esc presses that only left the grid's selection: they never cancel the query
+ * or discard the tab's edits (the next Esc does). The window still sees them,
+ * so Review SQL or a held write closes on the same press, as before.
  */
 export const escLeftSelection = new WeakSet<Event>();
 
