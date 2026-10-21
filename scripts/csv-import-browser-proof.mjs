@@ -203,8 +203,9 @@ const previewCount = await page.locator(`${ws} [data-import-row]`).count();
 check(previewCount === 20, `the file's first rows show in the grid (${previewCount})`);
 const firstPreview = await page.$$eval(`${ws} [data-import-row="0"] [data-col]`, (els) => els.map((e) => e.textContent.trim()));
 check(firstPreview[0] === "60000" && firstPreview[2] === "new0@mail.com" && firstPreview[4] === "default" && firstPreview[6] === "default", `preview cells read as the table gets them (${firstPreview.join(" | ")})`);
-const importFocused = await page.evaluate(() => document.activeElement?.hasAttribute("data-import-run"));
-check(importFocused, "focus lands on Import");
+const focusAt = await page.evaluate(() => (document.activeElement?.hasAttribute("data-import-body") ? "panel" : document.activeElement?.outerHTML.slice(0, 60)));
+check((await page.locator(`${panel} [data-import-option="header"] [data-choice="header"][aria-checked="true"]`).count()) === 1, "First row: Header is offered and picked");
+check(focusAt === "panel", `focus lands in the panel, not on Import (${focusAt})`);
 
 // Remap amount → total and placed → created_at from their pickers.
 const pickField = async (field, column) => {

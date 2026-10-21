@@ -1339,7 +1339,10 @@ export function Workspace({
   // Quick Look opening takes the column from Review SQL.
   const qlOpen = !!qlView;
   useEffect(() => {
-    if (qlOpen) setReview(null);
+    if (!qlOpen) return;
+    setReview(null);
+    // …and from an import panel that isn't running.
+    if (csvImportRef.current && !csvImportRef.current.run) setCsvImport(null);
   }, [qlOpen]);
   const setTabEdits = (
     tabId: number,
@@ -1430,7 +1433,11 @@ export function Workspace({
     const target = editTarget();
     if (!target || !activeConnection) return;
     const tabId = target.tab.id;
-    // One inspector: Review SQL takes the column from Quick Look.
+    // One inspector: Review SQL takes the column from Quick Look and an
+    // import panel, but never hides behind a running import.
+    const imp = csvImportRef.current;
+    if (imp?.run) return showToast("An import is running", imp.table, "error");
+    if (imp) setCsvImport(null);
     qlViewRef.current?.close();
     setReview({ tabId, sql: null, error: null, cards: null });
     const buffer = target.buffer;

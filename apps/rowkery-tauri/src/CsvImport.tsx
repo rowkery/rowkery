@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fieldNames, importRows, looksLikeData, remap, withHeader, type EmptyCells, type ImportDraft, type OnConflict } from "./importDraft";
+import { fieldNames, importRows, remap, withHeader, type EmptyCells, type ImportDraft, type OnConflict } from "./importDraft";
 import { GridMenu } from "./GridMenu";
 import { InspectorHead } from "./Inspector";
 import { ChevronDownIcon } from "./icons";
@@ -39,6 +39,7 @@ function Segment<T extends string>({
             role="radio"
             data-choice={c.value}
             aria-checked={value === c.value}
+            // nc-segment draws the picked choice from aria-selected.
             aria-selected={value === c.value}
             disabled={disabled}
             onClick={() => onChange(c.value)}
@@ -101,11 +102,11 @@ export function CsvImport({
     const t = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(t);
   }, [run]);
-  // The first row can be data only when it names no column (else it's a header).
-  const firstIsData = looksLikeData(draft.preview.rows[0] ?? [], columns);
-  const importRef = useRef<HTMLButtonElement>(null);
+  // Focus goes to the panel, not Import: on Confirm writes the button is the
+  // confirmation, so a stray ↵ after a drop mustn't press it.
+  const bodyRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    importRef.current?.focus({ preventScroll: true });
+    bodyRef.current?.focus({ preventScroll: true });
   }, [draft.path]);
   const busy = !!run;
   const conflictChoices: { value: OnConflict; label: string }[] = [
@@ -121,7 +122,7 @@ export function CsvImport({
           Import into {table}
         </h2>
       </InspectorHead>
-      <div className="ci-body" data-import-body>
+      <div className="ci-body" data-import-body ref={bodyRef} tabIndex={-1}>
         <p className="ci-file" data-import-file title={draft.path}>
           {draft.preview.file_name} · {n(rows)} {rows === 1 ? "row" : "rows"} · {names.length}{" "}
           {names.length === 1 ? "column" : "columns"}
@@ -145,19 +146,17 @@ export function CsvImport({
           disabled={busy}
           onChange={(empty) => onChange({ ...draft, empty })}
         />
-        {firstIsData && (
-          <Segment
-            name="header"
-            label="First row"
-            value={draft.header ? "header" : "data"}
-            choices={[
-              { value: "header", label: "Header" },
-              { value: "data", label: "Data" },
-            ]}
-            disabled={busy}
-            onChange={(v) => onChange(withHeader(draft, v === "header", columns, { name: table, key: keyColumns }))}
-          />
-        )}
+        <Segment
+          name="header"
+          label="First row"
+          value={draft.header ? "header" : "data"}
+          choices={[
+            { value: "header", label: "Header" },
+            { value: "data", label: "Data" },
+          ]}
+          disabled={busy}
+          onChange={(v) => onChange(withHeader(draft, v === "header", columns, { name: table, key: keyColumns }))}
+        />
         <div className="insp-label ci-label" data-import-matched={matched}>
           Columns · {matched} of {names.length} matched
         </div>
@@ -222,7 +221,6 @@ export function CsvImport({
               Cancel
             </button>
             <button
-              ref={importRef}
               type="button"
               className="insp-btn ink"
               data-import-run

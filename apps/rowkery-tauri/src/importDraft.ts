@@ -74,7 +74,9 @@ export function matchColumns(names: string[], columns: string[], table?: MatchTa
 
 /** The first row reads as data when none of its cells names a column. */
 export function looksLikeData(first: string[], columns: string[]): boolean {
-  return matchColumns(first, columns).every((m) => m === null);
+  // Exact names only: a near match ("Main Street" → street) is too easy for a value.
+  const names = new Set(columns.map(normalName));
+  return !first.some((f) => names.has(normalName(f)));
 }
 
 /** Without a header, fields go to the table's columns in order. */
@@ -129,13 +131,13 @@ export function importSpec(d: ImportDraft, schema: string, table: string): Impor
   };
 }
 
-const TEXT_TYPE = /^(text|character varying|varchar|character|char|bpchar|citext|name)\b/i;
+const TEXT_TYPES = new Set(["text", "character varying", "varchar", "character", "char", "bpchar", "citext", "name"]);
 
 /** Whether a column keeps `''` under Empty text (core's `takes_empty_text`). */
 export function takesEmptyText(typeName: string, sqlite: boolean): boolean {
   const t = typeName.trim().toLowerCase();
   if (sqlite) return t === "" || t.includes("char") || t.includes("clob") || t.includes("text");
-  return TEXT_TYPE.test(t);
+  return TEXT_TYPES.has(t.split("(")[0].trim());
 }
 
 /**

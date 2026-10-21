@@ -6,7 +6,7 @@ export const metadata = { title: "Importing a CSV" };
 
 <p className="lead">Load a CSV or TSV file into a table you already have. Rowkery matches the file's columns to the table's, shows its first rows in the grid, and writes every row in one transaction, so a file goes in whole or not at all.</p>
 
-<Shot src="/img/importing-csv-panel.webp" width={1016} height={603} alt="Import into orders beside the orders grid: orders-october.csv, 12,431 rows, 8 columns; If a key already exists set to Skip; Empty cells set to NULL; Columns 7 of 8 matched, with utm_source skipped; the file's first rows tinted in the grid; Cancel and Import 12,431 rows." />
+<Shot src="/img/importing-csv-panel.webp" width={1016} height={603} alt="Import into orders beside the orders grid: orders-october.csv, 12,431 rows, 8 columns; If a key already exists set to Skip; Empty cells set to NULL; First row set to Header; Columns 7 of 8 matched, with utm_source skipped; the file's first rows tinted in the grid; Cancel and Import 12,431 rows." />
 
 ## Starting an import
 
@@ -17,7 +17,7 @@ Any of these opens the file picker for a table, then the import panel beside its
 - **Query** › **Import CSV…** in the menu bar.
 - Drop a `.csv`, `.tsv` or `.tab` file onto a table in the schema panel, or onto a table tab's grid. No file picker: the dropped file is the one read.
 
-Views can't be imported into.
+Views can't be imported into, and neither can a generated column or an identity column the database always fills in: skip those.
 
 ## Matching columns
 
@@ -35,11 +35,11 @@ The file's first 20 rows sit at the top of the grid, tinted as new rows, the way
 
 | Choice | What it does |
 | --- | --- |
-| **If a key already exists: Stop** | The import stops at the first row whose key is taken, and nothing is written. The default |
+| **If a key already exists: Stop** | The import stops when a key is taken, names it, and writes nothing. The default |
 | **Skip** | Rows whose key is taken are left out; the rest go in |
-| **Update** | Rows whose key is taken update that row. Offered when the table has a primary key |
+| **Update** | Rows whose key is taken update that row; an empty cell keeps the value it has. Offered when the table has a primary key |
 | **Empty cells: NULL** | An empty cell is NULL, or the column's DEFAULT when it has one. The default |
-| **Empty text** | An empty cell is empty text in text columns; other columns still get NULL |
+| **Empty text** | An empty cell is empty text in text columns; other columns still get NULL or their DEFAULT |
 
 ## Running it
 
@@ -55,11 +55,13 @@ A value the column can't take stops the import, writes nothing, and keeps the pa
 
 <Shot src="/img/importing-csv-error.webp" width={360} height={60} alt="Line 4,812, total: 'n/a' isn't a number." />
 
+A rule of the table, such as a NOT NULL, CHECK or foreign key, also stops it and shows the database's message.
+
 Fix the file, or skip that column, and import again. Values follow the same rules as typing into a cell: see [Editing rows](/editing-rows/).
 
 ## Files it reads
 
-- Comma, tab, semicolon or bar separated, guessed from the first rows; quoted values can hold commas, quotes and line breaks.
+- Comma, tab, semicolon or bar separated, guessed from the first line; quoted values can hold commas, quotes and line breaks.
 - UTF-8 text, with or without a byte order mark.
 - Every row needs as many values as the first row.
 

@@ -51,6 +51,8 @@ describe("CSV import draft", () => {
   it("reads a first row that names no column as data, mapped in the table's order", () => {
     expect(looksLikeData(["48210", "300", "a@x.com"], COLUMNS)).toBe(true);
     expect(looksLikeData(["order", "email"], COLUMNS)).toBe(false);
+    // Only an exact column name makes it a header: "Main Street" is a value.
+    expect(looksLikeData(["7", "Main Street", "acme customer"], [...COLUMNS, "street"])).toBe(true);
     const d = draftFor("/f.csv", preview([["48210", "300", "a@x.com"]], 12), COLUMNS);
     expect(d.header).toBe(false);
     expect(d.mapping).toEqual(["id", "customer_id", "email"]);
@@ -123,6 +125,7 @@ describe("CSV import draft", () => {
   it("knows which columns keep empty text", () => {
     expect(takesEmptyText("character varying(40)", false)).toBe(true);
     expect(takesEmptyText("text", false)).toBe(true);
+    expect(takesEmptyText("text[]", false)).toBe(false);
     expect(takesEmptyText("uuid", false)).toBe(false);
     expect(takesEmptyText("timestamp with time zone", false)).toBe(false);
     expect(takesEmptyText("VARCHAR(10)", true)).toBe(true);
