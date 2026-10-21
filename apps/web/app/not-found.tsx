@@ -11,7 +11,7 @@ export default function NotFound() {
   return (
     <main className="lost" data-not-found>
       <Pg tilted />
-      <h1 className="h2">Nothing at this address</h1>
+      <h1>Nothing at this address</h1>
       <a className="btn ink" href="/">
         Back to Rowkery
       </a>

@@ -1,11 +1,11 @@
-/* rowkery.com, 2026-10-20 redesign (the omlx.ai / deno.com mock): one dark sheet with no side
-   rails, roomy bands, Gabarito headings over IBM Plex, and the penguin doing small jobs around
-   the page. Dark only. Each section's own rules live beside it (components/sections/*.css);
-   this file holds the tokens, the shared pieces and the top of the page.
+/* rowkery.com, 2026-10-21 story redesign: one black sheet, a floating nav, big Gabarito titles
+   over IBM Plex, and four chapters that play out as you scroll (components/story). Dark only.
+   This file holds the tokens, the shared pieces, the nav, the hero, the close and the foot;
+   the scenes' rules are in components/story/story.css.
 
-   Every looping animation moves only transform or opacity, so the compositor plays it and a
-   page sitting still never lays out or paints (scripts/scroll-profile.mjs checks). Distances
-   that depend on a box's width use container units (cqw) rather than a size set from script. */
+   Everything that moves moves by transform or opacity on an HTML box, so the compositor plays
+   it and a page sitting still never lays out or paints (scripts/scroll-profile.mjs checks).
+   Exits are quicker than entries. No gradients, glows or blur. */
 :root {
   --bg: #0a0a0a;
   --card: #141414;
@@ -21,61 +21,65 @@
   --inkfg: #0a0a0a;
   --ok: #4cc38a;
   --no: #ff6b6b;
-  --wash: rgba(255, 255, 255, 0.06);
+  --prd: #ff5f57;
+  /* The little app windows, in the app's own dark greys. */
+  --wbg: #1a1a1a;
+  --wpanel: #212121;
+  --wline: #2a2a2b;
+  /* The white page of the For everyone chapter. */
+  --paper: #f2f2ef;
+  --paper2: #e4e4df;
+  --paperline: #c9c9c3;
+  --paperink: #0a0a0a;
+  --papergrey: #5c6066;
   --sans: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: var(--font-mono), ui-monospace, Menlo, monospace;
   --display: var(--font-display), var(--sans);
-  --hand: var(--font-hand), "Bradley Hand", cursive;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
-  --gutter: 56px;
+  --pop: cubic-bezier(0.34, 1.4, 0.5, 1);
+  /* The title size: the words and the penguin share one line, or stack on a phone. */
+  --hs: min(11.2vw, 178px, 21svh);
+  --pgw: calc(var(--hs) * 1.02);
+  --hgap: calc(var(--hs) * 0.2);
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: 72px; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+/* clip, not hidden: the hero's parting words must never widen a phone's page (and sticky still works). */
+html { background: var(--bg); overflow-x: clip; }
+body { margin: 0; color: var(--fg); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: clip; }
 a { color: inherit; }
 code, kbd, pre { font-family: var(--mono); }
 p { margin: 0; }
-:focus-visible { outline: 2px solid var(--acc); outline-offset: 3px; border-radius: 8px; }
+h1, h2, h3, h4 { margin: 0; font-weight: inherit; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--acc); outline-offset: 3px; border-radius: 10px; }
 ::selection { background: var(--acc); color: var(--onacc); }
-.skip { position: absolute; left: -9999px; top: 12px; z-index: 40; }
+.skip { position: absolute; left: -9999px; top: 12px; z-index: 60; }
 .skip:focus { left: 16px; }
+.muted { color: var(--grey); }
 
-/* ── The sheet: one 1200 px column of bands, with room between them instead of rules ── */
-.sheet { max-width: 1200px; margin: 0 auto; }
-.band { position: relative; padding: 120px var(--gutter); }
-
-/* ── Type ── */
-h1, h2, h3 { margin: 0; text-wrap: balance; }
-.h1, .h2, h3, .brand, .stat b, blockquote { font-family: var(--display); }
-.h1 { font-size: clamp(40px, 5vw, 70px); line-height: 1; font-weight: 800; letter-spacing: -0.035em; }
-.h2 { font-size: clamp(32px, 4.1vw, 52px); line-height: 1.06; font-weight: 800; letter-spacing: -0.035em; margin-top: 18px; }
-h3 { font-size: 18px; line-height: 1.3; font-weight: 700; letter-spacing: -0.015em; }
-.ln { display: block; }
-.em { color: var(--acc); }
-.lead { max-width: 60ch; margin-top: 18px; font-size: 18px; color: var(--grey); }
-.eyebrow { display: inline-flex; align-items: center; gap: 10px; font: 500 13px/1 var(--mono); color: var(--grey); }
-.eyebrow i { width: 7px; height: 7px; background: var(--acc); border-radius: 2px; }
-.head { display: grid; margin-bottom: 64px; }
-/* A heading with a penguin scene to its right. */
-.art-head { grid-template-columns: minmax(0, 1fr) auto; align-items: end; column-gap: 40px; }
-.art-head > div:first-child { display: grid; }
+/* The grid of rows and columns behind the story, drifting slower than the page. */
+.bg-grid { position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: 0; overflow: hidden; }
+.bg-grid i {
+  position: absolute; inset: -80px 0; will-change: transform;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='40'%3E%3Cpath d='M0 .5H128M.5 0V40' stroke='%23fff' stroke-opacity='.045'/%3E%3C/svg%3E") center top;
+}
 
 /* ── Buttons: ink is the one to press, soft is everything else ── */
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 20px;
-  border-radius: 999px; border: 0; font: 500 15px/1 var(--sans); text-decoration: none; white-space: nowrap; cursor: pointer;
-  transition: background 0.15s, opacity 0.15s, transform 0.15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 46px; padding: 0 22px;
+  border: 0; border-radius: 999px; font: 500 15px/1 var(--sans); text-decoration: none; white-space: nowrap; cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
 }
 .btn:active { transform: scale(0.97); }
 .btn.ink { background: var(--ink); color: var(--inkfg); }
-.btn.ink:hover { opacity: 0.9; }
+.btn.ink:hover { opacity: 0.88; }
 .btn.soft { background: var(--card2); color: var(--fg); }
 .btn.soft:hover { background: var(--line2); }
-.btn.sm { height: 34px; padding: 0 14px; font-size: 13.5px; }
+.btn.sm { height: 38px; padding: 0 16px; font-size: 14px; }
 .btn svg { flex: none; }
-.ctas { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+.ctas { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 .card { background: var(--card); border-radius: 16px; }
 kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 6px; background: var(--card2); color: var(--fg); font: 500 12px var(--mono); box-shadow: inset 0 -1px 0 var(--line2); }
 
@@ -84,160 +88,195 @@ kbd { display: inline-flex; align-items: center; justify-content: center; min-wi
 .code { background: var(--bg); border-radius: 12px; padding: 14px 76px 14px 16px; font: 400 13px/1.65 var(--mono); overflow-x: auto; white-space: pre; }
 .code .c { color: var(--grey); }
 .code .p { color: var(--acc); user-select: none; }
-.copy { position: absolute; top: 8px; right: 8px; height: 26px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--card2); color: var(--fg); font: 500 12px var(--sans); cursor: pointer; }
+.copy { position: absolute; top: 8px; right: 8px; height: 28px; padding: 0 11px; border: 0; border-radius: 999px; background: var(--card2); color: var(--fg); font: 500 12px var(--sans); cursor: pointer; }
 .copy:hover { background: var(--line2); }
 
-/* The little app windows' shared moves: a blinking caret, rows arriving, a nudge on Commit. */
-.caret { display: inline-block; width: 7px; height: 1.1em; background: var(--fg); vertical-align: -0.2em; animation: caret 1s steps(1) infinite; }
-@keyframes caret { 50% { opacity: 0; } }
-@keyframes rowin { from { opacity: 0; transform: translateY(6px); } }
-@keyframes nudge { 0%, 70%, 100% { transform: none; } 80% { transform: scale(1.05); } 90% { transform: none; } }
-
-/* ── The penguin: the mark, one colour, with an eyelid that blinks ── */
-.pg { display: block; overflow: visible; color: var(--fg); }
+/* ── The penguin: the mark in one colour, props beside it in orange, an eyelid that blinks ── */
+.pg { display: block; width: 100%; height: 100%; overflow: visible; color: inherit; }
 .pg .lid { transform-box: fill-box; transform-origin: 50% 0; transform: scaleY(0); fill: currentColor; }
 a:hover .pg .lid, .pg:hover .lid { animation: blink 0.18s cubic-bezier(0.5, 0, 0.5, 1); }
 @keyframes blink { 50% { transform: scaleY(1); } }
-@keyframes rise { from { opacity: 0; transform: translateY(18px); } }
-@keyframes hop { 0%, 86%, 100% { transform: translateY(0); } 91% { transform: translateY(-12px); } 95% { transform: translateY(0); } 97% { transform: translateY(-4px); } }
-@keyframes hop1 { 40% { transform: translateY(-18px); } }
-@keyframes tick { to { transform: translateX(-50%); } }
+/* With several props drawn, data-prop names the one showing. */
+.pg[data-prop] [data-p] { display: none; }
+.pg[data-prop="hat"] [data-p="hat"], .pg[data-prop="shades"] [data-p="shades"], .pg[data-prop="magnifier"] [data-p="magnifier"],
+.pg[data-prop="letter"] [data-p="letter"], .pg[data-prop="sign"] [data-p="sign"], .pg[data-prop="key"] [data-p="key"] { display: inline; }
+/* A hop, played again by switching between two classes (engine.ts, replay). */
+.hopper { display: block; width: 100%; height: 100%; transform-origin: 50% 100%; }
+.ha { animation: hopA 0.62s var(--ease); }
+.hb { animation: hopB 0.62s var(--ease); }
+@keyframes hopA { 35% { transform: translateY(-16%) scaleY(1.04); } 62% { transform: translateY(0) scaleY(0.94); } 80% { transform: translateY(-3%); } }
+@keyframes hopB { 35% { transform: translateY(-16%) scaleY(1.04); } 62% { transform: translateY(0) scaleY(0.94); } 80% { transform: translateY(-3%); } }
+@keyframes rise { from { opacity: 0; transform: translateY(16px); } }
+@keyframes fade { from { opacity: 0; } }
 
-/* A penguin waddling to the end of its walkway and back: the walk, the turn and the waddle are
-   its own translate, scale and rotate. In Chromium an animation inside another moving box
-   repaints every frame; three properties on one box stay on the compositor. */
-.walkway { position: relative; height: 0; container-type: inline-size; }
-.walker { position: absolute; bottom: -2px; left: 0; width: 30px; height: 31px; z-index: 3; pointer-events: none; transform-origin: 50% 100%; animation: walk 46s linear infinite, turn 46s linear infinite, waddle 0.38s ease-in-out infinite alternate; }
-.walker .pg, .marcher .pg { width: 100%; height: 100%; }
-@keyframes walk { 50% { translate: calc(100cqw - 30px); } }
-@keyframes turn { 0%, 49.99% { scale: 1; } 50%, 100% { scale: -1 1; } }
+/* ── Nav: a floating island with where you are in the story ── */
+.nav {
+  position: fixed; z-index: 30; top: calc(env(safe-area-inset-top, 0px) + 12px); left: 50%; transform: translateX(-50%);
+  width: min(780px, calc(100% - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+  height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 8px 0 16px; border-radius: 999px; background: var(--card); isolation: isolate;
+}
+/* Over the white page the nav turns paper: a layer that fades in, and the words switch colour. */
+.nav::before { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--paper2); opacity: 0; transition: opacity 0.2s; }
+.nav.inv::before { opacity: 1; transition-duration: 0.35s; }
+.nav.inv { color: var(--paperink); }
+.nav.inv .btn.ink { background: var(--paperink); color: var(--paper); }
+.nav.inv .btn.soft { background: var(--paper); color: var(--paperink); }
+.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font: 700 18px/1 var(--display); letter-spacing: -0.02em; flex: none; }
+.brand .mk { display: block; width: 23px; height: 24px; color: var(--acc); }
+.chapter { position: relative; height: 34px; display: flex; align-items: center; overflow: hidden; width: 0; margin-left: 4px; opacity: 0; transition: opacity 0.2s; }
+.chapter.on { opacity: 1; transition-duration: 0.3s; }
+.ch-in { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; padding: 0 12px 4px; font-size: 14px; }
+.ch-in.sa { animation: chA 0.5s var(--ease); }
+.ch-in.sb { animation: chB 0.5s var(--ease); }
+@keyframes chA { from { opacity: 0; transform: translateY(8px); } }
+@keyframes chB { from { opacity: 0; transform: translateY(8px); } }
+.ch-n { font: 500 12px var(--mono); color: var(--grey); }
+.nav.inv .ch-n { color: var(--papergrey); }
+.ch-bar { position: absolute; left: 12px; right: 12px; bottom: 5px; height: 2px; border-radius: 2px; background: var(--line2); overflow: hidden; }
+.nav.inv .ch-bar { background: var(--paperline); }
+.ch-bar i { position: absolute; inset: 0; background: currentColor; transform-origin: 0 50%; transform: scaleX(0); }
+.nav .end { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+
+/* The phone's dock: Download, always in reach, until the close is in view. */
+.dock {
+  position: fixed; z-index: 30; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); transform: translateX(-50%) translateY(140%);
+  display: none; align-items: center; gap: 10px; height: 56px; padding: 0 8px 0 16px; border-radius: 999px; background: var(--card);
+  transition: transform 0.3s var(--ease);
+}
+.dock.on { transform: translateX(-50%); transition-duration: 0.5s; }
+.dock .brand { font-size: 17px; }
+
+/* ── Meet Rowkery, and Get Rowkery at the close: two words with the penguin between them ── */
+.h-title { display: flex; justify-content: center; align-items: center; gap: var(--hgap); font: 800 var(--hs)/0.9 var(--display); letter-spacing: -0.05em; white-space: nowrap; pointer-events: none; }
+.ht, .ht > span { display: block; }
+/* Each word slides in from the logo's side but is clipped at its own inner edge, so it never
+   crosses the logo, whose belly and eye are holes (a small allowance keeps the glyphs whole). */
+.h-title .ht-l { clip-path: inset(-0.3em -0.06em -0.3em -100vw); }
+.h-title .ht-r { clip-path: inset(-0.3em -100vw -0.3em -0.06em); }
+.h-slot { position: relative; display: block; flex: none; width: var(--pgw); height: calc(var(--pgw) * 1.07); }
+.hpg, .hpg2 { position: absolute; inset: 0; color: var(--acc); pointer-events: none; }
+.look, .intro { display: block; width: 100%; height: 100%; }
+.h-foot { display: grid; justify-items: center; gap: 22px; text-align: center; min-width: 0; }
+.h-sub { font: 500 clamp(19px, 1.7vw, 24px)/1.3 var(--display); letter-spacing: -0.01em; max-width: 30ch; }
+.h-sub .ln { display: block; }
+
+/* The hero. With the story playing it is a track a screen and a flight long, and its screen
+   holds still (sticky) while the words part and the logo flies into the brand: nothing has to
+   make up for the scroll, which a phone runs off the main thread. The held screen sits above
+   the nav, so the logo can land on it, but lets the pointer through to the nav everywhere but
+   its links. The flying logo is fixed to the screen, so a fast scroll past the hero still lands it. */
+.h-pin { position: relative; min-height: max(640px, 100svh); display: flex; flex-direction: column; padding: 84px max(16px, env(safe-area-inset-right, 0px)) max(44px, 6svh) max(16px, env(safe-area-inset-left, 0px)); }
+[data-motion] .hero { height: calc(max(640px, 100svh) + 70svh); }
+[data-motion] .h-pin { position: sticky; top: 0; z-index: 31; height: max(640px, 100svh); pointer-events: none; }
+[data-motion] .h-pin a, [data-motion] .h-pin button { pointer-events: auto; }
+[data-story] .hpg { position: fixed; left: var(--hx); top: var(--hy); width: var(--hw); height: var(--hh); transform-origin: 0 0; }
+.h-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding-bottom: 6svh; }
+.hpg { z-index: 1; will-change: transform; }
+.hero .intro { animation: pgin 1s var(--pop) 0.1s both; }
+@keyframes pgin { from { opacity: 0; transform: translateY(14%) scale(0.7); } }
+.ht { will-change: transform, opacity; }
+.hero .ht-l > span { animation: htL 1.25s var(--ease) 0.32s both; }
+.hero .ht-r > span { animation: htR 1.25s var(--ease) 0.32s both; }
+@keyframes htL { from { opacity: 0; transform: translateX(42%); } }
+@keyframes htR { from { opacity: 0; transform: translateX(-36%); } }
+.hero .h-foot > * { animation: rise 0.9s var(--ease) both; }
+.hero .h-foot > :nth-child(1) { animation-delay: 0.55s; }
+.hero .h-foot > :nth-child(2) { animation-delay: 0.65s; }
+.hero .h-foot > :nth-child(3) { animation-delay: 0.75s; }
+.trust { font: 400 13px/1.4 var(--mono); color: var(--grey); }
+/* The line under the logo: what Rowkery is doing, taking turns, 2.6 s each. */
+.job { opacity: 0; }
+.job:first-child { opacity: 1; }
+[data-motion] .job { animation: job 13s linear calc(var(--i) * 2.6s) infinite backwards; }
+.hero.held .job, .hero.away .job, .hero.away .cue i::after { animation-play-state: paused; }
+@keyframes job { 0% { opacity: 0; transform: translateY(6px); } 3%, 18.5% { opacity: 1; transform: none; } 20%, 100% { opacity: 0; } }
+.now-o { transform: translateX(var(--nx, 0px)); }
+.now { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 14px; border-radius: 999px; background: var(--card); font-size: 14px; white-space: nowrap; animation: fade 0.6s ease 0.9s both; }
+.now > i { width: 7px; height: 7px; border-radius: 2px; background: var(--acc); flex: none; }
+.jobs { display: grid; }
+.job { grid-area: 1 / 1; text-align: center; }
+.cue-o { position: absolute; left: max(28px, env(safe-area-inset-left, 0px)); bottom: max(44px, 6svh); }
+.cue { display: flex; align-items: center; gap: 10px; font: 400 12px var(--mono); color: var(--grey); animation: fade 0.8s ease 1.2s both; }
+.cue i { position: relative; width: 2px; height: 34px; border-radius: 2px; background: var(--line2); overflow: hidden; }
+.cue i::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 40%; background: var(--fg); animation: cue 2.4s var(--ease) infinite; }
+@keyframes cue { from { transform: translateY(-100%); } to { transform: translateY(250%); } }
+
+/* ── The close: Get Rowkery, the command, and the colony on the same screen ── */
+.close { position: relative; min-height: 100svh; display: flex; flex-direction: column; padding-top: 96px; }
+.c-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px; padding: 0 max(16px, env(safe-area-inset-right, 0px)) 36px max(16px, env(safe-area-inset-left, 0px)); }
+/* It arrives as it comes into view (engine.ts); without the engine it is simply there. */
+.close .ht > span, .close .intro, .close .h-foot > * { transition: opacity 0.7s ease, transform 1s var(--ease); }
+.close .intro { transition: opacity 0.4s ease, transform 1s var(--pop); }
+.close .h-foot > :nth-child(2) { transition-delay: 0.1s; }
+.close .h-foot > :nth-child(3) { transition-delay: 0.2s; }
+[data-story] .close:not(.on) .ht-l > span { opacity: 0; transform: translateX(42%); }
+[data-story] .close:not(.on) .ht-r > span { opacity: 0; transform: translateX(-36%); }
+[data-story] .close:not(.on) .intro { opacity: 0; transform: translateY(14%) scale(0.7); }
+[data-story] .close:not(.on) .h-foot > * { opacity: 0; transform: translateY(16px); }
+.unsigned { display: grid; gap: 10px; justify-items: center; width: min(560px, 100%); min-width: 0; font-size: 14px; color: var(--grey); }
+.cmd { display: flex; align-items: center; gap: 10px; max-width: 100%; min-width: 0; padding: 6px 6px 6px 14px; border-radius: 12px; background: var(--card); }
+.cmd code { order: 1; min-width: 0; overflow-x: auto; font: 400 12.5px var(--mono); color: var(--fg); white-space: nowrap; }
+.cmd .copy { position: static; order: 2; flex: none; }
+
+/* The colony: even gaps, standing on the ground line, the orange one in front. Sizes follow the
+   width (cqw) so no script places them; a phone keeps five, smaller. */
+.colony-box { container-type: inline-size; }
+.colony { --sum: 772; --f: 1; position: relative; display: flex; justify-content: space-evenly; align-items: flex-end; padding: 12px 0 2px; cursor: pointer; }
+.colony::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--line); }
+.bird { display: block; flex: none; width: min(calc(var(--h) * 0.94px * var(--f)), calc(var(--h) / var(--sum) * 86cqw)); aspect-ratio: 240 / 256; color: var(--card2); will-change: transform; }
+.bird.me { position: relative; z-index: 1; color: var(--acc); }
+
+/* Type "rookery": a parade crosses the bottom of the screen. */
+.parade { position: fixed; left: 0; right: 0; bottom: env(safe-area-inset-bottom, 0px); height: 40px; z-index: 50; overflow: hidden; pointer-events: none; }
+.marcher { position: absolute; bottom: 0; left: 0; width: 34px; height: 36px; color: var(--fg); transform-origin: 50% 100%; animation: march 7s linear forwards, waddle 0.38s ease-in-out infinite alternate; }
+@keyframes march { from { translate: -60px; } to { translate: calc(100vw + 60px); } }
 @keyframes waddle { from { rotate: -6deg; } to { rotate: 6deg; } }
 
-/* ── Nav ── */
-.nav { position: sticky; top: 0; z-index: 30; background: var(--bg); }
-.nav-in { max-width: 1200px; margin: 0 auto; height: 64px; display: flex; align-items: center; gap: 28px; padding-inline: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right)); }
-.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 17px; font-weight: 700; letter-spacing: -0.015em; }
-.brand .pg { width: 22px; height: 23px; }
-.ver { font: 500 12px/1 var(--mono); color: var(--grey); background: var(--card); padding: 6px 9px; border-radius: 999px; text-decoration: none; }
-.ver:hover { color: var(--fg); }
-.links { display: flex; gap: 22px; font-size: 14px; color: var(--grey); }
-.links a { text-decoration: none; transition: color 0.15s; }
-.links a:hover { color: var(--fg); }
-.nav .end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-
-/* ── Hero: the line on the left, connecting your agent on the right ── */
-.hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 56px; align-items: end; padding-top: 72px; padding-bottom: 56px; }
-.badge { display: inline-flex; align-items: center; gap: 10px; height: 32px; padding: 0 6px 0 12px; border-radius: 999px; background: var(--card); font-size: 13px; color: var(--grey); text-decoration: none; margin-bottom: 30px; animation: rise 0.8s var(--ease) both; }
-.badge b { font-weight: 500; color: var(--fg); }
-.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
-.badge .go { background: var(--card2); color: var(--fg); padding: 4px 9px; border-radius: 999px; }
-.hero .h1 .ln { animation: rise 0.9s var(--ease) both; }
-.hero .h1 .ln:nth-child(2) { animation-delay: 0.07s; }
-.hero .h1 .ln:nth-child(3) { animation-delay: 0.14s; }
-.hero .lead { animation: rise 0.9s var(--ease) 0.2s both; }
-.hero .ctas { animation: rise 0.9s var(--ease) 0.26s both; }
-.trust { margin-top: 22px; font: 400 13px/1.4 var(--mono); color: var(--grey); animation: rise 0.9s var(--ease) 0.32s both; }
-
-/* The connect card, with the penguin peeking over its edge and saying something now and then. */
-.connect { position: relative; margin-top: 70px; animation: rise 1s var(--ease) 0.35s both; }
-.connect .peek { position: absolute; right: 34px; top: -56px; width: 70px; height: 75px; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; border-radius: 12px; animation: peek 1.1s var(--ease) 1s both; }
-/* Each line has its own delay in one 26 s cycle (ConnectCard), and the penguin hops as each one
-   pops in: 0.88 of a 5.2 s hop is 4.58 s, so starting it 2.48 s in lands it at 2.1 s. */
-.connect .peek > span, .connect .peek .pg { display: block; width: 100%; height: 100%; }
-.connect .hops { animation: hop 5.2s var(--ease) -2.48s infinite; }
-@keyframes peek { from { transform: translateY(62px); } }
-.bubble {
-  position: absolute; right: 112px; top: -96px; z-index: 2; padding: 8px 14px 10px; border-radius: 14px 14px 4px 14px;
-  background: var(--ink); color: var(--inkfg); font: 600 20px/1.1 var(--hand); white-space: nowrap; pointer-events: none;
-  opacity: 0; transform-origin: 100% 100%; animation: say 26s var(--ease) infinite backwards;
+/* ── Footer ── */
+.foot {
+  width: 100%; max-width: 1200px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 40px; color: var(--grey); font-size: 14px;
+  padding: 28px max(24px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 28px) max(24px, env(safe-area-inset-left, 0px));
 }
-@keyframes say {
-  0% { opacity: 0; transform: scale(0.6) translateY(8px); }
-  1.7%, 19% { opacity: 1; transform: none; }
-  20%, 100% { opacity: 0; transform: none; }
-}
-.connect .card { position: relative; z-index: 1; padding: 20px; }
-.connect h3 { font-size: 16px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.connect h3 span { font: 400 12.5px var(--mono); color: var(--grey); }
-.tabs { display: flex; gap: 4px; margin: 14px 0 12px; padding: 3px; background: var(--card2); border-radius: 999px; width: max-content; max-width: 100%; overflow-x: auto; }
-.tab { height: 30px; padding: 0 13px; border-radius: 999px; border: 0; background: transparent; color: var(--grey); font: 500 13px var(--sans); cursor: pointer; white-space: nowrap; }
-.tab[aria-selected="true"] { background: var(--bg); color: var(--fg); }
-.connect .code { font-size: 12px; min-height: 104px; }
-.connect-note { margin-top: 12px; font-size: 13.5px; color: var(--grey); }
-
-/* The ticker: what's in the app, scrolling, with a penguin walking along it. */
-.ticker { overflow: hidden; }
-.ticker-in { display: flex; width: max-content; animation: tick 46s linear infinite; }
-.ticker:hover .ticker-in { animation-play-state: paused; }
-.ticker span { display: inline-flex; align-items: center; gap: 14px; padding: 15px 0 15px 14px; font: 400 13.5px var(--mono); color: var(--grey); white-space: nowrap; }
-.ticker span::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--line2); }
-
-/* The app itself, tilting upright as it scrolls in, then the agent's limits as numbers. */
-.shot { padding: 0 var(--gutter); }
-.shot-frame { margin-top: 48px; border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); transform-origin: 50% 0; background: var(--card); }
-.shot-frame img { display: block; width: 100%; height: auto; }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; margin-top: 64px; }
-.stat b { display: block; font-size: clamp(36px, 4vw, 52px); font-weight: 700; letter-spacing: -0.035em; line-height: 1; font-variant-numeric: tabular-nums; }
-.stat b small { font-size: 0.5em; letter-spacing: -0.01em; color: var(--grey); margin-left: 2px; }
-.stat span { display: block; margin-top: 10px; font-size: 14px; color: var(--grey); max-width: 22ch; }
-
-/* A penguin belly-sliding across the ice under the numbers. */
-.ice { position: relative; height: 72px; margin-top: 40px; border-bottom: 2px solid var(--line); overflow: hidden; container-type: inline-size; }
-.slider { position: absolute; left: 0; bottom: 0; display: flex; align-items: center; gap: 6px; animation: zoom 5.2s ease-in-out infinite; }
-.slider .lines { display: grid; gap: 6px; }
-.slider .lines i { display: block; height: 3px; border-radius: 2px; background: var(--grey2); }
-.slider .lines i:nth-child(1) { width: 40px; margin-left: 14px; }
-.slider .lines i:nth-child(2) { width: 54px; }
-.slider .lines i:nth-child(3) { width: 30px; margin-left: 24px; }
-.slider .pg { width: 66px; height: 68px; transform: rotate(90deg) translate(-6px, 0); }
-@keyframes zoom {
-  0% { transform: translateX(-180px); animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1); }
-  34% { transform: translateX(40cqw); animation-timing-function: linear; }
-  58% { transform: translateX(46cqw); animation-timing-function: cubic-bezier(0.6, 0, 0.9, 0.4); }
-  80%, 100% { transform: translateX(calc(100cqw + 40px)); }
-}
+.foot nav { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.foot a { text-decoration: none; }
+.foot a:hover { color: var(--fg); }
+.foot .brand { color: var(--fg); }
+.legal { width: 100%; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font: 400 12px var(--mono); color: var(--grey2); }
 
 /* ── The 404: the penguin Tilted, and the way home ── */
 .lost { min-height: 100svh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 16px; text-align: center; }
 .lost .pg { width: 140px; height: 144px; }
+.lost h1 { font: 800 clamp(32px, 4.1vw, 52px)/1.06 var(--display); letter-spacing: -0.035em; }
 
-@media (max-width: 1000px) {
-  .hero { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .connect { margin-top: 110px; }
-  .stats { grid-template-columns: repeat(2, 1fr); }
-  .art-head { grid-template-columns: minmax(0, 1fr); }
-  .art-head .art { margin-top: 28px; }
+@media (max-width: 860px) {
+  .nav { padding-right: 8px; gap: 6px; }
+  .nav .gh { display: none; }
+  .chapter { margin-left: auto; }
+  .cue-o { display: none; }
+  /* With the story playing, Download moves to the dock. */
+  [data-motion] .nav { padding-right: 16px; }
+  [data-motion] .nav .dl { display: none; }
+  [data-motion] .dock { display: flex; }
 }
-@media (max-width: 900px) { .links, .nav .gh { display: none; } }
-@media (max-width: 720px) {
-  :root { --gutter: max(16px, env(safe-area-inset-left)); }
-  /* Long commands scroll sideways here, so Copy gets a row of its own above them. */
-  .code { padding: 42px 16px 14px; }
-  .band { padding-block: 80px; }
-  .hero { padding-top: 40px; }
-  .connect .peek { width: 52px; height: 56px; top: -48px; }
-  .bubble { right: 76px; top: -84px; font-size: 18px; }
-  .stats { gap: 28px 16px; }
+@media (max-width: 599px) {
+  :root { --hs: min(21vw, 92px); --pgw: calc(var(--hs) * 1.5); --hgap: 0px; }
+  .h-title { flex-direction: column; }
+  /* Stacked, the inner edges are the first word's foot and the second word's head. */
+  .h-title .ht-l { clip-path: inset(-100vh -100vw -0.06em -100vw); }
+  .h-title .ht-r { clip-path: inset(-0.12em -100vw -100vh -100vw); }
+  .hero .ht-l > span { animation-name: htT; }
+  .hero .ht-r > span { animation-name: htB; }
+  [data-story] .close:not(.on) .ht-l > span { transform: translateY(42%); }
+  [data-story] .close:not(.on) .ht-r > span { transform: translateY(-42%); }
+  .h-sub { font-size: 18px; }
+  .h-mid { gap: 18px; }
+  .colony { --sum: 528; --f: 0.72; }
+  .bird.wide-only { display: none; }
+  .foot { gap: 14px 24px; }
 }
-@media (max-width: 520px) { .ver { display: none; } }
+@keyframes htT { from { opacity: 0; transform: translateY(42%); } }
+@keyframes htB { from { opacity: 0; transform: translateY(-42%); } }
 @media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  .walker, .slider { display: none; }
-  .bubble.on { opacity: 1; }
-}
-
-/* ── Footer ── */
-.foot { display: grid; grid-template-columns: 1.4fr repeat(3, 1fr); gap: 32px; padding-block: 56px; }
-.foot h4 { margin: 0 0 12px; font: 500 13px var(--mono); color: var(--grey); }
-.foot ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14.5px; }
-.foot a { text-decoration: none; opacity: 0.86; }
-.foot a:hover { opacity: 1; }
-.foot .about { display: grid; gap: 14px; align-content: start; max-width: 34ch; color: var(--grey); font-size: 14.5px; }
-.foot .about .brand { color: var(--fg); opacity: 1; }
-.legal { position: relative; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 18px var(--gutter) 28px; font: 400 12.5px var(--mono); color: var(--grey); }
-.legal .walkway { position: absolute; left: var(--gutter); right: var(--gutter); top: 0; }
-@media (max-width: 720px) {
-  .foot { grid-template-columns: 1fr 1fr; }
-  .foot .about { grid-column: 1 / -1; }
+  .parade { display: none; }
 }

@@ -1,14 +1,17 @@
 // Profiles scrolling the built site (out/) in Chromium: wheels from the top to the foot at a
 // steady pace and reports dropped frames, long tasks, and the main-thread layout, paint and
 // style work per second, both while scrolling and while the page sits still (what the looping
-// animations cost on their own). Fails if the page lays out or paints on its own while it sits
-// still: every loop must move only transform and opacity. Chromium only: Safari's compositor
+// animations cost on their own): at the top (the hero's job cycle), in the middle of a pinned
+// scene, and on the close over the colony. Fails if the page lays out or paints on its own while
+// it sits still (every loop must move only transform and opacity), or if the story engine's frame
+// loop keeps asking for frames once everything has settled. Chromium only: Safari's compositor
 // is not measured, and headless frame pacing is a rough guide, not what a Mac shows.
 //
 //   npm run build && node scripts/scroll-profile.mjs
 //
 // Env: THROTTLE=4 slows the CPU (default 4, to stand in for a busy laptop); W, H for the window.
 import { playwright, serveOut } from "./serve-out.mjs";
+import { MOMENTS, goTo } from "./story.mjs";
 
 const { chromium } = playwright();
 const THROTTLE = Number(process.env.THROTTLE ?? 4);
@@ -17,6 +20,12 @@ const server = await serveOut();
 const browser = await chromium.launch({ args: ["--enable-gpu-rasterization", "--ignore-gpu-blocklist"] });
 const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 2 });
 const cdp = await page.context().newCDPSession(page);
+// Counts the frames the page asks for, so a loop that never stops shows.
+await page.addInitScript(() => {
+  const raf = window.requestAnimationFrame.bind(window);
+  window.__rafs = 0;
+  window.requestAnimationFrame = (cb) => (window.__rafs++, raf(cb));
+});
 await page.goto(server.url, { waitUntil: "networkidle" });
 await page.waitForTimeout(1500);
 await cdp.send("Emulation.setCPUThrottlingRate", { rate: THROTTLE });
@@ -83,13 +92,23 @@ await page.evaluate(() => scrollTo(0, 0));
 await page.waitForTimeout(500);
 let scroll;
 const pacing = await frames(async () => { scroll = await trace(scrollDown); });
-// Sitting on the checkpoint card, where the loops play.
-await page.evaluate(() => document.querySelector(".stage").scrollIntoView({ block: "center" }));
-await page.waitForTimeout(500);
-const onStage = await trace(() => page.waitForTimeout(4000));
-console.log(JSON.stringify({ throttle: THROTTLE, idleAtTop: idle, idleOnCheckpoint: onStage, scrolling: scroll, scrollFramePacing: pacing }, null, 2));
+// Sitting still in the middle of a scene, and on the close over the colony: the engine's loop
+// must have stopped asking for frames (counted over 2 s once settled).
+const sits = {};
+const loops = [];
+for (const name of ["agent-checks", "get"]) {
+  await goTo(page, MOMENTS.find((m) => m.name === name), 2500);
+  const before = await page.evaluate(() => window.__rafs);
+  await page.waitForTimeout(2000);
+  const asked = (await page.evaluate(() => window.__rafs)) - before;
+  if (asked > 0) loops.push(`${name}: the page asked for ${asked} frames while sitting still`);
+  sits[name] = await trace(() => page.waitForTimeout(4000));
+}
+console.log(JSON.stringify({ throttle: THROTTLE, idleAtTop: idle, idleInScene: sits["agent-checks"], idleOnClose: sits.get, scrolling: scroll, scrollFramePacing: pacing }, null, 2));
 await browser.close();
 server.close();
-const still = Object.entries({ "at the top": idle, "on the checkpoint": onStage }).filter(([, r]) => r["layouts/s"] > 0 || r["paints/s"] > 2);
+const still = Object.entries({ "at the top": idle, "in a scene": sits["agent-checks"], "on the close": sits.get }).filter(([, r]) => r["layouts/s"] > 0 || r["paints/s"] > 2);
 for (const [where] of still) console.error(`The page lays out or paints by itself while it sits still ${where}: a loop is animating something other than transform or opacity.`);
-process.exit(still.length ? 1 : 0);
+for (const l of loops) console.error(`The frame loop doesn't stop: ${l}.`);
+if (!still.length && !loops.length) console.log("Sitting still: no layout, no paint, and no frames asked for.");
+process.exit(still.length || loops.length ? 1 : 0);

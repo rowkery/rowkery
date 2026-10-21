@@ -12,13 +12,6 @@ const PROPS = {
       <circle cx="206" cy="16" r="10" fill="currentColor" />
     </>
   ),
-  hardhat: (
-    <>
-      <path d="M170 90 C172 38 254 26 266 86 Z" fill="var(--acc)" />
-      <rect x="156" y="82" width="124" height="13" rx="6.5" fill="var(--acc)" />
-      <rect x="210" y="40" width="11" height="44" rx="5" fill="var(--bg)" opacity=".35" />
-    </>
-  ),
   shades: (
     <>
       <path d="M194 138 L222 134" stroke="var(--acc)" strokeWidth="7" strokeLinecap="round" />
@@ -44,45 +37,55 @@ const PROPS = {
       <path d="M257 212 h36 l-18 21 l18 21 h-36 l18 -21 z" fill="var(--bg)" />
     </>
   ),
-  arrow: <path d="M214 0 v44 M192 24 l22 22 l22 -22" stroke="var(--acc)" strokeWidth="13" fill="none" strokeLinecap="round" strokeLinejoin="round" />,
-  question: (
-    <text x="262" y="62" fontSize="84" fontWeight="600" fill="var(--acc)" fontFamily="var(--font-sans), system-ui, sans-serif">
-      ?
-    </text>
+  key: (
+    <>
+      <circle cx="304" cy="214" r="22" fill="none" stroke="var(--acc)" strokeWidth="11" />
+      <path d="M304 236 V300 M304 268 h20 M304 290 h15" stroke="var(--acc)" strokeWidth="11" strokeLinecap="round" fill="none" />
+    </>
   ),
 } satisfies Record<string, ReactNode>;
 
 export type PgProp = keyof typeof PROPS;
 
+const VIEW_BOX = "40 0 330 340";
+
 /**
  * The penguin: the mark plus an eyelid over its eye hole, which blinks on hover (only on hover:
- * a blink on a timer repaints the page while it sits still). `prop` adds something to hold,
- * `tilted` leans it 10° on its feet (the app's Tilted posture), `floe` stands it on an ice
- * floe. `tight` uses the mark's own view box, for a penguin with nothing beside it (the brand,
- * the 404).
+ * a blink on a timer repaints the page while it sits still). `prop` adds something to hold;
+ * with `props`, every one of them is drawn and `prop` names the one showing (`data-prop`, which
+ * the story scenes swap as they go). `tilted` leans it 10° on its feet (the app's Tilted
+ * posture). `tight` uses the mark's own view box, for a penguin with nothing beside it (the
+ * brand, the colony, the 404).
+ *
+ * The mark is always an inline path in an SVG with overflow visible, never a <symbol> behind
+ * <use>: a symbol clips to the view box that references it, which cuts penguins off.
  */
 export function Pg({
   prop,
+  props,
   tilted,
-  floe,
   tight,
   className,
   style,
 }: {
   prop?: PgProp;
+  props?: readonly PgProp[];
   tilted?: boolean;
-  floe?: boolean;
   tight?: boolean;
   className?: string;
   style?: CSSProperties;
 }) {
+  const drawn = props ?? (prop ? [prop] : []);
   return (
-    <svg className={`pg${className ? ` ${className}` : ""}`} viewBox={tight ? MARK_VIEW_BOX : "40 0 330 340"} style={style} aria-hidden="true">
-      {floe && <path d="M44 322 L66 306 H334 L362 322 L346 336 H62 Z" fill="var(--card2)" />}
+    <svg className={`pg${className ? ` ${className}` : ""}`} viewBox={tight ? MARK_VIEW_BOX : VIEW_BOX} style={style} data-prop={props ? (prop ?? "") : undefined} aria-hidden="true">
       <g transform={tilted ? "rotate(-10 198 320)" : undefined}>
         <MarkPaths />
         <ellipse className="lid" cx="240.7" cy="138.9" rx="12.4" ry="13.7" />
-        {prop && <g className="prop">{PROPS[prop]}</g>}
+        {drawn.map((p) => (
+          <g className="prop" data-p={p} key={p}>
+            {PROPS[p]}
+          </g>
+        ))}
       </g>
     </svg>
   );
