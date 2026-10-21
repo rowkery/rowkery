@@ -68,7 +68,7 @@ import {
 import { isMacPlatform } from "./platform";
 import { loadHistory, recordHistory, type HistoryEntry } from "./queryHistory";
 import { keywordHabits, recordKeywords } from "./keywordHabits";
-import { markReveal, ResultsGrid, type KeyColumns, type QuickLookView } from "./ResultsGrid";
+import { escLeftSelection, markReveal, ResultsGrid, type KeyColumns, type QuickLookView } from "./ResultsGrid";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
 import { sqlStatementRanges, type CharRange } from "./sqlStatements";
@@ -1832,7 +1832,8 @@ export function Workspace({
         e.key === "Escape" &&
         runStartedAt !== null &&
         !paletteOpen &&
-        !e.defaultPrevented
+        !e.defaultPrevented &&
+        !escLeftSelection.has(e)
       ) {
         e.preventDefault();
         void onCancelRef.current();
@@ -1858,6 +1859,7 @@ export function Workspace({
         !paletteOpen &&
         !e.defaultPrevented &&
         !isTypingTarget(e.target) &&
+        !escLeftSelection.has(e) &&
         isTableTabRef.current &&
         rowEditsRef.current.count > 0
       ) {
