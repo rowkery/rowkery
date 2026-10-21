@@ -35,6 +35,63 @@
   color: var(--text);
 }
 
+/* (?) then Guess links; the card opens under them, right-aligned. */
+.sm-guess-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.sm-help {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--hover);
+  color: var(--mute);
+  font: 600 10.5px/16px var(--sans);
+  text-align: center;
+  cursor: default;
+}
+
+.sm-help:hover,
+.sm-help[aria-expanded="true"] {
+  color: var(--text);
+}
+
+.sm-help-card {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 3;
+  width: 280px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--pop);
+  color: var(--text2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: normal;
+  transform-origin: top right;
+  animation: sm-grow 0.13s var(--ease-out);
+}
+
+.sm-help-card code {
+  font: 11.5px var(--mono);
+  color: var(--text);
+}
+
+@keyframes sm-grow {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
 /* Guess links: the report sheet's switch. */
 .sm-guess {
   display: inline-flex;
@@ -300,6 +357,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .sm-root,
+  .sm-help-card,
   .sm-switch,
   .sm-switch::after {
     animation: none;

@@ -105,6 +105,18 @@ export function SchemaMap({ schemas, centre, depth, onDepth, guess, onGuess, onC
   const canvasRef = useRef<HTMLDivElement>(null);
   /** The box a first click re-centred on, and when: a quick second click opens it. */
   const clicked = useRef<{ key: string; at: number } | null>(null);
+  const [help, setHelp] = useState(false);
+  const helpRef = useRef<HTMLSpanElement>(null);
+
+  // The (?) card closes on a click anywhere else.
+  useEffect(() => {
+    if (!help) return;
+    const away = (e: PointerEvent) => {
+      if (!helpRef.current?.contains(e.target as Node)) setHelp(false);
+    };
+    window.addEventListener("pointerdown", away);
+    return () => window.removeEventListener("pointerdown", away);
+  }, [help]);
 
   useEffect(() => {
     if (claimFocus()) rootRef.current?.focus({ preventScroll: true });
@@ -209,20 +221,44 @@ export function SchemaMap({ schemas, centre, depth, onDepth, guess, onGuess, onC
           {" · "}
           {plural(layout.pointedFrom, "points to it", "point to it")}
         </span>
-        <label className="sm-guess" title="Link customer_id to customers with no foreign key">
-          Guess links
+        <span ref={helpRef} className="sm-guess-wrap">
           <button
             type="button"
-            role="switch"
-            aria-checked={guess}
-            data-testid="sm-guess"
-            className="sm-switch"
-            onClick={() => {
-              onGuess(!guess);
-              rootRef.current?.focus({ preventScroll: true });
+            data-testid="sm-guess-help"
+            className="sm-help"
+            aria-label="What Guess links does"
+            aria-expanded={help}
+            onClick={() => setHelp((h) => !h)}
+            onKeyDown={(e) => {
+              if (e.key !== "Escape" || !help) return;
+              e.nativeEvent.stopPropagation();
+              setHelp(false);
             }}
-          />
-        </label>
+          >
+            ?
+          </button>
+          {help && (
+            <span data-testid="sm-guess-card" className="sm-help-card" role="note">
+              Some apps keep their links in code, like Laravel&rsquo;s <code>belongsTo</code>, with no foreign key in the
+              database. With this on, a column like <code>customer_id</code> gets a dashed line to <code>customers</code>.
+              It&rsquo;s a guess from the name, so check it before you rely on it.
+            </span>
+          )}
+          <label className="sm-guess">
+            Guess links
+            <button
+              type="button"
+              role="switch"
+              aria-checked={guess}
+              data-testid="sm-guess"
+              className="sm-switch"
+              onClick={() => {
+                onGuess(!guess);
+                rootRef.current?.focus({ preventScroll: true });
+              }}
+            />
+          </label>
+        </span>
         <div data-testid="sm-depths" className="sm-depths" role="radiogroup" aria-label="How far to reach">
           {DEPTHS.map((d) => {
             const off = d.depth === "all" && tooMany;

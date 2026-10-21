@@ -291,6 +291,15 @@ await page.hover(`${guessEdge} [data-hit]`);
 const gtip = (await page.textContent(`${map} [data-testid="sm-tip"]`)).trim();
 check(gtip === "reviews.order_id → orders.id · guessed from the name, no foreign key", `hover: ${gtip}`);
 await shot("5-guessed");
+await page.click(`${map} [data-testid="sm-guess-help"]`);
+check((await page.textContent(`${map} [data-testid="sm-guess-card"]`)).includes("no foreign key"), "(?) explains Guess links");
+await page.waitForTimeout(250); // let the card finish growing
+await page.screenshot({ path: `${OUT}/6-guess-help.png`, clip: await page.locator(`${ws} [data-testid="results-card"]`).boundingBox() });
+await page.keyboard.press("Escape");
+check(!(await page.$(`${map} [data-testid="sm-guess-card"]`)) && !!(await page.$(map)), "Esc closes the card and stays on the map");
+await page.click(`${map} [data-testid="sm-guess-help"]`);
+await page.mouse.click(5, 5);
+check(!(await page.$(`${map} [data-testid="sm-guess-card"]`)), "a click elsewhere closes the card");
 await page.click(guessSwitch);
 await page.waitForSelector(box("reviews"), { state: "detached" });
 check((await page.getAttribute(guessSwitch, "aria-checked")) === "false", "off again: the guess goes");

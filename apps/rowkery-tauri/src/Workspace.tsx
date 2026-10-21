@@ -799,10 +799,8 @@ export function Workspace({
     [activeTabId],
   );
 
-  // The map's Guess links switch, per connection (mapGuess.ts).
-  // Read in render so a connection switch never shows the last one's value.
-  const [mapGuessFlip, setMapGuessFlip] = useState(0);
-  const mapGuess = useMemo(() => mapGuessOn(activeId), [activeId, mapGuessFlip]);
+  // The map's Guess links switch, one for every connection (mapGuess.ts).
+  const [mapGuess, setMapGuessState] = useState(mapGuessOn);
 
   /** Re-centring the map is a step in history too; its own table clears the centre. */
   const centreMap = (key: string) => {
@@ -4334,9 +4332,8 @@ export function Workspace({
                   onDepth={(mapDepth) => patchTab(activeTab.id, { mapDepth })}
                   guess={mapGuess}
                   onGuess={(on) => {
-                    if (!activeConnection) return;
-                    setMapGuess(activeConnection.id, on);
-                    setMapGuessFlip((n) => n + 1);
+                    setMapGuess(on);
+                    setMapGuessState(on);
                   }}
                   onCentre={centreMap}
                   onOpen={(key, newTab) => {
