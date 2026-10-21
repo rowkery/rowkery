@@ -133,8 +133,14 @@
   cursor: default;
 }
 
-.sm-box[data-far] > * {
-  opacity: 0.55;
+/* Two steps out: an outline, quieter names; text keeps 4.5:1. */
+.sm-box[data-far] {
+  background: transparent;
+}
+
+.sm-box[data-far] .sm-box-name,
+.sm-box[data-far] .sm-col {
+  color: var(--mute);
 }
 
 .sm-box[data-lit] {
@@ -142,6 +148,11 @@
 }
 
 .sm-box[data-sel] {
+  border-color: var(--faint);
+}
+
+/* The ring is the focus ring: orange only while the map has the keys. */
+.sm-root:focus .sm-box[data-sel] {
   border-color: var(--acc);
   box-shadow: 0 0 0 1px var(--acc);
 }

@@ -195,6 +195,18 @@
         {
           "title": "Show map",
           "keys": "⌥⌘3"
+        },
+        {
+          "title": "Map: move between tables",
+          "keys": "↑↓←→"
+        },
+        {
+          "title": "Map: centre on the table",
+          "keys": "Space"
+        },
+        {
+          "title": "Map: open the table (⌘↵ in its own tab)",
+          "keys": "↵ · ⌘↵"
         }
       ]
     },

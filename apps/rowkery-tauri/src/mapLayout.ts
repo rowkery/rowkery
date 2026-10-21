@@ -8,7 +8,7 @@ import type { ForeignKeyNode } from "./types";
  * (foreign keys, read both ways), so it needs no query.
  */
 
-/** How far from the centre the map reaches: 1 or 2 steps, or every connected table. */
+/** How far each side reaches: 1 or 2 steps, or as far as the keys go. */
 export type MapDepth = 1 | 2 | "all";
 
 /** "All" stays off above this many tables: a map that big helps nobody. */
@@ -168,10 +168,10 @@ export function layoutSchemaMap(
   };
   for (const key of order) {
     for (const l of out.get(key) ?? []) {
-      // Two tables in one column (both one step out, say) would cross every
-      // box between them: the map leaves that line out; Structure lists it.
+      // Only lines between neighbouring columns (and loops): one within a
+      // column, or across the centre, would run behind other boxes. Structure lists them.
       const to = placed.get(l.to.key);
-      if (!to || (l.to.key !== key && to.col === placed.get(key)!.col)) continue;
+      if (!to || (l.to.key !== key && Math.abs(to.col - placed.get(key)!.col) !== 1)) continue;
       const refColumns = refColumnsOf(l.fk, l.to);
       const pk = l.from.table.primary_key ?? [];
       const whole = pk.length > 0 && pk.length === l.fk.columns.length && pk.every((c) => l.fk.columns.includes(c));

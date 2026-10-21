@@ -783,8 +783,11 @@ export function Workspace({
   const navRef = useRef(navHistory);
   navRef.current = navHistory;
 
+  /** Set when the user asks for the map (switch, ⌥⌘3, ⌘K): it takes the keys then, not when a tab merely shows it. */
+  const mapWantsFocus = useRef(false);
   const setActiveView = useCallback(
     (view: ResultsView) => {
+      if (view === "map") mapWantsFocus.current = true;
       const before = entryOf(tabsRef.current.find((t) => t.id === activeTabId));
       setTabs((prev) =>
         prev.map((t) => (t.id === activeTabId ? { ...t, view } : t)),
@@ -1877,6 +1880,20 @@ export function Workspace({
           e.preventDefault();
           confirmHeldRef.current();
         }
+      }
+      // Esc on the map, once nothing above wanted it: back to Data, keys to the grid.
+      if (
+        e.key === "Escape" &&
+        !paletteOpen &&
+        !e.defaultPrevented &&
+        (e.target as Element | null)?.closest?.('[data-testid="schema-map"]')
+      ) {
+        e.preventDefault();
+        setActiveViewRef.current("data");
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => mainRef.current?.querySelector<HTMLElement>('[data-testid="results-grid-wrap"]')?.focus()),
+        );
+        return;
       }
       // Esc, last (2026-10-13): with no cell open, no query running
       // and nothing else to dismiss, it discards the tab's pending edits; the
@@ -4314,7 +4331,11 @@ export function Workspace({
                     const item = findTable(schemaTree, key);
                     if (item) openTable(item, { keep: newTab });
                   }}
-                  onExit={() => setActiveView("data")}
+                  claimFocus={() => {
+                    const want = mapWantsFocus.current;
+                    mapWantsFocus.current = false;
+                    return want;
+                  }}
                 />
               ) : held?.hold.action === "refuse" ? (
                 <SafetyRefusal

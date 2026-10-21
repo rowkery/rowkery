@@ -25,8 +25,8 @@ interface SchemaMapProps {
   onCentre: (key: string) => void;
   /** ↵ / double-click opens the table; ⌘↵ in a tab of its own. */
   onOpen: (key: string, newTab: boolean) => void;
-  /** Esc: back to Data. */
-  onExit: () => void;
+  /** True when the user just asked for the map, so it takes the keys (once, on mount). */
+  claimFocus: () => boolean;
 }
 
 const DEPTHS: { depth: MapDepth; label: string }[] = [
@@ -35,8 +35,11 @@ const DEPTHS: { depth: MapDepth; label: string }[] = [
   { depth: "all", label: "All" },
 ];
 
-/** A loop's or a same-column link's reach past the box's right edge. */
+/** A self-reference's loop past the box's right edge. */
 const BULGE = 44;
+
+/** A second click this soon after the first opens the table the first one centred. */
+const DOUBLE_MS = 500;
 
 interface Drawn {
   edge: MapEdge;
@@ -52,10 +55,10 @@ function draw(edge: MapEdge, boxes: Map<string, MapBox>): Drawn | null {
   if (!c || !p) return null;
   const cy = rowY(c, edge.fk.columns[0]);
   const py = rowY(p, edge.refColumns[0]);
-  if (c.x === p.x) {
-    // Its own box, or one in the same column: a loop out of the right side.
+  if (c === p) {
+    // A self-reference: a loop out of the right side and back.
     const x = c.x + BOX_WIDTH;
-    const reach = x + BULGE + (c === p ? 0 : Math.min(60, Math.abs(py - cy) / 4));
+    const reach = x + BULGE;
     return {
       edge,
       d: `M${x},${cy} C${reach},${cy} ${reach},${py} ${x},${py}`,
@@ -80,7 +83,7 @@ function side(table: string, columns: string[]): string {
   return columns.length === 1 ? `${table}.${columns[0]}` : `${table}.(${columns.join(", ")})`;
 }
 
-export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, onExit }: SchemaMapProps) {
+export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, claimFocus }: SchemaMapProps) {
   const tooMany = useMemo(() => allTables(schemas).length > MAP_ALL_LIMIT, [schemas]);
   const shownDepth: MapDepth = depth === "all" && tooMany ? 2 : depth;
   const layout = useMemo(() => layoutSchemaMap(schemas, centre, shownDepth), [schemas, centre, shownDepth]);
@@ -90,16 +93,19 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, o
     [layout, boxes],
   );
 
-  const [sel, setSel] = useState(centre);
+  const [picked, setSel] = useState(centre);
+  // A box a depth change or a schema refresh took away hands the ring back to the centre.
+  const sel = boxes.has(picked) ? picked : centre;
   const [hover, setHover] = useState<{ edge: MapEdge; x: number; y: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
-  /** The box a first click re-centred on: the second click of a double-click opens it. */
-  const clicked = useRef<string | null>(null);
+  /** The box a first click re-centred on, and when: a quick second click opens it. */
+  const clicked = useRef<{ key: string; at: number } | null>(null);
 
   useEffect(() => {
-    rootRef.current?.focus({ preventScroll: true });
+    if (claimFocus()) rootRef.current?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     setSel(centre);
@@ -112,8 +118,10 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, o
     const scroller = scrollRef.current;
     const canvas = canvasRef.current;
     if (!box || !scroller || !canvas) return;
-    const left = canvas.offsetLeft + box.x;
-    const top = canvas.offsetTop + box.y;
+    const c = canvas.getBoundingClientRect();
+    const sc = scroller.getBoundingClientRect();
+    const left = c.left - sc.left + scroller.scrollLeft + box.x;
+    const top = c.top - sc.top + scroller.scrollTop + box.y;
     if (sel === centre) {
       scroller.scrollLeft = left + BOX_WIDTH / 2 - scroller.clientWidth / 2;
       scroller.scrollTop = top + box.height / 2 - scroller.clientHeight / 2;
@@ -128,8 +136,10 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, o
   if (!layout) return null;
   const centreBox = boxes.get(centre)!;
 
+  // Esc is the window's (Workspace): it closes what is open first, then leaves for Data.
   const onKey = (e: KeyboardEvent) => {
-    if (e.altKey || e.shiftKey) return;
+    // Keys on a depth button are that button's.
+    if (e.target !== e.currentTarget || e.altKey || e.shiftKey) return;
     const mod = isMacPlatform() ? e.metaKey : e.ctrlKey;
     if (e.key === "Enter") {
       e.preventDefault();
@@ -143,15 +153,18 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, o
     } else if (e.key === " ") {
       e.preventDefault();
       if (sel !== centre) onCentre(sel);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onExit();
     }
   };
 
-  const onBoxClick = (e: MouseEvent, key: string) => {
-    if (e.detail > 1) return;
-    clicked.current = key;
+  // The first click re-centres, so the second may land on whatever moved under
+  // the pointer: a quick second click anywhere on the map opens the first box.
+  const onClick = (e: MouseEvent) => {
+    const first = clicked.current;
+    clicked.current = null;
+    const key = (e.target as Element).closest<HTMLElement>('[data-testid="sm-box"]')?.dataset.table;
+    if (e.detail > 1 && first && e.timeStamp - first.at < DOUBLE_MS) return onOpen(first.key, false);
+    if (!key) return;
+    clicked.current = { key, at: e.timeStamp };
     setSel(key);
     if (key !== centre) onCentre(key);
   };
@@ -216,13 +229,8 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, o
           })}
         </div>
       </header>
-      <div className="sm-scroll" ref={scrollRef}>
-        <div
-          ref={canvasRef}
-          className="sm-canvas"
-          style={{ width: layout.width + BULGE, height: layout.height }}
-          onDoubleClick={() => clicked.current && onOpen(clicked.current, false)}
-        >
+      <div className="sm-scroll" ref={scrollRef} onClick={onClick}>
+        <div ref={canvasRef} className="sm-canvas" style={{ width: layout.width + BULGE, height: layout.height }}>
           <svg data-testid="sm-lines" className="sm-lines" width={layout.width + BULGE} height={layout.height} aria-hidden>
             {drawn.map(({ edge, d, child, parent }) => {
               const far = (boxes.get(edge.from)?.dist ?? 0) > 1 || (boxes.get(edge.to)?.dist ?? 0) > 1;
@@ -275,7 +283,6 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, o
                 className="sm-box"
                 style={{ left: b.x, top: b.y, width: BOX_WIDTH, height: b.height }}
                 title={`${b.table.schema}.${b.table.name}`}
-                onClick={(e) => onBoxClick(e, b.key)}
               >
                 <div className="sm-box-head">
                   <span className="sm-box-name">

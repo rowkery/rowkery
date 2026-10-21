@@ -185,7 +185,7 @@ A tab stops at 1,000,000 rows and tells you **Stopped at 1,000,000 rows**. To wo
 
 ## Structure
 
-Switch a table tab between **Data**, **Structure** and **Map** with the buttons at the right of the tab row, <kbd>⌥⌘1</kbd>, <kbd>⌥⌘2</kbd> and <kbd>⌥⌘3</kbd>. With the TablePlus keymap the keys are <kbd>⌃⌘[</kbd> and <kbd>⌃⌘]</kbd> (see [Shortcuts and keymaps](/shortcuts-and-keymaps/)).
+Switch a table tab between **Data**, **Structure** and **Map** with the buttons at the right of the tab row, <kbd>⌥⌘1</kbd>, <kbd>⌥⌘2</kbd> and <kbd>⌥⌘3</kbd>. With the TablePlus keymap Data and Structure are <kbd>⌃⌘[</kbd> and <kbd>⌃⌘]</kbd>, and Map stays <kbd>⌥⌘3</kbd> (see [Shortcuts and keymaps](/shortcuts-and-keymaps/)).
 
 <Shot src="/img/table-tabs-and-filters-structure.webp" width={1280} height={800} alt="The Structure view of public.orders: its comment, about 84,000 rows, 13.5 MB of data and 4.9 MB of indexes; the columns with types, defaults, nullability and keys; two btree indexes with their size and scan counts; the foreign key to customers and order_items referencing it with on delete cascade." />
 
@@ -207,7 +207,7 @@ SQLite doesn't report index methods, sizes or scan counts, so those are left out
 - Each box lists the table's row estimate and its key columns only: the primary key, foreign keys, and columns another table points at. A composite key lists every column.
 - Each line is marked **1** at the table pointed to and **n** at the table pointing (**1** when the key is that table's whole primary key). Hover a line to see the key, such as `orders.customer_id → customers.id · on delete cascade`.
 - **1 step** is the default. **2 steps** reaches one table further on each side and dims the second step; **All** follows the keys as far as they go, and is off when the database has more than 150 tables.
-- A table that points to itself, such as `parent_id`, loops back into its own box. A line between two tables in the same column is left out; Structure lists it.
+- A table that points to itself, such as `parent_id`, loops back into its own box. A line within one column, or one that would cross the centre, is left out; Structure lists it.
 
 | Do this | What happens |
 | --- | --- |

@@ -32,15 +32,15 @@ describe("tips", () => {
     expect(text(true)).toEqual({
       "preview-reused": "Preview tab reused · ⌘-click a table to keep it",
       "type-to-filter": "Type on a column to filter",
-      "view-keys": "⌥⌘1 / ⌥⌘2 switch Data and Structure",
+      "view-keys": "⌥⌘1 / ⌥⌘2 / ⌥⌘3 switch Data, Structure and Map",
       "widths-remembered": "Widths are remembered for this table",
       "db-new-window": "⌘↵ opens a database in a new window",
     });
-    expect(text(false)["view-keys"]).toBe("Ctrl+Alt+1 / Ctrl+Alt+2 switch Data and Structure");
+    expect(text(false)["view-keys"]).toBe("Ctrl+Alt+1 / Ctrl+Alt+2 / Ctrl+Alt+3 switch Data, Structure and Map");
     // Under a keymap the tip teaches the keys that keymap uses.
     setKeymap("tableplus");
-    expect(text(true)["view-keys"]).toBe("⌃⌘[ / ⌃⌘] switch Data and Structure");
-    expect(text(false)["view-keys"]).toBe("Ctrl+Alt+[ / Ctrl+Alt+] switch Data and Structure");
+    expect(text(true)["view-keys"]).toBe("⌃⌘[ / ⌃⌘] / ⌥⌘3 switch Data, Structure and Map");
+    expect(text(false)["view-keys"]).toBe("Ctrl+Alt+[ / Ctrl+Alt+] / Ctrl+Alt+3 switch Data, Structure and Map");
     setKeymap("rowkery");
     expect(text(false)["preview-reused"]).toBe("Preview tab reused · Ctrl-click a table to keep it");
   });

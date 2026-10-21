@@ -191,9 +191,12 @@ console.log(`${OUT}/2-hover.png`);
 await page.mouse.move(1, 1);
 
 // 3. A click re-centres; 2 steps reaches further and dims the second step; ‹ goes back.
+const centredOn = (key) =>
+  page
+    .waitForFunction(([sel, key]) => document.querySelector(sel)?.dataset.centre === key, [map, key], { timeout: 3000 })
+    .then(() => true, () => false);
 await page.click(box("order_items"));
-await page.waitForFunction((sel) => document.querySelector(sel)?.dataset.centre === "shop.public.order_items", map);
-check(true, "a click re-centres on order_items");
+check(await centredOn("shop.public.order_items"), "a click re-centres on order_items");
 await page.click(`${map} [data-testid="sm-depths"] [data-depth="2"]`);
 await page.waitForSelector(box("categories"));
 check((await page.getAttribute(box("categories"), "data-far")) === "", "2 steps: categories (two away) is dimmed");
@@ -201,9 +204,15 @@ check((await page.getAttribute(box("products"), "data-far")) === null, "products
 check((await page.getAttribute(box("customers"), "data-far")) === "", "customers, two away through orders, is dimmed");
 check(!(await page.$(box("payments"))), "payments (it points at orders, not up from order_items) is left out");
 await shot("3-recentred-2-steps");
+// A depth change that drops the ringed box hands the ring back to the centre.
+await page.click(`${map} [data-testid="sm-depths"] [data-depth="2"]`);
+await page.focus(map);
+await page.keyboard.press("ArrowLeft");
+await page.keyboard.press("ArrowLeft");
+await page.click(`${map} [data-testid="sm-depths"] [data-depth="1"]`);
+check((await page.$eval(`${map} [data-sel]`, (e) => e.dataset.table)) === "shop.public.order_items", "1 step: the ring goes back to the centre");
 await page.keyboard.press("Alt+ArrowLeft");
-await page.waitForFunction((sel) => document.querySelector(sel)?.dataset.centre === "shop.public.orders", map);
-check(true, "‹ goes back to the map centred on orders");
+check(await centredOn("shop.public.orders"), "‹ goes back to the map centred on orders");
 
 // 4. Arrows move the ring, ↵ opens that table; Esc on a map goes back to Data.
 await page.focus(map);
@@ -223,8 +232,11 @@ check(!(await page.$(map)), `↵ opened ${sel2.split(".").pop()} in Data`);
 await page.keyboard.press("Control+Alt+3");
 await page.waitForSelector(map);
 check((await centre()) === sel2, "Ctrl+Alt+3 shows its map");
+check(await page.$eval(map, (el) => el === document.activeElement), "the map has the keys when asked for");
 await page.keyboard.press("Escape");
 await page.waitForSelector(map, { state: "detached" });
+await page.waitForTimeout(100);
+check(await page.evaluate(() => !!document.activeElement?.closest('[data-testid="results-grid-wrap"]')), "Esc hands the keys to the grid");
 check(
   (await page.getAttribute(`${ws} [data-testid="view-switch"] [data-view="data"]`, "aria-selected")) === "true",
   "Esc goes back to Data",
@@ -236,8 +248,15 @@ await page.waitForSelector('[data-testid="cp-panel"]');
 await page.keyboard.type(">show map");
 await page.waitForSelector('[data-item="cmd:show-map"]');
 await page.click('[data-item="cmd:show-map"]');
-await page.waitForSelector(map);
-check(true, "⌘K Show map opens the map");
+check(!!(await page.waitForSelector(map)), "⌘K Show map opens the map");
+
+// A double-click opens the box: its first click re-centres, the second opens what it centred.
+await page.dblclick(box("orders"));
+await page.waitForSelector(map, { state: "detached" });
+check(
+  (await page.textContent(`${ws} [data-testid="query-tab"][data-on]`)).includes("orders"),
+  "a double-click on orders opens it",
+);
 
 // 6. A self-reference loops back into its box; a composite key lists every column.
 await page.click(`${ws} [data-table="shop.public.categories"] [data-testid="sb-row-main"]`);

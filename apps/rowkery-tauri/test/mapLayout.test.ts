@@ -73,10 +73,18 @@ describe("schema map layout", () => {
     expect(layoutSchemaMap(SHOP, "shop.public.categories", "all")!.boxes.map((b) => b.col).sort()).toEqual([0, 1, 2]);
   });
 
-  it("leaves out a line between two boxes of one column", () => {
+  it("leaves out lines within a column and across the centre", () => {
     // orders points at customers and at addresses, which points at customers too.
     const m = layoutSchemaMap(SHOP, "shop.public.orders", 1)!;
     expect(m.edges.some((e) => e.from === "shop.public.addresses")).toBe(false);
+    // payments → customers would run behind orders.
+    const tree = shop([
+      table("customers", ["id"]),
+      table("orders", ["id", "customer_id"], [fk(["customer_id"], "customers")]),
+      table("payments", ["id", "order_id", "customer_id"], [fk(["order_id"], "orders"), fk(["customer_id"], "customers")]),
+    ]);
+    const cross = layoutSchemaMap(tree, "shop.public.orders", 1)!;
+    expect(cross.edges.map((e) => `${e.from}>${e.to}`)).toEqual(["shop.public.orders>shop.public.customers", "shop.public.payments>shop.public.orders"]);
     expect(at(m, "addresses")!.columns.map((c) => `${c.kind}:${c.name}`)).toEqual(["pk:id", "fk:customer_id"]);
   });
 
