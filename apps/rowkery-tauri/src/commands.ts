@@ -97,7 +97,7 @@ export interface Chord {
   other?: string;
 }
 
-export type MenuSubmenu = "Rowkery" | "File" | "Connection" | "Query" | "View" | "Go" | "Window" | "Help";
+export type MenuSubmenu = "Rowkery" | "File" | "Edit" | "Connection" | "Query" | "View" | "Go" | "Window" | "Help";
 
 /** The shortcut sheet's sections, in order (menu-bar order, then the zones). */
 export const SHEET_SECTIONS = [
@@ -428,6 +428,17 @@ export const COMMANDS: Command[] = [
     menuTitle: "Run All Statements",
     chord: { mac: "Alt+Mod+Enter" },
     canRun: (s) => s.connected && !s.busy && !s.tableTab && !s.sessionsTab,
+  },
+  {
+    id: "format-sql",
+    title: "Format SQL",
+    menuTitle: "Format SQL",
+    // ⌘I on a query tab; a table tab's grid inserts a row with it.
+    chord: { mac: "Mod+I" },
+    synonyms: ["beautify", "prettify"],
+    section: "Editor",
+    // A running tab's editor is read-only and formats nothing; other tabs still can.
+    canRun: (s) => s.hasConnectionId && !s.failed && !s.tableTab && !s.sessionsTab,
   },
   {
     id: "explain",
@@ -912,13 +923,15 @@ export function availableCommands(s: CommandState, mac: boolean): AvailableComma
 
 /**
  * The macOS menu bar's app items, in order; `null` is a separator. Rowkery's
- * items sit under About in the app menu; Services, Hide, Quit, Edit and the
- * native View / Window items are added by app_menu around these. Commands whose chord is a bare key (`/`) stay out:
+ * items sit under About in the app menu, and Edit's below the native Undo,
+ * Cut, Copy, Paste; Services, Hide, Quit and the native View / Window items
+ * are added by app_menu around these. Commands whose chord is a bare key (`/`) stay out:
  * a menu key equivalent without a modifier would eat that key in text fields.
  */
 export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   { submenu: "Rowkery", items: ["check-updates", null, "settings"] },
   { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "close-tab"] },
+  { submenu: "Edit", items: ["format-sql"] },
   {
     submenu: "Connection",
     items: [

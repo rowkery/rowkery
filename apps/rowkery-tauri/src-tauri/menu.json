@@ -41,6 +41,16 @@
     ]
   },
   {
+    "submenu": "Edit",
+    "items": [
+      {
+        "id": "format-sql",
+        "title": "Format SQL",
+        "accelerator": "CmdOrCtrl+I"
+      }
+    ]
+  },
+  {
     "submenu": "Connection",
     "items": [
       {

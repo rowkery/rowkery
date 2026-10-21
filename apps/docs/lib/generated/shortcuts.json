@@ -74,6 +74,10 @@
           "keys": "⌃Space"
         },
         {
+          "title": "Format SQL",
+          "keys": "⌘I"
+        },
+        {
           "title": "Expand * into the column list",
           "keys": "⇥ after *"
         }
@@ -348,6 +352,15 @@
       ]
     },
     {
+      "menu": "Edit",
+      "items": [
+        {
+          "title": "Format SQL",
+          "keys": "⌘I"
+        }
+      ]
+    },
+    {
       "menu": "Connection",
       "items": [
         {
@@ -550,6 +563,10 @@
     {
       "title": "Run all statements",
       "keys": "⌥⌘↵"
+    },
+    {
+      "title": "Format SQL",
+      "keys": "⌘I"
     },
     {
       "title": "Explain statement",

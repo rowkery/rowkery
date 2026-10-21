@@ -10,7 +10,7 @@ export type MenuZone = "results" | "editor" | "panel";
 const ZONE_COMMANDS: Record<MenuZone, string[]> = {
   // Insert row: a table tab's way to a new row besides ⌘I (no foot button: the grid pages as it scrolls).
   results: ["insert-row", "find-results", "copy-csv", "copy-tsv", "copy-all-csv", "copy-all-tsv", "export", "clear-results", "timings"],
-  editor: ["run-all", "cancel", "stop-all-queries", "reopen-closed-tab", "clear-results", "timings"],
+  editor: ["run-all", "format-sql", "cancel", "stop-all-queries", "reopen-closed-tab", "clear-results", "timings"],
   panel: ["refresh-schema", "reconnect", "edit-connection", "switch-database", "switch-connection", "all-tables", "agents"],
 };
 
