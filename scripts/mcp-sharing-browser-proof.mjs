@@ -236,7 +236,7 @@ await shot("1-access-controls");
 
 // 3. The staging share runs out on its own.
 await page.waitForFunction(
-  () => /Stopped sharing with MCP/.test(document.querySelector("[data-toast]")?.textContent ?? ""),
+  () => /Stopped sharing with agents/.test(document.querySelector("[data-toast]")?.textContent ?? ""),
   null,
   { timeout: 8000 },
 );

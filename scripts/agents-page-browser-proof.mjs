@@ -338,7 +338,7 @@ check(
 await page.waitForSelector('[data-mcp-conn="prd"]:not([data-shared])');
 check(!(await page.$("[data-ag-stop-all]")), "with nothing shared the button goes away");
 const toast = await page.textContent("[data-toast]");
-check(/Stopped sharing with MCP/.test(toast ?? "") && /2 connections/.test(toast ?? ""), `one toast: ${toast?.trim()}`);
+check(/Stopped sharing with agents/.test(toast ?? "") && /2 connections/.test(toast ?? ""), `one toast: ${toast?.trim()}`);
 await page.focus('[data-testid="settings-page"]');
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="settings-page"]', { state: "detached" });

@@ -804,7 +804,7 @@ export function NewConnectionSheet({
           <label className="nc-toggle-row">
             <span className="nc-toggle-text">
               <span className="nc-toggle-label">Keep result samples</span>
-              <span className="nc-toggle-sub">first 5 rows of each query, on this Mac, 24 h</span>
+              <span className="nc-toggle-sub">start of each answer, on this Mac, 24 h</span>
             </span>
             <input
               type="checkbox"

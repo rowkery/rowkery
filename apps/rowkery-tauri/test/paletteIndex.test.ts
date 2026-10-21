@@ -155,11 +155,24 @@ describe("synonyms", () => {
     expect(firstCommand(q)).toEqual({ kind: "command", id });
   });
 
-  test("a synonym hit scores as a label hit and marks nothing", () => {
+  test("a synonym hit finds the command and marks nothing", () => {
     const [sec] = searchPalette(groups({ commands: commandItems() }), "help", null, []);
     expect(sec.hits[0].marks).toEqual([]);
     const label = searchPalette(groups({ commands: commandItems() }), "keyboard", null, []);
     expect(label[0].hits[0].marks.length).toBeGreaterThan(0);
+  });
+
+  test("among tied commands a label hit comes before a synonym hit", () => {
+    // "copy row" is Duplicate row's synonym; the Copy … commands come first.
+    const editable = availableCommands({ ...anything, cellEditable: true }, true).map((c) =>
+      item("commands", `cmd:${c.id}`, c.title, { kind: "command", id: c.id }, { syn: c.synonyms?.map((w) => w.toLowerCase()) }),
+    );
+    const ids = searchPalette(groups({ commands: editable }), "copy", "commands", [])[0].hits.map((h) => h.item.target);
+    expect(ids.some((t) => (t as { id: string }).id === "duplicate-row")).toBe(true);
+    const dup = ids.findIndex((t) => (t as { id: string }).id === "duplicate-row");
+    const copy = ids.findIndex((t) => (t as { id: string }).id.startsWith("copy"));
+    expect(copy).toBeGreaterThanOrEqual(0);
+    expect(copy).toBeLessThan(dup);
   });
 
   test("scattered letters of a synonym don't match", () => {

@@ -678,7 +678,7 @@ function App() {
         : new Date(until).getHours() === 0 && new Date(until).getMinutes() === 0
           ? " until midnight"
           : ` until ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`;
-    showToast(allow ? `Shared with MCP${end}` : "Not shared with MCP", conn.name);
+    showToast(allow ? `Shared with agents${end}` : "Not shared with agents", conn.name);
   };
 
   /** The page's Stop all sharing: every shared connection, one save each, one toast. */
@@ -687,7 +687,7 @@ function App() {
     if (!shared.length) return;
     for (const c of shared) await saveConnection({ ...c, allow_mcp: false, mcp_until: null }, {});
     await refreshConnections();
-    showToast("Stopped sharing with MCP", shared.length === 1 ? shared[0].name : `${shared.length} connections`);
+    showToast("Stopped sharing with agents", shared.length === 1 ? shared[0].name : `${shared.length} connections`);
   };
 
   /**
@@ -734,7 +734,7 @@ function App() {
     const t = window.setTimeout(
       () => {
         void refreshConnections();
-        showToast("Stopped sharing with MCP", nextShareEnd.name);
+        showToast("Stopped sharing with agents", nextShareEnd.name);
       },
       Math.min(nextShareEnd.at - Date.now() + 50, 2 ** 31 - 1),
     );

@@ -768,11 +768,11 @@
       "keys": ""
     },
     {
-      "title": "Allow MCP for this connection",
+      "title": "Share this connection with agents",
       "keys": ""
     },
     {
-      "title": "Stop sharing this connection with MCP",
+      "title": "Stop sharing this connection with agents",
       "keys": ""
     },
     {

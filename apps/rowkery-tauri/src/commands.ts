@@ -215,13 +215,13 @@ const envCommands = (): Command[] => [
   ),
   {
     id: "mcp:on",
-    title: "Allow MCP for this connection",
+    title: "Share this connection with agents",
     synonyms: ["mcp", "claude", "agent", "share"],
     canRun: (s) => !!s.connection && !s.connection.allowMcp,
   },
   {
     id: "mcp:off",
-    title: "Stop sharing this connection with MCP",
+    title: "Stop sharing this connection with agents",
     synonyms: ["mcp", "claude", "agent", "share"],
     canRun: (s) => !!s.connection && !!s.connection.allowMcp,
   },
