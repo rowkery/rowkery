@@ -1,6 +1,7 @@
-// Proves the email signup under Try Rowkery on the built site in out/, at 1440x900 and
-// 390x844, in Chromium, with Kit stubbed (no real signup is sent):
-//  1. the card sits right after the get-started section, and its penguin covers no text;
+// Proves the email signup under the close on the built site in out/, at 1440x900 and 390x844,
+// in Chromium, with Kit stubbed (no real signup is sent):
+//  1. the card comes after connecting your agent and the questions, and its penguin stands on
+//     the card covering no text;
 //  2. Subscribe posts the address to the Kit form as email_address, and the card then says to
 //     confirm by email;
 //  3. when Kit refuses, the card says so under the field (which stays put), keeps the address,
@@ -42,14 +43,19 @@ for (const [w, h] of [[1440, 900], [390, 844]]) {
 
   // 1. Placement, and the penguin clear of the text.
   const place = await page.evaluate(() => {
-    const card = document.querySelector("[data-follow]"), get = document.querySelector("#get");
+    const card = document.querySelector("[data-follow]"), above = document.querySelector(".more-in");
     if (!card) return { missing: true };
     const R = (e) => e.getBoundingClientRect(), over = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-    const pg = R(card.querySelector(".peek2"));
-    return { after: get.nextElementSibling === card, covered: [...card.querySelectorAll("h3, p"), ...get.querySelectorAll("h3, p")].filter((t) => over(pg, R(t))).map((t) => t.textContent.slice(0, 30)) };
+    const pg = R(card.querySelector(".peek2 path")), box = R(card.querySelector(".follow-card"));
+    return {
+      after: above.nextElementSibling === card && !!above.querySelector("#connect") && !!above.querySelector("#faq"),
+      stands: Math.abs(pg.bottom - box.top) < 1.5,
+      covered: [...card.querySelectorAll("h3, p"), ...above.querySelectorAll("h2, summary, p")].filter((t) => t.checkVisibility() && over(pg, R(t))).map((t) => t.textContent.slice(0, 30)),
+    };
   });
   if (place.missing) { bad("the signup card isn't on the page (is KIT_FORM_ID set?)"); continue; }
-  if (!place.after) bad("the signup card isn't right after Try Rowkery");
+  if (!place.after) bad("the signup card isn't right after connecting your agent and the questions");
+  if (!place.stands) bad("the letter penguin doesn't stand on the card's top edge");
   for (const t of place.covered) bad(`the letter penguin covers "${t}"`);
   const card = page.locator("[data-follow]");
   await card.scrollIntoViewIfNeeded();

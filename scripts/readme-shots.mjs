@@ -6,9 +6,7 @@
 //    and its DELETE refused over it;
 //  - docs/readme/k-palette-{light,dark}.webp: ⌘K finding the orders tables (760x540 at 2x);
 //  - docs/readme/log-{light,dark}.webp: the Agents inbox, its log with a refusal, a search and an
-//    opened query showing its access, request and response beside it;
-//  - apps/web/assets/img/window-dark.webp: the whole window in dark (1280x800 at 2x), with the
-//    toast of an agent's refused full read.
+//    opened query showing its access, request and response beside it.
 // The platform is pinned to macOS (⌘ labels, keys pressed with Meta). Writes PNGs to outDir
 // (default /tmp/rowkery-proof/readme-shots); with --write it also converts them (Python's Pillow)
 // into the repo paths above. Not a proof: it
@@ -299,27 +297,11 @@ const hideKeyStrip = (page) => page.addStyleTag({ content: '[data-testid="key-st
 
 const made = {};
 for (const scheme of ["light", "dark"]) {
-  // 1. The whole window (the banner's app; in dark, with the refusal toast, the website's hero).
+  // 1. The whole window (the banner's app).
   {
     const { context, page } = await openApp(scheme, 1280, 800);
     await hideKeyStrip(page);
     made[`window-${scheme}`] = await shot(page, `window-${scheme}`);
-    if (scheme === "dark") {
-      await page.evaluate(() => {
-        window.__MCP_NEXT__.push({
-          ts: Date.UTC(2026, 9, 14, 11, 43, 50),
-          session: Date.UTC(2026, 9, 14, 11, 30, 0),
-          client: "claude-code",
-          tool: "query",
-          connection: "prd",
-          database: "shop",
-          sql: "select * from events where payload::text like '%refund%'",
-          verdict: "Refused: the plan reads public.events (~4100000 rows) end to end.",
-        });
-      });
-      await page.waitForSelector("[data-toast-offer]", { timeout: 8000 });
-      made["window-dark-toast"] = await shot(page, "window-dark-toast");
-    }
     await context.close();
   }
   // 2. ⌘K finding the orders tables, in a narrow window with the sidebar hidden (⌘B).
@@ -436,6 +418,5 @@ else:
     convert(made[`k-palette-${s}`], `docs/readme/k-palette-${s}.webp`);
     convert(made[`log-${s}`], `docs/readme/log-${s}.webp`);
   }
-  convert(made["window-dark-toast"], "apps/web/assets/img/window-dark.webp");
-  console.log("wrote docs/readme/* and apps/web/assets/img/window-dark.webp");
+  console.log("wrote docs/readme/*");
 }

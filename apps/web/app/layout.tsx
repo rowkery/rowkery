@@ -4,9 +4,8 @@ import localFont from "next/font/local";
 import { DOWNLOAD_URL, MAKER_URL, RELEASE } from "@/lib/site";
 import "./globals.css";
 
-// IBM Plex Sans for text, IBM Plex Mono for SQL, keys and numbers, Gabarito for headings, and
-// Caveat for the penguin's speech bubble, shipped with the build from app/fonts (SIL OFL).
-// Every face listed here is preloaded but Caveat, which only the bubble uses.
+// IBM Plex Sans for text, IBM Plex Mono for SQL, keys and numbers, and Gabarito for headings,
+// shipped with the build from app/fonts (SIL OFL) and preloaded.
 const sans = localFont({
   src: [
     { path: "./fonts/ibm-plex-sans-latin-400-normal.woff2", weight: "400" },
@@ -28,13 +27,6 @@ const display = localFont({
   weight: "400 800",
   variable: "--font-display",
   display: "swap",
-});
-const hand = localFont({
-  src: "./fonts/caveat-latin-wght-normal.woff2",
-  weight: "500 700",
-  variable: "--font-hand",
-  display: "swap",
-  preload: false,
 });
 
 // Search results show the title and description; Google cuts the description near 155 characters.
@@ -107,6 +99,11 @@ const STRUCTURED_DATA = {
   ],
 };
 
+// The story plays out as you scroll only with scripts and without Reduce Motion. This runs
+// before the first paint and marks the page, so the pinned layout (components/story/story.css)
+// is there from the start; without the mark every scene is a plain stack, fully shown.
+const MOTION = `if(!matchMedia("(prefers-reduced-motion: reduce)").matches)document.documentElement.setAttribute("data-motion","")`;
+
 // Dark only (2026-10-14).
 export const viewport: Viewport = {
   themeColor: "#0a0a0a",
@@ -117,7 +114,10 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable} ${hand.variable}`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: MOTION }} />
+      </head>
       <body>
         <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(STRUCTURED_DATA) }} />
         {children}
