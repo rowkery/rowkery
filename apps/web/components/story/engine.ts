@@ -740,6 +740,20 @@ export function startStory() {
     }
 
     layout();
+    // Test-only, when a check asks before the page loads (scripts/story.mjs, SNAP): jumps every
+    // damped position to where the scroll puts it, so the check needn't wait out the glide.
+    const w = window as Window & { __storyTest?: boolean; __story?: { snap(): void } };
+    if (w.__storyTest)
+      w.__story = {
+        snap() {
+          heroS = clamp(scrollY / FLY, 0, 1);
+          for (const sc of scenes) {
+            sc.read(scrollY);
+            sc.s = sc.target;
+          }
+          wake();
+        },
+      };
     // What runs later fails the same way as the start.
     const guarded = (f: () => void) => () => {
       if (ac.signal.aborted) return;

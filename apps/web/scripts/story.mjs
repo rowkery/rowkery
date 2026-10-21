@@ -22,17 +22,22 @@ export const MOMENTS = [
   { name: "end", at: "end" },
 ];
 
-/** Scrolls to a moment and waits for the damped scenes to settle. */
-export async function goTo(page, m, settle = 1500) {
-  const y = await page.evaluate((m) => {
+/** Where a moment is on the page, in scroll px. */
+export function momentY(page, m) {
+  return page.evaluate((m) => {
     if (m.at === "top") return 0;
     if (m.at === "end") return document.documentElement.scrollHeight - innerHeight;
     if (m.at === "get") return document.getElementById("get").offsetTop;
     const el = document.querySelector(`[data-scene="${m.scene}"]`), stage = el.querySelector(".stage");
     const n = parseFloat(el.style.getPropertyValue("--n"));
-    return el.offsetTop + m.s * ((el.offsetHeight - stage.offsetHeight) / n);
+    return Math.round(el.offsetTop + m.s * ((el.offsetHeight - stage.offsetHeight) / n));
   }, m);
-  await page.evaluate((v) => scrollTo({ top: v, behavior: "instant" }), Math.round(y));
+}
+
+/** Scrolls to a moment and waits for the damped scenes to settle. */
+export async function goTo(page, m, settle = 1500) {
+  const y = await momentY(page, m);
+  await page.evaluate((v) => scrollTo({ top: v, behavior: "instant" }), y);
   await page.waitForTimeout(settle);
   // Then let any entrance still playing (a transition, a hop) finish; the endless loops keep going.
   await page.waitForFunction(() => !document.getAnimations().some((a) => a.playState === "running" && a.effect.getComputedTiming().iterations !== Infinity), null, { timeout: 4000 }).catch(() => {});
@@ -45,6 +50,31 @@ export const COUNT_FRAMES = `
   const raf = window.requestAnimationFrame.bind(window);
   window.requestAnimationFrame = (cb) => (window.__frames++, raf(cb));
 `;
+
+// In the page (an init script): asks the engine for its test hook, window.__story.snap().
+export const SNAP = "window.__storyTest = true;";
+
+/**
+ * Scrolls to y and shows where the story comes to rest there without waiting for it (needs SNAP):
+ * the damped positions jump to their targets, and every entrance still playing (a transition, a
+ * hop, a key press) skips to its end. The endless loops keep going.
+ */
+export function jump(page, y) {
+  return page.evaluate(async (y) => {
+    scrollTo({ top: y, behavior: "instant" });
+    window.__story.snap();
+    const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+    // Twice at least: a frame draws the snapped story, and what it switches on (a class, an
+    // intersection) can start an entrance a frame later.
+    for (let i = 0; i < 8; i++) {
+      await frame();
+      await frame();
+      const playing = document.getAnimations().filter((a) => a.playState === "running" && a.effect.getComputedTiming().iterations !== Infinity);
+      if (!playing.length && i > 0) break;
+      for (const a of playing) a.finish();
+    }
+  }, y);
+}
 
 /** Waits until the story stops asking for frames (needs COUNT_FRAMES), then for any entrance still playing. */
 export async function settle(page) {

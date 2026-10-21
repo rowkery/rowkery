@@ -18,9 +18,12 @@
 //
 //   npm run build && node scripts/penguin-proof.mjs [w h]
 //
-// With no size it runs all nine and prints "all penguins whole" when every one passes.
+// With no size it runs all nine side by side and prints "all penguins whole" when every one
+// passes. It doesn't wait for the story to glide to rest: the engine's test hook jumps it there
+// and the entrances still playing skip to their ends (scripts/story.mjs, jump), which is the same
+// resting state a reader stopping there sees.
 import { playwright, serveOut } from "./serve-out.mjs";
-import { COUNT_FRAMES, MOMENTS, goTo, settle } from "./story.mjs";
+import { MOMENTS, SNAP, jump, momentY } from "./story.mjs";
 
 const { chromium } = playwright();
 const SIZES = process.argv[3] ? [[Number(process.argv[2]), Number(process.argv[3])]] : [[1440, 900], [1280, 800], [1024, 768], [1920, 1080], [820, 1180], [390, 844], [430, 932], [375, 667], [360, 740]];
@@ -98,24 +101,26 @@ const line = (bad, where, r) => `  ${bad ? "BAD " : r.off ? "edge" : "ok  "} ${w
 
 const server = await serveOut();
 const browser = await chromium.launch();
-let failed = 0;
 
-for (const [w, h] of SIZES) {
+/** Checks one window size; resolves to what it found, printed once every size is done. */
+async function check(w, h) {
   const phone = w < 600;
-  const page = await browser.newPage({ viewport: { width: w, height: h }, isMobile: phone, hasTouch: phone });
-  const errors = [];
+  const ctx = await browser.newContext({ viewport: { width: w, height: h }, isMobile: phone, hasTouch: phone });
+  const page = await ctx.newPage();
+  const errors = [], out = [];
+  const log = (t) => out.push(t);
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.addInitScript(COUNT_FRAMES);
+  await page.addInitScript(SNAP);
   await page.addInitScript(HELPERS);
   await page.goto(server.url, { waitUntil: "networkidle" });
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(2200);
+  await page.waitForFunction(() => window.__story);
   await page.addStyleTag({ content: "* { pointer-events: auto !important; }" });
   let bad = 0, checked = 0, steps = 0;
 
   // 1. The named moments.
   for (const m of MOMENTS) {
-    await goTo(page, m, 1400);
+    await jump(page, await momentY(page, m));
     const pinned = !!m.scene || m.at === "top";
     for (const r of await page.evaluate(() => window.__penguins(0.5))) {
       // Off the edge only counts as scrolling past for a penguin in the page's flow at a moment about something else.
@@ -123,7 +128,7 @@ for (const [w, h] of SIZES) {
       const no = r.hidden > 0 || (r.off > 0 && atRest);
       checked++;
       if (no) bad++;
-      if (no || process.env.VERBOSE) console.log(line(no, m.name, r));
+      if (no || process.env.VERBOSE) log(line(no, m.name, r));
     }
   }
 
@@ -139,8 +144,7 @@ for (const [w, h] of SIZES) {
     const seq = [];
     for (let i = 0; i * STEP <= sc.n + 1e-6; i++) {
       const s = i * STEP;
-      await page.evaluate((y) => scrollTo({ top: y, behavior: "instant" }), Math.round(sc.top + s * sc.unit));
-      await settle(page);
+      await jump(page, Math.round(sc.top + s * sc.unit));
       seq.push([s, await page.evaluate(() => window.__penguins(0.1))]);
       steps++;
     }
@@ -158,7 +162,7 @@ for (const [w, h] of SIZES) {
         const no = r.hidden > 0 || (r.off > 0 && r.inScene && !moving(i, r));
         checked++;
         if (no) bad++;
-        if (no || process.env.VERBOSE) console.log(line(no, `${sc.name} ${s.toFixed(1)}`, r));
+        if (no || process.env.VERBOSE) log(line(no, `${sc.name} ${s.toFixed(1)}`, r));
       }
     });
   }
@@ -166,11 +170,11 @@ for (const [w, h] of SIZES) {
   // 3. The colony: as it scrolls in and out (its drift at either end), every bird stands on the
   // ground line and none touches its neighbour.
   for (const p of [0, 0.5, 1]) {
-    await page.evaluate((p) => {
+    const y = await page.evaluate((p) => {
       const r = document.querySelector("[data-colony]").getBoundingClientRect();
-      scrollTo({ top: r.top + scrollY - innerHeight + p * (innerHeight + r.height), behavior: "instant" });
+      return Math.round(r.top + scrollY - innerHeight + p * (innerHeight + r.height));
     }, p);
-    await page.waitForTimeout(400);
+    await jump(page, y);
     const flock = await page.evaluate(() => {
       const out = [], ground = document.querySelector("[data-colony]").getBoundingClientRect().bottom - 2;
       const birds = [...document.querySelectorAll("[data-colony] .bird")].filter((b) => b.offsetWidth > 0).map((b) => [b.dataset.pg, b.querySelector("path").getBoundingClientRect()]);
@@ -179,17 +183,23 @@ for (const [w, h] of SIZES) {
       return out;
     });
     for (const f of flock) {
-      console.log(`  BAD  colony at ${p}: ${f}`);
+      log(`  BAD  colony at ${p}: ${f}`);
       bad++;
     }
   }
   for (const e of errors) {
-    console.log(`  page error: ${e}`);
+    log(`  page error: ${e}`);
     bad++;
   }
-  console.log(`${w}x${h}: ${checked} penguin checks at ${MOMENTS.length} moments and ${steps} scene steps, ${bad ? `${bad} not whole` : "all penguins whole"}`);
+  log(`${w}x${h}: ${checked} penguin checks at ${MOMENTS.length} moments and ${steps} scene steps, ${bad ? `${bad} not whole` : "all penguins whole"}`);
+  await ctx.close();
+  return { bad, out };
+}
+
+let failed = 0;
+for (const { bad, out } of await Promise.all(SIZES.map(([w, h]) => check(w, h)))) {
+  for (const t of out) console.log(t);
   failed += bad;
-  await page.close();
 }
 
 await browser.close();
