@@ -197,6 +197,12 @@ const rowCount = () => page.getAttribute(`${ws} [data-testid="results-grid-wrap"
 const activeTabTitle = () => page.textContent(`${ws} [data-testid="query-tab"][aria-selected="true"] [data-testid="query-tab-title"]`).then((t) => t.trim());
 // The import tab shows the file's rows and nothing of a table's or a query's.
 const importTabClean = async (table) => {
+  const edges = await page.evaluate((ws) => {
+    const grid = document.querySelector(`${ws} [data-testid="results-grid-wrap"]`).getBoundingClientRect();
+    const panel = document.querySelector(`${ws} [data-inspector="import"]`).getBoundingClientRect();
+    return { grid: Math.round(grid.right), panel: Math.round(panel.left) };
+  }, ws);
+  check(edges.grid <= edges.panel, `the grid ends where the panel starts, nothing under it (${edges.grid} ≤ ${edges.panel})`);
   check((await activeTabTitle()) === `Import · ${table}`, `the import tab is shown (${await activeTabTitle()})`);
   const leaks = await page.evaluate((ws) => {
     const w = document.querySelector(ws);

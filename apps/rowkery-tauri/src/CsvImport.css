@@ -8,6 +8,12 @@
   width: var(--insp-import, 360px);
 }
 
+/* The main column ends where the panel starts, so the grid's last columns
+   scroll into view instead of under it (App.css, --inspector-right). */
+.app-frame:has(> .workspace:not([hidden])[data-inspector="import"]) {
+  --inspector-right: var(--insp-import, 360px);
+}
+
 .ci-title {
   min-width: 0;
   flex-shrink: 1;
