@@ -79,6 +79,7 @@ import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
 import { SchemaMap } from "./SchemaMap";
 import type { MapDepth } from "./mapLayout";
+import { mapGuessOn, setMapGuess } from "./mapGuess";
 import { Sidebar, SidebarFoot } from "./Sidebar";
 import type { SettingsSection } from "./SettingsPage";
 import { createPortal } from "react-dom";
@@ -797,6 +798,10 @@ export function Workspace({
     },
     [activeTabId],
   );
+
+  // The map's Guess links switch, per connection (mapGuess.ts).
+  const [mapGuess, setMapGuessState] = useState(() => mapGuessOn(activeId));
+  useEffect(() => setMapGuessState(mapGuessOn(activeId)), [activeId]);
 
   /** Re-centring the map is a step in history too; its own table clears the centre. */
   const centreMap = (key: string) => {
@@ -4326,6 +4331,12 @@ export function Workspace({
                   centre={activeTab.mapCentre && findTable(schemaTree, activeTab.mapCentre.key) ? activeTab.mapCentre.key : activeTable.key}
                   depth={activeTab.mapDepth ?? 1}
                   onDepth={(mapDepth) => patchTab(activeTab.id, { mapDepth })}
+                  guess={mapGuess}
+                  onGuess={(on) => {
+                    if (!activeConnection) return;
+                    setMapGuess(activeConnection.id, on);
+                    setMapGuessState(on);
+                  }}
                   onCentre={centreMap}
                   onOpen={(key, newTab) => {
                     const item = findTable(schemaTree, key);

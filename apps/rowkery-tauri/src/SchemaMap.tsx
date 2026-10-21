@@ -22,6 +22,9 @@ interface SchemaMapProps {
   centre: string;
   depth: MapDepth;
   onDepth: (depth: MapDepth) => void;
+  /** "Guess links": draw `customer_id` → `customers` where no foreign key says so. */
+  guess: boolean;
+  onGuess: (on: boolean) => void;
   onCentre: (key: string) => void;
   /** ↵ / double-click opens the table; ⌘↵ in a tab of its own. */
   onOpen: (key: string, newTab: boolean) => void;
@@ -83,10 +86,10 @@ function side(table: string, columns: string[]): string {
   return columns.length === 1 ? `${table}.${columns[0]}` : `${table}.(${columns.join(", ")})`;
 }
 
-export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, claimFocus }: SchemaMapProps) {
+export function SchemaMap({ schemas, centre, depth, onDepth, guess, onGuess, onCentre, onOpen, claimFocus }: SchemaMapProps) {
   const tooMany = useMemo(() => allTables(schemas).length > MAP_ALL_LIMIT, [schemas]);
   const shownDepth: MapDepth = depth === "all" && tooMany ? 2 : depth;
-  const layout = useMemo(() => layoutSchemaMap(schemas, centre, shownDepth), [schemas, centre, shownDepth]);
+  const layout = useMemo(() => layoutSchemaMap(schemas, centre, shownDepth, guess), [schemas, centre, shownDepth, guess]);
   const boxes = useMemo(() => new Map(layout?.boxes.map((b) => [b.key, b]) ?? []), [layout]);
   const drawn = useMemo(
     () => (layout?.edges ?? []).map((e) => draw(e, boxes)).filter((d): d is Drawn => !!d),
@@ -206,6 +209,20 @@ export function SchemaMap({ schemas, centre, depth, onDepth, onCentre, onOpen, c
           {" · "}
           {plural(layout.pointedFrom, "points to it", "point to it")}
         </span>
+        <label className="sm-guess" title="Link customer_id to customers with no foreign key">
+          Guess links
+          <button
+            type="button"
+            role="switch"
+            aria-checked={guess}
+            data-testid="sm-guess"
+            className="sm-switch"
+            onClick={() => {
+              onGuess(!guess);
+              rootRef.current?.focus({ preventScroll: true });
+            }}
+          />
+        </label>
         <div data-testid="sm-depths" className="sm-depths" role="radiogroup" aria-label="How far to reach">
           {DEPTHS.map((d) => {
             const off = d.depth === "all" && tooMany;

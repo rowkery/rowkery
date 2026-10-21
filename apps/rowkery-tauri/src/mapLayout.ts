@@ -139,7 +139,7 @@ function guessedLinks(t: SidebarTable, byKey: Map<string, SidebarTable>): Link[]
 }
 
 /** Every foreign key between two tables of the catalog, by table key both ways. */
-function linksOf(schemas: SidebarSchema[]) {
+function linksOf(schemas: SidebarSchema[], guess: boolean) {
   const byKey = new Map<string, SidebarTable>();
   for (const t of allTables(schemas)) byKey.set(t.key, t);
   const out = new Map<string, Link[]>();
@@ -150,7 +150,7 @@ function linksOf(schemas: SidebarSchema[]) {
       const to = byKey.get(tableKey(t.database, fk.ref_schema, fk.ref_table));
       if (to) links.push({ from: t, to, fk });
     }
-    for (const link of [...links, ...guessedLinks(t, byKey)]) {
+    for (const link of guess ? [...links, ...guessedLinks(t, byKey)] : links) {
       out.set(t.key, [...(out.get(t.key) ?? []), link]);
       into.set(link.to.key, [...(into.get(link.to.key) ?? []), link]);
     }
@@ -168,8 +168,10 @@ export function layoutSchemaMap(
   schemas: SidebarSchema[],
   centreKey: string,
   depth: MapDepth,
+  /** Also draw links guessed from column names (the map's "Guess links" switch). */
+  guess = false,
 ): SchemaMapLayout | null {
-  const { byKey, out, into } = linksOf(schemas);
+  const { byKey, out, into } = linksOf(schemas, guess);
   const centre = byKey.get(centreKey);
   if (!centre) return null;
   const max = depth === "all" ? Infinity : depth;

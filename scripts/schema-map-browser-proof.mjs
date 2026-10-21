@@ -67,6 +67,7 @@ function stubTauri(extraTables) {
     t("products", 3400, [col("id"), col("category_id"), col("title", "text")], [fk(["category_id"], "categories")]),
     t("categories", 64, [col("id"), col("parent_id"), col("name", "text")], [fk(["parent_id"], "categories")]),
     t("terms", 12, [col("year", "integer"), col("term", "integer"), col("label", "text")], [], ["year", "term"]),
+    t("reviews", 300, [col("id"), col("order_id"), col("customer_id"), col("stars", "integer")]),
     t("grades", 800, [col("id"), col("year", "integer"), col("term", "integer")], [fk(["year", "term"], "terms", ["year", "term"])]),
     ...Array.from({ length: extraTables }, (_, i) => t(`spare_${String(i).padStart(3, "0")}`, 1, [col("id")])),
   ];
@@ -274,21 +275,38 @@ const tcols = await page.$$eval(`${box("terms")} [data-column]`, (els) => els.ma
 check(tcols.join(",") === "year,term", `terms lists both columns of its key (${tcols})`);
 await shot("4-self-composite");
 
-// 7. Dark.
+// 7. Guess links: off, reviews (no foreign keys) stays away; on, its order_id is a dashed line.
 await page.click(`${ws} [data-table="shop.public.orders"] [data-testid="sb-row-main"]`);
 await page.click(`${ws} [data-testid="view-switch"] [data-view="map"]`);
 await page.waitForSelector(box("orders"));
+const guessSwitch = `${map} [data-testid="sm-guess"]`;
+check((await page.getAttribute(guessSwitch, "aria-checked")) === "false", "Guess links is off by default");
+check(!(await page.$(box("reviews"))), "off: reviews, with no foreign key, is not on the map");
+await page.click(guessSwitch);
+await page.waitForSelector(box("reviews"));
+const guessEdge = `${map} [data-edge="shop.public.reviews:guess:order_id"]`;
+check((await page.getAttribute(guessEdge, "data-guessed")) === "", "on: reviews.order_id → orders is a guessed line");
+check((await page.$$(`${map} [data-guessed]`)).length === 1, "only the guess is dashed; real keys stay solid");
+await page.hover(`${guessEdge} [data-hit]`);
+const gtip = (await page.textContent(`${map} [data-testid="sm-tip"]`)).trim();
+check(gtip === "reviews.order_id → orders.id · guessed from the name, no foreign key", `hover: ${gtip}`);
+await shot("5-guessed");
+await page.click(guessSwitch);
+await page.waitForSelector(box("reviews"), { state: "detached" });
+check((await page.getAttribute(guessSwitch, "aria-checked")) === "false", "off again: the guess goes");
+
+// 8. Dark.
 await page.emulateMedia({ colorScheme: "dark" });
 await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
 await shot("1-orders-dark");
 check(errors.length === 0, `no page errors (${errors.join("; ")})`);
 
-// 8. Above 150 tables, All is off and the steps stay.
+// 9. Above 150 tables, All is off and the steps stay.
 const big = await open(150);
 await big.page.click(`${ws} [data-table="shop.public.orders"] [data-testid="sb-row-main"]`);
 await big.page.click(`${ws} [data-testid="view-switch"] [data-view="map"]`);
 await big.page.waitForSelector(box("orders"));
-check(await big.page.isDisabled(`${map} [data-testid="sm-depths"] [data-depth="all"]`), "All is off with 162 tables");
+check(await big.page.isDisabled(`${map} [data-testid="sm-depths"] [data-depth="all"]`), "All is off with 163 tables");
 check(!(await big.page.isDisabled(`${map} [data-testid="sm-depths"] [data-depth="2"]`)), "2 steps stays on");
 check(big.errors.length === 0, `no page errors on the big schema (${big.errors.join("; ")})`);
 await browser.close();

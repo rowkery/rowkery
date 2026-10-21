@@ -128,4 +128,23 @@ describe("schema map layout", () => {
     expect(stepFrom(m.boxes, key("customers"), "ArrowUp")).toBeNull();
     expect(stepFrom(m.boxes, key("customers"), "ArrowLeft")).toBeNull();
   });
+  it("guesses links from column names only when asked, dashed and without a rule", () => {
+    const app = shop([
+      table("users", ["id", "name"]),
+      table("teams", ["id"]),
+      table("posts", ["id", "user_id", "team_id", "commentable_id", "commentable_type", "ghost_id"], [fk(["team_id"], "teams")]),
+    ]);
+    const off = layoutSchemaMap(app, "shop.public.posts", 1)!;
+    expect(off.edges.map((e) => e.to)).toEqual(["shop.public.teams"]);
+    expect(off.boxes.find((b) => b.table.name === "posts")!.columns.map((c) => c.name)).toEqual(["id", "team_id"]);
+
+    const on = layoutSchemaMap(app, "shop.public.posts", 1, true)!;
+    const guessed = on.edges.filter((e) => e.guessed);
+    expect(guessed.map((e) => [e.to, e.fk.columns, e.refColumns])).toEqual([["shop.public.users", ["user_id"], ["id"]]]);
+    expect(guessed[0].fk.on_delete).toBe("");
+    // A real key wins over a guess; a polymorphic pair and an unknown table stay unlinked.
+    expect(on.edges.filter((e) => !e.guessed).map((e) => e.to)).toEqual(["shop.public.teams"]);
+    const posts = on.boxes.find((b) => b.table.name === "posts")!;
+    expect(posts.columns.map((c) => [c.name, c.kind])).toEqual([["id", "pk"], ["user_id", "guess"], ["team_id", "fk"]]);
+  });
 });
