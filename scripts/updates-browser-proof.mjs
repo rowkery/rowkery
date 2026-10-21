@@ -3,8 +3,7 @@
 // for updates…" answers "up to date" or "couldn't check"; a ready update shows
 // "Rowkery 0.1.1 is ready · Restart", and Restart asks Rust to install and
 // relaunch, unless a query is running, when it says so and doesn't; ↵ never
-// takes it. ⌘K lists
-// the command, and the quiet check after launch offers a
+// takes it. ⌘K lists the command, and the quiet check after launch offers a
 // ready update on its own. The real install path is scripts/update-rehearsal.sh.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
