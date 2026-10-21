@@ -22,11 +22,13 @@ While a query runs, the **Run** button shows how long it has been running, and t
 | <kbd>⌥⌘↵</kbd> | Run all statements | Every statement in the editor, one after another |
 | <kbd>⌘E</kbd> | Explain statement | Nothing: it shows the plan. See [Query plans](/query-plans/) |
 | <kbd>⌃Space</kbd> | Complete at the caret | Nothing: it opens completion. See [Completion](/completion/) |
+| <kbd>⌘I</kbd> | Format SQL | Nothing: it lays out the statement under the caret, or the selected ones |
 
 ### Editing helpers
 
 - Typing `'` or `"` adds the closing quote. Typing the closing quote steps over it, and <kbd>⌫</kbd> in an empty pair removes both. A quote typed over a selection wraps it.
 - Brackets aren't paired.
+- <kbd>⌘I</kbd> (**Format SQL**, also in the **Edit** menu, the editor's **…** menu and <kbd>⌘K</kbd>) lays out the statement under the caret with one clause per line, keywords in capitals and function names in lower case. With text selected, it formats every statement the selection touches. The other statements stay as they are, and so do strings, comments and `$$` bodies. <kbd>⌘Z</kbd> undoes it in one step. If the SQL doesn't parse, nothing changes and a toast says where it stopped.
 - Pasting a connection URL into the editor shows **Looks like a connection URL** with **Connect**, in case you meant to open it. <kbd>Esc</kbd> keeps the text.
 
 ### Schema changes

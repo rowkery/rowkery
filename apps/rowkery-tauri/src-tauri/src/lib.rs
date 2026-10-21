@@ -1713,7 +1713,16 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         true,
         &refs(&app_items),
     )?];
-    for sub in spec.iter().filter(|s| s.submenu != "Rowkery") {
+    // Edit: the native Undo, Redo, Cut, Copy, Paste and Select All, then
+    // menu.json's "Edit" items (Format SQL).
+    let mut edit_items = match spec.iter().find(|s| s.submenu == "Edit") {
+        Some(own) => entries(&own.items)?,
+        None => Vec::new(),
+    };
+    for sub in spec
+        .iter()
+        .filter(|s| s.submenu != "Rowkery" && s.submenu != "Edit")
+    {
         let mut list = entries(&sub.items)?;
         match sub.submenu.as_str() {
             "View" => {
@@ -1733,20 +1742,20 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         }
         submenus.push(Submenu::with_items(app, &sub.submenu, true, &refs(&list))?);
         if sub.submenu == "File" {
-            submenus.push(Submenu::with_items(
-                app,
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
-                ],
-            )?);
+            let mut edit = vec![
+                Entry::Native(PredefinedMenuItem::undo(app, None)?),
+                Entry::Native(PredefinedMenuItem::redo(app, None)?),
+                sep()?,
+                Entry::Native(PredefinedMenuItem::cut(app, None)?),
+                Entry::Native(PredefinedMenuItem::copy(app, None)?),
+                Entry::Native(PredefinedMenuItem::paste(app, None)?),
+                Entry::Native(PredefinedMenuItem::select_all(app, None)?),
+            ];
+            if !edit_items.is_empty() {
+                edit.push(sep()?);
+                edit.append(&mut edit_items);
+            }
+            submenus.push(Submenu::with_items(app, "Edit", true, &refs(&edit))?);
         }
     }
     let refs: Vec<&dyn IsMenuItem<Wry>> =
@@ -2308,6 +2317,7 @@ mod tests {
             [
                 "Rowkery",
                 "File",
+                "Edit",
                 "Connection",
                 "Query",
                 "View",

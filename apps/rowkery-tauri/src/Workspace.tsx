@@ -1805,6 +1805,13 @@ export function Workspace({
           return;
         }
       }
+      // Query tabs: ⌘I formats the statement under the caret (or the selected
+      // ones); on a table tab it inserts a row, above.
+      if (mod && !e.altKey && !e.shiftKey && e.code === "KeyI" && !isTableTabRef.current) {
+        e.preventDefault();
+        runCommandRef.current("format-sql");
+        return;
+      }
       // Query tabs: ⌘F finds in the rows the result loaded.
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyF" && !isTableTabRef.current) {
         e.preventDefault();
@@ -3494,6 +3501,11 @@ export function Workspace({
   const exportWholeRef = useRef(exportWhole);
   exportWholeRef.current = exportWhole;
 
+  const formatEditorSql = async () => {
+    const error = await sqlEditorRef.current?.format(activeConnection?.kind === "sqlite" ? "sqlite" : "postgresql");
+    if (error) showToast("Couldn't format", error, "error");
+  };
+
   const runCommand = (id: string) => {
     if (id.startsWith("theme:")) return setThemeSetting(id.slice(6) as ThemeSetting);
     if (id === "mcp:on" || id === "mcp:off") return actions.setAllowMcp(id === "mcp:on");
@@ -3564,6 +3576,9 @@ export function Workspace({
         return cycleTab(-1);
       case "focus-editor":
         return sqlEditorRef.current?.focus();
+      case "format-sql":
+        if (commandById(id)?.canRun(commandState)) void formatEditorSql();
+        return;
       case "filter-schema":
         return focusFilter();
       case "toggle-sidebar":

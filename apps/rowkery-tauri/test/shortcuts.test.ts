@@ -137,7 +137,7 @@ describe("the registry against what the app prints", () => {
 });
 
 describe("keymaps", () => {
-  const SHARED = ["refresh-schema,retry-connect", "filter-rows,find-results", "follow-key,run", "edit-failed-connection,open-in-query", "explain,open-in-query", "edit-failed-connection,explain", "delete-row,remove-filter", "connection-save,run"];
+  const SHARED = ["refresh-schema,retry-connect", "filter-rows,find-results", "follow-key,run", "edit-failed-connection,open-in-query", "explain,open-in-query", "edit-failed-connection,explain", "delete-row,remove-filter", "connection-save,run", "format-sql,insert-row"];
   test.each(keymapIds)("%s: no chord is a predefined macOS accelerator or bound twice", (keymap) => {
     const seen = new Map<string, string>();
     for (const c of COMMANDS) {

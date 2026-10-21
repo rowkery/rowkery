@@ -15,6 +15,7 @@ import { CompletionPopup } from "./CompletionPopup";
 import type { CompletionResult } from "./sqlComplete";
 import { createSqlScan, lineAtOffset, lineStartOffsets, type SqlScan } from "./sqlHighlight";
 import { BLOCK, CATCH_UP_BLOCKS, linesNeeded, pickShownLines, type ShownLines } from "./sqlLineBlocks";
+import { formatSql, formatTarget, type FormatDialect } from "./sqlFormat";
 import { sqlToRun, statementRangeAtOffset, type CharRange } from "./sqlStatements";
 
 export interface SqlEditorHandle {
@@ -28,6 +29,11 @@ export interface SqlEditorHandle {
   focus: () => void;
   /** Replace the selection with `text`, keeping native undo. */
   insertText: (text: string) => void;
+  /**
+   * Formats the statements the selection touches, or the one under the caret,
+   * as one undo step. Resolves to the parse error when it couldn't, else null.
+   */
+  format: (dialect: FormatDialect) => Promise<string | null>;
 }
 
 /** Schema-aware completion, supplied by the window that owns the schema. */
@@ -420,10 +426,32 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
     syncCaretFromTextarea();
   }, [syncCaretFromTextarea]);
 
+  const format = useCallback(
+    async (dialect: FormatDialect) => {
+      const ta = textareaRef.current;
+      if (!ta || ta.readOnly) return null;
+      const { value, ranges } = live.current;
+      const range = formatTarget(value, ta.selectionStart, ta.selectionEnd, ranges);
+      if (!range) return null;
+      const selected = ta.selectionStart !== ta.selectionEnd;
+      const done = await formatSql(value, range, dialect);
+      if (!done.ok) return done.error;
+      // The first call waits for the formatter to load: typing meanwhile wins.
+      if (live.current.value !== value || ta.readOnly) return null;
+      if (done.sql === value.slice(range.start, range.end)) return null;
+      replaceRange(range.start, range.end, done.sql);
+      // A selection stays on what it formatted; a caret ends its statement.
+      if (selected) ta.setSelectionRange(range.start, range.start + done.sql.length);
+      syncCaretFromTextarea();
+      return null;
+    },
+    [replaceRange, syncCaretFromTextarea],
+  );
+
   useImperativeHandle(
     ref,
-    () => ({ getSqlToRun, getRunTarget, jumpTo, replaceRange, focus, insertText }),
-    [getSqlToRun, getRunTarget, jumpTo, replaceRange, focus, insertText],
+    () => ({ getSqlToRun, getRunTarget, jumpTo, replaceRange, focus, insertText, format }),
+    [getSqlToRun, getRunTarget, jumpTo, replaceRange, focus, insertText, format],
   );
 
   // The mark layer: the same text, transparent, with the marked token in a

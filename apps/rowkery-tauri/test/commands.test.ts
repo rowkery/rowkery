@@ -59,7 +59,8 @@ describe("chords", () => {
   // refreshes a connected window's schema and retries a failed one; ⌘F
   // filters a table tab and finds in a query tab's rows; ⌘↵ runs the
   // editor's statement on a query tab and will follow a key in the grid; ⌘E
-  // explains a query tab's statement and edits a table tab's SQL.
+  // explains a query tab's statement and edits a table tab's SQL; ⌘I formats a
+  // query tab's SQL and inserts a row in a table tab.
   const SHARED_CHORDS: Record<string, string> = {
     "retry-connect": "refresh-schema",
     "find-results": "filter-rows",
@@ -68,6 +69,7 @@ describe("chords", () => {
     "delete-row": "remove-filter",
     "connection-save": "run",
     explain: "open-in-query",
+    "format-sql": "insert-row",
   };
 
   test("shared chords are never runnable together", () => {
@@ -209,8 +211,8 @@ describe("menu bar", () => {
     expect(readFileSync(MENU_JSON, "utf8"), "run UPDATE_MENU=1 npm test").toBe(want);
   });
 
-  test("the app menu's items, then File, Connection, Query, View, Go, Window and Help", () => {
-    expect(MENU_BAR.map((m) => m.submenu)).toEqual(["Rowkery", "File", "Connection", "Query", "View", "Go", "Window", "Help"]);
+  test("the app menu's items, then File, Edit, Connection, Query, View, Go, Window and Help", () => {
+    expect(MENU_BAR.map((m) => m.submenu)).toEqual(["Rowkery", "File", "Edit", "Connection", "Query", "View", "Go", "Window", "Help"]);
   });
 
   test("Check for Updates… and Settings… are in the app menu, not Help", () => {
@@ -290,6 +292,9 @@ describe("menu bar", () => {
     const b = menuState({ ...base, running: true });
     expect(menuDiff(a, {})).toHaveLength(MENU_IDS.length);
     expect(menuDiff(a, a)).toEqual([]);
-    expect(menuDiff(b, a)).toEqual([{ id: "cancel", enabled: true, title: null, accelerator: "CmdOrCtrl+." }]);
+    expect(menuDiff(b, a)).toEqual([
+      { id: "format-sql", enabled: false, title: null, accelerator: "CmdOrCtrl+I" },
+      { id: "cancel", enabled: true, title: null, accelerator: "CmdOrCtrl+." },
+    ]);
   });
 });
