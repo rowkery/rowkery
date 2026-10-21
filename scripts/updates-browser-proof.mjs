@@ -2,7 +2,8 @@
 // In-app updates proof without a Tauri webview (stubbed `invoke`): ⌘K "Check
 // for updates…" answers "up to date" or "couldn't check"; a ready update shows
 // "Rowkery 0.1.1 is ready · Restart", and Restart asks Rust to install and
-// relaunch, unless a query is running, when it says so and doesn't. ⌘K lists
+// relaunch, unless a query is running, when it says so and doesn't; ↵ never
+// takes it. ⌘K lists
 // the command, and the quiet check after launch offers a
 // ready update on its own. The real install path is scripts/update-rehearsal.sh.
 //
@@ -189,6 +190,12 @@ await page.waitForSelector(visible + ' [data-testid="card-meta"]:not([data-state
 await page.waitForTimeout(1800);
 await pick();
 await page.waitForSelector("[data-toast-offer]");
+// ↵ while you type is the editor's, never the toast's Restart.
+await page.click(visible + ' [data-testid="sql-editor"]');
+await page.keyboard.press("Enter");
+await page.waitForTimeout(150);
+check((await calls("restart_to_update")) === 0, "↵ in the editor didn't restart");
+check((await page.locator("[data-toast-offer]").count()) === 1, "the ready toast stays after ↵");
 await page.click("[data-toast-offer]");
 await page.waitForTimeout(150);
 check((await calls("restart_to_update")) === 1, "Restart called restart_to_update");

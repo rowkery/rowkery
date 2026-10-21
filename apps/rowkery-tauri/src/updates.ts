@@ -210,7 +210,11 @@ export function restartToUpdate() {
 }
 
 function offerRestart(version: string) {
-  showOfferToast(`Rowkery ${version} is ready`, "Restart", "or it installs when you quit", { run: restartToUpdate });
+  // Its button only: the toast can arrive while you type, and ↵ there must not restart.
+  showOfferToast(`Rowkery ${version} is ready`, "Restart", "or it installs when you quit", {
+    run: restartToUpdate,
+    mouseOnly: true,
+  });
 }
 
 /** Automatic's moment to restart: unfocused, no key or click for `IDLE_MS`, nothing running. */
