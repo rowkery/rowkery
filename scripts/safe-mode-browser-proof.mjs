@@ -423,6 +423,9 @@ function stubSafeMode() {
   const inner = window.__TAURI_INTERNALS__.invoke;
   const check = (sql) => {
     const body = sql.replace(/--[^\n]*\n?/g, " ").trim();
+    // Like core's signal_check: ending another session is a destructive write.
+    if (/pg_terminate_backend\s*\(/i.test(body))
+      return { kind: "write", verb: "PG_TERMINATE_BACKEND", target: null, destructive: true, unlocks_writes: false };
     const verb = /^(\w+)/.exec(body)?.[1]?.toUpperCase() ?? "";
     if (!["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "CREATE", "ALTER"].includes(verb)) return null;
     const target = /^(?:\w+)\s+(?:FROM\s+|INTO\s+|TABLE\s+)?([\w.]+)/i.exec(body)?.[1] ?? null;
@@ -539,6 +542,15 @@ const warn = await text(page, `${bar} [data-testid="safe-bar-warn"]`);
 check(/^No WHERE: this changes every row in wallets \(about [\d,]+\)\.$/.test(warn), `destructive warning with row count (${warn})`);
 check((await text(page, `${bar} [data-testid="safe-btn"][data-tone="danger"]`)).startsWith("Update all rows"), "button says Update all rows");
 await shot(page, "2-destructive");
+await page.keyboard.press("Escape");
+
+// 4b. Ending another session: what it does, not a table drop.
+await type("SELECT pg_terminate_backend(4242);");
+await page.keyboard.press("Meta+Enter");
+await page.waitForSelector(`${bar}[data-tone="danger"]`);
+const endWarn = await text(page, `${bar} [data-testid="safe-bar-warn"]`);
+check(endWarn === "This ends another session: its open transaction rolls back.", `terminate warning (${endWarn})`);
+check((await text(page, `${bar} [data-testid="safe-btn"][data-tone="danger"]`)).startsWith("End session"), "button says End session");
 await page.keyboard.press("Escape");
 
 // 5. Read-only: refused, and ⇧⌘↵ can't push it through.

@@ -81,6 +81,7 @@ function stubTauri() {
     s(48230, { query_secs: 38.2, wait: "Lock: relation", blocked_by: [48213], query: "SELECT o.id, o.total FROM orders o WHERE o.customer_id = 4012" }),
     s(48231, { query_secs: 37.9, wait: "Lock: relation", blocked_by: [48213], query: "SELECT o.id, o.total FROM orders o WHERE o.customer_id = 4019" }),
     s(48199, { user: "bi", application: "metabase", query_secs: 65, wait: "IO: DataFileRead", query: "SELECT date_trunc('day', created_at), count(*) FROM events GROUP BY 1" }),
+    s(48240, { user: "alice", application: "Rowkery 9f8e7d6c", rowkery_tag: "9f8e7d6c", tab: { window_id: "another-window", tab_id: 1 }, query_secs: 2, query: "SELECT count(*) FROM orders" }),
     s(48250, { user: "alice", application: "psql", state: "idle in transaction", xact_secs: 12, query: "SELECT * FROM products WHERE sku = 'A-1'" }),
     s(48260, { user: "postgres", application: "", can_stop: false, query: null, query_secs: 3 }),
     s(48300, { state: "idle", state_secs: 120, query: "COMMIT" }),
@@ -163,8 +164,9 @@ check(JSON.stringify(first.slice(0, 2)) === JSON.stringify([47102, 48213]), `blo
 check(first.indexOf(48230) < first.indexOf(48199) && first.indexOf(48231) < first.indexOf(48199), "sessions waiting on a lock before the rest");
 check(!first.includes(48300), "idle sessions are hidden");
 check((await page.textContent(`${rowSel(47102)} [data-session-you]`)).trim() === "You · Query 1", "our own tab reads You · Query 1");
+check(!(await page.$(`${rowSel(48240)} [data-session-you]`)), "another window's tab 1 isn't You");
 check((await page.getAttribute(`${rowSel(47102)} [data-session-blocking]`, "data-session-blocking")) === "1", "the holder says blocking 1");
-check((await page.getAttribute(`${ws} [data-sessions-count]`, "data-sessions-count")) === "7", "the count says 7 of 9");
+check((await page.getAttribute(`${ws} [data-sessions-count]`, "data-sessions-count")) === "8", "the count says 8 of 10");
 check(/Not visible to your login/.test(await page.textContent(rowSel(48260))), "a query the login can't read says so");
 await away();
 check((await live()) === "live", "it says Live");
@@ -184,7 +186,7 @@ await away();
 // 4. The idle chip.
 await page.click(`${ws} [data-sessions-show-idle]`);
 await page.waitForSelector(rowSel(48300));
-check((await order()).length === 9, "removing the chip shows idle sessions too");
+check((await order()).length === 10, "removing the chip shows idle sessions too");
 await page.click(`${ws} [data-sessions-hide-idle]`);
 await page.waitForFunction((sel) => !document.querySelector(sel), rowSel(48300));
 

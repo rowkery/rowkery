@@ -60,3 +60,11 @@ test("a share counts until its time runs out", async () => {
   assert.equal(shareUntil("hour", now), now + 3_600_000);
   assert.equal(shareUntil("today", now), new Date(2026, 9, 9).getTime());
 });
+
+test("a share's duration button reads back from its end time", async () => {
+  const { shareDuration, shareUntil } = await import("../src/mcpActivity");
+  assert.equal(shareDuration(null), "off");
+  assert.equal(shareDuration(undefined), "off");
+  assert.equal(shareDuration(shareUntil("hour", now)), "hour");
+  assert.equal(shareDuration(shareUntil("today", now)), "today");
+});

@@ -341,8 +341,7 @@ await page.waitForSelector('[data-proposal="p_000000000001"] [data-testid="pp-dr
 // 9. Dry run, then Commit ⇧⌘↵: the rows moved, so nothing is saved and the fresh dry run shows.
 await page.click('[data-testid="pp-dry-run"]');
 await page.waitForSelector('[data-testid="pp-dry"][data-state="done"]');
-await page.focus('[data-testid="agents-page"]');
-await page.keyboard.press("Control+Shift+Enter");
+await page.keyboard.press("Control+Shift+Enter"); // straight after the click: focus stayed on the page
 await page.waitForFunction(() => document.querySelectorAll('[data-row="update"]').length === 2);
 check(JSON.stringify((await calls("proposal_commit"))[0]?.rows) === "[3]", "Commit sends the dry run's counts [3]");
 check(!(await page.$('[data-testid="pp-count"] [data-match]')), "2 rows no longer match the agent's 3");

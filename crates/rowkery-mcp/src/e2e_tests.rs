@@ -627,6 +627,15 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         let err = propose(sql).await.expect_err(sql);
         assert!(err.starts_with("Refused"), "{sql}: {err}");
     }
+    // A blank reason is asked for, not reported as a missing argument.
+    let blank = call(
+        &mcp,
+        "propose_change",
+        json!({ "connection": ID, "sql": "DELETE FROM mcp_p_orders WHERE id = 1", "reason": " " }),
+    )
+    .await
+    .expect_err("blank reason");
+    assert!(blank.starts_with("Say why"), "{blank}");
 
     // Two statements, several columns: the dry run shows old and new rows.
     let sent = propose(

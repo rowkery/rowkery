@@ -223,6 +223,9 @@ export function AgentsInbox({
 
   const dryRun = () => {
     if (!id || state === "running" || busy) return;
+    // The button disables while it runs, which would drop focus to the body and
+    // leave ⇧⌘↵ (Commit) with nowhere to land; the page keeps it instead.
+    rootRef.current?.focus({ preventScroll: true });
     setRun(id, { state: "running", dry: null, error: null });
     dryRunProposal(id).then(
       (dry) => setRun(id, { state: "done", dry, error: null }),
