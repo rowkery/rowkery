@@ -6,7 +6,7 @@ import { Keys } from "./Keys";
 
 /**
  * How long a toast stays: Paper's `toast` keyframes rise, hold and fade it
- * over the same 2.6 s (App.css). One with Undo or an offer holds longer and
+ * over the same 2.6 s (styles/toast.css). One with Undo or an offer holds longer and
  * fades on its exit instead.
  */
 const TOAST_MS = 2600;

@@ -6,7 +6,7 @@ import { showToast, toastPreview } from "./notify";
 import { commandKeys, keysFor } from "./commands";
 import { firstLine } from "./comments";
 import { INCOMING_CAP, type FollowLookup } from "./api";
-import type { KeyColumns, RowEditState } from "./ResultsGrid";
+import type { KeyColumns, RowEditState } from "./gridTypes";
 import type { Column, QueryResultDto, Value } from "./types";
 import { safeFormatCell } from "./types";
 import { jsonEditorText } from "./editBuffer";

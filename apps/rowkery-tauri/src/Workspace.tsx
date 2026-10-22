@@ -28,11 +28,8 @@ import {
   type ConnectExplanation,
   type CsvPreview,
   type FollowLookup,
-  type LocalServer,
-  type QueryPlan,
 } from "./api";
 import { PlanView, copy as copyPlanText, planText } from "./PlanView";
-import type { ConnectionState } from "./ConnectionSwitcher";
 import { CommandPalette, type PickMode } from "./CommandPalette";
 import { availableCommands, commandById, commandKeys, commandTip, keysFor, type CommandState } from "./commands";
 import { ZoneMenu } from "./ZoneMenu";
@@ -74,7 +71,8 @@ import {
 import { isMacPlatform } from "./platform";
 import { loadHistory, recordHistory, type HistoryEntry } from "./queryHistory";
 import { keywordHabits, recordKeywords } from "./keywordHabits";
-import { escLeftSelection, markReveal, ResultsGrid, type KeyColumns, type QuickLookView } from "./ResultsGrid";
+import { escLeftSelection, markReveal, ResultsGrid } from "./ResultsGrid";
+import type { KeyColumns, QuickLookView } from "./gridTypes";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
 import { sqlStatementRanges, type CharRange } from "./sqlStatements";
@@ -86,7 +84,6 @@ import { SchemaMap } from "./SchemaMap";
 import { depthKey, lastTableView, mapDepthFor, setLastTableView, setMapDepth } from "./viewMemory";
 import { mapGuessOn, setMapGuess } from "./mapGuess";
 import { Sidebar, SidebarFoot } from "./Sidebar";
-import type { SettingsSection } from "./SettingsPage";
 import { createPortal } from "react-dom";
 import { ENGINES } from "./engines";
 import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEditor";
@@ -118,11 +115,10 @@ import {
 import { flushPersist, readKey, writeKey } from "./persist";
 import type { SelectionStats } from "./selectionStats";
 import type { SavedTab } from "./windowStore";
-import { ResultRows, useResultRows } from "./resultStore";
+import { ResultRows } from "./resultStore";
 import { loadWidths, saveShapeWidths, type WidthsByShape } from "./gridWidths";
 import { flushTimings, initTimings, ledgerLines, mark, proofAutomation, startQuery } from "./timings";
 import { mcpShared } from "./mcpActivity";
-import type { ReportContext } from "./report";
 import { Presence, useSlidingThumb, useTabPresence } from "./motion";
 import { EnvTag } from "./EnvTag";
 import { GridMenu, useContextMenu } from "./GridMenu";
@@ -148,7 +144,7 @@ import { Inspector, type InspectorKind } from "./Inspector";
 import { useRowEdits } from "./useRowEdits";
 import { QueryErrorView } from "./QueryErrorView";
 import { nearestName, positionToOffset, quotedName, tokenAt } from "./queryError";
-import { EMPTY_HISTORY, goHistory, historyLabel, pushHistory, type History as NavHistory, type HistoryEntry as NavEntry } from "./history";
+import { EMPTY_HISTORY, goHistory, historyLabel, pushHistory, type History as NavHistory } from "./history";
 import { moveItem, useTabReorder } from "./tabReorder";
 import { setThemeSetting, useTheme, type ThemeSetting } from "./theme";
 import { connectionLine, markedNames, presentingOn, setPresenting, usePresenting } from "./presenting";
@@ -156,7 +152,6 @@ import { withMasked } from "./mcpAccess";
 import type {
   ConnectionEnv,
   ConnectionRecord,
-  MaskedColumns,
   QueryResultDto,
   SafeMode,
   Value,
@@ -172,11 +167,28 @@ import {
   safeFormatCell,
 } from "./types";
 import { Keys } from "./Keys";
-import { StatementList, type StatementResult } from "./StatementList";
+import { StatementList } from "./StatementList";
 import { instanceShortName } from "./CloudSqlFields";
 import { SessionDetail, SessionsBar, SessionsGrid, useSessions } from "./SessionsView";
-
-type ResultsView = "data" | "structure" | "map";
+import { Elapsed, RowsSoFar, TabStatus } from "./TabStatus";
+import type { WindowActions, WindowSession } from "./windowSession";
+import {
+  DEFAULT_PAGE,
+  IDLE_RUN,
+  MAX_CLOSED_TABS,
+  PAGE_SIZES,
+  entryOf,
+  keepShownStatement,
+  nextTabTitle,
+  queryTab,
+  shownStatement,
+  type ClosedTab,
+  type QueryTab,
+  type ResultsView,
+  type RunEnd,
+  type SortState,
+  type TabRun,
+} from "./workspaceTabs";
 
 /** Data | Structure | Map on a table tab. */
 const VIEWS = [
@@ -203,188 +215,8 @@ const SPECULATE_MS = 80;
 
 const SCHEMA_STALE_MS = 15 * 60_000;
 
-/** Rows a table tab loads at a time, unless its page size says otherwise. */
-const DEFAULT_PAGE = 1000;
-/** The page-size menu; 0 loads every row. */
-const PAGE_SIZES = [1000, 5000, 0];
-
-type SortState = SortKey;
-
-/**
- * A query tab is a SQL scratchpad. A table tab shows one table (no editor):
- * a filter line, header-click sorting and paged rows. The sidebar only ever
- * opens table tabs, so it can't overwrite a query.
- */
-interface QueryTab {
-  id: number;
-  /**
-   * "sessions": the server's sessions (SessionsView.tsx), Postgres only.
-   * "import": Import CSV's preview, beside its panel; never saved.
-   */
-  kind: "query" | "table" | "sessions" | "import";
-  title: string;
-  sql: string;
-  view?: ResultsView;
-  /** Table tabs: the table, its filter (as applied, and as typed) and sort. */
-  tableKey?: string;
-  schema?: string;
-  table?: string;
-  filter?: string;
-  /** The filter as chips; `filter` is always `chipsToWhere(chips)`. */
-  chips?: FilterChip[];
-  /** Sort keys, primary first (a table tab sorts on the server). */
-  sort?: SortState[];
-  /** Table tabs: columns left out of the SELECT list. */
-  hidden?: string[];
-  /** Table tabs: rows per page (`DEFAULT_PAGE` when unset; 0 is All). */
-  pageSize?: number;
-  /** The reusable tab a sidebar click retargets; keeping it makes it a normal tab. */
-  preview?: boolean;
-  /** Table tabs: staged row edits, saved with the tab until Commit or Discard. */
-  edits?: EditBuffer;
-  /** Map: the table it is centred on, when not the tab's own (session only). */
-  mapCentre?: { key: string; name: string };
-}
-
-/** Where a table tab is, as a history entry (null for query tabs). */
-function entryOf(tab: QueryTab | undefined): NavEntry | null {
-  if (!tab || tab.kind !== "table" || !tab.tableKey) return null;
-  return {
-    tableKey: tab.tableKey,
-    name: tab.table ?? tab.title,
-    view: tab.view === "structure" || tab.view === "map" ? tab.view : "data",
-    centre: tab.view === "map" ? tab.mapCentre : undefined,
-    filter: tab.filter ?? "",
-    chips: tab.chips,
-    sort: tab.sort ?? [],
-    pageSize: tab.pageSize,
-  };
-}
-
 /** Set once the first explicit chip is applied in this install: typing on a cell then filters. */
 const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
-
-/** A closed tab, kept for Undo and ⌘⇧T until the app quits. */
-interface ClosedTab {
-  tab: QueryTab;
-  run: TabRun | undefined;
-  /** Where it sat in the tab row. */
-  index: number;
-}
-
-/** Recently closed tabs kept per window (their rows only while the Undo toast is up). */
-const MAX_CLOSED_TABS = 10;
-
-const queryTab = (id: number, title: string, sql: string): QueryTab => ({
-  id,
-  kind: "query",
-  title,
-  sql,
-});
-
-/** "1,400 rows ·" in the results header while a query streams; re-renders on its own. */
-function RowsSoFar({ rows }: { rows: ResultRows }) {
-  const n = useResultRows(rows);
-  return (
-    <span data-rows-so-far={n}>
-      {n.toLocaleString()} {n === 1 ? "row" : "rows"} ·{" "}
-    </span>
-  );
-}
-
-/** A query tab's last run. Tabs run independently, several at a time. */
-/** How one run ended: Run All goes on only after "done". */
-type RunEnd = "done" | "error" | "cancelled" | "held" | "skipped";
-
-interface TabRun {
-  result: QueryResultDto | null;
-  /** The run failed before the database answered (bad session, network). */
-  error: string | null;
-  /**
-   * The one table `result` reads (a table tab's table, or what the query's SQL
-   * reads): its key columns get icons and Structure shows it.
-   */
-  tableKey: string | null;
-  /**
-   * More rows remain: a table tab's last page came back full. Load more (or
-   * scrolling to the end) gets them. A query tab gets every row at once.
-   */
-  hasMore: boolean;
-  /** The statement the last run ran (a query tab's), for Export and Copy all. */
-  ranSql?: string;
-  /**
-   * A failed run's token in the editor (dotted underline until the next
-   * edit) and, for an unknown column or table, the name it probably meant.
-   */
-  errorMark?: { start: number; end: number; suggestion: string | null } | null;
-  /** An export or copy-all of this tab's result is running: rows so far. */
-  exporting?: { verb: "Exporting" | "Copying"; rows: number } | null;
-  /** `Date.now()` when the running query started; null when none is running. */
-  startedAt: number | null;
-  /** The running fetch appends a page to the rows shown (they, and their edits, stay). */
-  appending?: boolean;
-  cancelling: boolean;
-  /**
-   * The run waits for a free connection: every one the saved connection may
-   * hold (10) is busy running something or holding a transaction.
-   */
-  waiting?: boolean;
-  /** How the last run ended: a green or red dot on the tab until the next run. */
-  outcome: "done" | "error" | null;
-  /** How long the last finished run took; shown after the tab's name. */
-  elapsedMs: number | null;
-  /**
-   * Safe mode stopped the last run; `sql` is exactly what would run.
-   * `explain`: it was a timed plan of a write (⌘E, Run with timings).
-   */
-  held: {
-    sql: string;
-    hold: SafetyHold;
-    tableKey: string | null;
-    explain?: boolean;
-    /** A statement of a run of several: confirmed, it joins that run's list. */
-    statement?: { at: number | null };
-  } | null;
-  /** ⌘E's plan of `sql`, shown in place of the results until the next run. */
-  plan?: { plan: QueryPlan; sql: string; elapsedMs: number } | null;
-  /** The running query's rows are arriving; `result` holds them so far. */
-  streaming: boolean;
-  /** Counts runs (not appended pages): a new one scrolls the grid to the top. */
-  runNo?: number;
-  /**
-   * A run of several statements (Run All, or a selection of several): each
-   * one's result, in order. The fields above show `statements[statementAt]`.
-   */
-  statements?: StatementResult[] | null;
-  statementAt?: number;
-}
-
-/** The run's statements with the one shown as it is now. */
-function keepShownStatement(run: TabRun): Pick<TabRun, "statements"> {
-  if (!run.statements || run.statementAt === undefined) return {};
-  const statements = run.statements.slice();
-  statements[run.statementAt] = shownStatement(run);
-  return { statements };
-}
-
-/** The statement a tab shows, to keep while it shows another. */
-function shownStatement(run: TabRun): StatementResult {
-  const { result, tableKey, ranSql, runNo } = run;
-  return { result, tableKey, ranSql, runNo };
-}
-
-const IDLE_RUN: TabRun = {
-  streaming: false,
-  result: null,
-  error: null,
-  tableKey: null,
-  hasMore: false,
-  startedAt: null,
-  cancelling: false,
-  outcome: null,
-  elapsedMs: null,
-  held: null,
-};
 
 /** How long a confirmation such as "Copied 100 rows" stays in the results header. */
 const NOTICE_MS = 2400;
@@ -409,185 +241,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 
-/** Lowest "Query N" not already open, so closing tabs never yields duplicates. */
 /** A table's name as SQL, schema-qualified unless it is the default one (⌥↵ inserts it). */
 function tableIdent(schema: string, name: string): string {
   const bare = schema === "public" || schema === "main";
   return bare ? sqlIdent(name) : `${sqlIdent(schema)}.${sqlIdent(name)}`;
-}
-
-function nextTabTitle(tabs: QueryTab[]): string {
-  const used = new Set(tabs.map((t) => t.title));
-  let n = 1;
-  while (used.has(`Query ${n}`)) n++;
-  return `Query ${n}`;
-}
-
-/**
- * The run clock: one 100 ms interval, alive only while an `Elapsed` in a
- * shown window reads it. Only those few spans re-render as it ticks; the
- * workspace and the grid never do.
- */
-const clock = { now: Date.now(), timer: 0, listeners: new Set<() => void>() };
-
-function subscribeClock(fn: () => void) {
-  clock.listeners.add(fn);
-  if (!clock.timer) {
-    clock.now = Date.now();
-    clock.timer = window.setInterval(() => {
-      clock.now = Date.now();
-      for (const l of clock.listeners) l();
-    }, 100);
-  }
-  return () => {
-    clock.listeners.delete(fn);
-    if (clock.listeners.size === 0) {
-      window.clearInterval(clock.timer);
-      clock.timer = 0;
-    }
-  };
-}
-
-const noSubscribe = () => () => {};
-const clockNow = () => clock.now;
-
-/** Time since `since`, ticking while `active` (a hidden window's stands still). */
-function Elapsed({ since, active, format }: { since: number; active: boolean; format: (ms: number) => string }) {
-  const now = useSyncExternalStore(active ? subscribeClock : noSubscribe, clockNow);
-  return <>{format(Math.max(0, Math.max(now, since) - since))}</>;
-}
-
-const formatRunningTab = (ms: number) => formatTabTime(ms);
-
-/**
- * A query tab's title with its run: a spinner and the elapsed time while it
- * runs, then a green or red dot for how it ended and how long it took, both
- * kept until the next run.
- */
-function TabStatus({
-  run,
-  table,
-  active,
-  spinning = false,
-  children,
-}: {
-  run?: TabRun;
-  /** The import tab while its import runs (it has no query run). */
-  spinning?: boolean;
-  table: boolean;
-  /** The window is shown: a running tab's time ticks. */
-  active: boolean;
-  children: ReactNode;
-}) {
-  const running = spinning || run?.startedAt != null;
-  const outcome = running ? null : run?.outcome;
-  const ms = outcome ? (run?.elapsedMs ?? null) : null;
-  return (
-    <>
-      {running ? (
-        <span data-testid="query-tab-spin" className="query-tab-spin" aria-label="Running" />
-      ) : outcome ? (
-        <span
-          data-testid="query-tab-dot"
-          className={`query-tab-dot ${outcome}`}
-          data-outcome={outcome}
-          aria-label={outcome === "error" ? "Failed" : "Succeeded"}
-        />
-      ) : (
-        table && <TableIcon size={12} className="query-tab-icon" />
-      )}
-      <span data-testid="query-tab-title" className="query-tab-title">{children}</span>
-      {running && run?.startedAt != null ? (
-        <span data-testid="query-tab-time" className="query-tab-time">
-          <Elapsed since={run.startedAt} active={active} format={formatRunningTab} />
-        </span>
-      ) : running ? null : (
-        ms !== null && <span data-testid="query-tab-time" className="query-tab-time">{formatTabTime(ms, true)}</span>
-      )}
-    </>
-  );
-}
-
-/**
- * "0.4s", "42.1s", "3:07": short, and steady in width as it ticks. A
- * finished run under a second reads in ms ("12ms"), not "0.0s".
- */
-function formatTabTime(ms: number, finished = false): string {
-  if (finished && ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const s = Math.floor(ms / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-/** A window's connection as the app shell tracks it. */
-export interface WindowSession {
-  id: string;
-  connectionId: string | null;
-  /** Database the window is on; null until it has connected once. */
-  database: string | null;
-  state: ConnectionState;
-  schema: SchemaCatalog | null;
-  /** From the last connect: "16.4" for Postgres, the SQLite library version. */
-  serverVersion: string | null;
-  connectMs: number | null;
-  error: string | null;
-  /** When `schema` was loaded (ms since epoch). */
-  schemaAt: number | null;
-  /** A reload asked for by hand (refresh button, ⌘R) is running. */
-  refreshing: boolean;
-}
-
-/** Things a window asks the app shell to do. */
-export interface WindowActions {
-  selectConnection: (id: string) => void;
-  reconnect: () => void;
-  newConnection: () => void;
-  editConnection: (id: string, mark?: { field: string; message: string }) => void;
-  /** Connect the window again, on the same database (a failed connection's Retry). */
-  retryConnect: () => void;
-  openConnectionSwitcher: () => void;
-  openDatabaseSwitcher: () => void;
-  newWindow: () => void;
-  closeWindow: () => void;
-  cycleWindow: (dir: 1 | -1) => void;
-  setEnvironment: (env: ConnectionEnv | null) => void;
-  setSafeMode: (mode: SafeMode) => void;
-  setAllowMcp: (allow: boolean) => void;
-  /** The grid header's Mark as sensitive: a connection's whole sensitive-column map. */
-  setMaskedColumns: (id: string, masked: MaskedColumns) => void;
-  /** ⌘K MCP activity / MCP access / Connect an agent. */
-  /** The Agents page: at its log, its switches, with Connect an agent open, or wherever it last was. */
-  openMcp: (tab: "activity" | "access" | "connect" | "page" | "edit") => void;
-  /** Agents' proposed changes, on the review page. */
-  reviewProposals: () => void;
-  toggleSidebar: () => void;
-  /**
-   * Reloads a window's schema in the background, keeping the current one
-   * meanwhile. `manual` (refresh button, ⌘R) shows a spinner and a toast.
-   */
-  refreshSchema: (windowId: string, manual?: boolean) => void;
-  /** Opens the Report an Issue sheet with this window's context. */
-  reportIssue: (context: ReportContext) => void;
-  /** ⌘K Open (`reset` false) / Reset (`reset` true) the sample database. */
-  openSample: (reset: boolean) => void;
-  /** ⇧⌘/: the keyboard shortcuts sheet. */
-  openShortcuts: () => void;
-  /** Help > Third-party Notices: the notices sheet. */
-  openNotices: () => void;
-  /** Rowkery > Check for Updates…: says what it found (updates.ts). */
-  checkForUpdates: () => void;
-  /** ⌘,, the foot's gear or its update button: the Settings page, on a section. */
-  openSettings: (section?: SettingsSection) => void;
-  /** ⌘O: the file dialog; the file becomes a connection named after it. */
-  openSqliteFile: () => void;
-  /** A SQLite file by path (pasted into ⌘K): a connection named after it. */
-  openSqlitePath: (path: string) => void;
-  /** ⌘V outside a text field (or the editor toast's Connect): the sheet filled from `text`, or from the clipboard. */
-  pasteConnection: (text?: string, openAnyway?: boolean) => void;
-  /** A Found on this Mac row: connect with libpq's defaults, or open the sheet on failure. */
-  connectFound: (server: LocalServer) => void;
-  /** The import panel's Connection picker: Import CSV `path` in a window on that connection. */
-  importInConnection: (id: string, path: string) => void;
 }
 
 /** Menu picks that open a sheet, menu or setting over the Agents page, so the page stays. */
@@ -2278,7 +1935,7 @@ export function Workspace({
   useEffect(() => {
     onRunningChange?.(windowId, runningCount);
   }, [onRunningChange, windowId, runningCount]);
-  // Elapsed times tick in `Elapsed` alone (the run clock above): a running
+  // Elapsed times tick in `Elapsed` alone (the run clock, TabStatus.tsx): a running
   // query never re-renders the workspace or the grid.
 
   // Cancel asks the server; pressed again (Force stop, or Esc twice) core
@@ -2653,7 +2310,7 @@ export function Workspace({
     return () => document.removeEventListener("paste", onPaste, true);
   }, [active]);
 
-  // A hidden window keeps its boxes (`content-visibility: hidden`, App.css),
+  // A hidden window keeps its boxes (`content-visibility: hidden`, styles/windows.css),
   // which not every engine treats as leaving focus: let go of it here, as
   // `display: none` did, so keys never land in a window that isn't shown.
   const workspaceRef = useRef<HTMLDivElement>(null);

@@ -1,0 +1,100 @@
+/* ---------- Scrollbars ----------
+   macOS with "always show scroll bars" (and Linux / Windows) would draw the
+   wide system bar. One thin, dim thumb everywhere instead, on no track. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 10px;
+  background-clip: content-box;
+  background-color: var(--line2);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--faint);
+}
+
+/* A tip (Tips.ts): one 12 px line under the control it is about, never a popover. */
+.tip-line {
+  position: absolute;
+  z-index: 6;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+  font: 500 12px/1.4 var(--sans);
+  color: var(--mute);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: tip-in 160ms var(--ease-out);
+}
+
+@keyframes tip-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Under the tab row, from its left. */
+.tip-tab-row {
+  top: calc(100% - 4px);
+  left: 12px;
+}
+
+/* Under the Data | Structure thumb, right-aligned with it. */
+.tip-view {
+  top: calc(100% + 4px);
+  right: 0;
+}
+
+/* Under the grid header, at the dragged column's left edge. */
+.rg-tip {
+  top: calc(100% + 4px);
+  margin-left: 4px;
+}
+
+/* The database picker's footer line, in place of the static hint. */
+.db-foot.db-tip {
+  position: static;
+  border-radius: 0;
+  background: none;
+  font-size: 12px;
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tip-line {
+    animation: none;
+  }
+}
+
+/* ⌘K group headers print their scope prefix at the right. */
+.cp-prefix {
+  margin-left: auto;
+  font: 10.5px var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+}
+
+/* The glide hover (motion.tsx useGlideHover): one fill per list that moves
+   to the row under the pointer, under the rows, instead of a fill per row. */
+.glide {
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: 0;
+  border-radius: var(--glide-radius, 6px);
+  background: var(--hover);
+  opacity: 0;
+  pointer-events: none;
+}

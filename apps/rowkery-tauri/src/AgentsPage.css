@@ -871,7 +871,7 @@
 
 /* ---------- Connect an agent as a sheet (over the connection sheet) ---------- */
 
-/* A Paper sheet (App.css, Paper sheets). */
+/* A Paper sheet (styles/sheets.css). */
 .mcp-overlay {
   position: fixed;
   inset: 0;

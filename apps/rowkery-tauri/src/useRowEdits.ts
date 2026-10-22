@@ -21,7 +21,7 @@ import {
 import { showToast } from "./notify";
 import { followLabel } from "./QuickLook";
 import { ResultRows, useResultRows } from "./resultStore";
-import type { EditTarget, GridEditing, RowEditState } from "./ResultsGrid";
+import type { EditTarget, GridEditing, RowEditState } from "./gridTypes";
 import type { EnumNode, QueryResultDto, SafeMode, TableNode, Value } from "./types";
 
 const NO_ROWS = new ResultRows();
