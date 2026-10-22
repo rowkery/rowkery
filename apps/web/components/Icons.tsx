@@ -62,15 +62,6 @@ export const LockIcon = () => (
   </Line>
 );
 
-/** Orange shades: a column marked sensitive. */
-export const ShadesIcon = () => (
-  <svg width={22} height={22} viewBox="0 0 24 24" aria-hidden="true">
-    <rect x="2.5" y="8" width="8" height="6.5" rx="3" fill="var(--acc)" />
-    <rect x="13.5" y="8" width="8" height="6.5" rx="3" fill="var(--acc)" />
-    <path d="M10.5 10.5h3" stroke="var(--acc)" strokeWidth="1.8" strokeLinecap="round" />
-  </svg>
-);
-
 /** A heart: free, and Sponsor. */
 export const HeartIcon = () => (
   <Line size={18} width={2.1}>

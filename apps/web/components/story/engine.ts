@@ -208,7 +208,7 @@ class AgentScene extends Scene {
   ask = $(".a-ask", this.stage);
   checks = $(".a-checks", this.stage);
   checkEls = $$(".check", this.stage);
-  legend = $(".a-legend", this.stage);
+  chat = $(".a-chat", this.stage);
   toast = $(".a-toast", this.stage);
   peek = $(".a-peek", this.stage);
   sql = $(".a-sql", this.stage);
@@ -261,8 +261,9 @@ class AgentScene extends Scene {
       setText(el, morph(real, masked, k, Math.floor(s * 60)));
       el.classList.toggle("mask", k >= masked.length);
     });
-    const lg = L(2.95, 3.25) * (1 - L(3.5, 3.75));
-    place(this.legend, phone ? { x: 40, y: mix(400, 350, lg), o: lg } : { x: inX(mix(40, -150, lg), 302), y: mix(360, 330, lg), o: lg });
+    // Once the stand-ins are in, the same rows lift out to the left as the agent's reply in the chat.
+    const ct = L(3.3, 3.5) * (1 - L(3.55, 3.75));
+    place(this.chat, phone ? { x: 20, y: mix(200, 150, ct), o: ct } : { x: inX(mix(40, -150, ct), 332), y: mix(280, 250, ct), o: ct });
     // Step 4: the change Claude proposed slides in; Commit presses; a note says it's done.
     css(this.review, "transform", `translateX(${((1 - seg(s, 3.6, 3.95)) * 102).toFixed(2)}%)`);
     this.commit.classList.toggle("press", s > 4.18 && s < 4.3);

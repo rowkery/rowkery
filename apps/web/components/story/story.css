@@ -49,7 +49,7 @@
 .lc { background: var(--card); border-radius: 14px; padding: 14px 16px; box-shadow: 0 0 0 1px var(--line), 0 24px 60px rgba(0, 0, 0, 0.55); font-size: 13.5px; }
 .lc .cap2 { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 10px; font: 400 11.5px var(--mono); color: var(--grey); }
 .bubble { display: flex; gap: 10px; align-items: flex-start; width: 290px; max-width: 100%; }
-.bubble .av, .legend .ic { display: grid; place-items: center; flex: none; background: var(--card2); }
+.bubble .av { display: grid; place-items: center; flex: none; background: var(--card2); }
 .bubble .av { width: 28px; height: 28px; border-radius: 9px; }
 .bubble b { display: block; font-size: 13px; font-weight: 500; }
 .bubble p { margin-top: 2px; font-size: 15px; line-height: 1.4; color: #e3e4e6; }
@@ -60,10 +60,17 @@
 .check .ok { margin-left: auto; font: 500 12px var(--mono); color: var(--ok); transition: opacity 0.15s, transform 0.2s; }
 .check.done { color: var(--fg); }
 .check.done .ok { transition: opacity 0.25s, transform 0.35s var(--ease); }
-.legend { display: flex; gap: 12px; align-items: center; width: 270px; max-width: 100%; }
-.legend .ic { width: 34px; height: 34px; border-radius: 10px; }
-.legend p { font-size: 13px; line-height: 1.4; color: var(--grey); }
-.legend p b { font-weight: 500; color: var(--fg); }
+.chat { width: 332px; max-width: 100%; padding: 12px; }
+.chat .bubble { width: auto; padding: 2px 4px 12px; }
+.chat .view { border-radius: 10px; background: var(--wpanel); overflow: hidden; font-size: 12px; color: var(--grey); }
+.chat .vhead, .chat .vfoot, .chat .vr { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 0 12px; }
+.chat .vhead { height: 34px; }
+.chat .vhead span:first-child { color: var(--fg); }
+.chat .env { margin-left: 4px; font-style: normal; color: var(--prd); }
+.chat .vr { height: 30px; border-top: 1px solid var(--wline); font: 400 12px var(--mono); color: var(--fg); }
+.chat .vr .mask { color: var(--acc); }
+.chat .vfoot { height: 44px; border-top: 1px solid var(--wline); }
+.chat .vfoot .btn { height: 28px; padding: 0 12px; font-size: 12px; }
 .toast { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-weight: 500; white-space: nowrap; }
 .toast .ok { color: var(--ok); }
 .review { display: grid; gap: 12px; padding: 16px; }
