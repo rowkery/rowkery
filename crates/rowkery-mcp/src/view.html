@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rowkery</title>
+<style>
+/* Rowkery's Paper tokens (apps/rowkery-tauri/src/App.css), the few this view uses. */
+:root {
+  color-scheme: light;
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bg: #ffffff; --panel: #f7f7f7; --bar: #f3f3f3; --line: #e6e6e6; --line2: #d6d6d6;
+  --rowline: #efefef; --hover: #ededed;
+  --text: #0a0a0a; --text2: #2b2b2b; --mute: #5c5c5c; --dim: #6b6b6b; --faint: #adadad;
+  --acc: #d9641a; --accbg: rgba(217, 100, 26, 0.1);
+  --ink: #0a0a0a; --inkfg: #ffffff; --onfill: #fff;
+  --ok: #2e8b57; --okbg: rgba(46, 139, 87, 0.08); --del: #c43d3d; --delbg: rgba(196, 61, 61, 0.07);
+  --tagmix: 60%;
+  --env-prd: #d6433f; --env-stg: #e38a2e; --env-dev: #2f5bb7; --env-local: #2e8b57;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a1a; --panel: #212121; --bar: #1e1e1e; --line: #2e2e2e; --line2: #3d3d3d;
+  --rowline: #242424; --hover: #2a2a2a;
+  --text: #ffffff; --text2: #d6d6d6; --mute: #a4a8ae; --dim: #8b9097; --faint: #5f656c;
+  --acc: #ff8a3d; --accbg: rgba(255, 138, 61, 0.14);
+  --ink: #ffffff; --inkfg: #1a1a1a; --onfill: #1a1a1a;
+  --ok: #5cc98c; --okbg: rgba(92, 201, 140, 0.1); --del: #ef6b6b; --delbg: rgba(239, 107, 107, 0.1);
+  --tagmix: 66%;
+  --env-prd: #f0525a; --env-stg: #f59a3c; --env-dev: #4f96f7; --env-local: #43c27a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: transparent; }
+body { font: 13px/1.4 var(--sans); color: var(--text); -webkit-font-smoothing: antialiased; }
+[hidden] { display: none !important; }
+.rk { background: var(--bg); border-radius: 10px; box-shadow: 0 0 0 1px var(--line); overflow: hidden; }
+.head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 12px; border-bottom: 1px solid var(--line); min-width: 0; user-select: none; }
+.mark { width: 16px; height: 17px; color: var(--acc); flex-shrink: 0; display: grid; }
+.mark svg { width: 100%; height: 100%; }
+.conn { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 8px; border-radius: 6px; background: var(--panel); font-size: 12px; color: var(--text2); }
+.conn .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env { --env: var(--faint); flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px; height: 16px; padding: 0 5px; border-radius: 4px; font-size: 10.5px; font-weight: 600;
+  background: color-mix(in srgb, var(--env) 14%, transparent); color: color-mix(in srgb, var(--env) var(--tagmix), var(--text)); }
+.env::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--env); }
+.env-prd { --env: var(--env-prd); background: color-mix(in srgb, var(--env-prd) 16%, transparent); }
+.env-stg { --env: var(--env-stg); } .env-dev { --env: var(--env-dev); } .env-local { --env: var(--env-local); }
+.meta { margin-left: auto; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.icon { width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: var(--mute); display: grid; place-items: center; cursor: pointer; padding: 0; }
+.icon:hover { background: var(--hover); color: var(--text); }
+.grid { overflow: auto; max-height: 360px; }
+.full .grid { max-height: none; height: calc(100vh - 82px); }
+table { border-collapse: collapse; min-width: 100%; font: 12px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left; font: 500 12px var(--sans); color: var(--mute); padding: 6px 10px; white-space: nowrap; border-bottom: 1px solid var(--line); cursor: pointer; user-select: none; }
+th.num { text-align: right; }
+th[aria-sort="ascending"], th[aria-sort="descending"] { color: var(--text); }
+th .ar { color: var(--acc); font-size: 10px; margin-left: 3px; }
+td { padding: 5px 10px; border-bottom: 1px solid var(--rowline); white-space: nowrap; color: var(--text2); max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+td.num { text-align: right; }
+td.masked, td.null { color: var(--dim); }
+td.null { font-style: italic; }
+tbody tr:hover td { background: var(--hover); }
+.empty { padding: 14px 12px; color: var(--dim); }
+.foot { display: flex; align-items: center; gap: 10px; padding: 7px 10px 7px 12px; border-top: 1px solid var(--line); background: var(--bar); min-height: 40px; }
+.note { font-size: 12px; color: var(--dim); min-width: 0; }
+.btn { margin-left: auto; flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; padding: 6px 11px; font: 600 12.5px var(--sans); cursor: pointer; background: var(--ink); color: var(--inkfg); }
+.btn.acc { background: var(--acc); color: var(--onfill); }
+.btn:disabled { opacity: 0.6; cursor: default; }
+.btn:focus-visible, th:focus-visible, .icon:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+.body { padding: 12px; display: grid; gap: 10px; }
+.verb { display: flex; align-items: center; gap: 8px; font-weight: 600; flex-wrap: wrap; }
+.verb .target { font-family: var(--mono); font-weight: 500; }
+.verb .expect { font-weight: 400; color: var(--dim); font-size: 12px; }
+.badge { font: 600 10.5px var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--acc); color: var(--onfill); }
+.badge.del { background: var(--del); }
+.reason { color: var(--text2); }
+.sql { font: 11.5px/1.5 var(--mono); background: var(--panel); border-radius: 7px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text2); margin: 0; }
+.state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 6px; background: var(--accbg); color: var(--acc); }
+.state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.state.committed { background: var(--okbg); color: var(--ok); }
+.state.rejected, .state.failed { background: var(--delbg); color: var(--del); }
+.state.expired { background: var(--panel); color: var(--dim); }
+.error { padding: 10px 12px; color: var(--text2); }
+.wait { padding: 10px 12px; color: var(--dim); }
+@media (prefers-reduced-motion: no-preference) { .btn, .icon { transition: background 0.12s; } }
+</style>
+</head>
+<body>
+<div id="wait" class="wait" data-testid="view-wait">Waiting for Rowkery…</div>
+<div id="view" class="rk" data-testid="mcp-view" hidden>
+  <div class="head">
+    <span class="mark" aria-hidden="true"><!--mark--></span>
+    <span class="conn" id="conn" data-testid="view-connection" hidden><span class="name" id="conn-name"></span><span class="env" id="conn-env" hidden></span></span>
+    <span class="meta" id="meta"></span>
+    <button class="icon" id="full" data-testid="view-full" type="button" hidden aria-label="Full screen" title="Full screen">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 5V1h4M12 5V1H8M1 8v4h4M12 8v4H8"/></svg>
+    </button>
+  </div>
+  <div id="content"></div>
+  <div class="foot" id="foot" hidden>
+    <span class="note" id="note" data-testid="view-note"></span>
+    <button class="btn" id="action" data-testid="view-action" type="button" hidden></button>
+  </div>
+</div>
+<script>
+"use strict";
+// MCP Apps, protocol 2026-01-26: JSON-RPC over postMessage with the host.
+const PROTOCOL = "2026-01-26";
+const $ = (id) => document.getElementById(id);
+let nextId = 1;
+const pending = new Map();
+let host = { capabilities: {}, context: {} };
+let toolArgs = {};
+let poll = null;
+
+function post(msg) { window.parent.postMessage({ jsonrpc: "2.0", ...msg }, "*"); }
+function request(method, params) {
+  const id = nextId++;
+  post({ id, method, params });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+function notify(method, params) { post({ method, params }); }
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const msg = event.data;
+  if (!msg || msg.jsonrpc !== "2.0") return;
+  if (msg.id !== undefined && !msg.method) {
+    const waiter = pending.get(msg.id);
+    if (!waiter) return;
+    pending.delete(msg.id);
+    if (msg.error) waiter.reject(new Error(msg.error.message || "Error"));
+    else waiter.resolve(msg.result);
+    return;
+  }
+  switch (msg.method) {
+    case "ui/notifications/tool-input": toolArgs = (msg.params && msg.params.arguments) || {}; break;
+    case "ui/notifications/tool-result": show(msg.params || {}); break;
+    case "ui/notifications/tool-cancelled": $("wait").textContent = "Cancelled."; break;
+    case "ui/notifications/host-context-changed": applyContext(msg.params || {}); break;
+    case "ui/resource-teardown": stopPolling(); post({ id: msg.id, result: {} }); break;
+    case "ping": post({ id: msg.id, result: {} }); break;
+    default: if (msg.id !== undefined) post({ id: msg.id, error: { code: -32601, message: "Method not found" } });
+  }
+});
+
+function applyContext(ctx) {
+  host.context = { ...host.context, ...ctx };
+  const theme = host.context.theme
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.dataset.theme = theme;
+  const modes = host.context.availableDisplayModes || [];
+  $("full").hidden = !modes.includes("fullscreen");
+  const full = host.context.displayMode === "fullscreen";
+  document.body.classList.toggle("full", full);
+  $("full").setAttribute("aria-label", full ? "Back to the chat" : "Full screen");
+  $("full").title = $("full").getAttribute("aria-label");
+}
+
+$("full").addEventListener("click", async () => {
+  const mode = host.context.displayMode === "fullscreen" ? "inline" : "fullscreen";
+  try {
+    const result = await request("ui/request-display-mode", { mode });
+    applyContext({ displayMode: (result && result.mode) || mode });
+  } catch { /* the host said no; stay as we are */ }
+});
+
+const canCall = () => !!host.capabilities.serverTools;
+async function callTool(name, args) {
+  const result = await request("tools/call", { name, arguments: args });
+  const text = result && result.content && result.content[0] && result.content[0].text;
+  if (result && result.isError) throw new Error(text || "Error");
+  try { return JSON.parse(text); } catch { return {}; }
+}
+
+// What the tool returned: structuredContent from Rowkery, else the text the agent got.
+function show(result) {
+  stopPolling();
+  $("wait").hidden = true;
+  $("view").hidden = false;
+  const text = result.content && result.content[0] && result.content[0].text;
+  if (result.isError) return showError(text || "Something went wrong.");
+  let data = result.structuredContent;
+  if (!data) {
+    try { data = JSON.parse(text); } catch { data = {}; }
+    data.kind = data.columns ? "rows" : data.id ? "proposal" : "";
+  }
+  showConnection(data.connection);
+  $("view").dataset.view = data.kind || "";
+  if (data.kind === "rows") showRows(data);
+  else if (data.kind === "proposal") showProposal(data);
+  else showError(text || "");
+}
+
+function showConnection(conn) {
+  const name = (conn && conn.name) || toolArgs.connection;
+  $("conn").hidden = !name;
+  $("conn-name").textContent = name || "";
+  const env = conn && conn.environment;
+  $("conn-env").hidden = !env;
+  $("conn-env").className = "env" + (env ? " env-" + env : "");
+  $("conn-env").textContent = env || "";
+}
+
+function showError(message) {
+  $("meta").textContent = "";
+  $("foot").hidden = true;
+  const box = el("div", "error", message);
+  $("content").replaceChildren(box);
+}
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+const plural = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+const NUMERIC = /^(int[248]?|integer|smallint|bigint|numeric|decimal|real|double|float[48]?|serial|bigserial|money)\b/i;
+
+// ----- query: a sortable grid of the rows the agent got -----
+function showRows(data) {
+  const columns = data.columns || [];
+  const rows = data.rows || [];
+  const types = data.types || [];
+  const masked = new Set(data.masked || []);
+  const numeric = columns.map((_, i) => NUMERIC.test(types[i] || "")
+    || (rows.length > 0 && rows.every((r) => r[i] === null || typeof r[i] === "number")));
+  const count = rows.length;
+  $("meta").textContent = (data.more ? `First ${plural(count, "row", "rows")}` : plural(count, "row", "rows"))
+    + (data.elapsed_ms !== undefined ? ` · ${data.elapsed_ms} ms` : "");
+
+  if (columns.length === 0) {
+    $("content").replaceChildren(el("div", "empty", "No columns."));
+  } else {
+    const wrap = el("div", "grid");
+    const table = el("table");
+    const head = el("tr");
+    const body = el("tbody");
+    let sort = { col: -1, dir: 1 };
+    const cellText = (v) => v === null ? "NULL" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    const compare = (i) => (a, b) => {
+      const x = a[i], y = b[i];
+      if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1; // NULLs last
+      if (numeric[i]) return (Number(x) - Number(y)) * sort.dir;
+      return cellText(x).localeCompare(cellText(y), undefined, { numeric: true }) * sort.dir;
+    };
+    const renderBody = () => {
+      const shown = sort.col < 0 ? rows : rows.slice().sort(compare(sort.col));
+      const frag = document.createDocumentFragment();
+      for (const row of shown) {
+        const tr = el("tr");
+        row.forEach((v, i) => {
+          const cls = [numeric[i] ? "num" : "", v === null ? "null" : "", masked.has(columns[i]) ? "masked" : ""].join(" ").trim();
+          const td = el("td", cls, cellText(v));
+          tr.append(td);
+        });
+        frag.append(tr);
+      }
+      body.replaceChildren(frag);
+      head.querySelectorAll("th").forEach((th, i) => {
+        const on = i === sort.col;
+        th.setAttribute("aria-sort", on ? (sort.dir > 0 ? "ascending" : "descending") : "none");
+        th.querySelector(".ar").textContent = on ? (sort.dir > 0 ? "▲" : "▼") : "";
+      });
+    };
+    columns.forEach((name, i) => {
+      const th = el("th", numeric[i] ? "num" : "", name);
+      th.dataset.header = name;
+      th.tabIndex = 0;
+      th.append(el("span", "ar"));
+      const go = () => {
+        sort = sort.col === i ? { col: i, dir: -sort.dir } : { col: i, dir: 1 };
+        renderBody();
+      };
+      th.addEventListener("click", go);
+      th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+      head.append(th);
+    });
+    const thead = el("thead");
+    thead.append(head);
+    table.append(thead, body);
+    wrap.append(table);
+    $("content").replaceChildren(count ? wrap : el("div", "empty", "No rows."));
+    if (count) renderBody();
+  }
+
+  const notes = ["Same rows as the agent"];
+  if (masked.size) notes.push(plural(masked.size, "column", "columns") + " masked");
+  $("note").textContent = notes.join(" · ");
+  $("foot").hidden = false;
+  const open = data.call && canCall();
+  setAction(open ? "Open in Rowkery" : "", "", () => openInRowkery({ call: data.call }));
+}
+
+function setAction(label, cls, onClick) {
+  const btn = $("action");
+  btn.hidden = !label;
+  btn.className = "btn" + (cls ? " " + cls : "");
+  btn.textContent = label;
+  btn.disabled = false;
+  btn.dataset.action = label ? (cls ? "review" : "open") : "";
+  btn.onclick = onClick;
+}
+
+async function openInRowkery(args) {
+  const btn = $("action");
+  const label = btn.textContent;
+  btn.disabled = true;
+  try {
+    await callTool("open_in_rowkery", args);
+    btn.textContent = "Opened";
+    setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 1500);
+  } catch (err) {
+    btn.textContent = label;
+    btn.disabled = false;
+    $("note").textContent = err.message;
+  }
+}
+
+// ----- propose_change: a card that follows the proposal until it's decided -----
+const STATES = {
+  waiting: "Waiting for you",
+  committed: "Committed",
+  rejected: "Rejected",
+  failed: "Commit failed",
+  expired: "Expired",
+};
+
+function showProposal(data) {
+  const body = el("div", "body");
+  const statements = data.statements || [];
+  statements.forEach((s, i) => {
+    const line = el("div", "verb");
+    line.append(el("span", "badge" + (s.verb === "DELETE" ? " del" : ""), s.verb), el("span", "target", s.target));
+    if (i === 0 && statements.length === 1 && Number.isInteger(data.expect_rows)) {
+      line.append(el("span", "expect", `expects ${plural(data.expect_rows, "row", "rows")}`));
+    }
+    body.append(line);
+    if (i === 0 && data.reason) body.append(el("div", "reason", data.reason));
+    body.append(el("pre", "sql", s.sql + ";"));
+  });
+  if (statements.length === 0 && data.reason) body.append(el("div", "reason", data.reason));
+  $("content").replaceChildren(body);
+  $("foot").hidden = false;
+  showStatus(data.id, { state: data.state || "waiting" });
+  if (canCall() && (data.state || "waiting") === "waiting") startPolling(data.id);
+}
+
+function at(ms) {
+  return ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+function showStatus(id, status) {
+  const state = STATES[status.state] ? status.state : "waiting";
+  const chip = el("span", "state " + state, STATES[state]);
+  chip.dataset.testid = "view-state";
+  chip.dataset.state = state;
+  if (state === "committed" && Array.isArray(status.rows)) {
+    chip.textContent += " · " + plural(status.rows.reduce((a, b) => a + b, 0), "row", "rows");
+  }
+  $("meta").replaceChildren(chip);
+  const notes = {
+    waiting: "Only you can commit it, in Rowkery",
+    committed: `Committed by you at ${at(status.at_ms)}`,
+    rejected: status.note ? `You rejected it: ${status.note}` : `You rejected it at ${at(status.at_ms)}`,
+    failed: status.error || "The commit failed; nothing was saved.",
+    expired: "Expired before it was reviewed",
+  };
+  $("note").textContent = notes[state];
+  const review = state === "waiting" && canCall();
+  setAction(review ? "Review in Rowkery" : "", "acc", () => openInRowkery({ proposal: id }));
+}
+
+function startPolling(id) {
+  const check = async () => {
+    if (document.visibilityState !== "visible") return;
+    try {
+      const status = await callTool("proposal_status", { id });
+      showStatus(id, status);
+      if (status.state !== "waiting") stopPolling();
+    } catch { /* try again next time */ }
+  };
+  poll = { timer: setInterval(check, 4000), check };
+  document.addEventListener("visibilitychange", check);
+}
+
+function stopPolling() {
+  if (!poll) return;
+  clearInterval(poll.timer);
+  document.removeEventListener("visibilitychange", poll.check);
+  poll = null;
+}
+
+// Tell the host how tall we are, so the chat gives us just that.
+new ResizeObserver(() => {
+  notify("ui/notifications/size-changed", { height: Math.ceil(document.documentElement.getBoundingClientRect().height) });
+}).observe(document.body);
+
+applyContext({});
+request("ui/initialize", {
+  appInfo: { name: "rowkery", version: "1" },
+  appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+  protocolVersion: PROTOCOL,
+}).then((result) => {
+  host.capabilities = (result && result.hostCapabilities) || {};
+  applyContext((result && result.hostContext) || {});
+  notify("ui/notifications/initialized", {});
+}, () => { /* no host: nothing to draw */ });
+</script>
+</body>
+</html>

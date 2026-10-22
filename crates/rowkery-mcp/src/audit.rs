@@ -57,6 +57,10 @@ pub struct Entry {
     /// Size of the response text the agent got.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// A random key the call's "Open in Rowkery" link carries, so a web page
+    /// can't guess a link to it (`views`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_key: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -94,6 +98,29 @@ impl Entry {
             session: Some(session()),
             ..Self::default()
         }
+    }
+
+    /// Gives the call a link key, so a view can open it in Rowkery.
+    pub fn add_link_key(&mut self) {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded from the OS per process; two of them, mixed
+        // with the time, make 128 bits nobody outside this machine can guess.
+        let half = || {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u64(self.ts);
+            h.finish()
+        };
+        self.link_key = Some(format!("{:016x}{:016x}", half(), half()));
+    }
+
+    /// `session-ts-key`: what a view's "Open in Rowkery" link names the call by.
+    pub fn call_id(&self) -> Option<String> {
+        Some(format!(
+            "{}-{}-{}",
+            self.session?,
+            self.ts,
+            self.link_key.as_deref()?
+        ))
     }
 }
 
@@ -191,6 +218,26 @@ fn read_file(path: &std::path::Path, offset: Option<u64>) -> Activity {
         offset: start + end as u64 + 1,
         reset,
     }
+}
+
+/// The logged call a view's link names (`Entry::call_id`), from the log
+/// or the one it moved to. A wrong key finds nothing.
+pub fn find_call(id: &str) -> Option<Entry> {
+    let mut parts = id.splitn(3, '-');
+    let session: u64 = parts.next()?.parse().ok()?;
+    let ts: u64 = parts.next()?.parse().ok()?;
+    let key = parts.next()?;
+    let dir = config_dir();
+    [dir.join(LOG_FILE), dir.join("mcp-log.1.jsonl")]
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+        .find_map(|bytes| {
+            bytes
+                .split(|&b| b == b'\n')
+                .filter_map(|l| serde_json::from_slice::<Entry>(l).ok())
+                .find(|e| e.session == Some(session) && e.ts == ts)
+        })
+        .filter(|e| e.link_key.as_deref() == Some(key))
 }
 
 /// Empties the log (⌘K MCP activity > Clear log).
