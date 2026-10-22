@@ -58,7 +58,9 @@ only return it) but not filter, sort, group or join on it; describe_table lists 
 what's running, what each session waits on and who blocks whom. Queries never change data: the session is \
 read-only. To change data, call propose_change with the INSERT, UPDATE or DELETE statements and why: \
 the user reviews a dry run in Rowkery and commits or rejects it, and check_proposal tells you which. \
-Don't send a rejected change again.";
+Don't send a rejected change again. describe_table gives what a change needs (columns, defaults, keys, \
+enum labels), so don't query existing rows to copy their style or values. Read only the rows a change \
+depends on, such as the one row it updates, and select only the columns you need.";
 
 /// Runs the server on stdin / stdout until the client disconnects.
 pub fn run_stdio() -> i32 {
