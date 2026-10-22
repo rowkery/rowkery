@@ -59,6 +59,19 @@ import { CmdHints } from "./CmdHints";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
 import { Workspace, type WindowActions, type WindowSession } from "./Workspace";
 import "./App.css";
+// The shell's styles, after App.css's tokens and layout, in this order.
+import "./styles/titlebar.css";
+import "./styles/connection-switcher.css";
+import "./styles/window-tabs.css";
+import "./styles/schema-panel.css";
+import "./styles/main-column.css";
+import "./styles/sql-editor.css";
+import "./styles/palette.css";
+import "./styles/toast.css";
+import "./styles/table-tabs.css";
+import "./styles/connect-to-start.css";
+import "./styles/scrollbars.css";
+import "./styles/sheets.css";
 
 const PROOFS = new Set(["query-cancel", "1", "latency"]);
 

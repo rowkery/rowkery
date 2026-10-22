@@ -1,0 +1,292 @@
+/* ---------- Window tabs ---------- */
+
+/* Dragging a tab (tabReorder.ts): neighbours slide out of its way. */
+.reordering > [data-reorder-key]:not([data-dragging]) {
+  transition: transform 160ms var(--ease-out);
+}
+
+.reordering > [data-dragging] {
+  position: relative;
+  z-index: 3;
+}
+
+/* The dragged query tab lifts over the ones it passes. */
+.query-tabs.reordering > [data-dragging] {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line), var(--shadow);
+}
+
+.db-chip {
+  color: var(--mute);
+  font: 400 12.5px var(--mono);
+}
+
+.db-chip:disabled {
+  opacity: 0.5;
+}
+
+/* The connection is named after its database: just the ▾, beside the name. */
+.db-chip.nameless {
+  flex-shrink: 0;
+  padding: 3px 4px;
+}
+
+.db-popover {
+  width: 360px;
+}
+
+.db-option {
+  height: 32px;
+}
+
+.db-check {
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--acc);
+  font-size: 12px;
+}
+
+.db-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.db-option-size {
+  flex-shrink: 0;
+  color: var(--dim);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.db-foot {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+  padding: 8px 10px 4px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.conn-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.conn-option.cursor {
+  background: var(--hover);
+}
+
+.conn-row {
+  position: relative;
+}
+
+/* Engine tile at the start of a connection row; the status dot sits on its
+   corner and only shows when the connection is open, connecting or failed. */
+.conn-engine {
+  --engine: var(--dim);
+  position: relative;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--engine) 14%, transparent);
+  color: var(--engine);
+}
+
+.conn-engine .conn-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+.conn-engine .conn-dot:not(.connected):not(.connecting):not(.error) {
+  display: none;
+}
+
+/* Pin and edit sit over the row's right edge and show on hover only. */
+.conn-row-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  transform: translateY(-50%);
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+}
+
+.conn-row:hover .conn-row-btn {
+  display: grid;
+}
+
+/* Pin sits left of the pencil. */
+.conn-pin {
+  right: 34px;
+}
+
+.conn-pin.on {
+  color: var(--acc);
+}
+
+.conn-section {
+  padding: 8px 10px 3px;
+  color: var(--dim);
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.conn-divider {
+  height: 1px;
+  margin: 6px 10px;
+  background: var(--line);
+}
+
+.conn-row:hover .conn-option {
+  padding-right: 64px;
+}
+
+.conn-row:hover .conn-option-state {
+  display: none;
+}
+
+.conn-row-btn:hover {
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.conn-option-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.conn-option-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.conn-option-name {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-option-sub {
+  color: var(--mute);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-option-state {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.conn-new {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 5px;
+  box-shadow: 0 -7px 0 -6px var(--line);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background-color 0.15s ease;
+}
+
+.conn-new:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.conn-new-label {
+  flex: 1;
+}
+
+.conn-option-key,
+.sb-kbd {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--kbd);
+  color: var(--mute);
+}
+
+.sb-kbd {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--mute);
+}
+
+/* ---------- Windows: sidebar panel and the main column ---------- */
+
+/* Every window is mounted; hidden ones keep their state for instant switching.
+   A hidden window keeps its boxes too: `content-visibility: hidden` skips its
+   contents (no paint, hit-testing, focus or accessibility tree) but keeps
+   their style and layout, so showing it again re-lays nothing out. With
+   `display: none` every switch rebuilt the whole window, its 2,000-row schema
+   list included (~250 ms on a big catalog). It sits under the shown window. */
+.workspace {
+  position: absolute;
+  inset: 0;
+}
+
+.workspace[hidden] {
+  display: block;
+  content-visibility: hidden;
+  z-index: -1;
+}
+
+@supports not (content-visibility: hidden) {
+  .workspace[hidden] {
+    display: none;
+  }
+}

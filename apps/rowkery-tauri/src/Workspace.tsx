@@ -2653,7 +2653,7 @@ export function Workspace({
     return () => document.removeEventListener("paste", onPaste, true);
   }, [active]);
 
-  // A hidden window keeps its boxes (`content-visibility: hidden`, App.css),
+  // A hidden window keeps its boxes (`content-visibility: hidden`, styles/window-tabs.css),
   // which not every engine treats as leaving focus: let go of it here, as
   // `display: none` did, so keys never land in a window that isn't shown.
   const workspaceRef = useRef<HTMLDivElement>(null);
