@@ -160,6 +160,50 @@ fn signal_check(toks: &[Tok]) -> Option<StatementCheck> {
     })
 }
 
+/// How one statement of a SQL file sits with a transaction around it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InTransaction {
+    /// Runs inside one like any other.
+    Fine,
+    /// `BEGIN` / `START TRANSACTION`.
+    Begins,
+    /// `COMMIT` / `END`.
+    Commits,
+    /// Any other transaction control: `ROLLBACK`, `SAVEPOINT`, `RELEASE`,
+    /// `PREPARE TRANSACTION`, …
+    Controls,
+    /// Can't run inside one: `VACUUM`, `CREATE INDEX CONCURRENTLY`,
+    /// `CREATE DATABASE`, …
+    Never,
+}
+
+/// A SQL file statement as safe mode sees it, and how it sits with a
+/// transaction (one tokenizing pass for both).
+pub fn check_file_statement(sql: &str) -> Option<(StatementCheck, InTransaction)> {
+    let toks = tokenize(sql).into_iter().find(|s| !s.is_empty())?;
+    let check = unclear_check(&toks)
+        .or_else(|| signal_check(&toks))
+        .unwrap_or_else(|| check_statement(&toks));
+    let words: Vec<&str> = top_level(&toks).filter_map(Tok::word).take(4).collect();
+    let concurrently = || top_level(&toks).any(|t| t.is("CONCURRENTLY"));
+    let role = match words.as_slice() {
+        ["BEGIN", ..] | ["START", "TRANSACTION", ..] => InTransaction::Begins,
+        ["COMMIT", "PREPARED", ..] => InTransaction::Controls,
+        ["COMMIT", ..] | ["END", ..] => InTransaction::Commits,
+        ["ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE", ..] | ["PREPARE", "TRANSACTION", ..] => {
+            InTransaction::Controls
+        }
+        ["VACUUM", ..]
+        | ["ALTER", "SYSTEM", ..]
+        | ["CREATE" | "DROP", "DATABASE" | "TABLESPACE" | "SUBSCRIPTION", ..] => {
+            InTransaction::Never
+        }
+        ["CREATE" | "DROP" | "REINDEX", ..] if concurrently() => InTransaction::Never,
+        _ => InTransaction::Fine,
+    };
+    Some((check, role))
+}
+
 /// One `SELECT`, `WITH`, `VALUES` or `TABLE` statement without a `LIMIT`,
 /// `OFFSET`, `FETCH` or `INTO` of its own at the top level: what a query tab
 /// pages through a cursor. Queries that bound themselves are left alone.
@@ -243,133 +287,188 @@ fn tokenize(sql: &str) -> Vec<Vec<Tok>> {
 /// `tokenize`, with each statement's byte range in `sql` (its `;` left out).
 fn tokenize_spans(sql: &str) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
     let b = sql.as_bytes();
-    let n = b.len();
     let mut out = vec![Vec::new()];
     let mut spans = Vec::new();
     let mut start = 0;
     let mut i = 0;
-    while i < n {
-        let c = b[i];
-        match c {
-            b'\'' => {
-                let (end, clear) = skip_string(b, i, false);
-                i = end;
-                push_string(out.last_mut().unwrap(), clear);
-            }
-            b'"' | b'`' => {
-                let start = i;
-                i += 1;
-                while i < n && b[i] != c {
-                    i += 1;
-                }
-                let toks = out.last_mut().unwrap();
-                if i == n {
+    while let Some((lexeme, end)) = lex(b, i, true) {
+        let toks = out.last_mut().unwrap();
+        match lexeme {
+            Lexeme::String { clear } => push_string(toks, clear),
+            Lexeme::Quoted { closed } => {
+                if !closed {
                     toks.push(Tok::Unclear);
                 }
-                i = (i + 1).min(n);
-                toks.push(Tok::Quoted(sql[start..i].to_string()));
+                toks.push(Tok::Quoted(sql[i..end].to_string()));
             }
-            b'-' if b.get(i + 1) == Some(&b'-') => {
-                while i < n && b[i] != b'\n' {
-                    i += 1;
+            Lexeme::BlockComment { clear: false } => toks.push(Tok::Unclear),
+            Lexeme::Dollar { closed } => {
+                if !closed {
+                    toks.push(Tok::Unclear);
                 }
+                toks.push(Tok::Other('$'));
             }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                let (end, clear) = skip_block_comment(b, i);
-                i = end;
-                if !clear {
-                    out.last_mut().unwrap().push(Tok::Unclear);
-                }
-            }
-            b'$' => {
-                // `$tag$ … $tag$`: the tag is empty or an identifier, so not
-                // `$1`; never inside a word, which takes its own `$`.
-                let tag_end = sql[i + 1..].find('$').map(|p| i + 1 + p).filter(|&e| {
-                    let tag = &b[i + 1..e];
-                    tag.first().is_none_or(|ch| !ch.is_ascii_digit())
-                        && tag
-                            .iter()
-                            .all(|&ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch >= 0x80)
-                });
-                match tag_end {
-                    Some(e) => {
-                        let tag = &sql[i..=e];
-                        let toks = out.last_mut().unwrap();
-                        match sql[e + 1..].find(tag) {
-                            Some(p) => i = e + 1 + p + tag.len(),
-                            None => {
-                                toks.push(Tok::Unclear);
-                                i = n;
-                            }
-                        }
-                        toks.push(Tok::Other('$'));
-                    }
-                    None => i += 1,
-                }
-            }
-            b';' => {
+            Lexeme::Semicolon => {
                 out.push(Vec::new());
                 spans.push(start..i);
-                i += 1;
-                start = i;
+                start = end;
             }
-            b'(' => {
-                out.last_mut().unwrap().push(Tok::Open);
-                i += 1;
+            Lexeme::Open => toks.push(Tok::Open),
+            Lexeme::Close => toks.push(Tok::Close),
+            Lexeme::Dot => toks.push(Tok::Dot),
+            Lexeme::Word => {
+                let text = &sql[i..end];
+                toks.push(Tok::Word(text.to_ascii_uppercase(), text.to_string()));
             }
-            b')' => {
-                out.last_mut().unwrap().push(Tok::Close);
-                i += 1;
-            }
-            b'.' => {
-                out.last_mut().unwrap().push(Tok::Dot);
-                i += 1;
-            }
-            _ if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
-                let start = i;
-                while i < n
-                    && (b[i].is_ascii_alphanumeric()
-                        || b[i] == b'_'
-                        || b[i] == b'$'
-                        || b[i] >= 0x80)
-                {
-                    i += 1;
-                }
-                let text = &sql[start..i];
-                if (text == "E" || text == "e") && b.get(i) == Some(&b'\'') {
-                    // `E'…'` takes backslash escapes: `E'\''` is one quote.
-                    let (end, clear) = skip_string(b, i, true);
-                    i = end;
-                    push_string(out.last_mut().unwrap(), clear);
-                    continue;
-                }
-                out.last_mut()
-                    .unwrap()
-                    .push(Tok::Word(text.to_ascii_uppercase(), text.to_string()));
-            }
-            _ if c.is_ascii_digit() => {
-                while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
-                    i += 1;
-                }
-                out.last_mut().unwrap().push(Tok::Other('0'));
-            }
-            _ if c.is_ascii_whitespace() => i += 1,
-            _ => {
-                out.last_mut().unwrap().push(Tok::Other(c as char));
-                i += 1;
-            }
+            Lexeme::Number => toks.push(Tok::Other('0')),
+            Lexeme::Other => toks.push(Tok::Other(b[i] as char)),
+            Lexeme::LineComment
+            | Lexeme::BlockComment { clear: true }
+            | Lexeme::Space
+            | Lexeme::Skip => {}
         }
+        i = end;
     }
-    spans.push(start..n.max(start));
+    spans.push(start..b.len().max(start));
     (out, spans)
 }
 
-/// Past the string opening at `b[i]` (a `'`), and whether every server
-/// reads it the same way. `''` is a quote; with `backslash` (an `E'…'`
-/// string) `\` escapes the next byte too. Unclear: it never ends, or a
+/// Each statement's text as the editor splits `sql`, trimmed, empty ones
+/// left out: what the SQL file reader must agree with.
+#[cfg(test)]
+pub(crate) fn split_statements(sql: &str) -> Vec<String> {
+    let (toks, spans) = tokenize_spans(sql);
+    toks.iter()
+        .zip(spans)
+        .filter(|(t, _)| !t.is_empty())
+        .map(|(_, span)| sql[span].trim().to_string())
+        .collect()
+}
+
+/// One lexeme of SQL text, as [`lex`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lexeme {
+    /// `'…'` or `E'…'`; `clear` as [`skip_string`] judges it.
+    String {
+        clear: bool,
+    },
+    /// `"…"` or `` `…` ``.
+    Quoted {
+        closed: bool,
+    },
+    LineComment,
+    /// `clear` as [`skip_block_comment`] judges it.
+    BlockComment {
+        clear: bool,
+    },
+    /// A `$tag$ … $tag$` body.
+    Dollar {
+        closed: bool,
+    },
+    /// A `$` that opens no body: nothing.
+    Skip,
+    Semicolon,
+    Open,
+    Close,
+    Dot,
+    Word,
+    Number,
+    Space,
+    /// Any other byte, as itself.
+    Other,
+}
+
+/// The lexeme starting at `b[i]` and where it ends, with the editor's quoting
+/// rules; `None` at the end of `b`. Unless `eof`, more text may follow `b`:
+/// a lexeme that might go on past it is `None` too, for the caller to read
+/// more and ask again from `i` (the SQL file reader streams this way).
+pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> {
+    let n = b.len();
+    let start = i;
+    // A lexeme that ran into the end of `b` is final only when nothing follows.
+    let done = |lexeme: Lexeme, end: usize, open: bool| (eof || !open).then_some((lexeme, end));
+    let c = *b.get(i)?;
+    match c {
+        b'\'' => {
+            // Even a string closed by the last byte may go on: `''` is a quote.
+            let (end, clear, _) = skip_string(b, i, false);
+            done(Lexeme::String { clear }, end, end == n)
+        }
+        b'"' | b'`' => {
+            i += 1;
+            while i < n && b[i] != c {
+                i += 1;
+            }
+            let closed = i < n;
+            done(Lexeme::Quoted { closed }, (i + 1).min(n), !closed)
+        }
+        b'-' if b.get(i + 1) == Some(&b'-') => {
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+            done(Lexeme::LineComment, i, i == n)
+        }
+        b'/' if b.get(i + 1) == Some(&b'*') => {
+            let (end, clear, closed) = skip_block_comment(b, i);
+            done(Lexeme::BlockComment { clear }, end, !closed)
+        }
+        b'-' | b'/' if i + 1 == n => done(Lexeme::Other, n, true),
+        b'$' => {
+            // `$tag$ … $tag$`: the tag is empty or an identifier, so not
+            // `$1`; never inside a word, which takes its own `$`.
+            let mut e = i + 1;
+            while e < n && (b[e].is_ascii_alphanumeric() || b[e] == b'_' || b[e] >= 0x80) {
+                e += 1;
+            }
+            if e == n {
+                return done(Lexeme::Skip, i + 1, true);
+            }
+            if b[e] != b'$' || b[i + 1].is_ascii_digit() {
+                return Some((Lexeme::Skip, i + 1));
+            }
+            let tag = &b[i..=e];
+            match b[e + 1..].windows(tag.len()).position(|w| w == tag) {
+                Some(p) => Some((Lexeme::Dollar { closed: true }, e + 1 + p + tag.len())),
+                None => done(Lexeme::Dollar { closed: false }, n, true),
+            }
+        }
+        b';' => Some((Lexeme::Semicolon, i + 1)),
+        b'(' => Some((Lexeme::Open, i + 1)),
+        b')' => Some((Lexeme::Close, i + 1)),
+        b'.' => Some((Lexeme::Dot, i + 1)),
+        _ if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
+            while i < n
+                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] >= 0x80)
+            {
+                i += 1;
+            }
+            if i == n {
+                return done(Lexeme::Word, i, true);
+            }
+            if i == start + 1 && (c == b'E' || c == b'e') && b[i] == b'\'' {
+                // `E'…'` takes backslash escapes: `E'\''` is one quote.
+                let (end, clear, _) = skip_string(b, i, true);
+                return done(Lexeme::String { clear }, end, end == n);
+            }
+            Some((Lexeme::Word, i))
+        }
+        _ if c.is_ascii_digit() => {
+            while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
+                i += 1;
+            }
+            done(Lexeme::Number, i, i == n)
+        }
+        _ if c.is_ascii_whitespace() => Some((Lexeme::Space, i + 1)),
+        _ => Some((Lexeme::Other, i + 1)),
+    }
+}
+
+/// Past the string opening at `b[i]` (a `'`), whether every server reads
+/// it the same way, and whether it closed. `''` is a quote; with `backslash`
+/// (an `E'…'` string) `\` escapes the next byte too. Unclear: it never ends, or a
 /// plain string holds `\'`, which Postgres with `standard_conforming_strings`
 /// off reads as a quote that doesn't end the string.
-fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool) {
+fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool, bool) {
     let n = b.len();
     let mut clear = true;
     i += 1;
@@ -384,19 +483,19 @@ fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool) {
                 i += 2;
                 continue;
             }
-            b'\'' => return (i + 1, clear),
+            b'\'' => return (i + 1, clear, true),
             _ => {}
         }
         i += 1;
     }
-    (n, false)
+    (n, false, false)
 }
 
-/// Past the `/* … */` comment opening at `b[i]`, and whether every server
-/// reads it the same way. Postgres nests them (`/* /* */ */` is one
-/// comment); SQLite ends one at the first `*/`. So a nested one is unclear,
+/// Past the `/* … */` comment opening at `b[i]`, whether every server
+/// reads it the same way, and whether it closed. Postgres nests them
+/// (`/* /* */ */` is one comment); SQLite ends one at the first `*/`. So a nested one is unclear,
 /// and so is one that never ends.
-fn skip_block_comment(b: &[u8], mut i: usize) -> (usize, bool) {
+fn skip_block_comment(b: &[u8], mut i: usize) -> (usize, bool, bool) {
     let n = b.len();
     let mut depth = 1;
     let mut clear = true;
@@ -410,13 +509,13 @@ fn skip_block_comment(b: &[u8], mut i: usize) -> (usize, bool) {
             depth -= 1;
             i += 2;
             if depth == 0 {
-                return (i, clear);
+                return (i, clear, true);
             }
         } else {
             i += 1;
         }
     }
-    (n, false)
+    (n, false, false)
 }
 
 fn push_string(toks: &mut Vec<Tok>, clear: bool) {

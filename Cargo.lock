@@ -4565,6 +4565,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "keyring",
+ "memchr",
  "rand 0.8.8",
  "rand_core 0.10.1",
  "rcgen",
