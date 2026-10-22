@@ -47,7 +47,7 @@ pub struct Entry {
     pub rows: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
-    /// The whole call, from the request arriving to the answer going back.
+    /// The whole call, from the request arriving to the answer being ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub took_ms: Option<u64>,
     /// `ok`, `would refuse`, or the refusal / error text.

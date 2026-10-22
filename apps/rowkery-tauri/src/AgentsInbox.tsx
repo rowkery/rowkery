@@ -105,7 +105,12 @@ export function AgentsInbox({
     }
     return [...n.entries()].sort((a, b) => b[1].n - a[1].n).map(([key, { e, n }]) => ({ key, e, n }));
   }, [entries]);
-  const placeOn = place && placeList.some((p) => p.key === place) ? place : null;
+  // The menu shows only with two or more databases; with fewer, or once the
+  // picked one has left the log, every call shows again.
+  const placeOn = placeList.length > 1 && place && placeList.some((p) => p.key === place) ? place : null;
+  useEffect(() => {
+    if (place && !placeOn) setPlace(null);
+  }, [place, placeOn]);
   const inPlace = useMemo(() => (placeOn ? entries.filter((e) => placeKey(e) === placeOn) : entries), [entries, placeOn]);
   const calls = useMemo(() => {
     const out: Call[] = [];
@@ -319,7 +324,8 @@ export function AgentsInbox({
       } else onClose();
       return;
     }
-    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    const typing =
+      e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
     if (typing) return;
     const mod = mac ? e.metaKey : e.ctrlKey;
     if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -423,7 +429,7 @@ export function AgentsInbox({
                   const c = p.e.connection ? byId.get(p.e.connection) : undefined;
                   return (
                     <option key={p.key} value={p.key}>
-                      {[placeName(p.e, c), c && placeName(p.e, c) !== c.name ? c.name : null, c?.environment, `${p.n}`].filter(Boolean).join(" · ")}
+                      {[placeName(p.e, c), c && placeName(p.e, c) !== c.name ? c.name : null, c?.environment, `${p.n} ${p.n === 1 ? "call" : "calls"}`].filter(Boolean).join(" · ")}
                     </option>
                   );
                 })}
@@ -432,7 +438,7 @@ export function AgentsInbox({
           )}
           <div className="ag-calls" role="list" aria-label="Agent calls">
             {calls.length === 0 && (
-              <p className="mcp-muted ag-calls-none">{!entries.length ? "No calls yet." : filter === "error" ? "Nothing failed." : filter === "refused" ? "Nothing refused." : "No calls here yet."}</p>
+              <p className="mcp-muted ag-calls-none">{!entries.length ? "No calls yet." : filter === "error" ? "Nothing failed." : "Nothing refused."}</p>
             )}
             {calls.map((c) => (
               <CallRow
@@ -775,18 +781,21 @@ function ListResize({ width, onWidth }: { width: number | null; onWidth: (w: num
     e.preventDefault();
     const w0 = list.getBoundingClientRect().width;
     const x0 = e.clientX;
-    let w = width ?? Math.round(w0);
+    let w: number | null = null;
     handle.setPointerCapture(e.pointerId);
     handle.dataset.dragging = "";
+    // The element follows the pointer; the page re-renders once, on release.
     const move = (m: PointerEvent) => {
       w = clampList(w0 + m.clientX - x0);
-      onWidth(w);
+      list.style.width = `${w}px`;
     };
     const up = () => {
       delete handle.dataset.dragging;
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
       handle.removeEventListener("pointercancel", up);
+      if (w === null || w === width) return;
+      onWidth(w);
       writeKey(LIST_WIDTH_KEY, w);
     };
     handle.addEventListener("pointermove", move);
@@ -801,7 +810,8 @@ function ListResize({ width, onWidth }: { width: number | null; onWidth: (w: num
       aria-orientation="vertical"
       aria-label="Resize the list"
       onPointerDown={start}
-      onDoubleClick={() => {
+      onDoubleClick={(e) => {
+        e.currentTarget.parentElement?.style.removeProperty("width");
         onWidth(null);
         writeKey(LIST_WIDTH_KEY, undefined);
       }}
@@ -938,7 +948,7 @@ function CallView({
       <div className="pp-previews">
         <section className="pp-stmt">
           {(verdict === "refused" || verdict === "error") && e.verdict && (
-            <div className="ag-call-reason" data-testid="mcp-reason" data-verdict={verdict} role="status">
+            <div className="ag-call-reason" data-testid="mcp-reason" data-verdict={verdict}>
               <WarningIcon />
               <p>
                 <b>{verdict === "refused" ? "Refused" : "Failed"}</b>

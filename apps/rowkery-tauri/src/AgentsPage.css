@@ -1487,6 +1487,7 @@
    the picked item fills the rest of the window. */
 .ag-inbox .pp-list {
   width: 320px;
+  max-width: 50%;
   position: relative;
 }
 
@@ -1557,8 +1558,25 @@
 
 /* Every database, or one: a soft native menu under the filters. */
 .ag-place {
+  position: relative;
   display: block;
   padding: 0 16px 8px;
+}
+
+/* The chevron, a mask so it takes a token. */
+.ag-place::after {
+  content: "";
+  position: absolute;
+  top: 9px;
+  right: 25px;
+  width: 9px;
+  height: 6px;
+  background: var(--mute);
+  pointer-events: none;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 9px 6px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 9px 6px no-repeat;
 }
 
 .ag-place select {
@@ -1567,8 +1585,7 @@
   padding: 0 26px 0 9px;
   border: 0;
   border-radius: 6px;
-  background: var(--line) no-repeat right 9px center / 9px
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background: var(--line);
   color: var(--text);
   font: 500 12px var(--sans);
   appearance: none;
@@ -1581,7 +1598,7 @@
 }
 
 .ag-place select:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--acc);
   outline-offset: 1px;
 }
 
