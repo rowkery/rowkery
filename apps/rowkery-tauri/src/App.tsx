@@ -14,6 +14,7 @@ import {
   tableCounts,
   saveConnection,
   sqliteFileExists,
+  takeOpenLink,
   TEST_PG_CONNECTION,
   TEST_PG_SECRETS,
   type LocalServer,
@@ -220,7 +221,8 @@ function App() {
   /** Help > Report an Issue…, with what the window knew when it was asked. */
   const [report, setReport] = useState<ReportContext | null>(null);
   /** The Agents page (proposals and the log) in place of the main column; null while the window shows. */
-  const [agents, setAgents] = useState<{ initial: "proposals" | "activity" } | null>(null);
+  /** The Agents page; `proposal` picks that one (a card's Review in Rowkery). */
+  const [agents, setAgents] = useState<{ initial: "proposals" | "activity"; proposal?: string } | null>(null);
   /** The Settings page in place of the main column (⌘,, the foot's gear); null while the window shows. */
   const [settings, setSettings] = useState<SettingsSection | null>(null);
   /**
@@ -864,8 +866,11 @@ function App() {
     setSettings(section);
   };
 
-  /** An agent's SQL in a query tab on its connection: a window already on it, else a new one. */
-  const openMcpSql = (connectionId: string, database: string | undefined, sql: string) => {
+  /**
+   * An agent's SQL in a query tab on its connection: a window already on it,
+   * else a new one. `run`: it runs as it opens (Open in Rowkery from the chat).
+   */
+  const openMcpSql = (connectionId: string, database: string | undefined, sql: string, run = false) => {
     setAgents(null);
     const conn = connections.find((c) => c.id === connectionId);
     if (!conn) return;
@@ -875,18 +880,50 @@ function App() {
     const on = fits(activeWindow) ? activeWindow : windowsRef.current.find(fits);
     if (on) {
       switchWindow(on.id);
-      window.dispatchEvent(new CustomEvent("rowkery:open-sql", { detail: { windowId: on.id, sql, title: "Agent query" } }));
+      window.dispatchEvent(new CustomEvent("rowkery:open-sql", { detail: { windowId: on.id, sql, title: "Agent query", run } }));
       return;
     }
     const id = `w${nextWindowNo.current++}`;
     const seeded = { tabs: [{ kind: "query" as const, title: "Agent query", sql }], active: 0 };
     restoredTabs.current.set(id, seeded);
     tabsByWindow.current.set(id, seeded);
+    if (run) runOnConnect.current.add(id);
     const blankOnly = !activeWindow.connectionId;
     setWindows((prev) => (blankOnly ? prev.map((w) => (w.id === activeWindow.id ? blankWindow(id) : w)) : [...prev, blankWindow(id)]));
     setActiveWindowId(id);
     void connectWindow(id, connectionId, wantDb);
   };
+
+  // A rowkery:// link from a view in the chat: once connections are loaded
+  // (it may be what launched the app), and whenever another arrives.
+  const openLinkRef = useRef<() => void>(() => {});
+  openLinkRef.current = () => {
+    void takeOpenLink().then((link) => {
+      if (!link) return;
+      if (link.kind === "sql") {
+        if (!connections.some((c) => c.id === link.connection))
+          return showToast("That connection isn't in Rowkery any more", undefined, "error");
+        setSettings(null);
+        openMcpSql(link.connection, link.database ?? undefined, link.sql, true);
+      } else if (link.kind === "proposal") {
+        setPopover(null);
+        setPaletteOpen(false);
+        setSettings(null);
+        setAgents({ initial: "proposals", proposal: link.id });
+      } else if (link.kind === "decided") {
+        showToast("That change isn't waiting for you any more");
+      } else {
+        showToast("That query isn't in Rowkery's activity log any more", undefined, "error");
+      }
+    }, () => {});
+  };
+  useEffect(() => {
+    if (!loaded || !("__TAURI_INTERNALS__" in window)) return;
+    const take = () => openLinkRef.current();
+    take();
+    window.addEventListener("rowkery:open-link", take);
+    return () => window.removeEventListener("rowkery:open-link", take);
+  }, [loaded]);
 
   /** Import CSV moved to a connection (the panel's picker): the window it opens in, and the file. */
   const [pendingImport, setPendingImport] = useState<{ windowId: string; path: string } | null>(null);
@@ -1523,6 +1560,7 @@ function App() {
           <AgentsInbox
             connections={connections}
             initial={agents.initial}
+            focus={agents.proposal}
             backTo={backTo}
             onOpenSql={openMcpSql}
             onSharing={(connect) => openSharing({ connect })}

@@ -65,6 +65,14 @@ if ("__TAURI_INTERNALS__" in window) {
   }).catch(() => {});
 }
 
+// A rowkery:// link from a view in the chat is waiting (`open-link`); App
+// takes it from `rowkery:open-link`, which stubbed proofs dispatch directly.
+if ("__TAURI_INTERNALS__" in window) {
+  void listen("open-link", () => {
+    window.dispatchEvent(new CustomEvent("rowkery:open-link"));
+  }).catch(() => {});
+}
+
 // Files dragged onto the window (Tauri gives paths; an HTML drop doesn't)
 // arrive as `rowkery:file-drag` with `{ type, paths, x, y }` (CSS pixels in
 // the page, where the drop landed); stubbed proofs dispatch it directly.

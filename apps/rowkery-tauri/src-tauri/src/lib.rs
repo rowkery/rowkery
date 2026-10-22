@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager, State};
 #[cfg(feature = "e2e")]
 mod e2e;
 mod mcp_connect;
+mod open_link;
 pub mod timings;
 mod updates;
 use timings::{ProofEnv, Timings};
@@ -1997,6 +1998,7 @@ pub fn run(mut timings: Timings) {
         .manage(updates::Updates::default())
         .manage(Imports::default())
         .manage(rowkery_mcp::picker::Picker::default())
+        .manage(open_link::PendingLink::default())
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -2124,10 +2126,18 @@ pub fn run(mut timings: Timings) {
             updates::check_for_update,
             updates::download_update,
             updates::restart_to_update,
+            open_link::take_open_link,
         ])
         .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
+            // A rowkery:// link from a view in the chat (it may have launched us).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                for url in urls {
+                    open_link::opened(app, url.as_str());
+                }
+            }
             // UI state written in the last 500 ms is still in the writer.
             if let tauri::RunEvent::Exit = event {
                 app.state::<CoreBridge>().flush_config();

@@ -2323,6 +2323,18 @@ export function Workspace({
   // The sample's Getting started: its statement has run by the time the
   // window paints its schema, so the first screen already holds rows.
   const ranOnConnect = useRef(false);
+  // Open in Rowkery from the chat (`rowkery:open-sql` with run): the agent's
+  // query runs once its tab is open and the window connected.
+  const runWhenConnected = useRef<{ tabId: number; sql: string } | null>(null);
+  const [runWhenTick, setRunWhenTick] = useState(0);
+  useEffect(() => {
+    const want = runWhenConnected.current;
+    // A window that failed to connect drops it: a later reconnect shouldn't run it unasked.
+    if (connState === "error") runWhenConnected.current = null;
+    if (!want || connState !== "connected") return;
+    runWhenConnected.current = null;
+    void onRunRef.current(want.sql, false, undefined, want.tabId);
+  }, [runWhenTick, connState]);
   useEffect(() => {
     if (!runOnConnect || ranOnConnect.current || connState !== "connected") return;
     ranOnConnect.current = true;
@@ -3056,9 +3068,13 @@ export function Workspace({
   openSqlInTabRef.current = openSqlInTab;
   useEffect(() => {
     const onOpenSql = (e: Event) => {
-      const d = (e as CustomEvent<{ windowId: string; sql: string; title?: string }>).detail;
+      const d = (e as CustomEvent<{ windowId: string; sql: string; title?: string; run?: boolean }>).detail;
       if (d?.windowId !== windowId) return;
-      openSqlInTabRef.current(d.sql, d.title, tabsRef.current[tabsRef.current.length - 1]?.id);
+      const tabId = openSqlInTabRef.current(d.sql, d.title, tabsRef.current[tabsRef.current.length - 1]?.id);
+      if (d.run) {
+        runWhenConnected.current = { tabId, sql: d.sql };
+        setRunWhenTick((n) => n + 1);
+      }
       requestAnimationFrame(() => requestAnimationFrame(() => sqlEditorRef.current?.focus()));
     };
     window.addEventListener("rowkery:open-sql", onOpenSql);

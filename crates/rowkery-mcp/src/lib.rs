@@ -23,14 +23,16 @@ pub mod proposals;
 pub mod samples;
 pub mod sessions;
 mod target;
+mod views;
 
 use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
-    Tool, ToolAnnotations,
+    Implementation, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig, Tool,
+    ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServiceExt};
@@ -1085,24 +1087,63 @@ async fn pg_masked(
 
 impl ServerHandler for RowkeryMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(
-                Implementation::new("rowkery", env!("CARGO_PKG_VERSION")).with_title("Rowkery"),
-            )
-            .with_instructions(INSTRUCTIONS)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(
+            Implementation::new("rowkery", env!("CARGO_PKG_VERSION")).with_title("Rowkery"),
+        )
+        .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let mut list = tools();
+        if draws_views(&context) {
+            views::add_to(&mut list);
+        }
         // Clients on MCP 2026-07-28 require ttlMs and cacheScope on list results
         // (Claude Code rejects the response without them). The tool list depends
         // on nothing per-user, but 0 / private keeps clients re-reading it.
-        Ok(ListToolsResult::with_all_items(tools())
+        Ok(ListToolsResult::with_all_items(list)
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private))
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        // Only a host that draws views has a use for the page.
+        let list = if draws_views(&context) {
+            views::list()
+        } else {
+            ListResourcesResult::default()
+        };
+        Ok(list.with_ttl_ms(0).with_cache_scope(CacheScope::Private))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        views::read(&request.uri)
+            .map(|r| {
+                r.with_ttl_ms(0)
+                    .with_cache_scope(CacheScope::Private)
+                    .into()
+            })
+            .ok_or_else(|| {
+                McpError::resource_not_found(format!("No resource {}", request.uri), None)
+            })
     }
 
     async fn call_tool(
@@ -1111,6 +1152,22 @@ impl ServerHandler for RowkeryMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let args = request.arguments.unwrap_or_default();
+        let views = draws_views(&context);
+        // The view's own calls: a click, not the agent, so they aren't logged.
+        if views {
+            let page = match request.name.as_ref() {
+                "open_in_rowkery" => Some(
+                    views::link(&args)
+                        .and_then(|url| views::open(&url))
+                        .map(|()| json!({ "opened": true })),
+                ),
+                "proposal_status" => Some(required(&args, "id").and_then(proposals::status)),
+                _ => None,
+            };
+            if let Some(outcome) = page {
+                return Ok(text_result(&outcome).into());
+            }
+        }
         let client = context.peer.peer_info().map(|p| p.client_info.name.clone());
         if let Ok(mut slot) = self.client.lock() {
             slot.clone_from(&client);
@@ -1119,6 +1176,12 @@ impl ServerHandler for RowkeryMcp {
         let (outcome, mut entry, keep_sample) = self.dispatch(&request.name, &args).await;
         entry.took_ms = Some(started.elapsed().as_millis() as u64);
         entry.client = client;
+        if views && views::CAN_OPEN && request.name == "query" && outcome.is_ok() {
+            entry.add_link_key();
+        }
+        let page_meta = views
+            .then(|| views::page_meta(&request.name, &args, outcome.as_ref(), &entry))
+            .flatten();
         let text = match &outcome {
             Ok(value) => value.to_string(),
             Err(message) => message.clone(),
@@ -1137,8 +1200,21 @@ impl ServerHandler for RowkeryMcp {
             });
         }
         audit::append(&entry);
-        Ok(text_result(&outcome).into())
+        let mut result = text_result(&outcome);
+        if views && request.name == "query" && outcome.is_ok() {
+            result.content.push(ContentBlock::text(views::SHOWN_NOTE));
+        }
+        result.meta = page_meta;
+        Ok(result.into())
     }
+}
+
+/// The client draws MCP Apps views (`views`): it said so at `initialize`, or
+/// in this request's `_meta` on protocols without a handshake.
+fn draws_views(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .client_capabilities()
+        .is_some_and(|caps| views::supported(&caps))
 }
 
 #[cfg(test)]

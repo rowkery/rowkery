@@ -447,6 +447,13 @@ pub fn mask_key(connection_id: &str) -> Result<String, SecretError> {
     Ok(key)
 }
 
+/// `bytes` from the OS's secure random source, as hex.
+pub fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    OsRng.fill_bytes(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Delete a connection's secrets (keychain, older per-secret items, fallback).
 pub fn delete_secrets_for_connection(connection_id: &str) -> Result<(), SecretError> {
     if let Ok(mut c) = item_cache().lock() {

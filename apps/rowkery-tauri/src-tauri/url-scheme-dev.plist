@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Rowkery Dev's own rowkery-dev:// links (src/open_link.rs), so a link never lands in the release app. tauri.dev.conf.json merges this in place of url-scheme.plist. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>dev.rowkery.app.dev</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>rowkery-dev</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

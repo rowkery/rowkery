@@ -5,5 +5,10 @@
     "updater": {
       "endpoints": []
     }
+  },
+  "bundle": {
+    "macOS": {
+      "infoPlist": "url-scheme-dev.plist"
+    }
   }
 }
