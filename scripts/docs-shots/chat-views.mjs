@@ -6,7 +6,7 @@
 //  - rows-in-the-chat-committed: the same card once you committed it.
 // Not a proof (scripts/mcp-view-browser-proof.mjs is): it checks nothing beyond waiting for each screen.
 //
-//   node scripts/docs-shots/chat-views.mjs [outDir] [--write] [--only=rows,proposal]
+//   node scripts/docs-shots/chat-views.mjs [outDir] [--write] [--only=chat-rows,proposal,committed]
 import { launch, shot, close, sizes, OUT } from "./lib.mjs";
 import { drawView, toolResult } from "../lib/mcp-view-host.mjs";
 
