@@ -4916,3 +4916,70 @@ fn postgres_import_csv() {
     assert_eq!(run("DROP TABLE public.it_import").1, None);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// Run SQL file goes through safe mode: read-only refuses, Confirm
+/// writes needs the panel's Run, and a run commits the whole file.
+#[test]
+fn sqlite_sql_file_runs_through_safe_mode() {
+    let (_guard, _file, path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.sql");
+    std::fs::write(
+        &file,
+        "CREATE TABLE imported(a);\nINSERT INTO imported VALUES (1), (2);\n",
+    )
+    .unwrap();
+    let scan = rowkery_core::sql_file::scan(&file, EngineKind::Sqlite, |_| true).unwrap();
+    let options = RunOptions {
+        whole_file: true,
+        keep_going: false,
+    };
+    let progress = || ProgressSink(Box::new(|_| {}));
+    for (id, mode) in [
+        ("ro", SafeMode::ReadOnly),
+        ("confirm", SafeMode::Confirm),
+        ("off", SafeMode::Off),
+    ] {
+        CoreBridge::upsert_connection(
+            &bridge,
+            ConnectionRecord::Sqlite(SqliteConnection {
+                environment: None,
+                safe_mode: mode,
+                allow_mcp: false,
+                mcp_hidden_tables: Vec::new(),
+                mcp_until: None,
+                mcp_samples_off: false,
+                mcp_access: None,
+                masked_columns: Default::default(),
+                id: id.into(),
+                name: id.into(),
+                path: path.clone(),
+                sample: false,
+            }),
+            ConnectionSecrets::default(),
+        )
+        .expect("save");
+        bridge.open_window(id, id, None).expect("open");
+    }
+    let run = |window: &str, confirmed: bool| {
+        bridge.run_sql_file(
+            window,
+            file.clone(),
+            scan.clone(),
+            options,
+            confirmed,
+            progress(),
+        )
+    };
+    assert!(run("ro", true).unwrap_err().contains("read-only"));
+    assert!(run("confirm", false).unwrap_err().contains("Run"));
+    let report = run("off", false).expect("runs");
+    assert_eq!((report.done, report.rows, report.failed), (2, 2, None));
+    let count: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM imported", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

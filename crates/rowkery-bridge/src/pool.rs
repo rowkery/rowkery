@@ -108,6 +108,9 @@ pub(crate) enum Slot {
     Monitor,
     /// CSV import: its own transaction, never a tab's session or transaction.
     Import,
+    /// Run SQL file: used for one file, then closed (the file's `SET`s stay
+    /// on it), never parked.
+    SqlFile,
 }
 
 type Key = (String, Slot);

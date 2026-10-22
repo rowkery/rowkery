@@ -17,6 +17,7 @@ pub mod query_util;
 pub mod safety;
 pub mod sample;
 pub mod secrets;
+pub mod sql_file;
 pub mod ssh;
 
 pub use bridge::{CoreEvent, QueryDetail};

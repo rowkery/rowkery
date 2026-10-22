@@ -39,6 +39,9 @@ use rowkery_core::sample;
 use rowkery_core::secrets::{
     delete_secret, delete_secrets_for_connection, ConnectionSecrets, SecretKind,
 };
+use rowkery_core::sql_file::{
+    open_sqlite, run_postgres, run_sqlite, Progress, RunOptions, RunReport, Scan,
+};
 use rowkery_core::{CoreEvent, QueryDetail};
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
@@ -179,6 +182,17 @@ enum Command {
     CancelWindowQuery {
         window_id: String,
         tab_id: u64,
+    },
+    /// Run SQL file: the file `scan` read, on a session (or SQLite
+    /// connection) of its own. Cancelled like a tab, as [`IMPORT_TAB`].
+    RunSqlFile {
+        window_id: String,
+        path: std::path::PathBuf,
+        scan: Box<Scan>,
+        options: RunOptions,
+        confirmed: bool,
+        on_progress: ProgressSink,
+        respond_to: oneshot::Sender<Result<RunReport, String>>,
     },
     /// ⌘K "Stop all queries": every run in every window, at once.
     StopAllQueries,
@@ -615,6 +629,18 @@ struct CancelState {
     /// The run is waiting for a free connection: nothing to ask the server,
     /// so a cancel stops it at once.
     waiting: bool,
+}
+
+/// The tab id a window's Run SQL file runs under, for cancelling it.
+pub const IMPORT_TAB: u64 = u64::MAX - 2;
+
+/// Where a SQL file run's progress goes.
+pub struct ProgressSink(pub Box<dyn Fn(&Progress) + Send + Sync>);
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
 }
 
 /// The tab id the SQL line's exact count runs under: its own slot (and
@@ -2038,6 +2064,170 @@ fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
     }
 }
 
+struct SqlFileRun {
+    path: std::path::PathBuf,
+    scan: Box<Scan>,
+    options: RunOptions,
+    confirmed: bool,
+    on_progress: ProgressSink,
+}
+
+/// Run SQL file. Safe mode first: read-only connections refuse, and under
+/// Confirm writes the panel's Run is the confirmation. One at a time per
+/// window; a window's queries keep running beside it.
+fn run_sql_file(
+    state: &mut CoreState,
+    window_id: String,
+    run: SqlFileRun,
+    respond_to: oneshot::Sender<Result<RunReport, String>>,
+) {
+    let Some(target) = state.windows.get(&window_id).cloned() else {
+        let _ = respond_to.send(Err("This window is not connected".into()));
+        return;
+    };
+    let safe_mode = match &target {
+        WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
+        WindowTarget::Postgres { config, .. } => config.safe_mode,
+    };
+    if safe_mode == SafeMode::ReadOnly {
+        let _ = respond_to.send(Err(
+            "This connection is read-only, so a SQL file can't run on it.".into(),
+        ));
+        return;
+    }
+    if safe_mode == SafeMode::Confirm && run.scan.writes && !run.confirmed {
+        let _ = respond_to.send(Err(
+            "This connection confirms writes: press Run on the file's summary to run it.".into(),
+        ));
+        return;
+    }
+    let key = (window_id.clone(), IMPORT_TAB);
+    if state
+        .window_interrupts
+        .get(&key)
+        .is_some_and(|slot| Arc::strong_count(slot) > 1)
+    {
+        let _ = respond_to.send(Err("A SQL file is already running in this window.".into()));
+        return;
+    }
+    let slot: CancelSlot = Arc::default();
+    state.window_interrupts.insert(key, slot.clone());
+    invalidate_prefetch(&state.pool, &window_id, &state.runtime);
+    let SqlFileRun {
+        path,
+        scan,
+        options,
+        confirmed: _,
+        on_progress,
+    } = run;
+    match target {
+        WindowTarget::Sqlite { path: db, .. } => {
+            thread::spawn(move || {
+                let report = with_catch(|| {
+                    let conn = open_sqlite(&db)?;
+                    if !arm_cancel(&slot, CancelHandle::Sqlite(conn.get_interrupt_handle())) {
+                        return Ok(RunReport {
+                            cancelled: true,
+                            ..RunReport::default()
+                        });
+                    }
+                    let report = run_sqlite(
+                        &conn,
+                        &path,
+                        &scan,
+                        options,
+                        || cancel_requested(&slot),
+                        |p| (on_progress.0)(p),
+                    );
+                    disarm_cancel(&slot);
+                    Ok(report)
+                })
+                .and_then(|r| r);
+                let _ = respond_to.send(report);
+            });
+        }
+        WindowTarget::Postgres {
+            connection_id,
+            config,
+        } => {
+            let pool = state.pool.clone();
+            let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
+            let runtime = state.runtime.clone();
+            state.runtime.spawn(async move {
+                let stop = slot.lock().map(|s| s.stop.clone()).ok();
+                let committing = Arc::new(AtomicBool::new(false));
+                let sent = committing.clone();
+                let on_progress = move |p: &rowkery_core::sql_file::Progress| {
+                    sent.store(p.committing, Ordering::SeqCst);
+                    (on_progress.0)(p)
+                };
+                let work = async {
+                    let Lease { session, .. } = pool::lease(
+                        &pool,
+                        &window_id,
+                        Slot::SqlFile,
+                        generation,
+                        connection_id,
+                        config,
+                    )
+                    .await
+                    .map_err(driver_error_message)?;
+                    let handle = CancelHandle::Postgres {
+                        token: session.cancel_token.clone(),
+                        tls: session.cancel_via.clone(),
+                    };
+                    if !arm_cancel(&slot, handle) {
+                        return Ok(RunReport {
+                            cancelled: true,
+                            ..RunReport::default()
+                        });
+                    }
+                    let report = run_postgres(
+                        &session,
+                        &path,
+                        &scan,
+                        options,
+                        || cancel_requested(&slot),
+                        on_progress,
+                    )
+                    .await;
+                    disarm_cancel(&slot);
+                    // Never parked: the file's SETs stay on the session.
+                    drop(session);
+                    Ok(report)
+                };
+                let report = match stop {
+                    Some(stop) => tokio::select! {
+                        report = work => report,
+                        _ = stop.notified() => {
+                            // Stopped during COMMIT, the server may have saved it.
+                            let committing = committing.load(Ordering::SeqCst);
+                            Ok(RunReport {
+                                cancelled: true,
+                                rolled_back: options.whole_file && !committing,
+                                failed: Some(rowkery_core::sql_file::Failure {
+                                    line: None,
+                                    statement: String::new(),
+                                    message: if committing {
+                                        "The server didn't answer during COMMIT, so Rowkery closed the connection. The file may or may not be saved: reload the schema to check."
+                                    } else {
+                                        "The server didn't answer the cancel, so Rowkery closed the connection. The server rolls back what was still open when it notices."
+                                    }
+                                    .into(),
+                                }),
+                                ..RunReport::default()
+                            })
+                        }
+                    },
+                    None => work.await,
+                };
+                invalidate_prefetch(&pool, &window_id, &runtime);
+                let _ = respond_to.send(report);
+            });
+        }
+    }
+}
+
 /// Stops a run at once, without waiting for the server (⌘K "Stop all queries").
 /// Runs `work` on the runtime for a Postgres window; a SQLite window has no
 /// server sessions to show.
@@ -2902,6 +3092,26 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 .is_some_and(|f| f.has(&sql));
             let _ = respond_to.send(has);
         }
+        Command::RunSqlFile {
+            window_id,
+            path,
+            scan,
+            options,
+            confirmed,
+            on_progress,
+            respond_to,
+        } => run_sql_file(
+            state,
+            window_id,
+            SqlFileRun {
+                path,
+                scan,
+                options,
+                confirmed,
+                on_progress,
+            },
+            respond_to,
+        ),
         Command::CancelWindowQuery { window_id, tab_id } => {
             if let Some(slot) = state.window_interrupts.get(&(window_id, tab_id)) {
                 request_cancel(&state.runtime, slot);
@@ -3582,6 +3792,29 @@ impl CoreBridge {
             respond_to,
         })
         .unwrap_or(false)
+    }
+
+    /// Runs the SQL file at `path`, which `scan` read, and blocks until it
+    /// ends. Cancel with `cancel_window_query(window, IMPORT_TAB)`.
+    pub fn run_sql_file(
+        &self,
+        window_id: &str,
+        path: std::path::PathBuf,
+        scan: Scan,
+        options: RunOptions,
+        confirmed: bool,
+        on_progress: ProgressSink,
+    ) -> Result<RunReport, String> {
+        self.send_command(|respond_to| Command::RunSqlFile {
+            window_id: window_id.to_string(),
+            path,
+            scan: Box::new(scan),
+            options,
+            confirmed,
+            on_progress,
+            respond_to,
+        })
+        .unwrap_or_else(|| Err("Rowkery's core stopped".into()))
     }
 
     pub fn cancel_window_query(&self, window_id: &str, tab_id: u64) {

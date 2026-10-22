@@ -639,6 +639,52 @@ pub async fn session_execute(session: &PostgresSession, sql: &str) -> Result<(),
         .map_err(|e| map_query_error(&e, &session.config.username))
 }
 
+/// Runs one statement of a SQL file in the simple protocol, as psql does,
+/// and returns the rows it reports (`INSERT 0 5`: 5). Rows it returns are
+/// read and dropped, never kept.
+pub async fn session_run_file_statement(
+    session: &PostgresSession,
+    sql: &str,
+) -> Result<u64, DriverError> {
+    let username = &session.config.username;
+    let stream = session
+        .client
+        .simple_query_raw(sql)
+        .await
+        .map_err(|e| map_query_error(&e, username))?;
+    let mut stream = std::pin::pin!(stream);
+    let mut rows = 0;
+    while let Some(message) = stream
+        .try_next()
+        .await
+        .map_err(|e| map_query_error(&e, username))?
+    {
+        if let tokio_postgres::SimpleQueryMessage::CommandComplete(n) = message {
+            rows += n;
+        }
+    }
+    Ok(rows)
+}
+
+/// Starts a `COPY … FROM stdin`: send its rows into the sink, then
+/// `finish` it for the rows copied. Dropping the sink unfinished fails the
+/// COPY.
+pub async fn session_copy_in(
+    session: &PostgresSession,
+    sql: &str,
+) -> Result<tokio_postgres::CopyInSink<std::io::Cursor<Vec<u8>>>, DriverError> {
+    session
+        .client
+        .copy_in(sql)
+        .await
+        .map_err(|e| map_query_error(&e, &session.config.username))
+}
+
+/// The message to show for a COPY's failure.
+pub fn copy_error(session: &PostgresSession, err: &tokio_postgres::Error) -> DriverError {
+    map_query_error(err, &session.config.username)
+}
+
 pub async fn session_query_stream<F>(
     session: &PostgresSession,
     sql: &str,

@@ -23,6 +23,7 @@ use tauri::{AppHandle, Manager, State};
 mod e2e;
 mod mcp_connect;
 mod open_link;
+mod sql_file;
 pub mod timings;
 mod updates;
 use timings::{ProofEnv, Timings};
@@ -859,7 +860,7 @@ fn export_file_name(name: &str) -> String {
 }
 
 /// Choose file… in the connection sheet: the native open dialog filtered to
-/// `kind` ("sqlite", "pem" or "key"). `None` when dismissed.
+/// `kind` ("sqlite", "pem", "key" or "sql"). `None` when dismissed.
 #[tauri::command]
 async fn choose_file(app: AppHandle, kind: String) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -868,6 +869,8 @@ async fn choose_file(app: AppHandle, kind: String) -> Result<Option<String>, Str
         let dialog = match kind.as_str() {
             "sqlite" => dialog.add_filter("SQLite database", &["sqlite", "db", "sqlite3"]),
             "pem" => dialog.add_filter("Certificate", &["pem", "crt", "cer"]),
+            // `.dump` too, so a pg_dump archive gets its pg_restore hint.
+            "sql" => dialog.add_filter("SQL file", &["sql", "dump"]),
             _ => dialog,
         };
         dialog.blocking_pick_file()
@@ -1994,6 +1997,7 @@ pub fn run(mut timings: Timings) {
     builder
         .manage(bridge)
         .manage(timings)
+        .manage(sql_file::SqlFiles::default())
         .manage(chrome)
         .manage(updates::Updates::default())
         .manage(Imports::default())
@@ -2051,6 +2055,10 @@ pub fn run(mut timings: Timings) {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            sql_file::scan_sql_file,
+            sql_file::run_sql_file,
+            sql_file::cancel_sql_file,
+            sql_file::forget_sql_file,
             list_connections,
             save_connection,
             delete_connection,
