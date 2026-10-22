@@ -1119,11 +1119,15 @@ impl ServerHandler for RowkeryMcp {
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(views::list()
-            .with_ttl_ms(0)
-            .with_cache_scope(CacheScope::Private))
+        // Only a host that draws views has a use for the page.
+        let list = if draws_views(&context) {
+            views::list()
+        } else {
+            ListResourcesResult::default()
+        };
+        Ok(list.with_ttl_ms(0).with_cache_scope(CacheScope::Private))
     }
 
     async fn read_resource(
@@ -1170,11 +1174,11 @@ impl ServerHandler for RowkeryMcp {
         }
         let (outcome, mut entry, keep_sample) = self.dispatch(&request.name, &args).await;
         entry.client = client;
-        if views && request.name == "query" && outcome.is_ok() {
+        if views && views::CAN_OPEN && request.name == "query" && outcome.is_ok() {
             entry.add_link_key();
         }
-        let structured = match &outcome {
-            Ok(value) if views => views::structured(&request.name, &args, value, &entry),
+        let page_meta = match &outcome {
+            Ok(value) if views => views::page_meta(&request.name, &args, value, &entry),
             _ => None,
         };
         let text = match &outcome {
@@ -1196,7 +1200,7 @@ impl ServerHandler for RowkeryMcp {
         }
         audit::append(&entry);
         let mut result = text_result(&outcome);
-        result.structured_content = structured;
+        result.meta = page_meta;
         Ok(result.into())
     }
 }

@@ -173,22 +173,29 @@ async function callTool(name, args) {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
-// What the tool returned: structuredContent from Rowkery, else the text the agent got.
+// What the tool returned: the text the agent got (rows, or the proposal's
+// id), plus what only the page needs under _meta["rowkery/view"].
 function show(result) {
   stopPolling();
   $("wait").hidden = true;
   $("view").hidden = false;
   const text = result.content && result.content[0] && result.content[0].text;
+  const extra = (result._meta && result._meta["rowkery/view"]) || {};
+  showConnection(extra.connection);
   if (result.isError) return showError(text || "Something went wrong.");
-  let data = result.structuredContent;
-  if (!data) {
-    try { data = JSON.parse(text); } catch { data = {}; }
-    data.kind = data.columns ? "rows" : data.id ? "proposal" : "";
-  }
-  showConnection(data.connection);
-  $("view").dataset.view = data.kind || "";
-  if (data.kind === "rows") showRows(data);
-  else if (data.kind === "proposal") showProposal(data);
+  let data;
+  try { data = JSON.parse(text); } catch { data = null; }
+  if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
+  const kind = extra.kind || (Array.isArray(data.columns) ? "rows" : data.id ? "proposal" : "");
+  $("view").dataset.view = kind;
+  if (kind === "rows" && Array.isArray(data.columns)) showRows({ ...data, call: extra.call });
+  else if (kind === "proposal") showProposal({
+    id: extra.id || data.id,
+    statements: Array.isArray(extra.statements) ? extra.statements
+      : toolArgs.sql ? [{ verb: "Change", target: "", sql: String(toolArgs.sql).trim().replace(/;+$/, "") }] : [],
+    reason: extra.reason || toolArgs.reason,
+    expect_rows: extra.expect_rows ?? toolArgs.expect_rows,
+  });
   else showError(text || "");
 }
 
@@ -217,14 +224,14 @@ function el(tag, cls, text) {
 }
 
 const plural = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
-const NUMERIC = /^(int[248]?|integer|smallint|bigint|numeric|decimal|real|double|float[48]?|serial|bigserial|money)\b/i;
+const NUMERIC = /^(int[248]?|integer|smallint|bigint|numeric|decimal|real|double|float[48]?|serial|bigserial)\b/i;
 
 // ----- query: a sortable grid of the rows the agent got -----
 function showRows(data) {
-  const columns = data.columns || [];
-  const rows = data.rows || [];
-  const types = data.types || [];
-  const masked = new Set(data.masked || []);
+  const columns = data.columns;
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  const types = Array.isArray(data.types) ? data.types : [];
+  const masked = new Set(Array.isArray(data.masked) ? data.masked : []);
   const numeric = columns.map((_, i) => NUMERIC.test(types[i] || "")
     || (rows.length > 0 && rows.every((r) => r[i] === null || typeof r[i] === "number")));
   const count = rows.length;
@@ -254,6 +261,7 @@ function showRows(data) {
         row.forEach((v, i) => {
           const cls = [numeric[i] ? "num" : "", v === null ? "null" : "", masked.has(columns[i]) ? "masked" : ""].join(" ").trim();
           const td = el("td", cls, cellText(v));
+          td.title = td.textContent;
           tr.append(td);
         });
         frag.append(tr);
@@ -344,8 +352,8 @@ function showProposal(data) {
   if (statements.length === 0 && data.reason) body.append(el("div", "reason", data.reason));
   $("content").replaceChildren(body);
   $("foot").hidden = false;
-  showStatus(data.id, { state: data.state || "waiting" });
-  if (canCall() && (data.state || "waiting") === "waiting") startPolling(data.id);
+  showStatus(data.id, { state: "waiting" });
+  if (canCall() && data.id) startPolling(data.id);
 }
 
 function at(ms) {
@@ -369,7 +377,7 @@ function showStatus(id, status) {
     expired: "Expired before it was reviewed",
   };
   $("note").textContent = notes[state];
-  const review = state === "waiting" && canCall();
+  const review = state === "waiting" && canCall() && !!id;
   setAction(review ? "Review in Rowkery" : "", "acc", () => openInRowkery({ proposal: id }));
 }
 

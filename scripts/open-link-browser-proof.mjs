@@ -7,8 +7,8 @@
 //   "Agent query" tab holding the agent's SQL, run as the window connects.
 // - Another while that window is open: a new tab in the same window, run.
 // - Review in Rowkery: the Agents page on that proposal, not the oldest.
-// - A call no longer in the log, or a connection since deleted: an error
-//   toast, nothing opens.
+// - A call no longer in the log, a proposal decided since, or a connection
+//   since deleted: a toast, nothing opens.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/open-link-browser-proof.mjs [outDir]
@@ -146,12 +146,15 @@ await shot("3-review-link");
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="agents-page"]', { state: "detached" });
 
-// 4. A call no longer in the log; a connection since deleted.
+// 4. A call no longer in the log; a proposal decided since; a connection since deleted.
 await link({ kind: "gone" });
 await page.waitForSelector('[data-toast="error"]');
 // Text on purpose: the toast's wording is under test.
 check(/activity log/.test(await page.textContent('[data-testid="toast-message"]')), "a gone call says so");
 await shot("4-gone");
+await link({ kind: "decided" });
+await page.waitForFunction(() => /isn't waiting/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));
+check((await page.locator('[data-testid="agents-page"]').count()) === 0, "a decided proposal says so and opens nothing");
 const runs = (await ranSql()).length;
 await link({ kind: "sql", connection: "deleted", database: null, sql: "SELECT 1" });
 await page.waitForFunction(() => /isn't in Rowkery/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));

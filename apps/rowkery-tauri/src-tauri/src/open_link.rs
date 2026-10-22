@@ -26,6 +26,8 @@ pub enum OpenLink {
     },
     /// A proposal's review screen.
     Proposal { id: String },
+    /// The proposal was decided or expired since the card was drawn.
+    Decided,
     /// The call isn't in the log (cleared, rotated twice, or a made-up link).
     Gone,
 }
@@ -47,6 +49,7 @@ fn param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
 pub fn resolve(
     url: &str,
     find_call: impl Fn(&str) -> Option<rowkery_mcp::audit::Entry>,
+    waiting: impl Fn(&str) -> bool,
 ) -> Option<OpenLink> {
     let rest = url.strip_prefix("rowkery://")?;
     let (action, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -70,8 +73,9 @@ pub fn resolve(
             })
         }
         "review" => Some(match param(query, "proposal") {
-            Some(id) if !id.is_empty() => OpenLink::Proposal { id: id.to_string() },
-            _ => OpenLink::Gone,
+            // Not the oldest one instead: the Agents page would show another change.
+            Some(id) if waiting(id) => OpenLink::Proposal { id: id.to_string() },
+            _ => OpenLink::Decided,
         }),
         _ => None,
     }
@@ -79,7 +83,8 @@ pub fn resolve(
 
 /// A link the OS handed us: keep it for the page and bring the window up.
 pub fn opened(app: &AppHandle, url: &str) {
-    let Some(link) = resolve(url, rowkery_mcp::audit::find_call) else {
+    let waiting = |id: &str| rowkery_mcp::proposals::waiting().iter().any(|p| p.id == id);
+    let Some(link) = resolve(url, rowkery_mcp::audit::find_call, waiting) else {
         return;
     };
     if let Ok(mut slot) = app.state::<PendingLink>().0.lock() {
@@ -116,10 +121,14 @@ mod tests {
         (id != "missing").then_some(e)
     }
 
+    fn waiting(id: &str) -> bool {
+        id == "p_0123456789ab"
+    }
+
     #[test]
     fn a_call_link_opens_only_a_query_the_guard_let_through() {
         assert_eq!(
-            resolve("rowkery://open?call=1-2-ab", logged),
+            resolve("rowkery://open?call=1-2-ab", logged, waiting),
             Some(OpenLink::Sql {
                 connection: "pg".into(),
                 database: Some("shop".into()),
@@ -127,24 +136,31 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve("rowkery://open?call=refused", logged),
+            resolve("rowkery://open?call=refused", logged, waiting),
             Some(OpenLink::Gone)
         );
         assert_eq!(
-            resolve("rowkery://open?call=missing", logged),
+            resolve("rowkery://open?call=missing", logged, waiting),
             Some(OpenLink::Gone)
         );
         assert_eq!(
-            resolve("rowkery://open?sql=select%201", logged),
+            resolve("rowkery://open?sql=select%201", logged, waiting),
             Some(OpenLink::Gone)
         );
         assert_eq!(
-            resolve("rowkery://review?proposal=p_0123456789ab", logged),
+            resolve("rowkery://review?proposal=p_0123456789ab", logged, waiting),
             Some(OpenLink::Proposal {
                 id: "p_0123456789ab".into()
             })
         );
-        assert_eq!(resolve("rowkery://elsewhere", logged), None);
-        assert_eq!(resolve("https://rowkery.com/open?call=1", logged), None);
+        assert_eq!(
+            resolve("rowkery://review?proposal=p_committed000", logged, waiting),
+            Some(OpenLink::Decided)
+        );
+        assert_eq!(resolve("rowkery://elsewhere", logged, waiting), None);
+        assert_eq!(
+            resolve("https://rowkery.com/open?call=1", logged, waiting),
+            None
+        );
     }
 }

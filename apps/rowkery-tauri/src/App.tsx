@@ -894,6 +894,8 @@ function App() {
         setPaletteOpen(false);
         setSettings(null);
         setAgents({ initial: "proposals", proposal: link.id });
+      } else if (link.kind === "decided") {
+        showToast("That change isn't waiting for you any more");
       } else {
         showToast("That query isn't in Rowkery's activity log any more", undefined, "error");
       }

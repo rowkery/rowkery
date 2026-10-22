@@ -751,15 +751,11 @@ export async function cancelImport(windowId: string): Promise<void> {
 /** Incoming counts stop one past this: Quick Look prints `100+`. */
 export const INCOMING_CAP = 100;
 
-/**
- * Checks the window's idle sessions and replaces dead ones in the background
- * (returns at once). Called when the webview regains focus: the closest thing
- * to a wake-from-sleep signal.
- */
 /** A `rowkery://` link from a view in the chat, read from the activity log (open_link.rs). */
 export type OpenLink =
   | { kind: "sql"; connection: string; database: string | null; sql: string }
   | { kind: "proposal"; id: string }
+  | { kind: "decided" }
   | { kind: "gone" };
 
 /** The link waiting since the OS handed it over (`open-link`), if any; taking it clears it. */
@@ -767,6 +763,11 @@ export async function takeOpenLink(): Promise<OpenLink | null> {
   return invoke("take_open_link");
 }
 
+/**
+ * Checks the window's idle sessions and replaces dead ones in the background
+ * (returns at once). Called when the webview regains focus: the closest thing
+ * to a wake-from-sleep signal.
+ */
 export async function pingIdle(windowId: string): Promise<void> {
   return invoke("ping_idle", { windowId });
 }

@@ -102,15 +102,7 @@ impl Entry {
 
     /// Gives the call a link key, so a view can open it in Rowkery.
     pub fn add_link_key(&mut self) {
-        use std::hash::{BuildHasher, Hasher};
-        // RandomState is seeded from the OS per process; two of them, mixed
-        // with the time, make 128 bits nobody outside this machine can guess.
-        let half = || {
-            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-            h.write_u64(self.ts);
-            h.finish()
-        };
-        self.link_key = Some(format!("{:016x}{:016x}", half(), half()));
+        self.link_key = Some(rowkery_core::secrets::random_hex(16));
     }
 
     /// `session-ts-key`: what a view's "Open in Rowkery" link names the call by.
@@ -235,9 +227,10 @@ pub fn find_call(id: &str) -> Option<Entry> {
             bytes
                 .split(|&b| b == b'\n')
                 .filter_map(|l| serde_json::from_slice::<Entry>(l).ok())
-                .find(|e| e.session == Some(session) && e.ts == ts)
+                .find(|e| {
+                    e.session == Some(session) && e.ts == ts && e.link_key.as_deref() == Some(key)
+                })
         })
-        .filter(|e| e.link_key.as_deref() == Some(key))
 }
 
 /// Empties the log (⌘K MCP activity > Clear log).

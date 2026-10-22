@@ -6,8 +6,8 @@
 //   its env tag, "N rows · ms", masked columns dim, NULLs, a header click
 //   sorts (numbers as numbers, NULLs last), wide results scroll sideways;
 //   "Open in Rowkery" calls the page-only open_in_rowkery tool with the call id.
-// - No rows; no columns; a refusal; a host that sent no structuredContent
-//   (no call id, so no button).
+// - No rows; a refusal; a host that drops _meta (no call id, so no button;
+//   a proposal card from the tool's arguments).
 // - A proposal card: verb, table, reason, SQL; "Review in Rowkery" calls
 //   open_in_rowkery with the proposal id; it polls proposal_status and turns
 //   to Committed · N rows, and the button goes.
@@ -79,18 +79,21 @@ const wideRows = Array.from({ length: 40 }, (_, i) => [
   i % 5 === 0 ? "WELCOME10" : null,
   i % 7 === 0 ? { tag: "vip", retries: i % 3 } : null,
 ]);
-const rowsResult = {
-  content: [{ type: "text", text: "{}" }],
-  structuredContent: { kind: "rows", call: "1760000000000-1760000001234-9f2cabcdef012345", connection: conn, database: "shop",
-    columns: wideCols, types: ["int8", "text", "text", "numeric", "interval", "text", "timestamptz", "int8", "text", "text", "text", "jsonb"],
+// As rowkery --mcp sends it: the agent's text, plus _meta["rowkery/view"] for the page.
+const result = (text, view) => ({ content: [{ type: "text", text: JSON.stringify(text) }], _meta: { "rowkery/view": view } });
+const CALL = "1760000000000-1760000001234-9f2cabcdef0123456789abcdef012345";
+const rowsResult = result(
+  { columns: wideCols, types: ["int8", "text", "text", "numeric", "interval", "text", "timestamptz", "int8", "text", "text", "text", "jsonb"],
     rows: wideRows, row_count: 40, more: true, elapsed_ms: 41, masked: ["email"] },
-};
-const proposal = {
-  kind: "proposal", id: "p_0123456789ab", state: "waiting", connection: conn,
-  statements: [{ verb: "UPDATE", target: "orders", sql: "UPDATE orders SET status = 'failed'\nWHERE status = 'pending' AND provider_id = 4\n  AND created_at < '2026-10-20'" }],
-  reason: "Mark the Paylane orders stuck since Monday as failed, so customers get the retry email.",
-  expect_rows: 29,
-};
+  { kind: "rows", call: CALL, connection: conn, database: "shop" },
+);
+const SQL = "UPDATE orders SET status = 'failed'\nWHERE status = 'pending' AND provider_id = 4\n  AND created_at < '2026-10-20'";
+const REASON = "Mark the Paylane orders stuck since Monday as failed, so customers get the retry email.";
+const proposalResult = result(
+  { id: "p_0123456789ab", state: "waiting" },
+  { kind: "proposal", id: "p_0123456789ab", connection: conn, database: "shop",
+    statements: [{ verb: "UPDATE", target: "orders", sql: SQL }], reason: REASON, expect_rows: 29 },
+);
 
 const browser = await playwright.chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
 const fails = [];
@@ -136,19 +139,19 @@ for (const theme of ["light", "dark"]) {
     await frame.locator('[data-testid="view-action"]').click();
     await page.waitForFunction(() => window.calls.length > 0);
     const calls = await page.evaluate(() => window.calls);
-    check(calls[0].name === "open_in_rowkery" && calls[0].arguments.call === rowsResult.structuredContent.call, `${theme}: Open in Rowkery sends the call id`);
+    check(calls[0].name === "open_in_rowkery" && calls[0].arguments.call === CALL, `${theme}: Open in Rowkery sends the call id`);
     await page.close();
   }
   // No rows.
   {
-    const { page, frame } = await scene(theme, { content: [{ type: "text", text: "{}" }], structuredContent: { kind: "rows", call: "1-2-ab", connection: { name: "local" , environment: "local" }, columns: ["id"], rows: [], row_count: 0, more: false, elapsed_ms: 3 } });
+    const { page, frame } = await scene(theme, result({ columns: ["id"], rows: [], row_count: 0, more: false, elapsed_ms: 3 }, { kind: "rows", call: "1-2-ab", connection: { name: "local", environment: "local" } }));
     check((await frame.locator("tbody tr").count()) === 0, `${theme}: empty result has no rows`);
     await page.screenshot({ path: `${OUT}/3-no-rows-${theme}.png` });
     await page.close();
   }
   // A proposal: waiting, then committed while on screen.
   {
-    const { page, frame } = await scene(theme, { content: [{ type: "text", text: "{}" }], structuredContent: proposal });
+    const { page, frame } = await scene(theme, proposalResult);
     const state = frame.locator('[data-testid="view-state"]');
     check((await state.getAttribute("data-state")) === "waiting", `${theme}: proposal waits`);
     check((await frame.locator('[data-testid="view-action"]').getAttribute("data-action")) === "review", `${theme}: Review in Rowkery shown`);
@@ -166,11 +169,13 @@ for (const theme of ["light", "dark"]) {
   }
 }
 
-// A refusal shows its text; a host without structuredContent gets a grid
-// from the agent's text and no button (no call id).
+// A refusal shows its text and the connection; a host that drops _meta gets
+// a grid from the agent's text and no button (no call id), and a proposal
+// card from the tool's arguments.
 {
-  const { page, frame } = await scene("light", { isError: true, content: [{ type: "text", text: "Refused: the plan reads public.events (~4,200,000 rows; indexed: (id)) end to end." }] });
+  const { page, frame } = await scene("light", { isError: true, content: [{ type: "text", text: "Refused: the plan reads public.events (~4,200,000 rows; indexed: (id)) end to end." }], _meta: { "rowkery/view": { connection: conn } } }, { input: { connection: "shop" } });
   check((await frame.locator('[data-testid="mcp-view"]').innerText()).includes("Refused"), "refusal shown");
+  check((await frame.locator('[data-testid="view-connection"]').innerText()).includes("prd"), "refusal keeps the connection pill");
   await page.screenshot({ path: `${OUT}/6-refused-light.png` });
   await page.close();
 }
@@ -180,6 +185,13 @@ for (const theme of ["light", "dark"]) {
   check((await frame.locator("tbody tr").count()) === 2, "text-only result still draws a grid");
   check(await frame.locator('[data-testid="view-action"]').isHidden(), "no call id: no Open in Rowkery");
   check((await frame.locator('[data-testid="view-connection"]').innerText()) === "shop", "pill falls back to the tool's connection argument");
+  await page.close();
+}
+{
+  const { page, frame } = await scene("light", { content: [{ type: "text", text: JSON.stringify({ id: "p_0123456789ab", state: "waiting" }) }] }, { input: { connection: "shop", sql: SQL, reason: REASON } });
+  check((await frame.locator('[data-testid="mcp-view"]').getAttribute("data-view")) === "proposal", "text-only proposal still draws a card");
+  check((await frame.locator('[data-testid="mcp-view"]').innerText()).includes("Paylane"), "its reason comes from the tool's arguments");
+  await page.screenshot({ path: `${OUT}/7-proposal-text-only-light.png` });
   await page.close();
 }
 {

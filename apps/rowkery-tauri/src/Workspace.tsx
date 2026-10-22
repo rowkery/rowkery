@@ -2672,9 +2672,11 @@ export function Workspace({
   const [runWhenTick, setRunWhenTick] = useState(0);
   useEffect(() => {
     const want = runWhenConnected.current;
+    // A window that failed to connect drops it: a later reconnect shouldn't run it unasked.
+    if (connState === "error") runWhenConnected.current = null;
     if (!want || connState !== "connected") return;
     runWhenConnected.current = null;
-    void onRunRef.current(want.sql, true, undefined, want.tabId);
+    void onRunRef.current(want.sql, false, undefined, want.tabId);
   }, [runWhenTick, connState]);
   useEffect(() => {
     if (!runOnConnect || ranOnConnect.current || connState !== "connected") return;

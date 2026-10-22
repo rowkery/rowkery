@@ -2,10 +2,15 @@
 //!
 //! On a host that draws them (Claude Desktop and web, VS Code, Goose), a
 //! `query` result shows as a sortable grid and a `propose_change` as a card,
-//! both from one page bundled here (`view.html`). The page gets the same
-//! payload the agent got, plus a call id and the connection's label in
-//! `structuredContent`; it has no network. Hosts without the extension get
-//! today's text and none of the extra tools.
+//! both from one page bundled here (`view.html`). The page reads the same
+//! text the agent got; what only the page needs (the call id, the
+//! connection's label, a proposal's statements) goes in the result's `_meta`
+//! under `rowkery/view`, which hosts don't hand to the model. The page has no
+//! network. Hosts without the extension get today's text and none of the
+//! extra tools or resources.
+//!
+//! Opening Rowkery works on macOS only, so elsewhere there's no call id and no
+//! `open_in_rowkery`, and the page shows no button.
 //!
 //! "Open in Rowkery" and "Review in Rowkery" call `open_in_rowkery`, a tool
 //! only the page can see, and the server opens the `rowkery://` link itself:
@@ -23,6 +28,10 @@ use serde_json::{json, Map, Value as Json};
 pub const EXTENSION: &str = "io.modelcontextprotocol/ui";
 pub const MIME: &str = "text/html;profile=mcp-app";
 pub const VIEW_URI: &str = "ui://rowkery/view.html";
+/// The result `_meta` key the page reads.
+pub const META_KEY: &str = "rowkery/view";
+/// The page can bring Rowkery to the front (`open`).
+pub const CAN_OPEN: bool = cfg!(target_os = "macos");
 
 const VIEW_HTML: &str = include_str!("view.html");
 const MARK_SVG: &str = include_str!("../../../apps/rowkery-tauri/brand/rowkery-mark-no-shadow.svg");
@@ -45,7 +54,10 @@ fn meta(value: Json) -> MetaObject {
 pub fn add_to(tools: &mut Vec<Tool>) {
     for tool in tools.iter_mut() {
         if tool.name == "query" || tool.name == "propose_change" {
-            tool.meta = Some(meta(json!({ "ui": { "resourceUri": VIEW_URI } })));
+            // `ui/resourceUri` too, for hosts from before the nested form.
+            tool.meta = Some(meta(
+                json!({ "ui": { "resourceUri": VIEW_URI }, "ui/resourceUri": VIEW_URI }),
+            ));
         }
     }
     let page_only = |name: &'static str, description: &'static str, props: Json| {
@@ -55,16 +67,16 @@ pub fn add_to(tools: &mut Vec<Tool>) {
             description,
             std::sync::Arc::new(schema.as_object().cloned().unwrap_or_default()),
         );
-        tool.meta = Some(meta(
-            json!({ "ui": { "resourceUri": VIEW_URI, "visibility": ["app"] } }),
-        ));
+        tool.meta = Some(meta(json!({ "ui": { "visibility": ["app"] } })));
         tool
     };
-    tools.push(page_only(
-        "open_in_rowkery",
-        "Rowkery's view only: brings Rowkery to the front with a query call as a new tab, or a proposal's review screen.",
-        json!({ "call": { "type": "string" }, "proposal": { "type": "string" } }),
-    ));
+    if CAN_OPEN {
+        tools.push(page_only(
+            "open_in_rowkery",
+            "Rowkery's view only: brings Rowkery to the front with a query call as a new tab, or a proposal's review screen.",
+            json!({ "call": { "type": "string" }, "proposal": { "type": "string" } }),
+        ));
+    }
     tools.push(page_only(
         "proposal_status",
         "Rowkery's view only: what became of a proposal, for its card.",
@@ -104,18 +116,18 @@ fn label(connection: Option<&str>) -> Json {
     }
 }
 
-/// What the view gets for a successful call: the agent's payload, the call's
-/// id and the connection's label. `None` for tools without a view.
-pub fn structured(
+/// What only the view gets for a successful call (the result's `_meta`):
+/// the call's id, the connection's label and a proposal's statements, never
+/// rows (those are in the text the agent got). `None` for tools without a view.
+pub fn page_meta(
     tool: &str,
     args: &Map<String, Json>,
     outcome: &Json,
     entry: &crate::audit::Entry,
-) -> Option<Json> {
+) -> Option<MetaObject> {
     let mut out = match tool {
         "query" => {
-            let mut out = outcome.clone();
-            out["kind"] = json!("rows");
+            let mut out = json!({ "kind": "rows" });
             if let Some(id) = entry.call_id() {
                 out["call"] = json!(id);
             }
@@ -131,7 +143,6 @@ pub fn structured(
             json!({
                 "kind": "proposal",
                 "id": outcome["id"],
-                "state": outcome["state"],
                 "statements": statements,
                 "reason": args.get("reason"),
                 "expect_rows": args.get("expect_rows"),
@@ -143,7 +154,7 @@ pub fn structured(
     if let Some(db) = &entry.database {
         out["database"] = json!(db);
     }
-    Some(out)
+    Some(meta(json!({ META_KEY: out })))
 }
 
 /// A call id or proposal id as the server writes them: letters, digits, `-`
@@ -275,14 +286,14 @@ mod tests {
                 .map(|m| Json::Object(m.0.clone()))
         };
         assert_eq!(meta("query").unwrap()["ui"]["resourceUri"], VIEW_URI);
+        assert_eq!(meta("query").unwrap()["ui/resourceUri"], VIEW_URI);
         assert!(meta("explain").is_none());
+        let status = meta("proposal_status").unwrap();
+        assert_eq!(status, json!({ "ui": { "visibility": ["app"] } }));
+        // Only where Rowkery can be opened from the chat.
         assert_eq!(
-            meta("open_in_rowkery").unwrap()["ui"]["visibility"],
-            json!(["app"])
-        );
-        assert_eq!(
-            meta("proposal_status").unwrap()["ui"]["visibility"],
-            json!(["app"])
+            meta("open_in_rowkery"),
+            CAN_OPEN.then(|| json!({ "ui": { "visibility": ["app"] } }))
         );
     }
 
@@ -373,7 +384,8 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        assert!(names.contains(&"open_in_rowkery") && names.contains(&"proposal_status"));
+        assert!(names.contains(&"proposal_status"));
+        assert_eq!(names.contains(&"open_in_rowkery"), CAN_OPEN);
         let page = ask(3, "resources/read", json!({ "uri": VIEW_URI })).await;
         assert_eq!(page["result"]["contents"][0]["mimeType"], MIME);
 
@@ -383,28 +395,34 @@ mod tests {
             json!({ "name": "query", "arguments": { "connection": "s", "sql": "select id, total from orders order by id" } }),
         )
         .await;
-        let view = &result["result"]["structuredContent"];
+        // The agent's text is the rows as before: no call id, no label.
+        let text: Json =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text["rows"], json!([[1, 9.5], [2, 3.0]]));
+        assert!(text.get("call").is_none() && text.get("connection").is_none());
+        // What only the page needs rides in _meta.
+        let view = &result["result"]["_meta"][META_KEY];
         assert_eq!(view["kind"], "rows");
-        assert_eq!(view["rows"], json!([[1, 9.5], [2, 3.0]]));
         assert_eq!(
             view["connection"],
             json!({ "name": "shop", "environment": "prd" })
         );
-        // The agent's text is unchanged: no call id, no label.
-        let text: Json =
-            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert!(text.get("call").is_none() && text.get("connection").is_none());
+        assert!(result["result"].get("structuredContent").is_none());
 
-        let call = view["call"].as_str().unwrap();
-        let entry = crate::audit::find_call(call).unwrap();
-        assert_eq!(
-            entry.sql.as_deref(),
-            Some("select id, total from orders order by id")
-        );
-        assert_eq!(entry.connection.as_deref(), Some("s"));
-        // Without the right key, the call isn't found.
-        let (prefix, _) = call.rsplit_once('-').unwrap();
-        assert!(crate::audit::find_call(&format!("{prefix}-0000")).is_none());
+        if CAN_OPEN {
+            let call = view["call"].as_str().unwrap();
+            let entry = crate::audit::find_call(call).unwrap();
+            assert_eq!(
+                entry.sql.as_deref(),
+                Some("select id, total from orders order by id")
+            );
+            assert_eq!(entry.connection.as_deref(), Some("s"));
+            // Without the right key, the call isn't found.
+            let (prefix, _) = call.rsplit_once('-').unwrap();
+            assert!(crate::audit::find_call(&format!("{prefix}-0000")).is_none());
+        } else {
+            assert!(view.get("call").is_none());
+        }
 
         // A bad id is refused before anything opens; nothing is logged.
         let logged = crate::audit::read_since(None).entries.len();
