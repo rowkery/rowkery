@@ -1,0 +1,649 @@
+/* ---------- Schema panel: the column under the title bar ---------- */
+
+/* Above the main column (z 2) so the switchers' popovers open over it. */
+/* Holds the schema panel and clips it at the window's left edge (only there: the
+   switchers' popovers still open past it), so hiding slides the panel behind
+   the edge. The clip never moves, so it can't fall out of step. */
+.sidebar-clip {
+  position: absolute;
+  z-index: 2;
+  top: var(--titlebar-h);
+  bottom: 0;
+  left: 0;
+  width: var(--sidebar-width);
+  clip-path: inset(-100vh -100vw -100vh 0);
+  pointer-events: none;
+}
+
+.sidebar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  box-shadow: inset -1px 0 0 var(--line);
+  pointer-events: auto;
+  transition: left 240ms var(--ease-out), visibility 0s, background-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* ⌘B (⌃⌘S): the panel moves left exactly as far as the main column does. It
+   leaves faster (160ms) than it comes back (240ms), both easing out. */
+.app-frame.sidebar-hidden .sidebar {
+  left: calc(0px - var(--sidebar-width));
+  visibility: hidden;
+  transition:
+    left 160ms var(--ease-out),
+    visibility 0s linear 160ms;
+}
+
+/* The panel's right edge: an invisible 6px hit zone over the gap. Resizing
+   is live, so nothing that follows the width animates meanwhile. */
+.panel-resizer {
+  position: absolute;
+  z-index: 5;
+  top: var(--titlebar-h);
+  bottom: 0;
+  left: calc(var(--sidebar-width) - 3px);
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.app-frame.panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* The schema column's edge: a --line2 rule on hover, the orange while it is
+   dragged (2026-10-13). */
+.panel-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  transition: background-color 0.12s;
+}
+
+.panel-resizer:hover::after {
+  background: var(--line2);
+}
+
+.app-frame.panel-resizing .panel-resizer::after {
+  background: var(--acc);
+  transition: none;
+}
+
+.app-frame.panel-resizing .sidebar,
+.app-frame.panel-resizing .main {
+  transition: none;
+}
+
+/* While the panel is hidden: the connection / database switchers and the
+   environment tag at the tab row's left, in 12px dim text. It fades in once
+   the panel has gone and out before it returns. */
+.identity {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  animation: identity-in 120ms var(--ease-out) 160ms both;
+}
+
+.identity-switchers {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 160px;
+}
+
+.identity .conn-switcher {
+  min-width: 0;
+}
+
+.identity .conn-chip {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.identity .conn-chip:hover,
+.identity .conn-chip.open {
+  color: var(--text);
+}
+
+/* No room: the connection name goes first, then the database, never the tag. */
+.identity .conn-switcher:not(.db-switcher):has(~ .db-switcher) {
+  flex-shrink: 4;
+}
+
+.identity .env-tag {
+  flex-shrink: 0;
+}
+
+.identity .conn-popover {
+  top: calc(100% + 8px);
+  left: -8px;
+}
+
+.presence[data-closing] .identity {
+  animation: fade-out 100ms var(--ease-in) forwards;
+}
+
+@keyframes identity-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The top row: connection / database switchers, the connection's state and
+   latency, and schema refresh. It drags the window. */
+.sb-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  margin: 0;
+  padding: 14px 10px 0 16px;
+  position: relative;
+  z-index: 3;
+}
+
+.sb-head-switch {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--text);
+}
+
+/* Both chips shrink (connection first) so the database stays in view. */
+.sb-head-switch > .conn-switcher {
+  flex: 0 3 auto;
+}
+
+.sb-head-switch > .db-switcher {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sb-head-switch .conn-chip,
+.identity .conn-chip {
+  /* The chip's -2px side margins make it 4px wider than its wrapper: at
+     100% it lost those 4px and every name ended in an ellipsis. */
+  max-width: calc(100% + 4px);
+}
+
+.sb-head-sep {
+  flex-shrink: 0;
+  color: var(--faint);
+  font-family: var(--mono);
+}
+
+/* A SQLite connection's database slot (the head's second line): its file
+   name, not a picker. */
+.sb-db-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* .sidebar-clip's clip-path makes it the backdrop root, so the blur here
+   only sees the transparent panel: a near-opaque fill hides the list. */
+.sb-head .conn-popover {
+  top: calc(100% + 8px);
+  left: -8px;
+}
+
+.sb-status {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--mute);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sb-status .conn-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.sb-body {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px;
+}
+
+.sb-filter {
+  height: 30px;
+  margin-bottom: 8px;
+}
+
+/* Under the name: a mono line (where the connection points, its latency,
+   the env tag, ↻), then the Safe mode and MCP buttons. */
+.sb-head-sub {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 2px 0 12px;
+  padding: 0 10px 0 16px;
+}
+
+.sb-head-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  color: var(--mute);
+  font: 11.5px var(--mono);
+}
+
+/* The head names the database (2026-10-13: the title bar names the
+   connection): the database chip in the serif, its ▾ opening the database
+   switcher, or a SQLite file's name. The connection chip stays mounted but
+   hidden, so ⇧⌘O and the `…` menu still open its picker here. */
+.sb-head-switch > .conn-switcher:not(.db-switcher) > .conn-chip {
+  display: none;
+}
+
+.sb-head-switch .db-chip,
+.sb-head-file {
+  font: 600 17px/1.2 var(--font-display);
+  color: var(--text);
+}
+
+.sb-head-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-head-dot {
+  flex-shrink: 0;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.sb-head-sub-gap {
+  flex: 1;
+  align-self: stretch;
+}
+
+.sb-refresh {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.sb-refresh:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.sb-refresh[data-spinning] {
+  color: var(--acc);
+}
+
+.sb-refresh[data-spinning] svg {
+  animation: spin 0.8s linear infinite;
+}
+
+.sb-icon {
+  flex-shrink: 0;
+  color: var(--dim);
+}
+
+/* Rows fade out at the foot of the panel rather than being cut. */
+.sb-scroll {
+  animation: cp-fade 160ms ease-out;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  margin: 0 -4px;
+  padding: 0 4px 12px;
+  --glide-radius: 6px;
+  -webkit-mask-image: linear-gradient(#000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(#000 calc(100% - 16px), transparent);
+}
+
+.sb-empty {
+  padding: 14px 8px;
+  color: var(--dim);
+}
+
+.sb-section {
+  margin-top: 2px;
+}
+
+.sb-section + .sb-section {
+  margin-top: 10px;
+}
+
+.sb-section-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--dim);
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: default;
+}
+
+.sb-section-header:hover {
+  color: var(--mute);
+}
+
+.sb-chevron {
+  order: 3;
+  margin-left: -2px;
+  color: var(--faint);
+  opacity: 0;
+  transition: transform 120ms ease, opacity 0.18s ease;
+}
+
+.sb-section-header:hover .sb-chevron,
+.sb-chevron.collapsed {
+  opacity: 1;
+}
+
+.sb-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.sb-section-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-section-count,
+.sb-meta {
+  flex-shrink: 0;
+  font: 11px var(--mono);
+  letter-spacing: 0;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.sb-section-count {
+  order: 2;
+}
+
+.sb-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sb-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding-left: 10px;
+  border-radius: 6px;
+  color: var(--text2);
+  transition: color 0.18s ease;
+}
+
+.sb-row:hover {
+  color: var(--text);
+}
+
+.sb-row.selected {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--line), var(--shadow);
+  color: var(--text);
+}
+
+.sb-row .sb-icon {
+  color: var(--dim);
+  transition: color 0.18s ease;
+}
+
+.sb-row.selected .sb-row-main .sb-icon {
+  color: var(--acc);
+}
+
+.sb-row-main {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 0 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+
+.sb-row.selected .sb-row-main {
+  font-weight: 500;
+}
+
+.sb-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-badge {
+  flex-shrink: 0;
+  font: 500 10.5px var(--sans);
+  color: var(--mute);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--hover);
+}
+
+.sb-disclosure,
+.sb-pin {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+}
+
+.sb-disclosure svg {
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.sb-disclosure.open svg {
+  transform: none;
+}
+
+.sb-disclosure:hover,
+.sb-pin:hover {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+}
+
+/* Pin appears on hover (or when pinned) in the row count's place. */
+.sb-pin {
+  position: absolute;
+  right: 0;
+  opacity: 0;
+}
+
+.sb-row.has-disclosure .sb-pin {
+  right: 26px;
+}
+
+.sb-row:hover .sb-pin,
+.sb-pin:focus-visible {
+  opacity: 1;
+}
+
+.sb-row:hover .sb-meta {
+  visibility: hidden;
+}
+
+/* On the selected row's --sel, --dim drops under 4.5:1 in the dark. */
+.sb-row.selected .sb-meta {
+  color: var(--mute);
+}
+
+.sb-pin.on {
+  color: var(--acc);
+}
+
+/* The schema column's foot: Agents, Presenting | update, Appearance,
+   Keyboard shortcuts, Settings (2026-10-17), one row of 28 px icon buttons
+   under one glide hover; names in tooltips. */
+.sb-foot-rows {
+  position: relative;
+  isolation: isolate;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px 10px;
+  box-shadow: inset 0 1px 0 var(--line);
+  --glide-radius: 6px;
+}
+
+.sb-foot-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mute);
+  cursor: default;
+  transition: color 0.18s ease, background-color 0.18s ease, transform 120ms ease;
+}
+
+.sb-foot-btn:hover {
+  color: var(--text);
+}
+
+.sb-foot-btn:active {
+  transform: scale(0.9);
+}
+
+.sb-foot-btn[data-on] {
+  color: var(--acc);
+}
+
+.sb-foot-gap {
+  flex: 1 1 auto;
+}
+
+/* A newer Rowkery waits: an orange disc, the foot's one filled button, until
+   it is installed. It opens Settings > Updates. */
+.sb-update,
+.sb-update:hover {
+  border-radius: 50%;
+  background: var(--acc);
+  color: var(--onfill);
+  animation: pop 0.2s var(--ease-out);
+}
+
+.sb-update:hover {
+  background: var(--acc2);
+}
+
+.sb-update[data-phase="downloading"],
+.sb-update[data-phase="downloading"]:hover {
+  background: var(--accbg);
+  color: var(--acc);
+}
+
+.sb-agents-dot {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 1.5px var(--panel);
+}
+
+/* Changes agents proposed, waiting: a count where the dot was. */
+.sb-agents-count {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--acc);
+  box-shadow: 0 0 0 1.5px var(--panel);
+  color: var(--onfill);
+  font: 600 10px/14px var(--sans);
+  text-align: center;
+}

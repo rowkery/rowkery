@@ -397,7 +397,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
             key={`${connectionId}:${schemas[0]?.database ?? ""}:${schemas.length > 0}`}
           >
             {schemas.length === 0 ? (
-              // Couldn't connect folds the column to its head (App.css).
+              // Couldn't connect folds the column to its head (styles/connect-to-start.css).
               failed ? null : (
                 <div className="sb-empty">
                   {connecting

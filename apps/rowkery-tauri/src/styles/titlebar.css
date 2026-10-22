@@ -1,0 +1,257 @@
+/* ---------- Title bar (Paper, 2026-10-13) ----------
+   48 px of --bar with a rule under it, across the whole window: the traffic
+   lights, one pill per window and +, then the shown window's Safe mode and
+   MCP and ⌘K. */
+.titlebar {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: var(--titlebar-h);
+  padding: 0 14px 0 18px;
+  background: var(--bar);
+  box-shadow: inset 0 -1px 0 var(--line);
+  transition: background-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.titlebar-gap {
+  flex: 1;
+  align-self: stretch;
+}
+
+/* macOS draws its traffic lights here (trafficLightPosition 18, 24 in
+   tauri.macos.conf.json: y 18 put their centre at 19 pt in the app, 6 pt
+   above the pills' 25, 2026-10-13); elsewhere we draw ours, centred
+   by the bar's flex. Both take the same room. */
+.traffic-zone {
+  flex-shrink: 0;
+  width: 52px;
+  height: 12px;
+}
+
+.traffic {
+  display: flex;
+  gap: 8px;
+}
+
+.traffic-btn {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--shade) 28%, transparent);
+  opacity: 0.92;
+  cursor: default;
+}
+
+.traffic-btn:hover {
+  opacity: 1;
+}
+
+.traffic-btn.close {
+  background: #ff5f57;
+}
+
+.traffic-btn.minimize {
+  background: #febc2e;
+}
+
+.traffic-btn.maximize {
+  background: #28c840;
+}
+
+/* Linux / Windows with the system title bar (`native_decorations`,
+   windowChrome.ts): WindowControls renders nothing and the frame is square
+   to meet the system's bar. */
+:root.native-decorations .app-frame {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* The windows: 28 px pills, the shown one raised on paper. */
+.win-tabs {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: 8px;
+  --glide-radius: 6px;
+}
+
+.win-tab {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 1;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 3px 0 10px;
+  border-radius: 6px;
+  color: var(--mute);
+  font: 500 12.5px var(--sans);
+  white-space: nowrap;
+  cursor: default;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
+}
+
+.win-tab[data-on] {
+  background: var(--bg);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
+  color: var(--text);
+}
+
+.win-tab:hover {
+  color: var(--text);
+}
+
+.win-icon {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  color: var(--engine, var(--dim));
+}
+
+.win-name {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The environment dot, or a spinner while it connects (or runs queries out
+   of sight), or ⚠ when it couldn't connect. */
+.win-mark {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.win-env {
+  background: var(--env);
+}
+
+.win-tab[data-env="prd"] {
+  --env: var(--env-prd);
+}
+
+.win-tab[data-env="stg"] {
+  --env: var(--env-stg);
+}
+
+.win-tab[data-env="dev"] {
+  --env: var(--env-dev);
+}
+
+.win-tab[data-env="local"] {
+  --env: var(--env-local);
+}
+
+.win-spin {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-top-color: var(--acc);
+  animation: spin 0.8s linear infinite;
+}
+
+.win-warn {
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  background: var(--del);
+  color: var(--onfill);
+}
+
+/* × shows on the shown window and under the pointer (2026-10-13). */
+.win-close {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  opacity: 0;
+  transition: opacity 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.win-tab:is([data-on], :hover) .win-close {
+  opacity: 1;
+}
+
+.win-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The shown pill's safe mode shield (2026-10-17): its window portals it
+   into this slot while connected. Ink while a mode is on. */
+.win-tools {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.win-tools:empty {
+  display: none;
+}
+
+.win-shield {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.win-shield[data-shield="confirm"],
+.win-shield[data-shield="read_only"] {
+  color: var(--text);
+}
+
+.win-shield:hover,
+.win-shield[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.win-tabs.reordering > [data-dragging] {
+  z-index: 1;
+}
+
+.win-add {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  transition: color 0.18s ease;
+}
+
+.win-add:hover {
+  color: var(--text);
+}

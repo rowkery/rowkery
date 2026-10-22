@@ -1,0 +1,469 @@
+/* ---------- SQL editor ---------- */
+
+/* A textarea over a coloured copy of its text. Both share one box, font and
+   padding so they wrap alike; the line numbers live in the copy's left
+   padding (the gutter), one per line even when a line wraps. */
+.sql-editor-wrap {
+  --gutter: 56px;
+  position: relative;
+  z-index: 0;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: var(--editor-line-height);
+}
+
+.sql-highlight,
+.sql-editor {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  border: 0;
+  padding: 14px 16px 12px var(--gutter);
+  font: inherit;
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  scrollbar-gutter: stable;
+}
+
+.sql-highlight {
+  overflow: hidden;
+  background: transparent;
+  color: var(--text);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* A failed run's token: the same text, transparent, over the colours, with
+   a dotted underline (removed by the next edit). */
+.sql-marks {
+  color: transparent;
+}
+
+.sql-marks .ln::before {
+  content: none;
+}
+
+.sql-mark {
+  text-decoration: underline dotted var(--del);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+}
+
+.sql-highlight .ln.err::before {
+  color: var(--del);
+}
+
+.sql-highlight .ln {
+  position: relative;
+  min-height: var(--editor-line-height);
+  margin: 0 -16px 0 -8px;
+  padding: 0 16px 0 8px;
+  transition: background-color 0.3s ease;
+}
+
+.sql-highlight .ln::before {
+  content: attr(data-n);
+  position: absolute;
+  left: -44px;
+  width: 28px;
+  text-align: right;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.sql-highlight .ln.st::before {
+  color: var(--text);
+}
+
+.sql-highlight .ln.cur::before {
+  color: var(--text);
+}
+
+/* The statement ⌘↵ runs: a faint band and a soft bar in the gutter (orange
+   stays Run's alone). */
+.sql-highlight .ln.st {
+  background: var(--accbg);
+}
+
+.sql-highlight .ln.st::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  background: var(--acc);
+}
+
+.sql-highlight .ln.st-first::after {
+  border-top-left-radius: 2px;
+  border-top-right-radius: 2px;
+}
+
+.sql-highlight .ln.st-last::after {
+  border-bottom-left-radius: 2px;
+  border-bottom-right-radius: 2px;
+}
+
+.sql-highlight .k {
+  color: var(--kw);
+}
+
+.sql-highlight .f {
+  color: var(--fn);
+}
+
+.sql-highlight .s {
+  color: var(--str);
+}
+
+.sql-highlight .n {
+  color: var(--num);
+}
+
+.sql-highlight .c {
+  color: var(--cm);
+  font-style: italic;
+}
+
+.sql-highlight .p {
+  color: var(--mute);
+}
+
+.sql-editor {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  outline: none;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* A table tab's filter: one line, no gutter. */
+.sql-editor-wrap.compact {
+  --gutter: 0px;
+  flex: 0 0 auto;
+  height: 22px;
+  min-height: 0;
+}
+
+.sql-editor-wrap.compact .sql-highlight,
+.sql-editor-wrap.compact .sql-editor {
+  padding: 0;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.sql-editor-wrap.compact .sql-highlight .ln {
+  margin: 0;
+  padding: 0;
+}
+
+.sql-editor-wrap.compact .sql-highlight .ln::before {
+  display: none;
+}
+
+.sql-editor-wrap.compact .sql-editor::placeholder {
+  color: var(--dim);
+}
+
+.sql-editor::selection {
+  color: transparent;
+  background: var(--accbg2);
+}
+
+.results-grid-wrap {
+  flex: 1 1 0;
+  overflow: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+
+/* A failed run, in place of the grid: the sentence, the suggestion, the
+   raw text as psql prints it, then Copy error and Report…. */
+.query-error {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.qe-sentence {
+  margin: 0 0 10px;
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.qe-suggest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.qe-suggest b {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.qe-replace {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--control-bg);
+  box-shadow: inset 0 0.5px 0 color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+  font: inherit;
+  cursor: default;
+}
+
+.qe-replace:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.qe-replace kbd {
+  font: 11px var(--mono);
+  color: var(--text-dim);
+}
+
+.qe-raw {
+  margin: 0 0 14px;
+  max-width: 900px;
+  color: var(--text-muted);
+  font: 12px/1.55 var(--mono);
+  white-space: pre-wrap;
+}
+
+.qe-raw-line:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.qe-state {
+  color: var(--text-dim);
+}
+
+.qe-actions {
+  display: flex;
+  gap: 16px;
+}
+
+.qe-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+.qe-link:hover {
+  color: var(--text);
+}
+
+.results-error {
+  padding: 12px;
+  color: var(--del);
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.results-empty {
+  padding: 12px;
+  color: var(--text-muted);
+}
+
+/* "● 100 rows 19 ms" at the right of the results header. */
+.card-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--mute);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.card-meta b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.card-meta .conn-dot {
+  width: 6px;
+  height: 6px;
+  box-shadow: none;
+}
+
+.card-meta .conn-dot.connected {
+  box-shadow: none;
+}
+
+.card-meta.error {
+  color: var(--del);
+}
+
+.card-meta.running {
+  gap: 8px;
+  color: var(--text2);
+}
+
+.card-meta.cancelled {
+  color: var(--text-muted);
+}
+
+.card-meta.cancelled .conn-dot {
+  background: var(--text-dim);
+}
+
+/* Table tabs: rows per page (1,000 · 5,000 · All), right of the count. */
+.page-size {
+  margin-left: auto;
+}
+
+.card-meta ~ .page-size {
+  margin-left: 0;
+}
+
+.page-size select {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text2);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.page-size select:hover:not(:disabled) {
+  border-color: var(--dim);
+}
+
+.page-size select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cancel-btn {
+  height: 26px;
+  margin-left: 4px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cancel-btn:not(:disabled):hover {
+  border-color: var(--dim);
+}
+
+.cancel-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.cancel-key {
+  margin-left: 4px;
+  color: var(--dim);
+  font-family: var(--mono);
+}
+
+.spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--line2);
+  border-top-color: var(--acc);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.shell-fatal-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--text2);
+  background: var(--bg);
+  height: 100%;
+  text-align: center;
+}
+
+.shell-fatal-error h1 {
+  margin: 8px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.shell-fatal-error p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.shell-fatal-error pre {
+  max-width: 560px;
+  max-height: 30vh;
+  overflow: auto;
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--del);
+  white-space: pre-wrap;
+  text-align: left;
+}
+
+.fatal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.fatal-actions button {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font: inherit;
+  font-size: 13px;
+}
+
+.fatal-actions button:hover {
+  background: color-mix(in srgb, var(--text) 13%, transparent);
+}

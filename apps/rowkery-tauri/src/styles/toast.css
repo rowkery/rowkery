@@ -1,0 +1,150 @@
+/* ---------- Toast ---------- */
+
+/* Spans the main column, so the capsule centres over the cards and follows
+   the sidebar sliding away. Clicks pass through to the grid under it. */
+.toast-layer {
+  position: absolute;
+  z-index: 40;
+  left: var(--main-left);
+  right: var(--inspector-right);
+  bottom: 18px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  transition: left 240ms var(--ease-out), bottom 240ms var(--ease-out);
+}
+
+/* Above the foot edits bar (46 px) while it shows, never over Commit. The
+   shown window says so on itself (`data-tray-up`): a `:has()` that searched
+   each window's whole subtree for the bar cost every window switch. */
+.app-frame:has(> .workspace:not([hidden])[data-tray-up]) .toast-layer {
+  bottom: 64px;
+}
+
+.toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(560px, 100%);
+  height: 34px;
+  padding: 0 14px 0 12px;
+  border-radius: 8px;
+  background: var(--toast-bg);
+  box-shadow: var(--toast-shadow), inset 0 0 0 1px var(--toast-ring);
+  color: var(--toast-fg);
+  font: 500 12.5px var(--sans);
+  white-space: nowrap;
+  animation: toast 2.6s ease both;
+}
+
+.toast[data-held] {
+  animation: rise 0.2s var(--ease-out);
+}
+
+/* Undo (and View): a real button inside the toast, in the orange of what you
+   ask for, with its key. */
+.toast-undo {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 -8px 0 4px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--acc);
+  font: inherit;
+  font-weight: 600;
+  cursor: default;
+  transition: background-color 0.18s ease;
+}
+
+.toast-undo:hover {
+  background: color-mix(in srgb, var(--toast-fg) 12%, transparent);
+}
+
+.toast-undo kbd {
+  font: 400 11px/1 var(--mono);
+  color: color-mix(in srgb, var(--toast-fg) 62%, transparent);
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: color-mix(in srgb, var(--ok) 55%, var(--toast-fg));
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.toast-error .toast-icon {
+  stroke: color-mix(in srgb, var(--del) 60%, var(--toast-fg));
+}
+
+.toast-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: color-mix(in srgb, var(--toast-fg) 65%, transparent);
+  font: 400 12px var(--mono);
+}
+
+@keyframes toast {
+  0% { opacity: 0; transform: translateY(8px); }
+  10%, 85% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translateY(4px); }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+}
+
+/* The other entries: a popover's pop and a plain fade. */
+@keyframes pop {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(24px); }
+}
+
+.presence[data-closing] .toast {
+  animation: fade-out 110ms ease-in forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-splitter.sweeping::after,
+  .conn-popover,
+  .cp-scrim,
+  .cp-panel,
+  .sb-scroll,
+  .roll > span,
+  .card-notice,
+  .toast,
+  .identity,
+  .sb-update,
+  .presence[data-closing] * {
+    animation: none !important;
+  }
+
+  .sidebar,
+  .main,
+  .toast-layer,
+  .query-tab-thumb,
+  .app-frame,
+  .titlebar,
+  .win-tab,
+  .editor-header,
+  .view-switch-thumb,
+  .sb-foot-btn,
+  .reordering > [data-reorder-key] {
+    transition: none !important;
+  }
+}

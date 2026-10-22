@@ -1,0 +1,411 @@
+/* ---------- Connect to start (a window with no connection) ---------- */
+
+/* The tab row keeps ‹ › and the drag region; the tabs, editor and results go. */
+.main.empty .editor-card > :not(.editor-header),
+.main.empty .query-tabs,
+.main.empty .query-tab-add,
+.main.empty .open-query-btn,
+.main.empty .pane-splitter,
+.main.empty .results-card {
+  display: none;
+}
+
+.main.empty .editor-card {
+  flex: 0 0 auto !important;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Paper (2026-10-10): no connection, no schema column.
+   The main column spans the window under the title bar; the panel and its
+   resize edge step out of the way and come back with the first schema. */
+.app-frame:has(> .workspace:not([hidden])[data-empty-pose]) {
+  --main-left: 0px;
+}
+
+.workspace[data-empty-pose] .sidebar-clip {
+  visibility: hidden;
+}
+
+.app-frame:has(> .workspace:not([hidden])[data-empty-pose]) .panel-resizer {
+  display: none;
+}
+
+/* There is no tab row without a connection: no
+   history arrows and no chip, only ⌘K at the right. The switcher stays
+   mounted so ⇧⌘O's picker opens at the row's left. */
+.workspace[data-empty-pose] .history-nav,
+.workspace[data-empty-pose] .identity .conn-chip {
+  display: none;
+}
+
+.workspace[data-empty-pose] .editor-header {
+  box-shadow: none;
+}
+
+.workspace:not([data-empty-pose]) .sidebar {
+  animation: fade 0.25s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace:not([data-empty-pose]) .sidebar {
+    animation: none;
+  }
+}
+
+/* One 560 px column, 88 px under the tab row (Connect to start and
+   Couldn't connect share it). */
+.empty-window {
+  position: absolute;
+  inset: 42px 0 0;
+  display: flex;
+  justify-content: center;
+  padding: 88px 16px 32px;
+  overflow-y: auto;
+}
+
+.ew-block {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  width: 560px;
+  max-width: 100%;
+  animation: rise 0.28s var(--ease-out);
+}
+
+/* The app's one penguin motion: the empty state (penguin and actions) fades out as
+   the first schema lands. Reduce Motion unmounts it at once (Presence). */
+.presence[data-closing] .empty-window {
+  animation: fade-out 100ms var(--ease-in) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ew-block {
+    animation: none;
+  }
+}
+
+/* A long list scrolls the screen; nothing in the block shrinks (the penguin would). */
+.ew-block > * {
+  flex-shrink: 0;
+}
+
+/* The penguin beside the heading, bottoms aligned. The pose box's slack
+   (0.2 × size each side) is taken back so the mark itself sits 20 px off. */
+.ew-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 20px;
+}
+
+.ew-head .penguin-box {
+  margin-inline: calc(-0.2 * 64px);
+}
+
+.ew-penguin {
+  color: var(--mute);
+}
+
+/* Couldn't connect: the same mark, leaning back, in the delete colour. */
+.ew-penguin-tilted {
+  color: var(--del);
+}
+
+.ew-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ew-title {
+  margin: 0;
+  font: 600 30px/1.1 var(--font-display);
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.ew-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--mute);
+}
+
+/* The four ways in: bordered cards, two by two. */
+.ew-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ew-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.ew-card:hover,
+.ew-card.cursor {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+  transform: translateY(-1px);
+}
+
+.ew-card:focus-visible {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg2);
+}
+
+.ew-card .ew-label {
+  font: 600 14px var(--sans);
+}
+
+.ew-card-sub {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.ew-card .ew-key {
+  color: var(--mute);
+}
+
+/* Your connections, Found on this Mac. */
+.ew-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* The pointer's highlight glides between the rows (motion.tsx). */
+  --glide-radius: 6px;
+}
+
+.ew-section {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  margin: 0;
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.ew-found-section {
+  margin-top: 12px;
+  animation: ew-grow 120ms var(--ease-out);
+}
+
+@keyframes ew-grow {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ew-found-section {
+    animation: none;
+  }
+}
+
+.ew-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ew-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: 13px var(--sans);
+  text-align: left;
+  cursor: default;
+  transition: background-color 0.18s ease;
+}
+
+/* Only the keyboard's cursor paints its own fill; the pointer's is the glide. */
+.ew-row.cursor {
+  background: var(--hover);
+}
+
+.ew-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ew-mono {
+  font: 12px var(--mono);
+}
+
+.ew-key {
+  flex-shrink: 0;
+  font: 11px var(--mono);
+  color: var(--dim);
+}
+
+/* "Connect ↵" reads as words, not a keycap; --mute, as --dim is 3.5:1 on paper. */
+.ew-go {
+  font: 12px var(--sans);
+  color: var(--mute);
+}
+
+.ew-found .conn-dot {
+  margin: 0 5px;
+}
+
+/* A saved connection: 28 px engine tile, name + env tag, mono subtitle. */
+.ew-saved {
+  height: 44px;
+}
+
+.ew-saved .conn-engine {
+  width: 28px;
+  height: 28px;
+}
+
+.ew-saved-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ew-saved-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.ew-saved-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ew-pinned {
+  display: inline-flex;
+  color: var(--dim);
+}
+
+.ew-saved-sub {
+  color: var(--mute);
+  font: 11px var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ew-all .ew-label {
+  color: var(--mute);
+}
+
+/* A .sqlite / .db over the window: the cards take the accent, as on hover. */
+.empty-window[data-dragging] .ew-card {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+}
+
+/* Couldn't connect: the raw error as code, then the bordered buttons. */
+.ew-error-text {
+  max-height: calc(11.5px * 1.5 * 8 + 20px);
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--hover);
+  color: var(--text2);
+  font: 11.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.ew-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ew-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text2);
+  font: 500 12px var(--sans);
+  cursor: default;
+  transition: border-color 0.18s ease;
+}
+
+.ew-btn:hover:not(:disabled) {
+  border-color: var(--dim);
+}
+
+.ew-btn:disabled {
+  opacity: 0.5;
+}
+
+.ew-btn kbd {
+  font: 11px var(--mono);
+  color: var(--dim);
+}
+
+.ew-btn-quiet {
+  margin-left: auto;
+}
+
+/* The panel of an empty window: only its head, which opens the picker. */
+.sidebar[data-empty] .sb-body > * {
+  display: none;
+}
+
+/* Couldn't connect: the column folds to its head (the database's name, the
+   host, env, the red dot); the filter has nothing to act on until the
+   connection comes back (Paper, 2026-10-10). */
+.sidebar[data-failed] .sb-body > * {
+  display: none;
+}
+
+.conn-chip-name.dim {
+  color: var(--text-dim);
+}

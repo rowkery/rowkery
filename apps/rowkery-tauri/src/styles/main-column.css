@@ -1,0 +1,391 @@
+/* ---------- Main column: editor over results, no cards ---------- */
+
+.main {
+  position: absolute;
+  z-index: 1;
+  top: var(--titlebar-h);
+  bottom: 0;
+  left: var(--main-left);
+  right: var(--inspector-right);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: left 240ms var(--ease-out);
+}
+
+.app-frame.sidebar-hidden .main {
+  transition-duration: 160ms;
+}
+
+/* A page (Agents) stands in for the main column and the schema column
+   (2026-10-14: the tables don't matter while it's open): the window
+   keeps its state underneath, out of sight and out of the tab order. */
+.app-frame[data-page] .main,
+.app-frame[data-page] .sidebar-clip {
+  visibility: hidden;
+}
+
+.app-frame[data-page] .panel-resizer {
+  display: none;
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.results-card {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.editor-card {
+  min-height: 0;
+  max-height: none;
+}
+
+/* One hairline between editor and results; drag it to resize. */
+.pane-splitter {
+  flex: 0 0 6px;
+  margin: -3px 0;
+  position: relative;
+  z-index: 2;
+  overflow: hidden;
+  cursor: row-resize;
+  background: linear-gradient(transparent 2.5px, var(--line) 2.5px 3.5px, transparent 3.5px);
+}
+
+/* Dragged: the orange line (2026-10-13). */
+.pane-splitter[data-dragging],
+.pane-splitter[data-dragging]:hover {
+  background: linear-gradient(transparent 2px, var(--acc) 2px 4px, transparent 4px);
+}
+
+/* While the editor's query runs, Run's orange sweeps along the hairline. */
+.pane-splitter.sweeping::after {
+  content: "";
+  position: absolute;
+  top: 2.5px;
+  left: 0;
+  width: 30%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 70%, transparent), transparent);
+  animation: splitter-sweep 0.9s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes splitter-sweep {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 340% 0;
+  }
+}
+
+.pane-splitter:hover {
+  background: linear-gradient(transparent 2.5px, var(--line2) 2.5px 3.5px, transparent 3.5px);
+}
+
+/* The window's one row of chrome: query tabs, with ⌘K (drawn by the app
+   shell) in its right corner. It drags the window. */
+.editor-header {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 42px;
+  padding: 0 16px;
+  flex-shrink: 0;
+  box-shadow: inset 0 -1px 0 var(--line);
+  /* A theme switch cross-fades the frame, panels and bars (Paper). */
+  transition: box-shadow 0.3s ease;
+}
+
+
+/* ‹ › at the tab row's left: this window's history (⌘[ ⌘]). */
+.history-nav {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+}
+
+.history-btn {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.history-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.history-btn:disabled {
+  color: var(--faint);
+  opacity: 1;
+}
+
+.query-tabs {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.query-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.query-tab {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 42px;
+  padding: 0 4px 0 12px;
+  color: var(--mute);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: color 0.18s ease;
+}
+
+.query-tab:hover {
+  color: var(--text);
+}
+
+.query-tab.selected {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The selected tab's pill, one element that glides between tabs
+   (useSlidingThumb). */
+.query-tab-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  box-shadow: inset 0 -2px 0 var(--acc);
+  pointer-events: none;
+  transition: transform 280ms var(--ease-out), width 280ms var(--ease-out);
+}
+
+/* A dragged tab carries its own fill; the pill waits for the drop. */
+.query-tabs.reordering > .query-tab-thumb {
+  opacity: 0;
+  transition: none;
+}
+
+/* A long title ellipsises instead of widening the tab. */
+.query-tab-title {
+  min-width: 0;
+  max-width: 160px;
+  /* The tab's line-height is 1; a clipped title needs room for descenders (the y in Query). */
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.query-tab-icon {
+  margin-left: -2px;
+  opacity: 0.6;
+}
+
+/* A tab's run (TabStatus.tsx): spinner and time while it runs, a
+   dot and the time when it finished out of sight. */
+.query-tab-spin {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line2);
+  border-top-color: var(--acc);
+  animation: spin 0.8s linear infinite;
+}
+
+.query-tab-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.query-tab-dot.error {
+  background: var(--del);
+}
+
+.query-tab-time {
+  margin-left: -1px;
+  color: var(--dim);
+  font: 400 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.query-tab.selected .query-tab-time {
+  color: var(--mute);
+}
+
+.query-tab-close {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  opacity: 0;
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease, opacity 0.18s ease;
+}
+
+.query-tab:hover .query-tab-close,
+.query-tab.selected .query-tab-close {
+  opacity: 1;
+}
+
+.query-tab-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.query-tab-add {
+  flex-shrink: 0;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.query-tab-add:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The editor's foot, bottom right: safe mode, then Run. */
+.composer {
+  position: absolute;
+  z-index: 4;
+  left: 16px;
+  right: 16px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.composer > * {
+  pointer-events: auto;
+}
+
+/* Run: the one orange control in the window, one flat fill (no gradient,
+   highlight or glow). */
+.run-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--acc);
+  color: var(--onfill);
+  font: 600 12.5px/1 var(--sans);
+  cursor: default;
+  transition: background-color 0.18s ease, transform 0.18s ease;
+}
+
+.run-btn:not(:disabled):hover {
+  background: var(--acc2);
+}
+
+.run-btn:not(:disabled):active {
+  background: var(--acc2);
+  transform: translateY(1px);
+}
+
+.run-btn:disabled {
+  opacity: 0.45;
+}
+
+/* Running: Run stays lit and counts the time. */
+.run-btn.running:disabled {
+  opacity: 1;
+}
+
+.run-btn.running .run-label {
+  min-width: 40px;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-shortcut {
+  color: inherit;
+  opacity: 0.8;
+  font: 500 11px var(--mono);
+}
+
+.card-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+
+.card-title {
+  font: 600 15px var(--font-display);
+  color: var(--text);
+}
+
+.card-notice {
+  margin-left: auto;
+  color: var(--mute);
+  font-size: 12px;
+  animation: cp-fade 160ms ease-out;
+}
+
+.card-notice + .card-meta {
+  margin-left: 12px;
+}
