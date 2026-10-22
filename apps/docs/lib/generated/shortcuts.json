@@ -366,6 +366,10 @@
           "keys": ""
         },
         {
+          "title": "Import SQL…",
+          "keys": ""
+        },
+        {
           "title": "Close Tab",
           "keys": "⌘W"
         }
@@ -707,6 +711,10 @@
     {
       "title": "Open a SQLite file…",
       "keys": "⌘O"
+    },
+    {
+      "title": "Run SQL file…",
+      "keys": ""
     },
     {
       "title": "Open the sample database",

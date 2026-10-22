@@ -140,7 +140,7 @@ export async function readClipboardText(): Promise<string> {
 }
 
 /** Choose file… : the native open dialog; null when dismissed. */
-export async function chooseFile(kind: "sqlite" | "pem" | "key"): Promise<string | null> {
+export async function chooseFile(kind: "sqlite" | "pem" | "key" | "sql"): Promise<string | null> {
   return invoke("choose_file", { kind });
 }
 
@@ -918,3 +918,98 @@ export const TEST_PG_CONNECTION: ConnectionRecord = {
 export const TEST_PG_SECRETS: ConnectionSecrets = {
   db_password: "rowkery",
 };
+
+/** One kind of statement in a SQL file (core `sql_file::KindCount`). */
+export interface SqlFileKind {
+  /** `CREATE TABLE`, `COPY`, `DELETE without WHERE`… */
+  label: string;
+  count: number;
+  destructive: boolean;
+}
+
+/** What Run SQL file read in a file before running anything (core `sql_file::Scan`). */
+export interface SqlFileScan {
+  bytes: number;
+  /** `pg_dump 16.4` or `sqlite3 .dump`, when the file says. */
+  source: string | null;
+  statements: number;
+  kinds: SqlFileKind[];
+  copy_rows: number;
+  writes: boolean;
+  /** Set when the file can't run in one transaction: the first statement that says so. */
+  per_statement: { line: number; reason: string } | null;
+  /** Set when Rowkery won't run the file at all. */
+  refused: { line: number | null; message: string } | null;
+}
+
+export interface SqlFileProgress {
+  done: number;
+  line: number;
+  current: string;
+  bytes: number;
+  rows: number;
+  /** COMMIT is sent: a stop now may or may not save the file. */
+  committing: boolean;
+}
+
+export interface SqlFileFailure {
+  line: number | null;
+  statement: string;
+  message: string;
+}
+
+/** How a run ended (core `sql_file::RunReport`). */
+export interface SqlFileReport {
+  done: number;
+  rows: number;
+  elapsed_ms: number;
+  failed: SqlFileFailure | null;
+  errors: number;
+  first_error: SqlFileFailure | null;
+  cancelled: boolean;
+  rolled_back: boolean;
+  /** Per statement: of `done`, those rolled back with the file's own open transaction. */
+  lost: number;
+}
+
+type SqlFileFrame = { t: "read"; bytes: number } | ({ t: "progress" } & SqlFileProgress);
+
+/** Reads the file without running it; core keeps the scan for `runSqlFile`. */
+export function scanSqlFile(
+  windowId: string,
+  path: string,
+  engine: string,
+  onRead?: (bytes: number) => void,
+): Promise<SqlFileScan> {
+  const channel = new Channel<SqlFileFrame>();
+  channel.onmessage = (f) => {
+    if (f.t === "read") onRead?.(f.bytes);
+  };
+  return invoke("scan_sql_file", { windowId, path, engine, onFrame: channel });
+}
+
+/** Runs the file this window last scanned; `confirmed` is the panel's Run. */
+export function runSqlFile(
+  windowId: string,
+  options: { wholeFile: boolean; keepGoing: boolean },
+  onProgress?: (p: SqlFileProgress) => void,
+): Promise<SqlFileReport> {
+  const channel = new Channel<SqlFileFrame>();
+  channel.onmessage = (f) => {
+    if (f.t === "progress") {
+      const { t: _t, ...p } = f;
+      onProgress?.(p);
+    }
+  };
+  return invoke("run_sql_file", { windowId, ...options, confirmed: true, onFrame: channel });
+}
+
+/** Stops the window's scan or run (a run rolls back). */
+export function cancelSqlFile(windowId: string): Promise<void> {
+  return invoke("cancel_sql_file", { windowId });
+}
+
+/** The panel closed: core drops its scan. */
+export function forgetSqlFile(windowId: string): Promise<void> {
+  return invoke("forget_sql_file", { windowId });
+}

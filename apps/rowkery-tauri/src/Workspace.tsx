@@ -11,6 +11,7 @@ import {
   exportResults,
   browseTableSql,
   cancelCount,
+  chooseFile,
   cancelQuery,
   countRows,
   stopAllQueries,
@@ -126,6 +127,7 @@ import { tabMenu as tabMenuRows } from "./contextMenus";
 import { bufferChanges, changeCount, editTableOf, savedBuffer, withoutCommitted, type EditBuffer } from "./editBuffer";
 import { EditTray, type TrayState } from "./EditTray";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
+import { SqlFilePanel } from "./SqlFilePanel";
 import { CsvImport, type ImportRun } from "./CsvImport";
 import {
   draftFor,
@@ -1041,11 +1043,21 @@ export function Workspace({
   const [qlView, setQlView] = useState<QuickLookView | null>(null);
   const qlViewRef = useRef(qlView);
   qlViewRef.current = qlView;
-  // Quick Look opening takes the column from Review SQL.
+  /**
+   * Run SQL file: the file the inspector's panel reads and runs, and the
+   * connection it was opened on (a run goes on there if the window switches).
+   */
+  const [sqlFile, setSqlFile] = useState<{ path: string; engine: string; name: string } | null>(null);
+  const [sqlFileBusy, setSqlFileBusy] = useState(false);
+  const sqlFileRef = useRef({ open: false, busy: false });
+  sqlFileRef.current = { open: !!sqlFile, busy: sqlFileBusy };
+  // Quick Look opening takes the column from Review SQL, and from Run SQL
+  // file unless a run is going.
   const qlOpen = !!qlView;
   useEffect(() => {
     if (!qlOpen) return;
     setReview(null);
+    if (!sqlFileRef.current.busy) setSqlFile(null);
   }, [qlOpen]);
   const setTabEdits = (
     tabId: number,
@@ -1138,7 +1150,9 @@ export function Workspace({
     const tabId = target.tab.id;
     // One inspector: Review SQL takes the column from Quick Look. (The
     // import panel lives on its own tab, so the two never meet.)
+    if (sqlFileRef.current.busy) return;
     qlViewRef.current?.close();
+    setSqlFile(null);
     setReview({ tabId, sql: null, error: null, cards: null });
     const buffer = target.buffer;
     reviewChanges(engineForConnection(activeConnection), target.table, bufferChanges(buffer)).then(
@@ -1176,6 +1190,41 @@ export function Workspace({
   const reviewKeysRef = useRef({ open: false, close: () => {}, commit: () => {} });
   reviewKeysRef.current = { open: !!reviewShown, close: () => setReview(null), commit: commitReview };
 
+  /** Run SQL file…: the panel on `path`, or on a file picked in the open dialog. */
+  const openSqlFile = (path?: string) => {
+    if (sqlFileRef.current.busy) return;
+    const conn = activeConnection;
+    if (!conn) return;
+    const show = (path: string) => {
+      qlViewRef.current?.close();
+      setReview(null);
+      setSqlFile({ path, engine: engineForConnection(conn), name: conn.name });
+    };
+    if (path) return show(path);
+    chooseFile("sql").then(
+      (p) => p && !sqlFileRef.current.busy && show(p),
+      (e) => showToast("Couldn't open the file", String(e), "error"),
+    );
+  };
+  const openSqlFileRef = useRef(openSqlFile);
+  openSqlFileRef.current = openSqlFile;
+  // Another connection or database: the panel was for the last one.
+  useEffect(() => {
+    if (!sqlFileRef.current.busy) setSqlFile(null);
+  }, [activeId, session.database]);
+  // A .sql file dropped on a connected window opens the panel on it (App
+  // takes .sqlite / .db drops).
+  const canRunSqlFile = active && connState === "connected" && activeConnection?.safe_mode !== "read_only";
+  useEffect(() => {
+    if (!canRunSqlFile) return;
+    const onDrag = (e: Event) => {
+      const { type, paths } = (e as CustomEvent<{ type: string; paths: string[] }>).detail;
+      const file = type === "drop" ? paths.find((p) => /\.(sql|dump)$/i.test(p)) : undefined;
+      if (file) openSqlFileRef.current(file);
+    };
+    window.addEventListener("rowkery:file-drag", onDrag);
+    return () => window.removeEventListener("rowkery:file-drag", onDrag);
+  }, [canRunSqlFile]);
   // ---- Import CSV (2026-10-21) -----------------------------------------
 
   /**
@@ -1740,6 +1789,12 @@ export function Workspace({
           rv.commit();
           return;
         }
+      }
+      // Run SQL file closes on Esc, except while it runs (its Cancel rolls back).
+      if (e.key === "Escape" && sqlFileRef.current.open && !e.defaultPrevented) {
+        e.preventDefault();
+        if (!sqlFileRef.current.busy) setSqlFile(null);
+        return;
       }
       // Quick Look with the focus outside the grid (the grid takes its own Esc).
       if (e.key === "Escape" && qlViewRef.current && !isTypingTarget(e.target)) {
@@ -3575,6 +3630,7 @@ export function Workspace({
     if (id === "edit-failed-connection") return editFailed();
     if (id === "open-sample") return actions.openSample(false);
     if (id === "open-sqlite-file") return actions.openSqliteFile();
+    if (id === "run-sql-file") return openSqlFile();
     if (id === "keyboard-shortcuts") return actions.openShortcuts();
     if (id === "third-party-notices") return actions.openNotices();
     if (id === "check-updates") return actions.checkForUpdates();
@@ -3822,15 +3878,17 @@ export function Workspace({
   // column gives it its width (App.css, --inspector-right).
   const inspectorKind: InspectorKind | null = emptyPose
     ? null
-    : importShown
-      ? "import"
-      : reviewShown
-      ? "review"
-      : isSessionsTab && sessions.picked
-        ? "session"
-        : qlView
-          ? "quicklook"
-          : null;
+    : sqlFile
+      ? "sqlfile"
+      : importShown
+        ? "import"
+        : reviewShown
+          ? "review"
+          : isSessionsTab && sessions.picked
+            ? "session"
+            : qlView
+              ? "quicklook"
+              : null;
 
   return (
     <div
@@ -4522,13 +4580,34 @@ export function Workspace({
         <Inspector
           kind={inspectorKind ?? "quicklook"}
           aria-label={
-            inspectorKind === "import" ? "Import CSV" : inspectorKind === "review" ? "Review SQL" : inspectorKind === "session" ? "Session" : "Quick Look"
+            inspectorKind === "import"
+              ? "Import CSV"
+              : inspectorKind === "review"
+                ? "Review SQL"
+                : inspectorKind === "sqlfile"
+                  ? "Run SQL file"
+                  : inspectorKind === "session"
+                    ? "Session"
+                    : "Quick Look"
           }
           data-quicklook={inspectorKind === "quicklook" ? "" : undefined}
           data-review-sql={inspectorKind === "review" ? "" : undefined}
           data-deleted={inspectorKind === "quicklook" && qlView?.edit?.mark === "delete" ? "" : undefined}
         >
-          {inspectorKind === "import" && importShown ? (
+          {inspectorKind === "sqlfile" && sqlFile ? (
+            <SqlFilePanel
+              key={sqlFile.path}
+              windowId={windowId}
+              path={sqlFile.path}
+              engine={sqlFile.engine}
+              connectionName={sqlFile.name}
+              onBusy={setSqlFileBusy}
+              onRan={() => refreshSchemaRef.current()}
+              onChooseFile={() => openSqlFile()}
+              // A run ends by its Cancel, which rolls back.
+              onClose={() => !sqlFileBusy && setSqlFile(null)}
+            />
+          ) : inspectorKind === "import" && importShown ? (
             <CsvImport
               connectionId={activeConnection?.id ?? ""}
               active={active}
