@@ -12,8 +12,7 @@
 # updater feed, so it installs beside Rowkery and never touches its data.
 # Given a pull request or branch, it first checks that out as on origin
 # (scripts/checkout.sh, like `make dev 74`) and returns to your branch after;
-# without one it builds what is
-# checked out now.
+# without one it builds what is checked out now.
 #
 # The app is unsigned: on another Mac, drag it to Applications, then run
 #   xattr -dr com.apple.quarantine /Applications/Rowkery.app
