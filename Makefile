@@ -6,6 +6,7 @@
 # make dmg                  build a release DMG for this Mac's chip
 # make dmg universal        one DMG for Apple Silicon and Intel Macs
 # make dmg-dev              Rowkery Dev: beside Rowkery, own data, no auto-update (dmg-dev universal too)
+# make dmg-dev 74           check out pull request #74 (or a branch), then build its Rowkery Dev DMG
 # make release              build a public release: universal DMG, signed update, latest.json
 # make release publish      ...then a draft GitHub release on the releases repository
 # make web                  build the new Next.js website (apps/web) and serve it on http://localhost:3000
@@ -22,15 +23,17 @@ ifneq (,$(filter dev dmg dmg-dev release,$(firstword $(MAKECMDGOALS))))
     $(eval $(extra):;@:)
   endif
 endif
+# Every word for dmg.sh, e.g. `make dmg-dev universal 74` or `make dmg-dev b=74 universal`.
+opts := $(strip $(if $(filter command line,$(origin b)),$(b)) $(extra))
 
 dev:
 	@scripts/dev.sh $(b)
 
 dmg:
-	@scripts/dmg.sh $(b)
+	@scripts/dmg.sh $(opts)
 
 dmg-dev:
-	@scripts/dmg.sh dev $(b)
+	@scripts/dmg.sh dev $(opts)
 
 release:
 	@scripts/release.sh $(b)
