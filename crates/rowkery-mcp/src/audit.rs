@@ -1,7 +1,9 @@
 //! One JSON line per tool call in `mcp-log.jsonl` beside `config.json`:
 //! time, tool, the arguments as sent, connection, database, what was shared
-//! then, SQL, rows, ms, response size and the verdict. Never result rows
-//! (`samples` keeps a short, expiring start of each response). The app reads it back (`read_since`) for ⌘K MCP activity.
+//! then, SQL, rows, ms (the query's own run), how long the whole call took,
+//! response size and the verdict. Never result rows (`samples` keeps a
+//! short, expiring start of each response). The app reads it back
+//! (`read_since`) for ⌘K MCP activity.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -45,6 +47,9 @@ pub struct Entry {
     pub rows: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
+    /// The whole call, from the request arriving to the answer going back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub took_ms: Option<u64>,
     /// `ok`, `would refuse`, or the refusal / error text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<String>,

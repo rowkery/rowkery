@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { chordFor, commandById, eventMatches, keysFor } from "./commands";
-import { CallDetail, EnvDot, clock, copyText } from "./AgentSharing";
+import { CallDetail, clock, copyText } from "./AgentSharing";
 import { AgentIcon, PlayIcon, SettingsIcon, WarningIcon } from "./icons";
 import { PageBack, usePageFocus } from "./Inspector";
 import { Keys } from "./Keys";
-import { bytesLabel, clientLabel, sinceLabel, useMcpEntries, verdictOf, type McpEntry } from "./mcpActivity";
+import { bytesLabel, clientLabel, sinceLabel, tookLabel, useMcpEntries, verdictOf, type McpEntry } from "./mcpActivity";
 import { useGlideHover } from "./motion";
 import { showToast } from "./notify";
 import { isMacPlatform } from "./platform";
@@ -45,7 +45,8 @@ type Call = { e: McpEntry; key: number };
  * The Agents page (2026-10-17): what agents did and what they ask for, one
  * list on the left and the picked item beside it. "Waiting for you" holds
  * the changes agents proposed (`propose_change`), oldest first; "Activity"
- * every call, newest first (All, or only Refused). Sharing itself is a
+ * every call, newest first (All, Refused or Failed, from every database or
+ * one: each row names the database it read). Sharing itself is a
  * one-off and lives in Settings › Agents (the foot's Sharing button).
  * ↑↓ move through both lists; on a call, ↵ opens its SQL in a query tab (not
  * run) and ⌘C copies it. The way out is the head's first control, which
@@ -81,7 +82,9 @@ export function AgentsInbox({
 }) {
   const waiting = useProposals();
   const entries = useMcpEntries();
-  const [filter, setFilter] = useState<"all" | "refused">("all");
+  const [filter, setFilter] = useState<"all" | "refused" | "error">("all");
+  // One database's calls only (its `placeKey`), or every call.
+  const [place, setPlace] = useState<string | null>(null);
   // "12 s ago" stays current while the page is up.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -89,14 +92,31 @@ export function AgentsInbox({
     return () => window.clearInterval(t);
   }, []);
   const byId = useMemo(() => new Map(connections.map((c) => [c.id, c])), [connections]);
+  // Every database the log names, most used first, for the place filter.
+  const placeList = useMemo(() => {
+    const n = new Map<string, { e: McpEntry; n: number }>();
+    for (const e of entries) {
+      const k = placeKey(e);
+      if (!k) continue;
+      const p = n.get(k);
+      if (p) p.n++;
+      else n.set(k, { e, n: 1 });
+    }
+    return [...n.entries()].sort((a, b) => b[1].n - a[1].n).map(([key, { e, n }]) => ({ key, e, n }));
+  }, [entries]);
+  const placeOn = place && placeList.some((p) => p.key === place) ? place : null;
+  const inPlace = useMemo(() => (placeOn ? entries.filter((e) => placeKey(e) === placeOn) : entries), [entries, placeOn]);
   const calls = useMemo(() => {
     const out: Call[] = [];
-    for (let i = entries.length - 1; i >= 0 && out.length < SHOWN; i--)
-      if (filter === "all" || verdictOf(entries[i]) === "refused") out.push({ e: entries[i], key: i });
+    for (let i = entries.length - 1; i >= 0 && out.length < SHOWN; i--) {
+      const e = entries[i];
+      if (placeOn && placeKey(e) !== placeOn) continue;
+      if (filter === "all" || verdictOf(e) === filter) out.push({ e, key: i });
+    }
     return out;
-  }, [entries, filter]);
-  const refusedCount = useMemo(() => entries.filter((e) => verdictOf(e) === "refused").length, [entries]);
-  const manyPlaces = useMemo(() => new Set(entries.map((e) => e.connection).filter(Boolean)).size > 1, [entries]);
+  }, [entries, filter, placeOn]);
+  const refusedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "refused").length, [inPlace]);
+  const failedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "error").length, [inPlace]);
 
   const [sel, setSel] = useState<Sel>(null);
   // The picked proposal, or once it's decided, the one that took its place in
@@ -375,6 +395,7 @@ export function AgentsInbox({
                 [
                   ["all", "All"],
                   ["refused", `Refused${refusedCount ? ` ${refusedCount}` : ""}`],
+                  ["error", `Failed${failedCount ? ` ${failedCount}` : ""}`],
                 ] as const
               ).map(([f, label]) => (
                 <button key={f} type="button" className="ag-filter" data-mcp-filter={f} aria-pressed={filter === f} onClick={() => setFilter(f)}>
@@ -382,16 +403,35 @@ export function AgentsInbox({
                 </button>
               ))}
           </h2>
+          {placeList.length > 1 && (
+            <label className="ag-place">
+              <select
+                data-testid="ag-place"
+                aria-label="Database"
+                value={placeOn ?? ""}
+                onChange={(ev) => setPlace(ev.target.value || null)}
+              >
+                <option value="">Every database</option>
+                {placeList.map((p) => {
+                  const c = p.e.connection ? byId.get(p.e.connection) : undefined;
+                  return (
+                    <option key={p.key} value={p.key}>
+                      {[placeName(p.e, c), c && placeName(p.e, c) !== c.name ? c.name : null, c?.environment, `${p.n}`].filter(Boolean).join(" · ")}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+          )}
           <div className="ag-calls" role="list" aria-label="Agent calls">
             {calls.length === 0 && (
-              <p className="mcp-muted ag-calls-none">{entries.length ? "Nothing refused." : "No calls yet."}</p>
+              <p className="mcp-muted ag-calls-none">{!entries.length ? "No calls yet." : filter === "error" ? "Nothing failed." : filter === "refused" ? "Nothing refused." : "No calls here yet."}</p>
             )}
             {calls.map((c) => (
               <CallRow
                 key={c.key}
                 c={c}
                 conn={c.e.connection ? byId.get(c.e.connection) : undefined}
-                showConn={manyPlaces}
                 current={c === call}
                 onPick={() => {
                   setSel({ kind: "call", key: c.key });
@@ -711,6 +751,17 @@ function ProposalCard({
   );
 }
 
+/** One database of one connection, as the place filter tells them apart. */
+function placeKey(e: McpEntry): string | null {
+  return e.connection ? `${e.connection}\u0000${e.database ?? ""}` : null;
+}
+
+/** The database a call read, by name: SQLite files by their connection's. */
+function placeName(e: McpEntry, conn: ConnectionRecord | undefined): string {
+  if (conn?.kind === "sqlite" || !e.database) return conn?.name ?? e.connection ?? "";
+  return e.database;
+}
+
 /** A call's size or outcome, as the row's right edge prints it. */
 function callMeta(e: McpEntry): string {
   const v = verdictOf(e);
@@ -724,21 +775,20 @@ function callMeta(e: McpEntry): string {
 }
 
 /**
- * One call in Activity: its time and tool, its outcome or size, and under
- * them one line of its SQL (or what it described). Double-click opens the
- * SQL in a tab, as ↵ does.
+ * One call in Activity: its time, tool and the database it read (with its
+ * environment as a word, so a red prd never reads as a failure), its
+ * outcome or size, and under them one line of its SQL (or what it
+ * described). Double-click opens the SQL in a tab, as ↵ does.
  */
 function CallRow({
   c,
   conn,
-  showConn,
   current,
   onPick,
   onOpen,
 }: {
   c: Call;
   conn: ConnectionRecord | undefined;
-  showConn: boolean;
   current: boolean;
   onPick: () => void;
   onOpen: () => void;
@@ -751,8 +801,8 @@ function CallRow({
     (e.tool === "list_connections" && e.rows !== undefined
       ? `${e.rows} shared`
       : e.tool === "sessions" && e.rows !== undefined
-        ? `${e.rows} ${e.rows === 1 ? "session" : "sessions"} · ${conn?.name ?? e.connection ?? ""}`
-        : (conn?.name ?? e.database ?? ""));
+        ? `${e.rows} ${e.rows === 1 ? "session" : "sessions"}`
+        : "");
   return (
     <button
       type="button"
@@ -769,8 +819,17 @@ function CallRow({
     >
       <span className="ag-call-time">{clock(e.ts, false)}</span>
       <span className="ag-call-tool">
-        {showConn && e.connection && <EnvDot conn={conn} />}
         {e.tool}
+        {e.connection && (
+          <span className="ag-call-place" data-testid="ag-call-place">
+            <span className="ag-call-db">{placeName(e, conn)}</span>
+            {conn?.environment && (
+              <span className="ag-call-env" data-env={conn.environment}>
+                {conn.environment}
+              </span>
+            )}
+          </span>
+        )}
       </span>
       <span className="ag-call-meta" data-testid="ag-call-meta" data-verdict={verdict}>
         {callMeta(e)}
@@ -783,7 +842,8 @@ function CallRow({
 /**
  * The picked call in full, beside the list: who sent it where and when, why
  * it was refused, its SQL, then what was shared, the request as sent and
- * the start of the response, with Open in tab and the copies.
+ * the start of the response, with Open SQL in tab and the copies. A failed
+ * or refused call leads with a tinted line saying so and why.
  */
 function CallView({
   c,
@@ -799,11 +859,13 @@ function CallView({
   const e = c.e;
   const verdict = verdictOf(e);
   const sqlHtml = useMemo(() => (e.sql ? highlightSqlLines(e.sql.trim()).join("\n") : ""), [e.sql]);
+  const took = tookLabel(e);
   const sub = [
     clientLabel(e.client),
     e.connection ? (conn?.name ?? e.connection) : null,
     e.database && conn?.kind === "postgres" ? e.database : null,
     clock(e.ts),
+    took && verdict !== "refused" && verdict !== "error" ? `took ${took}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -818,9 +880,15 @@ function CallView({
       <div className="pp-previews">
         <section className="pp-stmt">
           {(verdict === "refused" || verdict === "error") && e.verdict && (
-            <p className="ag-call-reason" data-testid="mcp-reason" data-verdict={verdict}>
-              <b>{verdict === "refused" ? "Refused" : "Failed"}</b> {e.verdict.replace(/^Refused:\s*/, "")}
-            </p>
+            <div className="ag-call-reason" data-testid="mcp-reason" data-verdict={verdict} role="status">
+              <WarningIcon />
+              <p>
+                <b>{verdict === "refused" ? "Refused" : "Failed"}</b>
+                {took && <span className="ag-call-took"> after {took}</span>}
+                <br />
+                {e.verdict.replace(/^Refused:\s*/, "")}
+              </p>
+            </div>
           )}
           {e.target && !e.sql && <h3 className="pp-stmt-head">{e.target}</h3>}
           {e.sql && <pre className="rv-card-sql pp-stmt-sql" data-testid="ag-call-sql" dangerouslySetInnerHTML={{ __html: sqlHtml }} />}

@@ -251,6 +251,13 @@ export function CallDetail({
   const request = e.args === undefined ? null : typeof e.args === "string" ? e.args : JSON.stringify(e.args, null, 2);
   const verdict = verdictOf(e);
   const answered = verdict === "ok" || verdict === "flagged";
+  const size = sample
+    ? sample.bytes > sample.text.length
+      ? `first ${bytesLabel(sample.text.length)} of ${bytesLabel(sample.bytes)}`
+      : bytesLabel(sample.bytes)
+    : e.bytes !== undefined
+      ? bytesLabel(e.bytes)
+      : null;
   const scope = e.scope;
   const L = MCP_LIMITS;
   const mac = isMacPlatform();
@@ -322,16 +329,7 @@ export function CallDetail({
         {answered && (
           <div className="mcp-box" data-mcp-box="response">
             <h5>
-              Response{" "}
-              <small>
-                {sample
-                  ? sample.bytes > sample.text.length
-                    ? `first ${bytesLabel(sample.text.length)} of ${bytesLabel(sample.bytes)}`
-                    : bytesLabel(sample.bytes)
-                  : e.bytes !== undefined
-                    ? bytesLabel(e.bytes)
-                    : ""}
-              </small>
+              Response <small>{size}</small>
             </h5>
             {sample ? (
               <pre className="mcp-json">
@@ -347,7 +345,7 @@ export function CallDetail({
       <div className="mcp-acts">
         {canOpen && (
           <button type="button" className="mcp-btn" data-mcp-open onClick={onOpen}>
-            Open in tab <kbd>↵</kbd>
+            Open SQL in tab <kbd>↵</kbd>
           </button>
         )}
         {e.sql && (
@@ -356,13 +354,13 @@ export function CallDetail({
           </button>
         )}
         {request !== null && (
-          <button type="button" className="mcp-btn" data-mcp-copy-request onClick={() => void copyText(request, "request")}>
-            Copy request
+          <button type="button" className="mcp-btn" data-mcp-copy-request onClick={() => void copyText(request, "request JSON")}>
+            Copy request JSON
           </button>
         )}
         {sample && (
-          <button type="button" className="mcp-btn" data-mcp-copy-response onClick={() => void copyText(sample.text, "response")}>
-            Copy response
+          <button type="button" className="mcp-btn" data-mcp-copy-response onClick={() => void copyText(sample.text, "response JSON")}>
+            Copy response JSON
           </button>
         )}
       </div>
