@@ -57,7 +57,8 @@ import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall } from "./u
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
-import { Workspace, type WindowActions, type WindowSession } from "./Workspace";
+import { Workspace } from "./Workspace";
+import type { WindowActions, WindowSession } from "./windowSession";
 import "./App.css";
 
 const PROOFS = new Set(["query-cancel", "1", "latency"]);
