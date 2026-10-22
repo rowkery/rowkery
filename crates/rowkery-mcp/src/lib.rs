@@ -1199,6 +1199,9 @@ impl ServerHandler for RowkeryMcp {
         }
         audit::append(&entry);
         let mut result = text_result(&outcome);
+        if views && request.name == "query" && outcome.is_ok() {
+            result.content.push(ContentBlock::text(views::SHOWN_NOTE));
+        }
         result.meta = page_meta;
         Ok(result.into())
     }
