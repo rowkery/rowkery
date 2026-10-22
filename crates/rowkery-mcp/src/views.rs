@@ -172,16 +172,13 @@ pub fn link(args: &Map<String, Json>) -> Result<String, String> {
     }
 }
 
-/// Hands the link to the OS, which starts Rowkery if it isn't running.
+/// Hands the link to macOS, which starts Rowkery if it isn't running (the
+/// app registers the scheme in its bundle; `open_link.rs` takes it).
 pub fn open(url: &str) -> Result<(), String> {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "linux") {
-        "xdg-open"
-    } else {
-        return Err("Opening Rowkery from the chat works on macOS and Linux.".into());
-    };
-    let status = std::process::Command::new(program)
+    if !cfg!(target_os = "macos") {
+        return Err("Opening Rowkery from the chat works on macOS for now.".into());
+    }
+    let status = std::process::Command::new("open")
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -248,7 +245,13 @@ mod tests {
         assert_eq!(mime_type.as_deref(), Some(MIME));
         assert!(text.contains("fill-rule=\"evenodd\""));
         assert!(!text.contains("<!--mark-->"));
-        for net in ["http://", "https://", "fetch(", "XMLHttpRequest", "WebSocket"] {
+        for net in [
+            "http://",
+            "https://",
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+        ] {
             assert!(
                 !text.replace("http://www.w3.org/2000/svg", "").contains(net),
                 "{net}"
@@ -273,8 +276,14 @@ mod tests {
         };
         assert_eq!(meta("query").unwrap()["ui"]["resourceUri"], VIEW_URI);
         assert!(meta("explain").is_none());
-        assert_eq!(meta("open_in_rowkery").unwrap()["ui"]["visibility"], json!(["app"]));
-        assert_eq!(meta("proposal_status").unwrap()["ui"]["visibility"], json!(["app"]));
+        assert_eq!(
+            meta("open_in_rowkery").unwrap()["ui"]["visibility"],
+            json!(["app"])
+        );
+        assert_eq!(
+            meta("proposal_status").unwrap()["ui"]["visibility"],
+            json!(["app"])
+        );
     }
 
     /// A host that draws views, end to end over the wire: the tools point at
@@ -377,7 +386,10 @@ mod tests {
         let view = &result["result"]["structuredContent"];
         assert_eq!(view["kind"], "rows");
         assert_eq!(view["rows"], json!([[1, 9.5], [2, 3.0]]));
-        assert_eq!(view["connection"], json!({ "name": "shop", "environment": "prd" }));
+        assert_eq!(
+            view["connection"],
+            json!({ "name": "shop", "environment": "prd" })
+        );
         // The agent's text is unchanged: no call id, no label.
         let text: Json =
             serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -385,7 +397,10 @@ mod tests {
 
         let call = view["call"].as_str().unwrap();
         let entry = crate::audit::find_call(call).unwrap();
-        assert_eq!(entry.sql.as_deref(), Some("select id, total from orders order by id"));
+        assert_eq!(
+            entry.sql.as_deref(),
+            Some("select id, total from orders order by id")
+        );
         assert_eq!(entry.connection.as_deref(), Some("s"));
         // Without the right key, the call isn't found.
         let (prefix, _) = call.rsplit_once('-').unwrap();

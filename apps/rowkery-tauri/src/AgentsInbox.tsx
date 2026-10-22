@@ -64,6 +64,7 @@ type Call = { e: McpEntry; key: number };
 export function AgentsInbox({
   connections,
   initial,
+  focus,
   backTo,
   onOpenSql,
   onSharing,
@@ -72,6 +73,8 @@ export function AgentsInbox({
   connections: ConnectionRecord[];
   /** What shows first: the oldest waiting proposal, or the newest call. */
   initial: "proposals" | "activity";
+  /** A proposal to show first, while it waits (a card's Review in Rowkery). */
+  focus?: string;
   /** The window the page returns to, named on the way out. */
   backTo: string;
   onOpenSql: (connectionId: string, database: string | undefined, sql: string) => void;
@@ -98,7 +101,10 @@ export function AgentsInbox({
   const refusedCount = useMemo(() => entries.filter((e) => verdictOf(e) === "refused").length, [entries]);
   const manyPlaces = useMemo(() => new Set(entries.map((e) => e.connection).filter(Boolean)).size > 1, [entries]);
 
-  const [sel, setSel] = useState<Sel>(null);
+  const [sel, setSel] = useState<Sel>(focus ? { kind: "proposal", id: focus } : null);
+  useEffect(() => {
+    if (focus) setSel({ kind: "proposal", id: focus });
+  }, [focus]);
   // The picked proposal, or once it's decided, the one that took its place in
   // the list; with none left, the newest call.
   const lastAt = useRef(0);

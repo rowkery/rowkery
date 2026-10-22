@@ -756,6 +756,17 @@ export const INCOMING_CAP = 100;
  * (returns at once). Called when the webview regains focus: the closest thing
  * to a wake-from-sleep signal.
  */
+/** A `rowkery://` link from a view in the chat, read from the activity log (open_link.rs). */
+export type OpenLink =
+  | { kind: "sql"; connection: string; database: string | null; sql: string }
+  | { kind: "proposal"; id: string }
+  | { kind: "gone" };
+
+/** The link waiting since the OS handed it over (`open-link`), if any; taking it clears it. */
+export async function takeOpenLink(): Promise<OpenLink | null> {
+  return invoke("take_open_link");
+}
+
 export async function pingIdle(windowId: string): Promise<void> {
   return invoke("ping_idle", { windowId });
 }

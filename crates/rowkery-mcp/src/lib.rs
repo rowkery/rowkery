@@ -1093,10 +1093,10 @@ impl ServerHandler for RowkeryMcp {
                 .enable_resources()
                 .build(),
         )
-            .with_server_info(
-                Implementation::new("rowkery", env!("CARGO_PKG_VERSION")).with_title("Rowkery"),
-            )
-            .with_instructions(INSTRUCTIONS)
+        .with_server_info(
+            Implementation::new("rowkery", env!("CARGO_PKG_VERSION")).with_title("Rowkery"),
+        )
+        .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -1132,8 +1132,14 @@ impl ServerHandler for RowkeryMcp {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         views::read(&request.uri)
-            .map(|r| r.with_ttl_ms(0).with_cache_scope(CacheScope::Private).into())
-            .ok_or_else(|| McpError::resource_not_found(format!("No resource {}", request.uri), None))
+            .map(|r| {
+                r.with_ttl_ms(0)
+                    .with_cache_scope(CacheScope::Private)
+                    .into()
+            })
+            .ok_or_else(|| {
+                McpError::resource_not_found(format!("No resource {}", request.uri), None)
+            })
     }
 
     async fn call_tool(
