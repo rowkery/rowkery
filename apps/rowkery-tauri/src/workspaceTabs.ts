@@ -85,10 +85,10 @@ export const queryTab = (id: number, title: string, sql: string): QueryTab => ({
   sql,
 });
 
-/** A query tab's last run. Tabs run independently, several at a time. */
 /** How one run ended: Run All goes on only after "done". */
 export type RunEnd = "done" | "error" | "cancelled" | "held" | "skipped";
 
+/** A query tab's last run. Tabs run independently, several at a time. */
 export interface TabRun {
   result: QueryResultDto | null;
   /** The run failed before the database answered (bad session, network). */

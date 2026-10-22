@@ -1934,7 +1934,7 @@ export function Workspace({
   useEffect(() => {
     onRunningChange?.(windowId, runningCount);
   }, [onRunningChange, windowId, runningCount]);
-  // Elapsed times tick in `Elapsed` alone (the run clock above): a running
+  // Elapsed times tick in `Elapsed` alone (the run clock, TabStatus.tsx): a running
   // query never re-renders the workspace or the grid.
 
   // Cancel asks the server; pressed again (Force stop, or Esc twice) core
