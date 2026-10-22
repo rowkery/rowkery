@@ -309,12 +309,70 @@ mod tests {
     /// the page, a query's result carries the rows and a call id the app can
     /// find in the log, and the page-only tools aren't logged.
     // The env lock spans the whole test, awaits included: each test has its own runtime.
+    /// One client session against a fresh server over an in-memory pipe.
+    struct Host {
+        lines: tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+        write: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    }
+
+    impl Host {
+        async fn connect(capabilities: Json) -> Self {
+            use rmcp::ServiceExt;
+            use tokio::io::AsyncBufReadExt;
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let (server_read, server_write) = tokio::io::split(server);
+            tokio::spawn(async move {
+                if let Ok(running) = crate::RowkeryMcp::default()
+                    .serve((server_read, server_write))
+                    .await
+                {
+                    let _ = running.waiting().await;
+                }
+            });
+            let (client_read, write) = tokio::io::split(client);
+            let mut host = Self {
+                lines: tokio::io::BufReader::new(client_read).lines(),
+                write,
+            };
+            host.ask(
+                1,
+                "initialize",
+                json!({ "protocolVersion": "2025-11-25", "clientInfo": { "name": "host", "version": "1" },
+                        "capabilities": capabilities }),
+            )
+            .await;
+            host.ask(0, "notifications/initialized", json!({})).await;
+            host
+        }
+
+        /// A request, or a notification (id 0) that gets no reply.
+        async fn ask(&mut self, id: u64, method: &str, params: Json) -> Json {
+            use tokio::io::AsyncWriteExt;
+            let mut msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+            if id > 0 {
+                msg["id"] = json!(id);
+            }
+            self.write
+                .write_all(format!("{msg}\n").as_bytes())
+                .await
+                .unwrap();
+            if id == 0 {
+                return Json::Null;
+            }
+            loop {
+                let line = self.lines.next_line().await.unwrap().unwrap();
+                let reply: Json = serde_json::from_str(&line).unwrap();
+                if reply["id"] == json!(id) {
+                    return reply;
+                }
+            }
+        }
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_host_that_draws_views_gets_rows_and_a_call_it_can_open() {
-        use rmcp::ServiceExt;
         use rowkery_core::connections::{ConnectionRecord, SqliteConnection};
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rowkery-mcp-views-{}", std::process::id()));
@@ -343,49 +401,10 @@ mod tests {
         }));
         config.save().unwrap();
 
-        let (client, server) = tokio::io::duplex(1 << 20);
-        let (server_read, server_write) = tokio::io::split(server);
-        tokio::spawn(async move {
-            if let Ok(running) = crate::RowkeryMcp::default()
-                .serve((server_read, server_write))
-                .await
-            {
-                let _ = running.waiting().await;
-            }
-        });
-        let (client_read, mut client_write) = tokio::io::split(client);
-        let mut lines = BufReader::new(client_read).lines();
-        // A request, or a notification (id 0) that gets no reply.
-        let mut ask = async |id: u64, method: &str, params: Json| -> Json {
-            let mut msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-            if id > 0 {
-                msg["id"] = json!(id);
-            }
-            client_write
-                .write_all(format!("{msg}\n").as_bytes())
-                .await
-                .unwrap();
-            if id == 0 {
-                return Json::Null;
-            }
-            loop {
-                let line = lines.next_line().await.unwrap().unwrap();
-                let reply: Json = serde_json::from_str(&line).unwrap();
-                if reply["id"] == json!(id) {
-                    return reply;
-                }
-            }
-        };
-        ask(
-            1,
-            "initialize",
-            json!({ "protocolVersion": "2025-11-25", "clientInfo": { "name": "host", "version": "1" },
-                    "capabilities": { "extensions": { EXTENSION: { "mimeTypes": [MIME] } } } }),
-        )
-        .await;
-        ask(0, "notifications/initialized", json!({})).await;
+        let mut host =
+            Host::connect(json!({ "extensions": { EXTENSION: { "mimeTypes": [MIME] } } })).await;
 
-        let tools = ask(2, "tools/list", json!({})).await;
+        let tools = host.ask(2, "tools/list", json!({})).await;
         let names: Vec<&str> = tools["result"]["tools"]
             .as_array()
             .unwrap()
@@ -394,10 +413,12 @@ mod tests {
             .collect();
         assert!(names.contains(&"proposal_status"));
         assert_eq!(names.contains(&"open_in_rowkery"), CAN_OPEN);
-        let page = ask(3, "resources/read", json!({ "uri": VIEW_URI })).await;
+        let page = host
+            .ask(3, "resources/read", json!({ "uri": VIEW_URI }))
+            .await;
         assert_eq!(page["result"]["contents"][0]["mimeType"], MIME);
 
-        let result = ask(
+        let result = host.ask(
             4,
             "tools/call",
             json!({ "name": "query", "arguments": { "connection": "s", "sql": "select id, total from orders order by id" } }),
@@ -435,7 +456,7 @@ mod tests {
         }
 
         // A refusal keeps the connection's label for the page.
-        let refused = ask(
+        let refused = host.ask(
             6,
             "tools/call",
             json!({ "name": "query", "arguments": { "connection": "s", "sql": "delete from orders" } }),
@@ -450,14 +471,28 @@ mod tests {
 
         // A bad id is refused before anything opens; nothing is logged.
         let logged = crate::audit::read_since(None).entries.len();
-        let refused = ask(
-            5,
-            "tools/call",
-            json!({ "name": "open_in_rowkery", "arguments": { "call": "x&y" } }),
-        )
-        .await;
+        let refused = host
+            .ask(
+                5,
+                "tools/call",
+                json!({ "name": "open_in_rowkery", "arguments": { "call": "x&y" } }),
+            )
+            .await;
         assert_eq!(refused["result"]["isError"], true);
         assert_eq!(crate::audit::read_since(None).entries.len(), logged);
+
+        // A client without views, like Claude Code in a terminal, gets the
+        // rows alone: no note, no page data.
+        let mut plain = Host::connect(json!({})).await;
+        let result = plain
+            .ask(
+                2,
+                "tools/call",
+                json!({ "name": "query", "arguments": { "connection": "s", "sql": "select id from orders" } }),
+            )
+            .await;
+        assert_eq!(result["result"]["content"].as_array().unwrap().len(), 1);
+        assert!(result["result"].get("_meta").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
