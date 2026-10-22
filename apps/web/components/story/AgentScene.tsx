@@ -6,8 +6,8 @@ import { Side, Sql, Steps, Title, TitleBar, units } from "./parts";
 /**
  * 01 · With your agent: the agent asks, Rowkery checks the query, the sensitive column comes
  * back as stand-ins (and the same rows show in the chat), and a change the agent proposes
- * waits for Commit. The markup is the
- * finished state; the engine plays it out as you scroll (engine.ts, sceneAgent).
+ * waits for Commit. The markup is the finished state; the engine plays it out as you scroll
+ * (engine.ts, sceneAgent).
  */
 const TABLES: [string, string][] = [
   ["api_keys", "140"],
@@ -38,7 +38,7 @@ export function AgentScene() {
           steps={[
             ["Your agent asks", "A SELECT goes to Rowkery, on your Mac."],
             ["Rowkery checks it first", "Shared tables only, read-only, 1,000 rows at most, 10 seconds."],
-            ["Sensitive columns stay hidden", "The agent gets a stand-in instead of the value. You see the same rows in your chat."],
+            ["Sensitive columns stay hidden", "The agent gets a stand-in instead of the real value. Your chat shows the stand-ins too."],
             ["Changes wait for you", "See every row before and after, then press Commit."],
           ]}
         />

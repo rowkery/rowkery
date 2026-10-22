@@ -6,7 +6,7 @@ export const MOMENTS = [
   { name: "agent-title", scene: "agent", s: 0, title: "Let your AI agent read your database" },
   { name: "agent-asks", scene: "agent", s: 1.35, cap: "Your agent asks" },
   { name: "agent-checks", scene: "agent", s: 2.3, cap: "Rowkery checks it first" },
-  { name: "agent-hidden", scene: "agent", s: 3.37, cap: "Sensitive columns stay hidden" },
+  { name: "agent-hidden", scene: "agent", s: 3.5, cap: "Sensitive columns stay hidden" },
   { name: "agent-commit", scene: "agent", s: 4.55, cap: "Changes wait for you" },
   { name: "security-tables", scene: "security", s: 1.3, cap: "Only the tables you share" },
   { name: "security-stand-in", scene: "security", s: 2.37, cap: "Sensitive columns get a stand‑in" },

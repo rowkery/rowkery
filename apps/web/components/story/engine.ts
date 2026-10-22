@@ -261,8 +261,8 @@ class AgentScene extends Scene {
       setText(el, morph(real, masked, k, Math.floor(s * 60)));
       el.classList.toggle("mask", k >= masked.length);
     });
-    // The same rows, as the agent's reply in the chat, lift out to the left.
-    const ct = L(2.95, 3.25) * (1 - L(3.5, 3.75));
+    // Once the stand-ins are in, the same rows lift out to the left as the agent's reply in the chat.
+    const ct = L(3.3, 3.5) * (1 - L(3.55, 3.75));
     place(this.chat, phone ? { x: 20, y: mix(200, 150, ct), o: ct } : { x: inX(mix(40, -150, ct), 332), y: mix(280, 250, ct), o: ct });
     // Step 4: the change Claude proposed slides in; Commit presses; a note says it's done.
     css(this.review, "transform", `translateX(${((1 - seg(s, 3.6, 3.95)) * 102).toFixed(2)}%)`);
