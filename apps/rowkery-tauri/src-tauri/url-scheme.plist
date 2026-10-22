@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- rowkery:// links from Rowkery's views in the chat (src/open_link.rs). Tauri merges this into the bundle's Info.plist. -->
+  <!-- rowkery:// links from Rowkery's views in the chat (src/open_link.rs). tauri.conf.json merges this into the bundle's Info.plist (url-scheme-dev.plist for Rowkery Dev). -->
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

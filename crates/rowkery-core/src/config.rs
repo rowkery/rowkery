@@ -73,6 +73,10 @@ pub const DEV_BUILD: bool = match option_env!("ROWKERY_CHANNEL") {
     None => false,
 };
 
+/// The URL scheme the app opens links from (views in the chat, `open_link.rs`):
+/// Rowkery Dev has its own, so a link never lands in the other app.
+pub const LINK_SCHEME: &str = if DEV_BUILD { "rowkery-dev" } else { "rowkery" };
+
 /// Directory for Rowkery app data (`ROWKERY_CONFIG_DIR` overrides for tests).
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ROWKERY_CONFIG_DIR") {

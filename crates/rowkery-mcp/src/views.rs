@@ -22,7 +22,7 @@ use rmcp::model::{
     ClientCapabilities, ListResourcesResult, MetaObject, ReadResourceResult, Resource,
     ResourceContents, Tool,
 };
-use rowkery_core::config::AppConfig;
+use rowkery_core::config::{AppConfig, LINK_SCHEME};
 use serde_json::{json, Map, Value as Json};
 
 pub const EXTENSION: &str = "io.modelcontextprotocol/ui";
@@ -171,15 +171,16 @@ fn plain_id(id: &str) -> Option<&str> {
     .then_some(id)
 }
 
-/// The `rowkery://` link for a page-only `open_in_rowkery` call.
+/// The `rowkery://` link (`rowkery-dev://` from Rowkery Dev) for a page-only
+/// `open_in_rowkery` call.
 pub fn link(args: &Map<String, Json>) -> Result<String, String> {
     let arg = |name| args.get(name).and_then(Json::as_str);
     match (arg("call"), arg("proposal")) {
         (Some(call), None) => plain_id(call)
-            .map(|id| format!("rowkery://open?call={id}"))
+            .map(|id| format!("{LINK_SCHEME}://open?call={id}"))
             .ok_or_else(|| "Not a call id.".into()),
         (None, Some(p)) => plain_id(p)
-            .map(|id| format!("rowkery://review?proposal={id}"))
+            .map(|id| format!("{LINK_SCHEME}://review?proposal={id}"))
             .ok_or_else(|| "Not a proposal id.".into()),
         _ => Err("Pass call or proposal.".into()),
     }
@@ -229,11 +230,11 @@ mod tests {
     fn links_carry_only_plain_ids() {
         assert_eq!(
             link(&args(json!({ "call": "1760000000000-1760000001234-9f2c" }))).unwrap(),
-            "rowkery://open?call=1760000000000-1760000001234-9f2c"
+            format!("{LINK_SCHEME}://open?call=1760000000000-1760000001234-9f2c")
         );
         assert_eq!(
             link(&args(json!({ "proposal": "p_0123456789ab" }))).unwrap(),
-            "rowkery://review?proposal=p_0123456789ab"
+            format!("{LINK_SCHEME}://review?proposal=p_0123456789ab")
         );
         for bad in [
             json!({ "call": "1&sql=drop" }),

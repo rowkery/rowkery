@@ -1,0 +1,290 @@
+/* ---------- Command palette (⌘K) ---------- */
+
+/* ⌘K opens in the middle of the window, Spotlight-like (2026-10-17), over
+   the window blurred and dimmed: the one backdrop-filter in the app
+   (DESIGN.md). */
+.cp-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--veil);
+  -webkit-backdrop-filter: blur(8px) saturate(0.8);
+  backdrop-filter: blur(8px) saturate(0.8);
+  animation: cp-fade 160ms var(--ease-out);
+}
+
+@keyframes cp-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.cp-panel {
+  position: absolute;
+  top: 16vh;
+  left: 0;
+  right: 0;
+  width: 640px;
+  max-width: calc(100vw - 28px);
+  max-height: min(460px, calc(84vh - 28px));
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--pop);
+  color: var(--text);
+  transform-origin: 50% 0;
+  animation: pop-in 160ms var(--ease-out);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.cp-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  height: 48px;
+  padding: 0 16px;
+  box-shadow: inset 0 -1px 0 var(--line);
+  color: var(--dim);
+}
+
+.cp-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font: 15px var(--sans);
+}
+
+.cp-search input::placeholder {
+  color: var(--dim);
+}
+
+.cp-scope {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accbg);
+  color: var(--acc2);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.cp-kbd {
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--kbd);
+  /* Paper finish (2026-10-13): --dim on --kbd / --hover is under 4.5:1 at this size; --mute clears it in both themes. */
+  color: var(--mute);
+  font: 10.5px/1.3 var(--mono);
+  white-space: nowrap;
+}
+
+.cp-list {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  --glide-radius: 5px;
+}
+
+.cp-group {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px 3px;
+  color: var(--dim);
+  font: 600 10.5px var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cp-row {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+
+.cp-row.active {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.cp-icon {
+  flex-shrink: 0;
+  width: 16px;
+  display: flex;
+  justify-content: center;
+  color: var(--dim);
+}
+
+.cp-row.active .cp-icon-tables {
+  color: var(--acc);
+}
+
+.cp-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-row .cp-label mark {
+  background: transparent;
+  color: var(--acc2);
+}
+
+.cp-detail {
+  margin-left: 10px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.cp-icon-tables + .cp-label,
+.cp-icon-columns + .cp-label,
+.cp-icon-queries + .cp-label {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.cp-meta {
+  flex-shrink: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cp-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+}
+
+.cp-empty {
+  padding: 16px 10px;
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.cp-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 30px;
+  padding: 0 14px;
+  box-shadow: inset 0 1px 0 var(--line);
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.cp-footer-spacer {
+  flex: 1;
+}
+
+.cp-footer-conn {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Motion: exits for overlays that <Presence> (motion.tsx) keeps on screen
+   until these animations end, and the rolling database name. */
+.presence {
+  display: contents;
+}
+
+.presence[data-closing] .conn-popover {
+  animation: pop-out 90ms var(--ease-in) forwards;
+}
+
+@keyframes pop-out {
+  to { opacity: 0; transform: translateY(-2px) scale(0.98); }
+}
+
+.presence[data-closing] .cp-panel {
+  animation: pop-out 100ms var(--ease-in) forwards;
+}
+
+.presence[data-closing] .cp-scrim {
+  animation: fade-out 100ms var(--ease-in) forwards;
+}
+
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes panel-out {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+.roll {
+  display: inline-grid;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+.roll > span {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.roll-out {
+  animation: roll-out 140ms var(--ease-in) forwards;
+}
+
+.roll-in {
+  animation: roll-in 150ms var(--ease-out);
+}
+
+@keyframes roll-out {
+  to {
+    opacity: 0;
+    transform: translateY(-70%);
+  }
+}
+
+@keyframes roll-in {
+  from {
+    opacity: 0;
+    transform: translateY(70%);
+  }
+}
