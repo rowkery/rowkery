@@ -12,6 +12,7 @@
 
 use std::sync::Mutex;
 
+use rowkery_core::config::LINK_SCHEME;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -51,7 +52,8 @@ pub fn resolve(
     find_call: impl Fn(&str) -> Option<rowkery_mcp::audit::Entry>,
     waiting: impl Fn(&str) -> bool,
 ) -> Option<OpenLink> {
-    let rest = url.strip_prefix("rowkery://")?;
+    // Only this build's own scheme: Rowkery Dev's links are `rowkery-dev://`.
+    let rest = url.strip_prefix(LINK_SCHEME)?.strip_prefix("://")?;
     let (action, query) = rest.split_once('?').unwrap_or((rest, ""));
     match action.trim_end_matches('/') {
         "open" => {
@@ -128,7 +130,11 @@ mod tests {
     #[test]
     fn a_call_link_opens_only_a_query_the_guard_let_through() {
         assert_eq!(
-            resolve("rowkery://open?call=1-2-ab", logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://open?call=1-2-ab"),
+                logged,
+                waiting
+            ),
             Some(OpenLink::Sql {
                 connection: "pg".into(),
                 database: Some("shop".into()),
@@ -136,28 +142,51 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve("rowkery://open?call=refused", logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://open?call=refused"),
+                logged,
+                waiting
+            ),
             Some(OpenLink::Gone)
         );
         assert_eq!(
-            resolve("rowkery://open?call=missing", logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://open?call=missing"),
+                logged,
+                waiting
+            ),
             Some(OpenLink::Gone)
         );
         assert_eq!(
-            resolve("rowkery://open?sql=select%201", logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://open?sql=select%201"),
+                logged,
+                waiting
+            ),
             Some(OpenLink::Gone)
         );
         assert_eq!(
-            resolve("rowkery://review?proposal=p_0123456789ab", logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://review?proposal=p_0123456789ab"),
+                logged,
+                waiting
+            ),
             Some(OpenLink::Proposal {
                 id: "p_0123456789ab".into()
             })
         );
         assert_eq!(
-            resolve("rowkery://review?proposal=p_committed000", logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://review?proposal=p_committed000"),
+                logged,
+                waiting
+            ),
             Some(OpenLink::Decided)
         );
-        assert_eq!(resolve("rowkery://elsewhere", logged, waiting), None);
+        assert_eq!(
+            resolve(&format!("{LINK_SCHEME}://elsewhere"), logged, waiting),
+            None
+        );
         assert_eq!(
             resolve("https://rowkery.com/open?call=1", logged, waiting),
             None
