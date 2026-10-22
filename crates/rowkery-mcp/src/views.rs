@@ -116,6 +116,11 @@ fn label(connection: Option<&str>) -> Json {
     }
 }
 
+/// Added after a query's rows when the host draws them. Without it Claude
+/// Desktop retypes the rows as a markdown table right under the grid.
+pub const SHOWN_NOTE: &str = "The user already sees these rows as a table under this call. \
+Don't repeat them as a table: answer the question, or point out what matters in them.";
+
 /// What only the view gets (the result's `_meta`): the connection's label,
 /// and for a successful call the call's id or a proposal's statements, never
 /// rows (those are in the text the agent got). `None` for tools without a view.
@@ -403,6 +408,8 @@ mod tests {
             serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text["rows"], json!([[1, 9.5], [2, 3.0]]));
         assert!(text.get("call").is_none() && text.get("connection").is_none());
+        // A second block asks the agent not to retype the rows the user sees.
+        assert_eq!(result["result"]["content"][1]["text"], SHOWN_NOTE);
         // What only the page needs rides in _meta.
         let view = &result["result"]["_meta"][META_KEY];
         assert_eq!(view["kind"], "rows");
@@ -435,6 +442,7 @@ mod tests {
         )
         .await;
         assert_eq!(refused["result"]["isError"], true);
+        assert!(refused["result"]["content"].get(1).is_none());
         assert_eq!(
             refused["result"]["_meta"][META_KEY]["connection"],
             json!({ "name": "shop", "environment": "prd" })
