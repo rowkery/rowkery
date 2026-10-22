@@ -1,0 +1,268 @@
+/* ---------- Run SQL file (plan 2026-10-21) ----------
+   In the inspector column: the file, what it does kind by kind (destructive
+   ones red on a red wash), the transaction and on-error choices, then the
+   run's progress or how it ended. */
+
+.inspector[data-inspector="sqlfile"] {
+  width: var(--insp-sqlfile, 340px);
+}
+
+.sf-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 14px 18px;
+}
+
+.sf-meta {
+  overflow-wrap: anywhere;
+  font: 12px/1.5 var(--mono);
+  color: var(--mute);
+}
+
+.sf-meta-part {
+  white-space: nowrap;
+}
+
+.sf-wait {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.sf-wait.error {
+  color: var(--del);
+  overflow-wrap: anywhere;
+}
+
+.sf-kinds {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sf-kinds .insp-label {
+  margin-bottom: 6px;
+}
+
+.sf-kind {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font: 12px var(--mono);
+  color: var(--text);
+}
+
+.sf-kind.destructive {
+  background: var(--delbg);
+  color: var(--del);
+}
+
+.sf-kind-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sf-kind-sub {
+  color: var(--dim);
+}
+
+.sf-kind-count {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--mute);
+}
+
+.sf-kind.destructive .sf-kind-count {
+  color: inherit;
+}
+
+.sf-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sf-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sf-option-label {
+  flex-shrink: 0;
+  width: 78px;
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.sf-segment {
+  flex: 1;
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--hover);
+}
+
+.sf-segment button {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mute);
+  font: 400 12px var(--sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.sf-segment button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.sf-segment button[aria-checked="true"] {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: var(--shadow);
+}
+
+.sf-segment button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sf-segment button:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.sf-why {
+  margin: -4px 0 0 88px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.sf-running {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sf-running-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.sf-elapsed {
+  font-family: var(--mono);
+  color: var(--mute);
+}
+
+.sf-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hover);
+  overflow: hidden;
+}
+
+.sf-bar span {
+  display: block;
+  height: 100%;
+  background: var(--acc);
+  transform-origin: left;
+  transition: transform 0.2s linear;
+}
+
+.sf-current {
+  margin: 0;
+  max-height: 90px;
+  overflow: hidden;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  font: 11.5px/17px var(--mono);
+  color: var(--mute);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sf-rows {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+.sf-ended {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sf-ended-title {
+  font: 600 13px var(--sans);
+  color: var(--text);
+}
+
+.sf-ended.failed .sf-ended-title,
+.sf-ended.errors .sf-ended-title,
+.sf-ended-error {
+  color: var(--del);
+}
+
+.sf-ended-line {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--mute);
+}
+
+.sf-ended-error {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Run when the file drops or deletes something: red, as safe mode's Run anyway. */
+.insp-btn.danger {
+  padding: 0 12px;
+  border-color: transparent;
+  background: var(--del);
+  color: var(--onfill);
+  font-weight: 600;
+}
+
+.insp-btn.danger:hover:not(:disabled) {
+  border-color: transparent;
+  filter: brightness(0.92);
+}
+
+.sf-run {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sf-bar span {
+    transition: none;
+  }
+}

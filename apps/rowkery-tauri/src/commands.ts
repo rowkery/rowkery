@@ -649,6 +649,14 @@ export const COMMANDS: Command[] = [
     canRun: always,
   },
   {
+    id: "run-sql-file",
+    title: "Run SQL file…",
+    menuTitle: "Import SQL…",
+    synonyms: ["import sql file", "restore", "dump", "pg_dump", "load"],
+    // Read-only refuses it in core too; agents can't start it at all.
+    canRun: (s) => s.connected && s.connection?.safeMode !== "read_only",
+  },
+  {
     id: "open-sample",
     title: "Open the sample database",
     menuTitle: "Open the Sample Database",
@@ -947,7 +955,7 @@ export function availableCommands(s: CommandState, mac: boolean): AvailableComma
  */
 export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   { submenu: "Rowkery", items: ["check-updates", null, "settings"] },
-  { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "import-csv", null, "close-tab"] },
+  { submenu: "File", items: ["new-tab", "reopen-closed-tab", null, "import-csv", "run-sql-file", null, "close-tab"] },
   { submenu: "Edit", items: ["format-sql"] },
   {
     submenu: "Connection",

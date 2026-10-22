@@ -5,7 +5,7 @@ import "./Inspector.css";
 
 /**
  * The inspector: the column at the main column's right that hosts Quick Look,
- * New connection and Review SQL (Paper, 2026-10-10: "a row opens on
+ * New connection, Review SQL and Run SQL file (Paper, 2026-10-10: "a row opens on
  * the right, not over the data"), and the Sessions tab's picked session. It takes its width from the main column, so
  * nothing it shows covers a row. 340 px (Quick Look 280 under 1100 px);
  * New connection 380; each as dragged on its left edge (InspectorResize).
@@ -14,7 +14,7 @@ import "./Inspector.css";
  * Mount it inside `<Presence>`: it slides in from the right on mount and
  * fades out, shorter, while Presence holds it closing.
  */
-export type InspectorKind = "quicklook" | "connect" | "review" | "session" | "import";
+export type InspectorKind = "quicklook" | "connect" | "review" | "session" | "import" | "sqlfile";
 
 type DataProps = { [data: `data-${string}`]: unknown };
 

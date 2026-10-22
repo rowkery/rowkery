@@ -39,6 +39,11 @@
         "accelerator": null
       },
       {
+        "id": "run-sql-file",
+        "title": "Import SQL…",
+        "accelerator": null
+      },
+      {
         "separator": true
       },
       {
