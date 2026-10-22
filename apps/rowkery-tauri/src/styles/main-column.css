@@ -217,7 +217,7 @@
   opacity: 0.6;
 }
 
-/* A tab's run (Workspace.tsx TabStatus): spinner and time while it runs, a
+/* A tab's run (TabStatus.tsx): spinner and time while it runs, a
    dot and the time when it finished out of sight. */
 .query-tab-spin {
   flex-shrink: 0;

@@ -59,10 +59,12 @@ import { CmdHints } from "./CmdHints";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
 import { Workspace, type WindowActions, type WindowSession } from "./Workspace";
 import "./App.css";
-// The shell's styles, after App.css's tokens and layout, in this order.
+// The shell's styles, after App.css's tokens and layout, in this order: the
+// cascade depends on it, so they stay here rather than beside their components.
 import "./styles/titlebar.css";
 import "./styles/connection-switcher.css";
 import "./styles/window-tabs.css";
+import "./styles/windows.css";
 import "./styles/schema-panel.css";
 import "./styles/main-column.css";
 import "./styles/sql-editor.css";
@@ -1372,7 +1374,7 @@ function App() {
   const busyWindows = new Set(windows.filter((w) => w.id !== activeWindow.id && (runningByWindow[w.id] ?? 0) > 0).map((w) => w.id));
   // A window with no connection has no schema column (Paper, 2026-10-10):
   // its switcher moves to the tab row's left, where the chip itself is
-  // hidden (App.css) and only ⇧⌘O's picker shows.
+  // hidden (styles/connect-to-start.css) and only ⇧⌘O's picker shows.
   const panelOff = !activeWindow.connectionId;
   // Where a page's way out returns: the shown window, by its connection's name.
   const backTo = activeConnection?.name ?? "New window";

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Window switch on a big catalog (stubbed `invoke`, 2,000 tables per window).
 // A hidden window is `content-visibility: hidden` instead of `display: none`
-// (styles/window-tabs.css), so showing it again re-lays nothing out. This proves the switch
+// (styles/windows.css), so showing it again re-lays nothing out. This proves the switch
 // still behaves like a hidden window:
 //
 // 1. The hidden window is skipped (checkVisibility false), sits under the
