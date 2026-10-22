@@ -17,7 +17,6 @@ app="$root/apps/rowkery-tauri"
 cd "$root"
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 "$root/scripts/checkout.sh" "${1:-}"
 
