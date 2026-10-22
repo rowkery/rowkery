@@ -156,16 +156,17 @@ Every call an agent makes is listed, newest first, grouped by agent session. A s
 | --- | --- |
 | Time | When the call came in, to the second |
 | Tool | Which tool it called: `query`, `describe_table`, `explain` … |
-| Connection | Its name, environment tag, and the database when it isn't the connection's own |
+| Database | The database it read (a SQLite file by its connection's name), then the connection's environment as a coloured word: `platform_api prd` |
 | Target | The table for `describe_table`, the text for `search_schema` |
 | SQL | The query as the agent wrote it |
 | Verdict | **ok**, **refused**, **failed**, or **would refuse** (an `explain` whose query would be refused) |
 | Size | Rows and milliseconds for a query, the response size for other tools |
-| Reason | For a refused or failed call, the reason the agent was given |
 
 ### A call in full
 
-Click a call, or move to it with <kbd>↑</kbd> <kbd>↓</kbd>, to open it.
+Click a call, or move to it with <kbd>↑</kbd> <kbd>↓</kbd>, to open it. Its head names the agent, connection, database and time, and how long the whole call took. A refused or failed call opens with a tinted band: **Refused** (orange) or **Failed** (red), how long it took, and the reason the agent was given.
+
+The line between the list and the call drags to widen or narrow the list; double-click it to go back to the default width.
 
 <Shot src="/img/choosing-what-to-share-call.webp" width={864} height={493} alt="A query call opened: Access when it ran (storefront prd, shop, 3 tables ticked, masked host, 200 rows, 10 s, read-only), the request as sent, the first part of the response, and buttons to open the SQL in a tab or copy it." />
 
@@ -177,19 +178,19 @@ Click a call, or move to it with <kbd>↑</kbd> <kbd>↓</kbd>, to open it.
 
 | Action | Key |
 | --- | --- |
-| Open in tab: the SQL in a new query tab named Agent query, on that connection and database. It doesn't run | <kbd>↵</kbd> or double-click |
+| Open SQL in tab: the SQL in a new query tab named Agent query, on that connection and database. It doesn't run | <kbd>↵</kbd> or double-click |
 | Copy SQL | <kbd>⌘C</kbd> |
-| Copy request, Copy response | Buttons |
+| Copy request JSON, Copy response JSON: the arguments as sent, or the kept start of the response | Buttons |
 
 ### Filtering the log
 
-The buttons above the list show **All**, **Queries** (calls with SQL) or **Refused**, each with its count. When agents have called more than one connection, a button per connection narrows the list to it; click it again to show all. The page lists the newest 300 calls that match.
+The buttons above the list show **All**, **Refused** or **Failed**, with the count of each. When agents have called more than one database, the menu under them narrows the list to one database (named with its connection, environment and call count); **Every database** shows them all again. The page lists the newest 300 calls that match.
 
 ### Clearing the log
 
 **Clear log**, at the log's foot, asks once: **Keep** or **Clear all**. Clearing removes every entry and every result sample, and can't be undone.
 
-The log lives in `mcp-log.jsonl` beside your config. It records each call's time, tool, arguments, connection, database, what was shared, SQL, row count, time taken, response size and verdict, and never the rows themselves. Past 8 MB it starts a new file and keeps one older one.
+The log lives in `mcp-log.jsonl` beside your config. It records each call's time, tool, arguments, connection, database, what was shared, SQL, row count, how long the query and the whole call took, response size and verdict, and never the rows themselves. Past 8 MB it starts a new file and keeps one older one.
 
 ## While you work
 

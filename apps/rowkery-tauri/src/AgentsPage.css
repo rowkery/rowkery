@@ -1487,6 +1487,14 @@
    the picked item fills the rest of the window. */
 .ag-inbox .pp-list {
   width: 320px;
+  max-width: 50%;
+  position: relative;
+}
+
+/* Its right edge drags (the inspector's handle, mirrored). */
+.ag-list-resize {
+  left: auto;
+  right: -3px;
 }
 
 .ag-inbox-head {
@@ -1548,6 +1556,52 @@
   color: var(--text);
 }
 
+/* Every database, or one: a soft native menu under the filters. */
+.ag-place {
+  position: relative;
+  display: block;
+  padding: 0 16px 8px;
+}
+
+/* The chevron, a mask so it takes a token. */
+.ag-place::after {
+  content: "";
+  position: absolute;
+  top: 9px;
+  right: 25px;
+  width: 9px;
+  height: 6px;
+  background: var(--mute);
+  pointer-events: none;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 9px 6px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 9px 6px no-repeat;
+}
+
+.ag-place select {
+  width: 100%;
+  height: 26px;
+  padding: 0 26px 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--line);
+  color: var(--text);
+  font: 500 12px var(--sans);
+  appearance: none;
+  cursor: default;
+  transition: background-color 0.18s ease;
+}
+
+.ag-place select:hover {
+  background-color: var(--line2);
+}
+
+.ag-place select:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
 .ag-calls {
   display: flex;
   flex-direction: column;
@@ -1592,13 +1646,49 @@
 
 .ag-call-tool {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
   overflow: hidden;
   font: 600 12px var(--mono);
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* The database a call read, then its environment as a plain coloured word:
+   a lone red dot read as a failure (2026-10-22). */
+.ag-call-place {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mute);
+  font: 11px var(--mono);
+}
+
+.ag-call-db {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ag-call-env {
+  flex-shrink: 0;
+  font: 500 10.5px var(--mono);
+}
+
+.ag-call-env[data-env="prd"] {
+  color: color-mix(in srgb, var(--env-prd) var(--tagmix), var(--text));
+}
+.ag-call-env[data-env="stg"] {
+  color: color-mix(in srgb, var(--env-stg) var(--tagmix), var(--text));
+}
+.ag-call-env[data-env="dev"] {
+  color: color-mix(in srgb, var(--env-dev) var(--tagmix), var(--text));
+}
+.ag-call-env[data-env="local"] {
+  color: color-mix(in srgb, var(--env-local) var(--tagmix), var(--text));
 }
 
 .ag-call-meta {
@@ -1662,21 +1752,45 @@
   overflow: auto;
 }
 
+/* A failed or refused call leads with a tinted band: what and why. */
 .ag-call-reason {
-  margin: 0;
-  padding: 14px 16px 0;
-  color: var(--text2);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 16px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--text);
   font: 13px/1.5 var(--sans);
+  user-select: text;
+  --tone: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+}
+
+.ag-call-reason[data-verdict="error"] {
+  background: color-mix(in srgb, var(--del) 12%, transparent);
+  --tone: color-mix(in srgb, var(--del) var(--tagmix), var(--text));
+}
+
+.ag-call-reason svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--tone);
+}
+
+.ag-call-reason p {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ag-call-reason b {
-  margin-right: 4px;
-  color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
+  color: var(--tone);
   font-weight: 600;
 }
 
-.ag-call-reason[data-verdict="error"] b {
-  color: color-mix(in srgb, var(--del) var(--tagmix), var(--text));
+.ag-call-took {
+  color: var(--mute);
 }
 
 .ag-call-view .pp-stmt-sql {

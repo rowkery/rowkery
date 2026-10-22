@@ -1115,7 +1115,9 @@ impl ServerHandler for RowkeryMcp {
         if let Ok(mut slot) = self.client.lock() {
             slot.clone_from(&client);
         }
+        let started = std::time::Instant::now();
         let (outcome, mut entry, keep_sample) = self.dispatch(&request.name, &args).await;
+        entry.took_ms = Some(started.elapsed().as_millis() as u64);
         entry.client = client;
         let text = match &outcome {
             Ok(value) => value.to_string(),

@@ -22,7 +22,10 @@ export interface McpEntry {
   target?: string;
   sql?: string;
   rows?: number;
+  /** The query's own run. */
   ms?: number;
+  /** The whole call, from the request arriving to the answer being ready (older lines lack it). */
+  took_ms?: number;
   verdict?: string;
   /** The arguments exactly as the agent sent them (a cut string past 4 KB). */
   args?: Record<string, unknown> | string;
@@ -52,6 +55,13 @@ export function verdictOf(e: McpEntry): McpVerdict {
   if (v === "would refuse") return "flagged";
   if (v.startsWith("Refused")) return "refused";
   return "error";
+}
+
+/** How long the whole call took, as its detail prints it: `182 ms`, `1.4 s`; null on older lines. */
+export function tookLabel(e: McpEntry): string | null {
+  const ms = e.took_ms;
+  if (ms === undefined) return null;
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
 }
 
 interface Activity {
