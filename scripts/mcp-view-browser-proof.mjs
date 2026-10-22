@@ -15,8 +15,9 @@
 //
 //   node scripts/mcp-view-browser-proof.mjs [outDir]
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { drawView, toolResult as result } from "./lib/mcp-view-host.mjs";
 
 const require = createRequire(import.meta.url);
 let playwright;
@@ -27,41 +28,6 @@ try {
 }
 const OUT = process.argv[2] ?? "/tmp/rowkery-proof/mcp-view";
 mkdirSync(OUT, { recursive: true });
-const root = new URL("..", import.meta.url).pathname;
-const view = readFileSync(`${root}crates/rowkery-mcp/src/view.html`, "utf8").replace(
-  "<!--mark-->",
-  readFileSync(`${root}apps/rowkery-tauri/brand/rowkery-mark-no-shadow.svg`, "utf8"),
-);
-
-// The host: one frame, answers the page's requests, logs its tool calls.
-const hostPage = (theme) => `<!doctype html><html><body style="margin:0;padding:16px;background:${theme === "dark" ? "#262624" : "#f4f4f2"}">
-<iframe id="v" sandbox="allow-scripts" style="border:0;width:640px;height:80px;display:block"></iframe>
-<script>
-window.calls = [];
-window.proposalStatus = { state: "waiting" };
-const frame = document.getElementById("v");
-const reply = (id, result) => frame.contentWindow.postMessage({ jsonrpc: "2.0", id, result }, "*");
-window.addEventListener("message", (e) => {
-  const m = e.data;
-  if (e.source !== frame.contentWindow || !m || m.jsonrpc !== "2.0") return;
-  if (m.method === "ui/initialize") {
-    reply(m.id, { protocolVersion: "2026-01-26", hostInfo: { name: "host", version: "1" },
-      hostCapabilities: window.noTools ? {} : { serverTools: {} },
-      hostContext: { theme: ${JSON.stringify(theme)}, displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"] } });
-  } else if (m.method === "ui/notifications/initialized") {
-    window.ready = true;
-  } else if (m.method === "ui/notifications/size-changed") {
-    frame.style.height = m.params.height + "px";
-  } else if (m.method === "tools/call") {
-    window.calls.push(m.params);
-    const body = m.params.name === "proposal_status" ? window.proposalStatus : { opened: true };
-    reply(m.id, { content: [{ type: "text", text: JSON.stringify(body) }] });
-  } else if (m.id !== undefined) {
-    reply(m.id, {});
-  }
-});
-window.send = (method, params) => frame.contentWindow.postMessage({ jsonrpc: "2.0", method, params }, "*");
-</script></body></html>`;
 
 const conn = { name: "shop-prd-with-a-long-connection-name", environment: "prd" };
 const wideCols = ["id", "email", "provider", "total", "pending_for", "status", "created_at", "customer_id", "shipping_address_line_1", "shipping_city", "coupon", "notes"];
@@ -79,8 +45,6 @@ const wideRows = Array.from({ length: 40 }, (_, i) => [
   i % 5 === 0 ? "WELCOME10" : null,
   i % 7 === 0 ? { tag: "vip", retries: i % 3 } : null,
 ]);
-// As rowkery --mcp sends it: the agent's text, plus _meta["rowkery/view"] for the page.
-const result = (text, view) => ({ content: [{ type: "text", text: JSON.stringify(text) }], _meta: { "rowkery/view": view } });
 const CALL = "1760000000000-1760000001234-9f2cabcdef0123456789abcdef012345";
 const rowsResult = result(
   { columns: wideCols, types: ["int8", "text", "text", "numeric", "interval", "text", "timestamptz", "int8", "text", "text", "text", "jsonb"],
@@ -99,20 +63,7 @@ const browser = await playwright.chromium.launch({ executablePath: process.env.C
 const fails = [];
 const check = (ok, what) => { if (!ok) fails.push(what); console.log(`${ok ? "ok  " : "FAIL"} ${what}`); };
 
-async function scene(theme, result, opts = {}) {
-  const page = await browser.newPage({ viewport: { width: 700, height: 640 }, deviceScaleFactor: 2 });
-  const file = `${OUT}/host-${theme}.html`;
-  writeFileSync(file, hostPage(theme));
-  await page.goto(`file://${file}`);
-  if (opts.noTools) await page.evaluate(() => (window.noTools = true));
-  await page.evaluate((html) => (document.getElementById("v").srcdoc = html), view);
-  await page.waitForFunction(() => window.ready === true);
-  if (opts.input) await page.evaluate((a) => window.send("ui/notifications/tool-input", { arguments: a }), opts.input);
-  await page.evaluate((r) => window.send("ui/notifications/tool-result", r), result);
-  const frame = page.frameLocator("#v");
-  await frame.locator('[data-testid="mcp-view"]').waitFor();
-  return { page, frame };
-}
+const scene = (theme, r, opts = {}) => drawView(browser, theme, r, { ...opts, out: OUT });
 
 for (const theme of ["light", "dark"]) {
   // A wide query result.
