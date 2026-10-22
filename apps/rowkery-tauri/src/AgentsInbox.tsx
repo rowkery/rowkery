@@ -7,6 +7,7 @@ import { Keys } from "./Keys";
 import { bytesLabel, clientLabel, sinceLabel, tookLabel, useMcpEntries, verdictOf, type McpEntry } from "./mcpActivity";
 import { useGlideHover } from "./motion";
 import { showToast } from "./notify";
+import { readKey, writeKey } from "./persist";
 import { isMacPlatform } from "./platform";
 import { HIDDEN_TEXT, markedNames, usePresenting } from "./presenting";
 import {
@@ -117,6 +118,11 @@ export function AgentsInbox({
   }, [entries, filter, placeOn]);
   const refusedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "refused").length, [inPlace]);
   const failedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "error").length, [inPlace]);
+
+  const [listWidth, setListWidth] = useState<number | null>(() => {
+    const w = Number(readKey(LIST_WIDTH_KEY));
+    return Number.isFinite(w) && w > 0 ? clampList(w) : null;
+  });
 
   const [sel, setSel] = useState<Sel>(null);
   // The picked proposal, or once it's decided, the one that took its place in
@@ -354,7 +360,8 @@ export function AgentsInbox({
       tabIndex={-1}
       onKeyDown={onKeyDown}
     >
-      <nav className="pp-list" data-testid="pp-list" aria-label="Agents">
+      <nav className="pp-list" data-testid="pp-list" aria-label="Agents" style={listWidth ? { width: listWidth } : undefined}>
+        <ListResize width={listWidth} onWidth={setListWidth} />
         <header className="ag-head ag-inbox-head">
           <PageBack to={backTo} onBack={onClose} />
           <span className="mcp-grow" />
@@ -748,6 +755,57 @@ function ProposalCard({
         ) : null}
       </span>
     </button>
+  );
+}
+
+const LIST_WIDTH_KEY = "rowkery.agentsListWidth";
+/** The list's dragged width: 260 px to half the window (2026-10-22). */
+const clampList = (w: number) => Math.round(Math.min(Math.max(260, window.innerWidth * 0.5), Math.max(260, w)));
+
+/**
+ * The list's right edge: drag to widen or narrow it (the picked item gives
+ * or takes the room), double-click for the default 320 px. Kept in
+ * config.json like the inspector's widths.
+ */
+function ListResize({ width, onWidth }: { width: number | null; onWidth: (w: number | null) => void }) {
+  const start = (e: React.PointerEvent<HTMLDivElement>) => {
+    const handle = e.currentTarget;
+    const list = handle.parentElement;
+    if (!list || e.button !== 0) return;
+    e.preventDefault();
+    const w0 = list.getBoundingClientRect().width;
+    const x0 = e.clientX;
+    let w = width ?? Math.round(w0);
+    handle.setPointerCapture(e.pointerId);
+    handle.dataset.dragging = "";
+    const move = (m: PointerEvent) => {
+      w = clampList(w0 + m.clientX - x0);
+      onWidth(w);
+    };
+    const up = () => {
+      delete handle.dataset.dragging;
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      writeKey(LIST_WIDTH_KEY, w);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+  return (
+    <div
+      className="insp-resize ag-list-resize"
+      data-testid="ag-list-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the list"
+      onPointerDown={start}
+      onDoubleClick={() => {
+        onWidth(null);
+        writeKey(LIST_WIDTH_KEY, undefined);
+      }}
+    />
   );
 }
 

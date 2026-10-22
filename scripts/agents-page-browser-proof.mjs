@@ -6,8 +6,11 @@
 // holding still as the page rises in; the
 // head's first control names the window it goes back to, the pill's mark
 // reads as pressed, and each of them (and Esc) goes back. With nothing
-// waiting it lands on the newest call: the log newest first, an env dot per
-// row, ↓ moves, Refused narrows it, ↵ opens a query's SQL in the window.
+// waiting it lands on the newest call: the log newest first, each row naming
+// its database and environment word (2026-10-22: no lone env dot), ↓ moves,
+// Refused and Failed narrow it, the database menu narrows it to one place,
+// the head says how long the call took, the list's edge drags, ↵ opens a
+// query's SQL in the window.
 // Its foot's Sharing opens Settings › Agents: the cards, What can the agent
 // do (Esc closes it first), Connect an agent inline (Esc closes it first),
 // Stop all sharing in one go; ⌘K Connect lands there too. Proposals are
@@ -240,8 +243,11 @@ await shot("1-page");
 // connections in the log each row carries its environment dot.
 const tools = await page.$$eval('[data-testid="ag-call"]', (els) => els.map((el) => el.getAttribute("data-tool")));
 check(tools.join(",") === "query,sessions,query,query,describe_table,list_connections", `the log, newest first: ${tools.join(", ")}`);
-const dots = await page.$$eval('[data-testid="ag-call"] .mcp-dot', (els) => els.map((el) => el.getAttribute("data-env"))); // Class on purpose: the env dot.
-check(JSON.stringify(dots) === JSON.stringify(["local", "prd", "local", "prd", "prd"]), `each call carries its connection's environment: ${dots.join(", ")}`);
+const envs = await page.$$eval('[data-testid="ag-call"] .ag-call-env', (els) => els.map((el) => el.getAttribute("data-env"))); // Class on purpose: the env word.
+check(JSON.stringify(envs) === JSON.stringify(["local", "prd", "local", "prd", "prd"]), `each call names its connection's environment as a word: ${envs.join(", ")}`);
+check(!(await page.$('[data-testid="ag-call"] .mcp-dot')), "no lone env dot on the rows");
+const placeText = await page.textContent('[data-testid="ag-call"][data-mcp-entry="2"] [data-testid="ag-call-place"]');
+check(placeText === "payments-prodprd", `a row names the database it read: ${placeText}`);
 const sessionsRow = await page.textContent('[data-testid="ag-call"][data-tool="sessions"]');
 check(/3 sessions/.test(sessionsRow ?? ""), `a sessions call says how many it showed: ${sessionsRow}`);
 check((await page.textContent('[data-testid="ag-call-title"]')) === "query", "the picked call shows beside the list");
@@ -257,8 +263,37 @@ await page.waitForFunction(() => document.querySelectorAll('[data-testid="ag-cal
 check((await page.getAttribute('[data-testid="ag-call"]', "data-verdict")) === "refused", "Refused leaves the refused call");
 check(/plan reads public\.wallet_transactions/.test(await page.textContent('[data-testid="ag-call-view"] [data-testid="mcp-reason"]')), "and shows why it was refused");
 await shot("2-refused");
+await page.click('[data-mcp-filter="error"]');
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="ag-call"]').length === 0);
+check(/Nothing failed/.test(await page.textContent('[data-testid="agents-page"] .ag-calls')), "Failed with no failures says so");
 await page.click('[data-mcp-filter="all"]');
 await page.waitForFunction(() => document.querySelectorAll('[data-testid="ag-call"]').length === 6);
+
+// 3b. The database menu narrows the log to one database; Every database undoes it.
+const placeOpts = await page.$$eval('[data-testid="ag-place"] option', (els) => els.map((el) => el.textContent));
+check(placeOpts[0] === "Every database" && placeOpts.some((o) => /^payments-prod · prd · 3$/.test(o)), `the menu lists each database with its environment and count: ${placeOpts.join(" | ")}`);
+await page.selectOption('[data-testid="ag-place"]', { label: "payments-prod · prd · 3" });
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="ag-call"]').length === 3);
+const placeTools = await page.$$eval('[data-testid="ag-call"]', (els) => els.map((el) => el.getAttribute("data-tool")));
+check(placeTools.join(",") === "sessions,query,describe_table", `one database's calls only: ${placeTools.join(", ")}`);
+await page.selectOption('[data-testid="ag-place"]', "");
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="ag-call"]').length === 6);
+
+// 3c. The head says how long the call took.
+await page.click('[data-testid="ag-call"][data-mcp-entry="2"]');
+check(/took 61 ms/.test(await page.textContent('[data-testid="ag-call-view"] .pp-sub')), "the picked call's head says how long it took");
+
+// 3d. The list's right edge drags; double-click puts it back.
+const listW = () => page.$eval('[data-testid="pp-list"]', (el) => Math.round(el.getBoundingClientRect().width));
+const w0 = await listW();
+const edge = await page.$eval('[data-testid="ag-list-resize"]', (el) => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 200 }; });
+await page.mouse.move(edge.x, edge.y);
+await page.mouse.down();
+await page.mouse.move(edge.x + 120, edge.y, { steps: 4 });
+await page.mouse.up();
+check((await listW()) === w0 + 120, `dragging the edge widens the list: ${w0} → ${await listW()}`);
+await page.mouse.dblclick(edge.x + 120, edge.y);
+check((await listW()) === w0, "double-clicking it puts the default width back");
 
 // 4. ↵ on a query opens its SQL in a query tab; the page goes.
 await page.click('[data-testid="ag-call"][data-mcp-entry="5"]');

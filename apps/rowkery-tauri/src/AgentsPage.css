@@ -1487,6 +1487,13 @@
    the picked item fills the rest of the window. */
 .ag-inbox .pp-list {
   width: 320px;
+  position: relative;
+}
+
+/* Its right edge drags (the inspector's handle, mirrored). */
+.ag-list-resize {
+  left: auto;
+  right: -3px;
 }
 
 .ag-inbox-head {
