@@ -74,7 +74,8 @@ import {
 import { isMacPlatform } from "./platform";
 import { loadHistory, recordHistory, type HistoryEntry } from "./queryHistory";
 import { keywordHabits, recordKeywords } from "./keywordHabits";
-import { escLeftSelection, markReveal, ResultsGrid, type KeyColumns, type QuickLookView } from "./ResultsGrid";
+import { escLeftSelection, markReveal, ResultsGrid } from "./ResultsGrid";
+import type { KeyColumns, QuickLookView } from "./gridTypes";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
 import { sqlStatementRanges, type CharRange } from "./sqlStatements";
