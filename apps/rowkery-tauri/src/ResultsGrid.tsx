@@ -63,7 +63,7 @@ export function markReveal(result: QueryResultDto) {
   pendingReveal.add(result);
 }
 
-/** How long the cascade runs before the class comes off (last row's delay + its animation). */
+/** How long the cascade runs before the class comes off (last row's delay + its animation; REVEAL_ROWS in GridRow.tsx caps the delay). */
 const REVEAL_MS = 900;
 
 interface Props {

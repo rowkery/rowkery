@@ -7,7 +7,7 @@ import type { Column, Value } from "./types";
 /** `2026-09-27 06:12:44.201+00` → date, time, then fraction and zone. */
 const TIMESTAMP_PARTS = /^(\d{4}-\d{2}-\d{2})([ T])(\d{2}:\d{2}:\d{2})(.*)$/;
 
-/** Rows past this one enter together, so a tall window doesn't wait. */
+/** Rows past this one enter together, so a tall window doesn't wait; REVEAL_MS in ResultsGrid.tsx must outlast the last delay. */
 const REVEAL_ROWS = 24;
 
 /** Timestamps read by their time: the date and fraction are dimmed. */
