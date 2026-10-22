@@ -69,6 +69,8 @@ Rowkery is careful with changes you make yourself, too:
 
 Rowkery's MCP server is the same app, started by your agent's client with `--mcp`. It has no window and no network port: the client starts it, talks to it over standard input and output, and stops it. On every call it reads your saved connections from `config.json` and their secrets from the keychain, so it only knows what you have shared at that moment.
 
+In clients that draw MCP Apps, the server also hands the client one bundled page, Rowkery's view of a query's rows or a proposed change. It loads nothing from the network and shows only what the agent got. Its buttons open Rowkery through the server with a call id and a random key from the activity log, never with SQL, so no web page can make Rowkery run a query. See [Rows in the chat](/rows-in-the-chat/#what-a-button-can-open).
+
 An agent never gets a connection that can write. It reads through the checks below, and anything it wants changed goes to you as a proposal.
 
 ## Every check on agent access
