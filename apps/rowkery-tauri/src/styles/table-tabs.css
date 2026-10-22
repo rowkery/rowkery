@@ -1,0 +1,109 @@
+/* ---------- Table tabs ---------- */
+
+/* The one reusable preview tab reads in italics until you keep it. */
+.query-tab.preview .query-tab-title {
+  font-style: italic;
+}
+
+.editor-card.table-mode {
+  flex: 0 0 auto !important;
+}
+
+/* A table tab's head draws its own 1 px rule, and nothing resizes it: the
+   splitter under it draws none (one rule, not two). */
+.editor-card.table-mode + .pane-splitter,
+.editor-card.table-mode + .pane-splitter:hover {
+  background: none;
+  cursor: default;
+}
+
+/* A zone's `…`: results head, editor foot, schema panel head. */
+.zone-menu-btn {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: default;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.zone-menu-btn:hover,
+.zone-menu-btn[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.card-toolbar > .zone-menu-btn {
+  margin-left: 4px;
+}
+
+/* Export: the title bar's bordered button, 26 px, after the count. */
+.results-export {
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text2);
+  font: 500 11.5px var(--sans);
+  cursor: pointer;
+  transition: border-color 0.18s ease;
+}
+
+.results-export:hover:not(:disabled) {
+  border-color: var(--dim);
+}
+
+.results-export:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* With no count to push it right, it takes the margin itself. */
+.card-toolbar > .card-title + .results-export {
+  margin-left: auto;
+}
+
+.composer > .zone-menu-btn {
+  margin-left: -8px;
+}
+
+/* The WHERE editor in the SQL line (⌘F). */
+.tt-kw {
+  flex-shrink: 0;
+  color: var(--dim);
+  font: 600 10px var(--sans);
+  letter-spacing: 0.08em;
+}
+
+.sql-line-filter .sql-editor-wrap {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.tt-hint {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.rg-header-cell.rg-sortable {
+  cursor: default;
+}
+
+.rg-header-cell.rg-sortable:hover {
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+}
+
+.rg-sort {
+  flex-shrink: 0;
+  color: var(--acc);
+  font-family: var(--sans);
+}

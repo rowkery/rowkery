@@ -1,0 +1,24 @@
+/* ---------- Windows: sidebar panel and the main column ---------- */
+
+/* Every window is mounted; hidden ones keep their state for instant switching.
+   A hidden window keeps its boxes too: `content-visibility: hidden` skips its
+   contents (no paint, hit-testing, focus or accessibility tree) but keeps
+   their style and layout, so showing it again re-lays nothing out. With
+   `display: none` every switch rebuilt the whole window, its 2,000-row schema
+   list included (~250 ms on a big catalog). It sits under the shown window. */
+.workspace {
+  position: absolute;
+  inset: 0;
+}
+
+.workspace[hidden] {
+  display: block;
+  content-visibility: hidden;
+  z-index: -1;
+}
+
+@supports not (content-visibility: hidden) {
+  .workspace[hidden] {
+    display: none;
+  }
+}

@@ -1,4 +1,4 @@
-/* Report an Issue sheet: an opaque Paper sheet (App.css, Paper sheets) with the kind of
+/* Report an Issue sheet: an opaque Paper sheet (styles/sheets.css) with the kind of
    report, a bordered text field, the details sent with it (each behind its own switch)
    and an ink Send. */
 .rp-overlay {
@@ -212,4 +212,4 @@
   font-size: 12px;
 }
 
-/* .rp-btn is a .sheet-btn (App.css); ink for Send. */
+/* .rp-btn is a .sheet-btn (styles/sheets.css); ink for Send. */
