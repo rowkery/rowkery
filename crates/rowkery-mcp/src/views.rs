@@ -116,24 +116,26 @@ fn label(connection: Option<&str>) -> Json {
     }
 }
 
-/// What only the view gets for a successful call (the result's `_meta`):
-/// the call's id, the connection's label and a proposal's statements, never
+/// What only the view gets (the result's `_meta`): the connection's label,
+/// and for a successful call the call's id or a proposal's statements, never
 /// rows (those are in the text the agent got). `None` for tools without a view.
 pub fn page_meta(
     tool: &str,
     args: &Map<String, Json>,
-    outcome: &Json,
+    outcome: Result<&Json, &String>,
     entry: &crate::audit::Entry,
 ) -> Option<MetaObject> {
-    let mut out = match tool {
-        "query" => {
+    let mut out = match (tool, outcome) {
+        // A refusal: the page shows its text, under the connection's label.
+        ("query" | "propose_change", Err(_)) => json!({}),
+        ("query", Ok(_)) => {
             let mut out = json!({ "kind": "rows" });
             if let Some(id) = entry.call_id() {
                 out["call"] = json!(id);
             }
             out
         }
-        "propose_change" => {
+        ("propose_change", Ok(outcome)) => {
             let sql = args.get("sql").and_then(Json::as_str).unwrap_or_default();
             let statements: Vec<Json> = rowkery_core::safety::row_changes(sql)
                 .unwrap_or_default()
@@ -423,6 +425,19 @@ mod tests {
         } else {
             assert!(view.get("call").is_none());
         }
+
+        // A refusal keeps the connection's label for the page.
+        let refused = ask(
+            6,
+            "tools/call",
+            json!({ "name": "query", "arguments": { "connection": "s", "sql": "delete from orders" } }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true);
+        assert_eq!(
+            refused["result"]["_meta"][META_KEY]["connection"],
+            json!({ "name": "shop", "environment": "prd" })
+        );
 
         // A bad id is refused before anything opens; nothing is logged.
         let logged = crate::audit::read_since(None).entries.len();

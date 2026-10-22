@@ -1177,10 +1177,9 @@ impl ServerHandler for RowkeryMcp {
         if views && views::CAN_OPEN && request.name == "query" && outcome.is_ok() {
             entry.add_link_key();
         }
-        let page_meta = match &outcome {
-            Ok(value) if views => views::page_meta(&request.name, &args, value, &entry),
-            _ => None,
-        };
+        let page_meta = views
+            .then(|| views::page_meta(&request.name, &args, outcome.as_ref(), &entry))
+            .flatten();
         let text = match &outcome {
             Ok(value) => value.to_string(),
             Err(message) => message.clone(),
