@@ -11,7 +11,7 @@ import { mcpShared } from "./mcpActivity";
 import { useTabReorder } from "./tabReorder";
 import { WindowControls } from "./WindowControls";
 import { CONNECTION_ENVS, type ConnectionRecord } from "./types";
-import type { WindowSession } from "./Workspace";
+import type { WindowSession } from "./windowSession";
 
 interface TitleBarProps {
   windows: WindowSession[];
