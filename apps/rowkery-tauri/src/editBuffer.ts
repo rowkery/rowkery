@@ -398,7 +398,7 @@ export function editorStartText(kind: EditorKind, initial: Value | null): string
 export const gridCopyBytes = Symbol("gridCopyBytes");
 export type GridCopyCell = Value | null | typeof gridCopyBytes;
 
-function stripTrailingLineBreak(text: string): string {
+export function stripTrailingLineBreak(text: string): string {
   if (text.endsWith("\r\n")) return text.slice(0, -2);
   if (text.endsWith("\n") || text.endsWith("\r")) return text.slice(0, -1);
   return text;
@@ -580,7 +580,7 @@ function parseNoTabPaste(text: string): string[][] {
     }
     field += text[i++];
   }
-  if (field.length > 0 || rows.length === 0) pushRow();
+  pushRow();
   return rows;
 }
 

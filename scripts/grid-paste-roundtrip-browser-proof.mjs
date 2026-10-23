@@ -38,9 +38,8 @@ function stubTauri() {
     partition_of: null,
   });
   const id = col("id", "bigint", { nullable: false });
-  const tables = [
-    table("paste_demo", [id, col("city", "text"), col("note", "text"), col("meta", "jsonb"), col("qty", "integer")], 6),
-  ];
+  const cols = [id, col("city", "text"), col("note", "text"), col("meta", "jsonb"), col("qty", "integer")];
+  const tables = [table("paste_demo", cols, 6), table("paste_demo_b", cols, 4)];
   const wire = {
     paste_demo: [
       { name: "id", type_name: "int8" },
@@ -49,15 +48,25 @@ function stubTauri() {
       { name: "meta", type_name: "jsonb" },
       { name: "qty", type_name: "int4" },
     ],
+    paste_demo_b: [
+      { name: "id", type_name: "int8" },
+      { name: "city", type_name: "text" },
+      { name: "note", type_name: "text" },
+      { name: "meta", type_name: "jsonb" },
+      { name: "qty", type_name: "int4" },
+    ],
   };
-  const total = { paste_demo: 6 };
-  const rowOf = (n) => [
+  const total = { paste_demo: 6, paste_demo_b: 4 };
+  const rowOf = (t, n) =>
+    t === "paste_demo_b"
+      ? [{ Int: n }, { Text: `b-city${n}` }, { Text: `b-note${n}` }, { Text: "{}" }, { Int: n }]
+      : [
     { Int: n },
     n === 1 ? { Null: null } : n === 2 ? { Text: "line1\nline2" } : { Text: `city${n}` },
     n === 2 ? { Text: "NULL" } : n === 3 ? { Text: "" } : { Text: `note${n}` },
     { Text: n === 2 ? '{"a":1,"b":2}' : "{}" },
-    { Int: n * 10 },
-  ];
+          { Int: n * 10 },
+        ];
   let nextId = 0;
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
@@ -78,7 +87,11 @@ function stubTauri() {
             const send = (f) => onFrame.onmessage({ query_id: queryId, ...f });
             send({ t: "columns", columns: wire[t] });
             for (let i = 0; i < n; i += 500) {
-              send({ t: "rows", seq: i / 500, rows: Array.from({ length: Math.min(500, n - i) }, (_, j) => rowOf(from + i + j + 1)) });
+              send({
+                t: "rows",
+                seq: i / 500,
+                rows: Array.from({ length: Math.min(500, n - i) }, (_, j) => rowOf(t, from + i + j + 1)),
+              });
             }
             send({ t: "done", status: "ok", row_count: n, affected_rows: null, elapsed_ms: 3, first_row_ms: 1, frames: 1, error: null, sqlstate: null, error_position: null, hold: null });
           }, 5);
@@ -143,6 +156,21 @@ await cell(0, "city").click();
 await cell(1, "note").click({ modifiers: ["Shift"] });
 await page.keyboard.press("Control+c");
 await page.waitForTimeout(100);
+
+// Copy in table A, paste into table B (typed round trip must survive the tab switch).
+await page.click(`${ws} [data-table="rowkery.public.paste_demo_b"] [data-testid="sb-row-main"]`);
+await page.waitForFunction(([ws]) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "4", [ws]);
+await cell(0, "city").click();
+await page.keyboard.press("Control+v");
+await page.waitForSelector("[data-toast]");
+check((await nullPill(0, "city").count()) === 1, "cross-table paste: NULL in city");
+check(await edited(1, "city"), "cross-table paste: multi-line city staged");
+check((await cell(1, "city").textContent()).includes("line1"), "cross-table paste: multi-line text in city column");
+check(await edited(0, "note"), "cross-table paste: note column got first copied cell");
+check(await edited(1, "note"), 'cross-table paste: text "NULL" in note column');
+
+await page.click(`${ws} [data-table="rowkery.public.paste_demo"] [data-testid="sb-row-main"]`);
+await page.waitForFunction(([ws]) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "6", [ws]);
 
 await cell(3, "city").click();
 await page.keyboard.press("Control+v");
