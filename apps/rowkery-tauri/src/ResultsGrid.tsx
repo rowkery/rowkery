@@ -65,6 +65,29 @@ export function markReveal(result: QueryResultDto) {
 
 /** How long the cascade runs before the class comes off (last row's delay + its animation; REVEAL_ROWS in GridRow.tsx caps the delay). */
 const REVEAL_MS = 900;
+/** Find reads up to this many cells in one go; a bigger result in slices between frames. */
+const FIND_SYNC_CELLS = 100_000;
+/** One slice of a big Find: well inside a frame. */
+const FIND_SLICE_MS = 8;
+const NO_MATCHES: CellPos[] = [];
+
+/** Find's matches in rows [from, to): every shown cell containing `q` (lowercase). */
+function findIn(
+  shown: { isNull: (r: number, c: number) => boolean; text: (r: number, c: number) => string },
+  q: string,
+  from: number,
+  to: number,
+  hidden: boolean[],
+  out: CellPos[],
+) {
+  const ncols = hidden.length;
+  for (let r = from; r < to; r++) {
+    for (let c = 0; c < ncols; c++) {
+      if (hidden[c]) continue;
+      if (!shown.isNull(r, c) && shown.text(r, c).toLowerCase().includes(q)) out.push({ row: r, col: c });
+    }
+  }
+}
 
 interface Props {
   result: QueryResultDto | null;
@@ -516,19 +539,43 @@ function ResultsGridView({
   );
   const sampleNote = profileSample(rows);
 
-  // Find: every loaded cell that contains the query (case-insensitive).
-  const findMatches = useMemo(() => {
-    const q = find?.query.toLowerCase();
-    if (!q) return [] as CellPos[];
+  // Find: every loaded cell that contains the query (case-insensitive). A
+  // small result is read at once; a big one in slices between frames, so
+  // typing in Find never holds the page (its count shows when the scan ends).
+  const findQuery = find?.query.toLowerCase() ?? "";
+  const findAtOnce = rowCount * columns.length <= FIND_SYNC_CELLS;
+  const syncMatches = useMemo(() => {
+    if (!findQuery || !findAtOnce) return NO_MATCHES;
     const out: CellPos[] = [];
-    for (let r = 0; r < rowCount; r++) {
-      for (let c = 0; c < columns.length; c++) {
-        if (looks.hidden[c]) continue;
-        if (!shown.isNull(r, c) && shown.text(r, c).toLowerCase().includes(q)) out.push({ row: r, col: c });
-      }
-    }
+    findIn(shown, findQuery, 0, rowCount, looks.hidden, out);
     return out;
-  }, [find?.query, rows, shown, rowCount, columns, looks]);
+  }, [findQuery, findAtOnce, shown, rowCount, looks]);
+  const [sliced, setSliced] = useState<{ key: unknown[]; matches: CellPos[] } | null>(null);
+  const slicedKey = [findQuery, shown, rowCount, looks];
+  useEffect(() => {
+    if (!findQuery || findAtOnce) return;
+    const key = [findQuery, shown, rowCount, looks];
+    const out: CellPos[] = [];
+    let row = 0;
+    let timer = 0;
+    const step = () => {
+      const end = performance.now() + FIND_SLICE_MS;
+      while (row < rowCount && performance.now() < end) {
+        const to = Math.min(rowCount, row + 64);
+        findIn(shown, findQuery, row, to, looks.hidden, out);
+        row = to;
+      }
+      if (row < rowCount) timer = window.setTimeout(step, 0);
+      else setSliced({ key, matches: out });
+    };
+    timer = window.setTimeout(step, 0);
+    return () => window.clearTimeout(timer);
+  }, [findQuery, findAtOnce, shown, rowCount, looks]);
+  const findMatches = findAtOnce
+    ? syncMatches
+    : sliced && sliced.key.every((k, i) => k === slicedKey[i])
+      ? sliced.matches
+      : NO_MATCHES;
   const findSet = useMemo(() => new Set(findMatches.map((m) => `${m.row}:${m.col}`)), [findMatches]);
   const findCurrent =
     find && findMatches.length

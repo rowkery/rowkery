@@ -169,11 +169,8 @@ export function sortResult(result: QueryResultDto, keys: SortKey[]): QueryResult
     .filter((k) => k.col >= 0);
   if (idx.length === 0) return result;
   const rows = result.rows;
-  const n = rows.length;
-  const ncols = result.columns.length;
-  const order = sortedOrder((r, c) => rows.get(r, c), n, idx);
-  const sorted = ResultRows.fromValues(order.map((r) => rows.row(r, ncols)));
-  // Sorting doesn't change a column's shape: the profiles carry over.
-  sorted.profiles = rows.profiles;
-  return { ...result, rows: sorted };
+  const order = sortedOrder((r, c) => rows.get(r, c), rows.length, idx);
+  // A view over the same rows in the new order (no cell is copied); the
+  // profiles carry over, since sorting doesn't change a column's shape.
+  return { ...result, rows: ResultRows.ordered(rows, order) };
 }
