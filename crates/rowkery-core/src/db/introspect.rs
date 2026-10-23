@@ -533,7 +533,7 @@ fn keyset_predicate(
             // A cell shown as `<type name>` (a type the core doesn't decode)
             // is no value to compare with.
             Value::Text(t) if is_type_placeholder(t) => return None,
-            v => Some(sql_literal(v)?),
+            v => Some(sql_literal(engine, v)?),
         };
         let not_null = key.contains(&o.column);
         if not_null && literal.is_none() {

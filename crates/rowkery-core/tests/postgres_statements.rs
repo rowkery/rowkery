@@ -439,3 +439,40 @@ async fn keep_stops_decoding_but_not_the_statement() {
         .await
         .unwrap();
 }
+
+/// A key value read from the table can't break out of the keyset page's
+/// literal on a server with `standard_conforming_strings` off, where `\'`
+/// inside a plain string is a quote that doesn't end it.
+#[tokio::test]
+async fn keyset_literal_holds_with_standard_conforming_strings_off() {
+    use rowkery_core::db::{table_browse_query, BrowseOptions, EngineKind};
+    let s = session("scs").await;
+    let table = format!("it_scs_{}", std::process::id());
+    let breakout = r"\' OR TRUE --";
+    session_execute(
+        &s,
+        &format!(
+            r#"CREATE TABLE {table} (k text COLLATE "C" PRIMARY KEY);
+              INSERT INTO {table} VALUES ('!'), ('\'' OR TRUE --'), ('zz')"#
+        ),
+    )
+    .await
+    .unwrap();
+    session_execute(&s, "SET standard_conforming_strings = off")
+        .await
+        .unwrap();
+    let opts = BrowseOptions {
+        key: vec!["k".into()],
+        after: Some([("k".to_string(), Value::Text(breakout.into()))].into()),
+        ..BrowseOptions::first_page(100)
+    };
+    let sql = table_browse_query(EngineKind::Postgres, "public", &table, &opts);
+    let got = plain(&s, &sql).await.expect(&sql);
+    assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
+    session_execute(
+        &s,
+        &format!("SET standard_conforming_strings = on; DROP TABLE {table}"),
+    )
+    .await
+    .unwrap();
+}

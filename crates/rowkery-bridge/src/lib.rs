@@ -283,7 +283,7 @@ pub struct FollowRow {
 /// `SELECT * … WHERE column = literal LIMIT 1`, or `None` when the value
 /// can't be matched (NULL, bytes).
 fn follow_sql(engine: EngineKind, lookup: &FollowLookup) -> Option<String> {
-    let literal = rowkery_core::query_util::sql_literal(&lookup.value)?;
+    let literal = rowkery_core::query_util::sql_literal(engine, &lookup.value)?;
     let opts = BrowseOptions {
         filter: Some(format!(
             "{} = {literal}",
@@ -314,7 +314,7 @@ const QUICK_LOOK_LIMIT: Duration = Duration::from_secs(5);
 /// how many rows reference a value, bounded so a hot key costs no more than
 /// a cold one.
 fn incoming_sql(engine: EngineKind, lookup: &FollowLookup) -> Option<String> {
-    let literal = rowkery_core::query_util::sql_literal(&lookup.value)?;
+    let literal = rowkery_core::query_util::sql_literal(engine, &lookup.value)?;
     Some(format!(
         "SELECT count(*) AS n FROM (SELECT 1 FROM {} WHERE {} = {literal} LIMIT {}) s",
         qualified_table_sql(engine, &lookup.schema, &lookup.table),
