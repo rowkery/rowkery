@@ -25,10 +25,11 @@ pub fn sqlite_version() -> &'static str {
 
 const BATCH_SIZE: usize = 200;
 
-/// How long a statement waits for a lock another connection on the file
-/// holds (another tab's open transaction, an edit being saved, an agent)
-/// before it fails with "database is locked".
-pub const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// What a statement fails with when another connection on the file holds
+/// the lock it needs (another tab's open transaction, an edit being saved,
+/// an agent) for longer than the busy timeout rusqlite sets on every
+/// connection it opens (5 s).
+pub const SQLITE_LOCKED: &str = "database is locked";
 
 /// SQLite's own objects (`sqlite_sequence`, `sqlite_stat1`, …): names that
 /// start with exactly `sqlite_`. Not `LIKE 'sqlite_%'`, which ignores case
@@ -107,9 +108,11 @@ impl SqliteDriver {
     }
 
     /// Turns `PRAGMA query_only` on or off on an open connection, when the
-    /// connection's safe mode changed since it was opened.
+    /// connection's safe mode changed since it was opened. Read-only sends
+    /// it on every call: a run on the connection may have switched it off
+    /// (`PRAGMA "query_only"(0)` reads as a read to the classifier).
     pub fn set_read_only(&mut self, read_only: bool) -> Result<(), DriverError> {
-        if self.read_only == read_only {
+        if self.read_only == read_only && !read_only {
             return Ok(());
         }
         let conn = self.connection()?;
@@ -313,8 +316,6 @@ impl Driver for SqliteDriver {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )
         .map_err(|e| DriverError::Message(e.to_string()))?;
-        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-            .map_err(|e| DriverError::Message(e.to_string()))?;
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
@@ -362,7 +363,8 @@ impl Driver for SqliteDriver {
     }
 }
 
-/// Maps an `interrupt()` abort to `Cancelled` so callers can tell it from a real error.
+/// Maps an `interrupt()` abort to `Cancelled` so callers can tell it from a
+/// real error, and a lock held elsewhere to `SQLITE_LOCKED`.
 fn map_query_error(e: rusqlite::Error) -> DriverError {
     match &e {
         rusqlite::Error::SqliteFailure(err, _)
@@ -370,8 +372,23 @@ fn map_query_error(e: rusqlite::Error) -> DriverError {
         {
             DriverError::Cancelled
         }
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(
+                err.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            DriverError::Message(SQLITE_LOCKED.into())
+        }
         _ => DriverError::Message(e.to_string()),
     }
+}
+
+/// A plain SQL error (`SQLITE_ERROR`: no such table, a bad view), as opposed
+/// to a lock, an interrupt, an I/O failure or a corrupt file.
+fn plain_sql_error(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(err, _)
+        if err.extended_code & 0xff == rusqlite::ffi::SQLITE_ERROR)
 }
 
 /// One table's row count, filled in after the catalog is shown.
@@ -523,9 +540,11 @@ fn list_sqlite_tables(
     }
 
     // Columns, in order; `pk` is the column's place in the primary key.
-    // One query reads every relation's; when it fails (a view whose table
-    // was dropped can't be read), each relation is read on its own and a
-    // broken one is listed without columns rather than failing the catalog.
+    // One query reads every relation's; when it fails with a plain SQL error
+    // (a view whose table was dropped can't be read), each relation is read
+    // on its own and a broken one is listed without columns rather than
+    // failing the catalog. Any other error (a lock, an interrupt, I/O, a
+    // corrupt file) fails it.
     {
         let one = format!(
             "SELECT ?1, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk
@@ -538,11 +557,18 @@ fn list_sqlite_tables(
         );
         let rows = match column_rows(guard, &all, []) {
             Ok(rows) => rows,
-            Err(_) => tables
-                .iter()
-                .filter_map(|t| column_rows(guard, &one, [&t.name]).ok())
-                .flatten()
-                .collect(),
+            Err(e) if plain_sql_error(&e) => {
+                let mut rows = Vec::new();
+                for t in &tables {
+                    match column_rows(guard, &one, [&t.name]) {
+                        Ok(more) => rows.extend(more),
+                        Err(e) if plain_sql_error(&e) => {}
+                        Err(e) => return Err(msg(e)),
+                    }
+                }
+                rows
+            }
+            Err(e) => return Err(msg(e)),
         };
         let mut keys: HashMap<usize, Vec<(i64, String)>> = HashMap::new();
         for (table, name, type_name, notnull, default, pk) in rows {
@@ -1091,6 +1117,25 @@ mod tests {
         assert!(counts.iter().all(|c| c.table != "sqlite_sequence"));
     }
 
+    /// Only a plain SQL error lets the catalog read relations one at a time;
+    /// a lock (or an interrupt, I/O, corruption) fails it.
+    #[test]
+    fn only_a_plain_sql_error_is_a_broken_relation() {
+        let (file, _path) = temp_db();
+        let conn = Connection::open(file.path()).expect("open");
+        let missing = conn.prepare("SELECT * FROM nope").map(|_| ()).unwrap_err();
+        assert!(plain_sql_error(&missing), "{missing:?}");
+        let holder = Connection::open(file.path()).expect("open");
+        holder.execute_batch("BEGIN EXCLUSIVE").expect("lock");
+        conn.busy_timeout(std::time::Duration::ZERO)
+            .expect("timeout");
+        let locked = conn
+            .query_row("SELECT count(*) FROM items", [], |_| Ok(()))
+            .unwrap_err();
+        assert!(!plain_sql_error(&locked), "{locked:?}");
+        assert_eq!(map_query_error(locked).into_message(), SQLITE_LOCKED);
+    }
+
     /// A kept connection: a transaction carries across runs, safe mode
     /// changes reach it, and a file replaced under it is noticed.
     #[test]
@@ -1107,6 +1152,10 @@ mod tests {
         assert_eq!(run(&mut driver, "SELECT * FROM items").unwrap(), 2);
 
         driver.set_read_only(true).expect("read-only");
+        assert!(run(&mut driver, "DELETE FROM items").is_err());
+        // A run that switches the backstop off gets it back on its next run.
+        run(&mut driver, "PRAGMA \"query_only\"(0)").expect("pragma");
+        driver.set_read_only(true).expect("still read-only");
         assert!(run(&mut driver, "DELETE FROM items").is_err());
         driver.set_read_only(false).expect("writable");
         assert_eq!(

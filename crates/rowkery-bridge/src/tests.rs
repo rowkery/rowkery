@@ -2269,6 +2269,159 @@ fn sqlite_tabs_keep_their_connection_between_runs() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A SQLite file with 30 orders, open in window `w1`.
+fn sqlite_orders() -> (
+    MutexGuard<'static, ()>,
+    NamedTempFile,
+    String,
+    super::CoreBridge,
+) {
+    let (guard, file, path) = test_guard();
+    Connection::open(&path)
+        .expect("open")
+        .execute_batch(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30)
+             INSERT INTO orders SELECT i, 'x' FROM n;",
+        )
+        .expect("seed");
+    let bridge = super::CoreBridge::spawn();
+    connect_sqlite(&bridge, path.clone());
+    (guard, file, path, bridge)
+}
+
+fn orders_on_disk(path: &str) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM orders", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// SQLite rolls back the whole transaction when a write inside it is
+/// cancelled or fails a certain way; the tab says so, instead of
+/// "Cancelled" or the bare error. A read cancelled inside one keeps it.
+#[test]
+fn sqlite_says_when_a_run_rolled_back_the_tabs_transaction() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |sql: &str| window_query(&bridge, "w1", 1, sql);
+
+    // An error: INSERT OR ROLLBACK on a duplicate key.
+    run("BEGIN");
+    assert_eq!(run("DELETE FROM orders WHERE id > 20").4, Some(10));
+    let error = run("INSERT OR ROLLBACK INTO orders VALUES (1, 'dup')")
+        .1
+        .expect("fails");
+    assert!(error.contains("UNIQUE"), "{error}");
+    assert!(error.ends_with(SQLITE_ERROR_ROLLED_BACK), "{error}");
+    assert!(!bridge.holds_transaction());
+    assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
+
+    // A plain error leaves the transaction open and says nothing more.
+    run("BEGIN");
+    let error = run("INSERT INTO orders VALUES (1, 'dup')")
+        .1
+        .expect("fails");
+    assert!(!error.contains(SQLITE_ERROR_ROLLED_BACK), "{error}");
+    assert!(bridge.holds_transaction());
+
+    // A cancelled read keeps it.
+    let queue = bridge
+        .run_window_query("w1", 1, SLOW_SQLITE.into(), None, false)
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w1", 1);
+    let (error, cancelled) =
+        wait_query_finished(&queue, std::time::Duration::from_secs(5)).expect("finish");
+    assert!(cancelled, "{error:?}");
+    assert!(bridge.holds_transaction());
+
+    // A cancelled write ends it.
+    assert_eq!(run("DELETE FROM orders WHERE id > 20").4, Some(10));
+    let queue = bridge
+        .run_window_query(
+            "w1",
+            1,
+            "INSERT INTO orders (item) \
+             WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT 'z' FROM n"
+                .into(),
+            None,
+            false,
+        )
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w1", 1);
+    let (error, cancelled) =
+        wait_query_finished(&queue, std::time::Duration::from_secs(5)).expect("finish");
+    assert!(!cancelled);
+    assert_eq!(error.as_deref(), Some(SQLITE_CANCEL_ROLLED_BACK));
+    assert!(!bridge.holds_transaction());
+    assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
+    assert_eq!(orders_on_disk(&path), 30);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// Switching a SQLite connection to Read-only drops its tabs' connections,
+/// as Postgres resets its sessions: a later COMMIT can't write what the
+/// tab deleted before (`query_only` doesn't refuse COMMIT).
+#[test]
+fn sqlite_read_only_ends_an_open_transaction() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |sql: &str| window_query(&bridge, "w1", 1, sql);
+    run("BEGIN");
+    assert_eq!(run("DELETE FROM orders").4, Some(30));
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Sqlite(SqliteConnection {
+            environment: None,
+            safe_mode: SafeMode::ReadOnly,
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            id: "cancel-sqlite".into(),
+            name: "cancel".into(),
+            path: path.clone(),
+            sample: false,
+        }),
+        ConnectionSecrets::default(),
+    )
+    .expect("save");
+    assert!(run("COMMIT").1.is_some(), "no transaction is open");
+    assert_eq!(orders_on_disk(&path), 30);
+    assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A write that waits out another tab's transaction says which tab holds
+/// it, and a file replaced under a tab's open transaction refuses the
+/// tab's next run instead of writing to the deleted copy.
+#[cfg(unix)]
+#[test]
+fn sqlite_names_the_tab_holding_the_lock_and_notices_a_replaced_file() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |tab: u64, sql: &str| window_query(&bridge, "w1", tab, sql);
+    run(1, "BEGIN");
+    assert_eq!(run(1, "DELETE FROM orders WHERE id > 20").4, Some(10));
+    // Waits out the busy timeout (5 s), then names the other tab.
+    assert_eq!(
+        run(2, "DELETE FROM orders").1.as_deref(),
+        Some(SQLITE_HELD_HERE)
+    );
+
+    let fresh = path.clone() + ".fresh";
+    std::fs::copy(&path, &fresh).expect("copy");
+    std::fs::rename(&fresh, &path).expect("replace");
+    assert_eq!(run(1, "COMMIT").1.as_deref(), Some(SQLITE_FILE_REPLACED));
+    assert_eq!(
+        run(1, "SELECT count(*) FROM orders").0,
+        Some(Value::Int(30))
+    );
+    assert!(!bridge.holds_transaction());
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// What a paged run or `fetch_more` streamed: rows, first cell, error,
 /// and the done event's `paged` / `more`.
 fn drain_paged(
