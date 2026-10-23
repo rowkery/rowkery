@@ -20,8 +20,7 @@ import { CellEditor, type EditMove } from "./CellEditor";
 import { commandById, eventMatches } from "./commands";
 import { isMacPlatform } from "./platform";
 import { showToast, toastPreview } from "./notify";
-import { cellsToTsv, copiedCells, rememberCopy } from "./resultsExport";
-import { parsePaste } from "./editBuffer";
+import { cellsToTsv, pastedCells, rememberCopy } from "./resultsExport";
 import { GridMenu, type GridMenuItem } from "./GridMenu";
 import { cellMenu, headerMenu as headerMenuRows } from "./contextMenus";
 import type { CommandState } from "./commands";
@@ -766,7 +765,7 @@ function ResultsGridView({
         const { row, col } = sel.active;
         const nul = shown.isNull(row, col);
         const text = nul ? "NULL" : shown.text(row, col);
-        rememberCopy({ text, cells: [[nul ? null : text]] });
+        rememberCopy({ text, width: 1, nulls: new Set(nul ? [0] : []) });
         void copyText(text);
         return;
       }
@@ -1144,8 +1143,7 @@ function ResultsGridView({
           e.preventDefault();
           if (editing.refusal) editing.onRefused();
           else {
-            const text = e.clipboardData.getData("text/plain");
-            editing.paste(sel.active.row, sel.active.col, copiedCells(text) ?? parsePaste(text));
+            editing.paste(sel.active.row, sel.active.col, pastedCells(e.clipboardData.getData("text/plain")));
           }
         }}
       >

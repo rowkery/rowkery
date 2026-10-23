@@ -395,30 +395,43 @@ export function editorStartText(kind: EditorKind, initial: Value | null): string
 }
 
 /**
- * Rows of fields split on `sep`, where a field opening with a quote runs to its closing quote
- * (tabs, commas and line breaks inside it kept, `""` a quote). Null when a quote is malformed.
+ * Rows of fields split on `sep`. A field is quoted only when it opens with a quote, closes at a
+ * field or line boundary and needed the quotes (a `sep`, line break or `""` inside); anything
+ * else, like Excel's `"Best" seller` or a lone `"hello"`, is taken as it is.
  */
-function splitQuoted(text: string, sep: string): string[][] | null {
+function splitQuoted(text: string, sep: string): { rows: string[][]; quoted: boolean } {
   const rows: string[][] = [];
   let row: string[] = [];
+  let quoted = false;
   let i = 0;
+  const boundary = (at: number) => at >= text.length || text[at] === sep || text[at] === "\n";
   for (;;) {
-    let field = "";
+    let field: string | null = null;
     if (text[i] === '"') {
-      i++;
+      let j = i + 1;
+      let inner = "";
+      let escaped = false;
       for (;;) {
-        const q = text.indexOf('"', i);
-        if (q < 0) return null;
-        field += text.slice(i, q);
-        i = q + 1;
-        if (text[i] !== '"') break;
-        field += '"';
-        i++;
+        const q = text.indexOf('"', j);
+        if (q < 0) break;
+        inner += text.slice(j, q);
+        if (text[q + 1] === '"') {
+          inner += '"';
+          escaped = true;
+          j = q + 2;
+          continue;
+        }
+        if (boundary(q + 1) && (escaped || inner.includes(sep) || inner.includes("\n"))) {
+          field = inner;
+          i = q + 1;
+          quoted = true;
+        }
+        break;
       }
-      if (i < text.length && text[i] !== sep && text[i] !== "\n") return null;
-    } else {
+    }
+    if (field === null) {
       let end = i;
-      while (end < text.length && text[end] !== sep && text[end] !== "\n") end++;
+      while (!boundary(end)) end++;
       field = text.slice(i, end);
       i = end;
     }
@@ -431,18 +444,19 @@ function splitQuoted(text: string, sep: string): string[][] | null {
     i++;
   }
   rows.push(row);
-  return rows;
+  return { rows, quoted };
 }
 
 /**
- * A pasted block: TSV when it has tabs, else CSV when every line has the same two or more
- * fields, else one value per line. Quoted fields keep their tabs, commas and line breaks.
+ * A pasted block: TSV, which with no tabs is one value per line. Only text with no tabs, several
+ * lines, a quoted field and the same two or more fields on every line is read as CSV.
  */
 export function parsePaste(text: string): string[][] {
   const t = text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
-  const lines = () => t.split("\n");
-  if (t.includes("\t")) return splitQuoted(t, "\t") ?? lines().map((l) => l.split("\t"));
-  const csv = splitQuoted(t, ",");
-  if (csv && csv[0].length > 1 && csv.every((r) => r.length === csv[0].length)) return csv;
-  return splitQuoted(t, "\t") ?? lines().map((l) => [l]);
+  if (!t.includes("\t") && t.includes("\n") && t.includes('"') && t.includes(",")) {
+    const csv = splitQuoted(t, ",");
+    const n = csv.rows[0].length;
+    if (csv.quoted && csv.rows.length > 1 && n > 1 && csv.rows.every((r) => r.length === n)) return csv.rows;
+  }
+  return splitQuoted(t, "\t").rows;
 }

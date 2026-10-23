@@ -195,8 +195,9 @@ export function useRowEdits(o: Options) {
             const ed = editors[c];
             const key = r < rows.length ? keyOf(r) : null;
             if (!ed || !key || states.get(r)?.mark === "delete") return;
-            // NULL only from the grid's own copy (`null`); the text "NULL" stays text.
-            const parsed = text === null || (text === "" && ed.kind !== "text") ? { value: null } : parseInput(ed.kind, text);
+            // In a text column only the grid's own copy (`null`) is NULL; "NULL" and "" stay text.
+            const asNull = text === null || (ed.kind !== "text" && (text === "" || text === "NULL"));
+            const parsed = asNull ? { value: null } : parseInput(ed.kind, text);
             if ("error" in parsed) return;
             next = stageCell(next, key, names[c], parsed.value, rows.isNull(r, c) ? null : rows.get(r, c), ed.kind);
             staged++;

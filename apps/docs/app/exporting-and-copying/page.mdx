@@ -37,7 +37,7 @@ Right-click a cell for **Copy** and **Copy with headers** too.
 
 ### Pasting into the grid
 
-<kbd>⌘V</kbd> over editable cells stages the pasted block cell by cell. Rowkery reads tab-separated text, CSV, or one value per line, and keeps quoted values with line breaks in one cell. A block copied from the grid pastes its NULLs back as NULL; from anywhere else, the text `NULL` is just text, and an empty value sets NULL in a column that isn't text.
+<kbd>⌘V</kbd> over editable cells stages the pasted block cell by cell. Rowkery reads tab-separated text, CSV, or one value per line, and keeps quoted values with line breaks in one cell. When you paste straight back what you just copied from the grid, without copying anything else or leaving the window, its NULL cells stay NULL. Otherwise, in a text column the text `NULL` is just text; in any other column, `NULL` or an empty value sets NULL.
 
 While you're presenting, sensitive values show as dots on screen, but copying puts the real value on the clipboard. See [Sensitive columns and presenting](/sensitive-columns-and-presenting/).
 

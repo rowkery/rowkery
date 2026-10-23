@@ -1,3 +1,4 @@
+import { parsePaste } from "./editBuffer";
 import type { QueryResultDto } from "./types";
 
 function csvField(s: string): string {
@@ -26,10 +27,11 @@ export function resultsToText(
   return lines.join("\n");
 }
 
-/** A grid copy: the text for the clipboard and the cells it holds, NULL as `null`. */
+/** A grid copy: the text for the clipboard, and which cells of it were NULL (`row * width + col`). */
 export interface CopiedCells {
   text: string;
-  cells: (string | null)[][];
+  width: number;
+  nulls: Set<number>;
 }
 
 /** Quoted the way spreadsheets quote TSV: a tab, line break or quote wraps the field in quotes. */
@@ -49,20 +51,26 @@ export function cellsToTsv(
   text: (row: number, col: number) => string = (r, c) => result.rows.text(r, c),
   isNull: (row: number, col: number) => boolean = (r, c) => result.rows.isNull(r, c),
 ): CopiedCells {
-  const cells: (string | null)[][] = [];
-  if (withHeader) cells.push(result.columns.slice(c0, c1 + 1).map((c) => c.name));
+  const width = c1 - c0 + 1;
+  const nulls = new Set<number>();
+  const lines: string[] = [];
+  if (withHeader) lines.push(result.columns.slice(c0, c1 + 1).map((c) => tsvQuoted(c.name)).join("\t"));
   for (let r = r0; r <= r1; r++) {
-    const line: (string | null)[] = [];
-    for (let c = c0; c <= c1; c++) line.push(isNull(r, c) ? null : text(r, c));
-    cells.push(line);
+    const fields: string[] = [];
+    for (let c = c0; c <= c1; c++) {
+      if (isNull(r, c)) nulls.add(lines.length * width + c - c0);
+      fields.push(isNull(r, c) ? "" : tsvQuoted(text(r, c)));
+    }
+    lines.push(fields.join("\t"));
   }
-  return { text: cells.map((l) => l.map((v) => tsvQuoted(v ?? "")).join("\t")).join("\n"), cells };
+  return { text: lines.join("\n"), width, nulls };
 }
 
 /**
  * The grid's last copy. Clipboard text can't tell NULL from the text "NULL" or an empty
  * string, and WKWebView doesn't carry custom clipboard formats, so a paste whose text is
- * exactly what the grid last wrote takes its cells from here.
+ * exactly what the grid last wrote takes its NULLs from here. Any other copy, or leaving the
+ * window (where another app may copy the same text), forgets it.
  */
 let lastCopy: CopiedCells | null = null;
 
@@ -70,9 +78,26 @@ export function rememberCopy(copy: CopiedCells): void {
   lastCopy = copy;
 }
 
+// The grid's ⌘C prevents the native copy event, so any copy or cut event is someone else's.
+if (typeof window !== "undefined") {
+  const forget = () => (lastCopy = null);
+  document.addEventListener("copy", forget, true);
+  document.addEventListener("cut", forget, true);
+  window.addEventListener("blur", forget);
+  document.addEventListener("visibilitychange", forget);
+}
+
 const sameText = (t: string) => t.replace(/\r\n?/g, "\n").replace(/\n$/, "");
 
-/** The cells of the grid's last copy, when `text` is what it wrote. */
-export function copiedCells(text: string): (string | null)[][] | null {
-  return lastCopy && sameText(lastCopy.text) === sameText(text) ? lastCopy.cells : null;
+/** A pasted block's cells, with NULL (`null`) where the grid's last copy, when `text` is it, had one. */
+export function pastedCells(text: string): (string | null)[][] {
+  const block: (string | null)[][] = parsePaste(text);
+  const copy = lastCopy;
+  if (copy?.nulls.size && sameText(copy.text) === sameText(text)) {
+    for (const i of copy.nulls) {
+      const line = block[Math.floor(i / copy.width)];
+      if (line) line[i % copy.width] = null;
+    }
+  }
+  return block;
 }

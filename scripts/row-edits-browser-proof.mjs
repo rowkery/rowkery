@@ -360,9 +360,17 @@ const pasteText = (text) =>
 await pick(10, "city");
 await pasteText('"Kuala\nLumpur"\nNULL\n');
 await page.waitForTimeout(100);
-check((await cell(10, "city").getAttribute("title")) === "Kuala\nLumpur" || (await cellText(10, "city")).startsWith("Kuala"), "a quoted line break stays in one cell");
+check((await cell(10, "city").textContent()) === "Kuala\nLumpur", `a quoted line break stays in one cell: ${JSON.stringify(await cell(10, "city").textContent())}`);
 check((await cellText(11, "city")) === "NULL" && (await cell(11, "city").locator('[data-testid="rg-null"]').count()) === 0, "pasted text NULL stays text");
 check((await toastText()).startsWith("Pasted 2 cells"), `quoted paste toast: ${await toastText()}`);
+// A copy made elsewhere after the grid's forgets its NULLs: "NULL" stays text.
+await pick(5, "city");
+await page.keyboard.press("Control+c");
+await page.evaluate(() => document.dispatchEvent(new Event("copy")));
+await pick(11, "city");
+await pasteText("NULL");
+await page.waitForTimeout(100);
+check((await cellText(11, "city")) === "NULL" && (await cell(11, "city").locator('[data-testid="rg-null"]').count()) === 0, "after another copy, pasted NULL stays text");
 // The grid's own copy of a NULL cell pastes back as NULL.
 await pick(5, "city");
 await page.keyboard.press("Control+c");
