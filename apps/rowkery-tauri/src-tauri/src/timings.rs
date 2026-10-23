@@ -110,7 +110,13 @@ pub struct ProofEnv {
 }
 
 impl ProofEnv {
+    /// Read only in debug builds and in builds made for a proof
+    /// (`VITE_ROWKERY_AUTO_PROOF` set at build time, as `latency-proof.sh`
+    /// does), so a shipped app never takes SQL from its environment.
     pub fn from_env() -> Option<Self> {
+        if !cfg!(debug_assertions) && option_env!("VITE_ROWKERY_AUTO_PROOF").is_none() {
+            return None;
+        }
         Self::from_values(
             std::env::var("ROWKERY_AUTO_RUN_SQL").ok(),
             std::env::var("ROWKERY_AUTO_BROWSE_TABLE").ok(),

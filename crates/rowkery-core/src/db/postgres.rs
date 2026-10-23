@@ -2051,12 +2051,6 @@ fn postgres_value_to_core(row: &Row, index: usize) -> Value {
             None => Value::Null,
         };
     }
-    if let Ok(v) = row.try_get::<_, Option<serde_json::Value>>(index) {
-        return match v {
-            Some(json) => Value::Text(json.to_string()),
-            None => Value::Null,
-        };
-    }
     let type_name = ty.as_ref().unwrap_or(&Type::TEXT).name().to_string();
     Value::Text(format!("<{type_name}>"))
 }
@@ -2090,7 +2084,7 @@ fn decode_known_type(row: &Row, index: usize, ty: &Type) -> Option<Value> {
 /// A binary wire value of type `ty`, or `None` for a type decoded no
 /// other way than the generic `FromSql` paths (and then a placeholder).
 fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
-    use tokio_postgres::types::{FromSql, Kind};
+    use tokio_postgres::types::Kind;
     match ty.kind() {
         // An enum's binary value is its label.
         Kind::Enum(_) => return std::str::from_utf8(b).ok().map(|s| Value::Text(s.into())),
@@ -2119,9 +2113,17 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
             std::str::from_utf8(b).ok().map(|s| Value::Text(s.into()))
         }
         Type::BYTEA => Some(Value::Bytes(b.to_vec())),
-        Type::JSON | Type::JSONB => serde_json::Value::from_sql(ty, b)
-            .ok()
-            .map(|json| Value::Text(json.to_string())),
+        // As stored, never through serde_json's f64: big integers and long
+        // decimals keep every digit, so an edit writes back what was read.
+        // xml's binary value is its text; jsonb's is a version byte (1) and
+        // then the text.
+        Type::JSON | Type::XML => std::str::from_utf8(b).ok().map(|s| Value::Text(s.into())),
+        Type::JSONB => match b {
+            [1, text @ ..] => std::str::from_utf8(text)
+                .ok()
+                .map(|s| Value::Text(s.into())),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2148,6 +2150,9 @@ fn array_element_shown(element: &Type) -> bool {
                 | Type::TIME
                 | Type::TIMESTAMP
                 | Type::TIMESTAMPTZ
+                | Type::JSON
+                | Type::JSONB
+                | Type::XML
         )
 }
 
@@ -2379,6 +2384,23 @@ mod decode_tests {
             decode_timestamp(&(-1i64).to_be_bytes()).as_deref(),
             Some("1999-12-31 23:59:59.999999")
         );
+    }
+
+    #[test]
+    fn json_keeps_its_digits() {
+        let text = r#"{"id": 9007199254740993, "amount": 0.1000000000000000055}"#;
+        let mut jsonb = vec![1];
+        jsonb.extend_from_slice(text.as_bytes());
+        assert_eq!(
+            decode_raw(&Type::JSONB, &jsonb),
+            Some(Value::Text(text.into()))
+        );
+        assert_eq!(
+            decode_raw(&Type::JSON, text.as_bytes()),
+            Some(Value::Text(text.into()))
+        );
+        // An unknown jsonb version isn't guessed at.
+        assert_eq!(decode_raw(&Type::JSONB, &[2, b'1']), None);
     }
 
     #[test]

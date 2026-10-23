@@ -4,11 +4,12 @@
 // test proves that half). The page takes the waiting link (take_open_link)
 // once connections are loaded, and again on each `rowkery:open-link`:
 // - Launched by Open in Rowkery: a new window on the call's connection, an
-//   "Agent query" tab holding the agent's SQL, run as the window connects.
-// - Another while that window is open: a new tab in the same window, run.
+//   "Agent query" tab holding the agent's SQL, not run: the user presses ⌘↵.
+// - Another while that window is open: a new tab in the same window, not run.
 // - Review in Rowkery: the Agents page on that proposal, not the oldest.
-// - A call no longer in the log, a proposal decided since, or a connection
-//   since deleted: a toast, nothing opens.
+// - A call no longer in the log, a logged query that fails the read guard
+//   again (refused), a proposal decided since, or a connection since
+//   deleted: a toast, nothing opens.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/open-link-browser-proof.mjs [outDir]
@@ -122,26 +123,31 @@ const link = (l) => page.evaluate((x) => {
   window.dispatchEvent(new CustomEvent("rowkery:open-link"));
 }, l);
 
-// 1. Launched by a link: a window on shop, the agent's SQL in its tab, run.
+// 1. Launched by a link: a window on shop, the agent's SQL in its tab, not run.
 await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
-await page.waitForFunction(() => window.__ROWKERY_CALLS__.some(([c]) => c === "run_query"));
-check((await ranSql()).some((a) => a.includes("WHERE status = 'pending'")), "the launch link's SQL ran");
 const active = await page.textContent(`${ws} [data-testid="query-tab"][data-on] [data-testid="query-tab-title"]`);
 check(active === "Agent query", `its tab is the shown one: "${active}"`);
+await page.waitForTimeout(500);
+check((await ranSql()).length === 0, "the launch link's SQL did not run by itself");
 await shot("1-launched-by-link");
 
-// 2. Another link while the window is open: a new tab there, run.
+// 2. Another link while the window is open: a new tab there, not run until ⌘↵.
 const tabsBefore = await page.locator(`${ws} [data-testid="query-tab"]`).count();
 await link({ kind: "sql", connection: "shop", database: "shop", sql: "SELECT count(*) FROM payment_providers" });
-await page.waitForFunction(() => window.__ROWKERY_CALLS__.some(([c, a]) => c === "run_query" && JSON.stringify(a).includes("payment_providers")));
+await page.waitForFunction((n) => document.querySelectorAll('[data-testid="workspace"]:not([hidden]) [data-testid="query-tab"]').length === n, tabsBefore + 1);
 check((await page.locator(`${ws} [data-testid="query-tab"]`).count()) === tabsBefore + 1, "a second link opens a new tab in the same window");
+await page.waitForTimeout(500);
+check((await ranSql()).length === 0, "the second link's SQL did not run by itself");
+await page.keyboard.press("ControlOrMeta+Enter");
+await page.waitForFunction(() => window.__ROWKERY_CALLS__.some(([c, a]) => c === "run_query" && JSON.stringify(a).includes("payment_providers")));
+check((await ranSql()).some((sql) => sql.includes("payment_providers")), "⌘↵ runs it");
 check((await page.locator('[data-testid="workspace"]').count()) === 1, "no second window");
 await shot("2-second-link");
 
 // 3. Review in Rowkery: the Agents page on that proposal.
 await link({ kind: "proposal", id: "p_000000000002" });
 await page.waitForSelector('[data-testid="agents-page"][data-proposal="p_000000000002"]');
-check(true, "Review opens the Agents page on the card's proposal, not the oldest");
+check((await page.getAttribute('[data-testid="agents-page"]', "data-proposal")) === "p_000000000002", "Review opens the Agents page on the card's proposal, not the oldest");
 await shot("3-review-link");
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="agents-page"]', { state: "detached" });
@@ -152,6 +158,13 @@ await page.waitForSelector('[data-toast="error"]');
 // Text on purpose: the toast's wording is under test.
 check(/activity log/.test(await page.textContent('[data-testid="toast-message"]')), "a gone call says so");
 await shot("4-gone");
+await link({ kind: "refused" });
+await page.waitForFunction(() => /agent checks/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));
+check(
+  (await page.textContent('[data-testid="toast-message"]')) === "Rowkery won't open that query: it didn't pass the agent checks",
+  "a forged log entry that fails the guard says so",
+);
+await shot("4b-refused");
 await link({ kind: "decided" });
 await page.waitForFunction(() => /isn't waiting/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));
 check((await page.locator('[data-testid="agents-page"]').count()) === 0, "a decided proposal says so and opens nothing");

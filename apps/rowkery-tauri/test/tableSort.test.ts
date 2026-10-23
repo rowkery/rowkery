@@ -136,6 +136,39 @@ describe("client-side sort of loaded rows", () => {
     expect(sorted.rows.text(0, 1)).toBe("y");
     expect(sortResult(result, [])).toBe(result);
   });
+
+  test("a sort is a view over the rows, not a copy; NULLs last; a sort of a sort", () => {
+    const base = ResultRows.fromValues([
+      [N(3), T("c")],
+      [{ Null: null }, T("n")],
+      [N(1), T("a")],
+      [N(2), T("b")],
+    ]);
+    base.profiles = [];
+    const result = {
+      columns: [
+        { name: "id", type_name: "int4" },
+        { name: "name", type_name: "text" },
+      ],
+      rows: base,
+      row_count: 4,
+      elapsed_ms: 1,
+      error: null,
+      cancelled: false,
+    } as QueryResultDto;
+    const asc = sortResult(result, [{ column: "id", desc: false }]);
+    const names = (r: QueryResultDto) => Array.from({ length: r.rows.length }, (_, i) => r.rows.text(i, 1));
+    expect(names(asc)).toEqual(["a", "b", "c", "n"]);
+    expect(asc.rows.isNull(3, 0)).toBe(true);
+    expect(asc.rows.number(0, 0)).toBe(1);
+    expect(asc.rows.row(1, 2)).toEqual([N(2), T("b")]);
+    expect(asc.rows.profiles).toBe(base.profiles);
+    // Sorting the sorted rows reads the same storage.
+    expect(names(sortResult(asc, [{ column: "name", desc: true }]))).toEqual(["n", "c", "b", "a"]);
+    // Out of range reads as NULL, as on the rows themselves.
+    expect(asc.rows.isNull(9, 0)).toBe(true);
+    expect(() => new ResultRows().appendRows(asc.rows)).toThrow();
+  });
 });
 
 describe("hidden columns", () => {
@@ -176,6 +209,20 @@ describe("numeric text sorts by value", () => {
     ]);
     // A text column still sorts as text.
     expect(col(sortResult(result, [{ column: "code", desc: false }]), 1)[0]).toBe("-3");
+  });
+
+  test("parsed once, a numeric column still orders mixed cells, descending, NULLs last", () => {
+    const cells: Value[] = [T("10.00"), { Null: null }, N(7), T("-3"), T("not a number"), B("100"), T("9.5")];
+    const order = (desc: boolean) =>
+      sortedOrder((r) => cells[r]!, cells.length, [{ col: 0, desc, numeric: true }]).map((r) => cells[r]);
+    const asc = order(false);
+    const desc = order(true);
+    // Every number in value order, the same either way round; NULL last both ways.
+    const nums = (xs: (Value | undefined)[]) => xs.filter((v) => v && !("Null" in v) && !("Text" in v && v.Text === "not a number"));
+    expect(nums(asc)).toEqual([T("-3"), N(7), T("9.5"), T("10.00"), B("100")]);
+    expect(nums(desc)).toEqual([B("100"), T("10.00"), T("9.5"), N(7), T("-3")]);
+    expect(asc[asc.length - 1]).toEqual({ Null: null });
+    expect(desc[desc.length - 1]).toEqual({ Null: null });
   });
 
   test("digits compare exactly, past what a double holds", () => {

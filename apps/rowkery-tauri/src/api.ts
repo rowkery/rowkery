@@ -688,6 +688,8 @@ export async function reviewChanges(engine: string, table: EditTable, changes: R
  */
 export async function applyChanges(
   windowId: string,
+  /** The connection the edits were staged on: core refuses when the window has moved off it. */
+  connectionId: string,
   tabId: number,
   table: EditTable,
   changes: RowChange[],
@@ -698,7 +700,7 @@ export async function applyChanges(
   if (applying.has(key)) throw new Error("A commit is already running in this tab");
   applying.add(key);
   try {
-    return await invoke("apply_changes", { windowId, tabId, table, changes, confirmed: confirmed ?? null });
+    return await invoke("apply_changes", { windowId, connectionId, tabId, table, changes, confirmed: confirmed ?? null });
   } finally {
     applying.delete(key);
   }
@@ -773,7 +775,8 @@ export type OpenLink =
   | { kind: "sql"; connection: string; database: string | null; sql: string }
   | { kind: "proposal"; id: string }
   | { kind: "decided" }
-  | { kind: "gone" };
+  | { kind: "gone" }
+  | { kind: "refused" };
 
 /** The link waiting since the OS handed it over (`open-link`), if any; taking it clears it. */
 export async function takeOpenLink(): Promise<OpenLink | null> {
