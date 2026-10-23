@@ -1132,11 +1132,43 @@ fn stop_all_queries(bridge: State<'_, CoreBridge>) {
     bridge.stop_all_queries();
 }
 
-/// Whether a tab may hold the user's open transaction: an Automatic update
-/// waits rather than restart it away (updates.ts).
+/// What a quit or a restart would cut short (an open transaction, a write,
+/// a commit, an import, a SQL file run): an Automatic update waits for none
+/// (updates.ts).
 #[tauri::command]
-async fn holds_open_transaction(app: AppHandle) -> Result<bool, String> {
-    on_blocking_pool(app, |bridge| bridge.holds_transaction()).await
+async fn busy_work(app: AppHandle) -> Result<rowkery_bridge::BusyWork, String> {
+    on_blocking_pool(app, |bridge| bridge.busy_work()).await
+}
+
+/// The app menu's Quit, in place of the native one (which ends the app
+/// before anything can ask): it goes through [`ask_before_quit`].
+#[cfg(target_os = "macos")]
+const QUIT_ITEM: &str = "rowkery-quit";
+
+/// Quitting (or closing the window, which quits) while work would be lost
+/// asks first, in one native dialog naming it; `then` quits.
+fn ask_before_quit(app: &AppHandle, then: impl FnOnce() + Send + 'static) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let app = app.clone();
+    // The core thread answers off the main thread, which the dialog needs free.
+    thread::spawn(move || {
+        let Some(warning) = app.state::<CoreBridge>().busy_work().quit_warning() else {
+            return then();
+        };
+        app.dialog()
+            .message(warning)
+            .title("Quit anyway?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Quit Anyway".into(),
+                "Cancel".into(),
+            ))
+            .show(move |quit| {
+                if quit {
+                    then();
+                }
+            });
+    });
 }
 
 #[derive(Debug, Serialize)]
@@ -1773,7 +1805,8 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     }
     let spec = menu_spec();
     // The app menu: About, then menu.json's "Rowkery" items (Check for
-    // Updates…, Settings…), then the native Services, Hide and Quit.
+    // Updates…, Settings…), then the native Services and Hide, and Quit
+    // (ours: it asks first when quitting would lose work).
     let mut app_items = vec![Entry::Native(PredefinedMenuItem::about(
         app,
         None,
@@ -1790,7 +1823,13 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         Entry::Native(PredefinedMenuItem::hide(app, None)?),
         Entry::Native(PredefinedMenuItem::hide_others(app, None)?),
         sep()?,
-        Entry::Native(PredefinedMenuItem::quit(app, None)?),
+        Entry::Item(MenuItem::with_id(
+            app,
+            QUIT_ITEM,
+            format!("Quit {}", info.name),
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?),
     ]);
     let mut submenus = vec![Submenu::with_items(
         app,
@@ -1990,6 +2029,10 @@ pub fn run(mut timings: Timings) {
     let builder = builder.menu(app_menu).on_menu_event(|app, event| {
         use tauri::Emitter;
         let id = event.id().as_ref();
+        if id == QUIT_ITEM {
+            let quit = app.clone();
+            return ask_before_quit(app, move || quit.exit(0));
+        }
         if menu_spec_contains(&menu_spec(), id) {
             let _ = app.emit("menu-command", id);
         }
@@ -2004,13 +2047,24 @@ pub fn run(mut timings: Timings) {
         .manage(rowkery_mcp::picker::Picker::default())
         .manage(open_link::PendingLink::default())
         .on_window_event(|window, event| {
-            #[cfg(target_os = "macos")]
+            // The one window closing quits the app: ask first when that
+            // would lose work.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                close_after_hiding(window);
+                let app = window.app_handle().clone();
+                let window = window.clone();
+                ask_before_quit(&app, move || {
+                    #[cfg(target_os = "macos")]
+                    close_after_hiding(&window);
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let target = window.clone();
+                        let _ = window.run_on_main_thread(move || {
+                            let _ = target.destroy();
+                        });
+                    }
+                });
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (window, event);
         })
         .setup(move |app| {
             app.state::<Timings>().mark("setup");
@@ -2065,7 +2119,7 @@ pub fn run(mut timings: Timings) {
             forget_connection_secrets,
             open_sample,
             stop_all_queries,
-            holds_open_transaction,
+            busy_work,
             count_rows,
             cancel_count,
             probe_local_servers,

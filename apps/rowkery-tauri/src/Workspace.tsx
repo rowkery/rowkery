@@ -92,6 +92,7 @@ import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
 import { showOfferToast, showToast, showUndoToast } from "./notify";
+import { commitLost, importLost } from "./runOutcome";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -1115,7 +1116,8 @@ export function Workspace({
     try {
       out = await applyChanges(windowId, tab.id, table, bufferChanges(buffer), confirmed);
     } catch (e) {
-      return setTray(tab.id, { kind: "failed", message: String(e) });
+      // No answer: the COMMIT may have gone through.
+      return setTray(tab.id, { kind: "failed", message: commitLost(String(e)), unknown: true });
     }
     if (out.status === "held") {
       if (out.hold.action === "refuse") return setTray(tab.id, { kind: "refused", reason: "Read-only connection · Change safe mode…" }, 4000);
@@ -1386,10 +1388,10 @@ export function Workspace({
       setCsvImport((c) => (c && c.tableKey === cur.tableKey ? { ...c, ...patch(c) } : c));
     const onImportTab = () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.kind === "import";
     /** A failure keeps the panel with the message; off its tab, a toast says so too. */
-    const failed = (message: string) => {
+    const failed = (message: string, toast = "Import failed · nothing was written", detail = message) => {
       if (closeWhenDoneRef.current) setCsvImport(null);
       else onRun(() => ({ run: null, error: message }));
-      if (!onImportTab() || closeWhenDoneRef.current) showToast("Import failed · nothing was written", message, "error");
+      if (!onImportTab() || closeWhenDoneRef.current) showToast(toast, detail, "error");
     };
     let out;
     try {
@@ -1397,7 +1399,9 @@ export function Workspace({
         onRun(() => ({ run: { rows, startedAt } })),
       );
     } catch (e) {
-      return failed(String(e));
+      // No answer: it may or may not have committed.
+      const lost = importLost(cur.table, String(e));
+      return failed(lost.message, lost.toast, lost.detail);
     }
     if (out.status === "failed") return failed(out.message);
     if (out.status === "cancelled") {

@@ -970,6 +970,8 @@ export interface SqlFileReport {
   rolled_back: boolean;
   /** Per statement: of `done`, those rolled back with the file's own open transaction. */
   lost: number;
+  /** Set by the panel, never by core: the run's answer never came, so what it did is unknown. */
+  unknown?: boolean;
 }
 
 type SqlFileFrame = { t: "read"; bytes: number } | ({ t: "progress" } & SqlFileProgress);

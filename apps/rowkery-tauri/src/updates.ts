@@ -9,7 +9,8 @@ import { readKey, writeKey } from "./persist";
  * The update preference says what a newer release does:
  *
  * - Automatic: downloads, then restarts into it once Rowkery is idle
- *   (`idleEnough`) and no tab holds an open transaction.
+ *   (`idleEnough`) and a restart would lose nothing (`losesNothing`: no open
+ *   transaction, write, commit, import or SQL file run).
  * - Download only (the default): downloads; the toast and the orange button
  *   at the schema column's foot offer Restart, and quitting installs it.
  * - Notify only: the orange button appears; Download in Settings fetches it.
@@ -222,10 +223,26 @@ export function idleEnough(o: { now: number; lastInput: number; focused: boolean
   return !o.focused && o.running === 0 && o.now - o.lastInput >= IDLE_MS;
 }
 
+/** What a restart would cut short (core `BusyWork`). */
+export interface BusyWork {
+  transaction: boolean;
+  writes: number;
+  commits: number;
+  imports: number;
+  sql_files: number;
+}
+
+/** Nothing a restart would cut short; not knowing counts as something. */
+export function losesNothing(work: BusyWork | null): boolean {
+  return (
+    !!work && !work.transaction && work.writes === 0 && work.commits === 0 && work.imports === 0 && work.sql_files === 0
+  );
+}
+
 /**
  * Automatic: once an update is ready, restarts into it the first time the app
- * is idle (`idleEnough`) and no tab holds an open transaction. Windows and
- * tabs come back as they were. Returns the cleanup.
+ * is idle (`idleEnough`) and a restart would lose nothing (`losesNothing`).
+ * Windows and tabs come back as they were. Returns the cleanup.
  */
 export function watchIdleInstall(runningNow: () => number): () => void {
   let lastInput = Date.now();
@@ -240,8 +257,8 @@ export function watchIdleInstall(runningNow: () => number): () => void {
     if (!idleEnough({ now: Date.now(), lastInput, focused: document.hasFocus(), running: runningNow() })) return;
     busy = true;
     try {
-      const held = await invoke<boolean | null>("holds_open_transaction").catch(() => true);
-      if (held === false && idleEnough({ now: Date.now(), lastInput, focused: document.hasFocus(), running: runningNow() }))
+      const work = await invoke<BusyWork>("busy_work").catch(() => null);
+      if (losesNothing(work) && idleEnough({ now: Date.now(), lastInput, focused: document.hasFocus(), running: runningNow() }))
         await invoke("restart_to_update");
     } catch {
       // It installs on quit instead.

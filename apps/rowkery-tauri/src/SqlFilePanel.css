@@ -225,6 +225,7 @@
 
 .sf-ended.failed .sf-ended-title,
 .sf-ended.errors .sf-ended-title,
+.sf-ended.unknown .sf-ended-title,
 .sf-ended-error {
   color: var(--del);
 }

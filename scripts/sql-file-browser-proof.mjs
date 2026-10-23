@@ -6,7 +6,9 @@
 // Whole file puts On error back to Stop. Run shows the statement, elapsed
 // time and a bar; Esc doesn't close it meanwhile, Cancel rolls back. A
 // dropped .sql that can't run in one transaction says why and offers only
-// Per statement; a custom-format dump is refused with the pg_restore hint.
+// Per statement; a run whose answer never comes (the call itself fails)
+// says its outcome is unknown, not that it rolled back; a custom-format dump
+// is refused with the pg_restore hint.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/sql-file-browser-proof.mjs [outDir]
@@ -87,12 +89,14 @@ function stubTauri() {
           return scans[name];
         }
         case "run_sql_file":
-          return new Promise((resolve) => {
+          return new Promise((resolve, reject) => {
             let done = 0;
             const started = Date.now();
             const tick = () => {
               done++;
               args.onFrame.onmessage({ t: "progress", done, line: done * 40, current: done === 12 ? "COPY public.orders (id, customer_id, total, placed_at) FROM stdin" : `ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id)`, bytes: done * 11000000, rows: done * 60000 });
+              // The call fails mid-run: what ran is unknown.
+              if (window.__LOSE_ANSWER__ && done >= 5) return reject("Rowkery's core stopped");
               if (done >= 38) {
                 stop = null;
                 resolve({ done, rows: 2410332, elapsed_ms: Date.now() - started, failed: null, errors: 0, first_error: null, cancelled: false, rolled_back: false, lost: 0 });
@@ -198,6 +202,24 @@ await page.waitForSelector(`${panel} [data-sql-file-ended="done"]`);
 check((await calls("run_sql_file")).at(-1)?.wholeFile === false, "it runs per statement");
 check((await text(`${panel} [data-sql-file-ended]`)).startsWith("Done 38 statements · 2,410,332 rows"), `done: ${await text(`${panel} [data-sql-file-ended]`)}`);
 await page.screenshot({ path: `${OUT}/5-done.png` });
+
+// The answer never comes: the outcome is unknown, never "Nothing was kept".
+await page.click(`${panel} [data-sql-file-close]`);
+await page.waitForFunction((p) => !document.querySelector(p), panel);
+await drop("/Users/me/cleanup.sql");
+await page.waitForSelector(`${panel} [data-sql-file="ready"]`);
+await page.evaluate(() => (window.__LOSE_ANSWER__ = true));
+await page.click(`${panel} [data-sql-file-run]`);
+await page.waitForSelector(`${panel} [data-sql-file-ended="unknown"]`);
+const lost = await text(`${panel} [data-sql-file-ended]`);
+check(lost.startsWith("Outcome unknown"), `lost answer: ${lost}`);
+check(
+  (await text(`${panel} [data-sql-file-kept]`)) === "Rowkery lost track of this run; check the tables it touches.",
+  "it says to check the tables",
+);
+check(!lost.includes("Nothing was kept") && !lost.includes("rolled back"), "and claims no rollback");
+await page.screenshot({ path: `${OUT}/5b-outcome-unknown.png` });
+await page.evaluate(() => (window.__LOSE_ANSWER__ = false));
 
 // A custom-format archive: refused, with the way forward.
 await page.click(`${panel} [data-sql-file-close]`);

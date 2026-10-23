@@ -47,9 +47,12 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
 use tokio_postgres::CancelToken;
 
+mod busy;
 mod pool;
 mod prefetch;
 mod sessions;
+pub use busy::BusyWork;
+use busy::{Busy, HoldUntilFinished, Work};
 use pool::{Lease, SharedPool, Slot};
 pub use prefetch::{
     APPLICATION_NAME as PREFETCH_APPLICATION_NAME, MAX_ENTRIES as PREFETCH_MAX_ENTRIES,
@@ -616,6 +619,8 @@ struct CoreState {
     /// SQLite query tabs' paged reads.
     sqlite_pages: SharedSqlitePages,
     runtime: Handle,
+    /// Writes, commits, imports and SQL file runs in flight.
+    busy: Arc<Busy>,
 }
 
 /// Cancel state for one running query. `requested` keeps a cancel that lands
@@ -1517,9 +1522,12 @@ fn apply_changes_now(
             },
         }
     };
+    // Counts as running (a quit asks first) until it answers.
+    let held = state.busy.hold(Work::Commit);
     match target {
         WindowTarget::Sqlite { path, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let result = with_catch(|| {
                     let mut driver = SqliteDriver::new(path);
                     driver.connect().map_err(driver_error_message)?;
@@ -1537,6 +1545,7 @@ fn apply_changes_now(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 // The tab's own session, waiting (boundedly) for a run on it
                 // to end, or for a free connection.
                 let no_room = std::sync::atomic::AtomicBool::new(false);
@@ -1620,9 +1629,11 @@ fn import_csv_now(
         return;
     }
     invalidate_prefetch(&state.pool, &window_id, &state.runtime);
+    let held = state.busy.hold(Work::Import);
     match target {
         WindowTarget::Sqlite { path, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let result = with_catch(|| {
                     rowkery_core::import::import_sqlite_file(&path, &spec, &cancel, &*progress.0)
                 });
@@ -1637,6 +1648,7 @@ fn import_csv_now(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 let Lease { session, .. } = match pool::lease(
                     &pool,
                     &window_id,
@@ -2120,9 +2132,11 @@ fn run_sql_file(
         confirmed: _,
         on_progress,
     } = run;
+    let held = state.busy.hold(Work::SqlFile);
     match target {
         WindowTarget::Sqlite { path: db, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let report = with_catch(|| {
                     let conn = open_sqlite(&db)?;
                     if !arm_cancel(&slot, CancelHandle::Sqlite(conn.get_interrupt_handle())) {
@@ -2154,6 +2168,7 @@ fn run_sql_file(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 let stop = slot.lock().map(|s| s.stop.clone()).ok();
                 let committing = Arc::new(AtomicBool::new(false));
                 let sent = committing.clone();
@@ -2283,6 +2298,8 @@ pub struct CoreBridge {
     ui: Arc<Mutex<Option<serde_json::Value>>>,
     catalog_listener: ListenerSlot,
     launch_warm: LaunchWarmSlot,
+    /// Shared with the core thread's state, read without a round trip.
+    busy: Arc<Busy>,
 }
 
 /// The config as it is now, numbered, for the caller to write.
@@ -2685,6 +2702,15 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     runtime: state.runtime.clone(),
                 }),
                 _ => sink,
+            };
+            // A write counts as running (a quit asks first) until it ends.
+            let events: SharedSink = if writes {
+                Arc::new(HoldUntilFinished {
+                    inner: events,
+                    held: Mutex::new(Some(state.busy.hold(Work::Write))),
+                })
+            } else {
+                events
             };
             // A new run ends the tab's SQLite page (an export leaves it).
             let tab_key = (window_id.clone(), tab_id);
@@ -3318,6 +3344,8 @@ impl CoreBridge {
         let thread_launch_warm = launch_warm.clone();
         let writer = ConfigWriter::spawn(initial.clone());
         let ui = Arc::new(Mutex::new(initial.ui.clone()));
+        let busy = Arc::new(Busy::default());
+        let thread_busy = busy.clone();
         thread::Builder::new()
             .name("rowkery-core".into())
             .spawn(move || {
@@ -3349,6 +3377,7 @@ impl CoreBridge {
                     pool: pool.clone(),
                     sqlite_pages: SharedSqlitePages::default(),
                     runtime: runtime_handle,
+                    busy: thread_busy,
                 };
                 // Commands may spawn onto the runtime from this thread
                 // (a closing window's prefetcher cancels its query).
@@ -3369,6 +3398,7 @@ impl CoreBridge {
             ui,
             catalog_listener,
             launch_warm,
+            busy,
         }
     }
 
@@ -3906,6 +3936,12 @@ impl CoreBridge {
             .unwrap_or(true)
     }
 
+    /// What quitting now would cut short: an open transaction, and the
+    /// writes, commits, imports and SQL file runs in flight.
+    pub fn busy_work(&self) -> BusyWork {
+        self.busy.now(self.holds_transaction())
+    }
+
     /// Databases on the window's server; empty for SQLite.
     pub fn list_databases(&self, window_id: &str) -> Result<Vec<DatabaseInfo>, String> {
         self.send_command(|respond_to| Command::ListDatabases {
@@ -4094,6 +4130,7 @@ impl Clone for CoreBridge {
             ui: self.ui.clone(),
             catalog_listener: self.catalog_listener.clone(),
             launch_warm: self.launch_warm.clone(),
+            busy: self.busy.clone(),
         }
     }
 }

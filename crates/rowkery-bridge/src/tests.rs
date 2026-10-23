@@ -4983,3 +4983,49 @@ fn sqlite_sql_file_runs_through_safe_mode() {
     assert_eq!(count, 2);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// What a quit would cut short: a tab's write while it runs, and a
+/// transaction left open in a tab; nothing once both have ended.
+#[test]
+fn postgres_busy_work_counts_writes_and_open_transactions() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "quitguard-busy";
+    if save_pg_at(&bridge, id, None, SafeMode::Off).is_none() {
+        eprintln!(
+            "skip postgres_busy_work_counts_writes_and_open_transactions (set ROWKERY_PG_HOST)"
+        );
+        return;
+    }
+    bridge.open_window("w", id, None).expect("open");
+    assert!(bridge.busy_work().is_idle());
+    let queue = bridge
+        .run_window_query(
+            "w",
+            1,
+            "DO $$ BEGIN PERFORM pg_sleep(1); END $$".into(),
+            None,
+            false,
+        )
+        .expect("run");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(bridge.busy_work().writes, 1, "the write is running");
+    let (error, _) = wait_query_finished(&queue, Duration::from_secs(10)).expect("done");
+    assert_eq!(error, None);
+    assert_eq!(bridge.busy_work().writes, 0);
+
+    assert_eq!(window_query(&bridge, "w", 1, "BEGIN").1, None);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !bridge.busy_work().transaction {
+        assert!(Instant::now() < deadline, "the open transaction counts");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(bridge.busy_work().quit_warning().is_some());
+    assert_eq!(window_query(&bridge, "w", 1, "ROLLBACK").1, None);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !bridge.busy_work().is_idle() {
+        assert!(Instant::now() < deadline, "idle again");
+        thread::sleep(Duration::from_millis(20));
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
