@@ -222,6 +222,19 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 
 /** How long a confirmation such as "Copied 100 rows" stays in the results header. */
 const NOTICE_MS = 2400;
+/** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
+const NO_SORT: SortState[] = [];
+
+/**
+ * A function with one identity for the component's life that calls the
+ * latest `fn`: handlers passed to the memo'd grid, so a render of the
+ * workspace (an editor keystroke) doesn't re-render it.
+ */
+function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
 
 const PALETTE_EMPTY_GROUPS: PaletteGroup[] = [
   "queries",
@@ -1487,12 +1500,12 @@ export function Workspace({
     [dbMarks, markTable?.schema, markTable?.name],
   );
   const hiddenSet = presenting ? markedSet : null;
-  const markColumn = (column: string, marked: boolean) => {
+  const markColumn = useStableCallback((column: string, marked: boolean) => {
     if (!activeConnection || !marksDb || !markTable) return;
     const name = `${markTable.schema}.${markTable.name}.${column}`;
     actions.setMaskedColumns(activeConnection.id, withMasked(allMarks, marksDb, [name], marked));
     showToast(marked ? "Marked as sensitive" : "No longer sensitive", column);
-  };
+  });
   const resultTable = resultTableItem?.table;
   /** Our single-column foreign keys, by column: what Quick Look and ⌘↵ follow. */
   const outgoing = useMemo(() => {
@@ -2925,14 +2938,14 @@ export function Workspace({
   };
 
   /** A printable key on a selected cell: the chip editor for that column, once unlocked. */
-  const typeToFilter = (column: string, key: string) => {
+  const typeToFilter = useStableCallback((column: string, key: string) => {
     if (readKey(TYPE_TO_FILTER_KEY) !== true) {
       showLockedHint();
       return;
     }
     retireTip("type-to-filter");
     openChipEditor({ column: chipColumns.some((c) => c.name === column) ? column : null, value: key });
-  };
+  });
 
   /** ⌘F on a query tab: find in the loaded rows (client-side; nothing reruns). */
   const [find, setFind] = useState<{ tabId: number; query: string; index: number } | null>(null);
@@ -2949,8 +2962,9 @@ export function Workspace({
   const findAt = find && findCount ? ((find.index % findCount) + findCount) % findCount : 0;
 
   /** The grid's cell menu, profile segments and histogram drags add chips. */
-  const gridFilter = (column: string, op: ChipDraft["op"], value = "", value2?: string) =>
-    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 });
+  const gridFilter = useStableCallback((column: string, op: ChipDraft["op"], value: string = "", value2?: string) =>
+    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 }),
+  );
 
   /**
    * Query tabs sort the rows they loaded on the client (nothing reruns); a
@@ -3016,10 +3030,13 @@ export function Workspace({
   const currentSort = (): SortState[] => (isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? []));
 
   /** Header click: ascending, then descending, then unsorted; ⇧-click adds a secondary key. */
-  const sortBy = (column: string, secondary = false) => applySort(cycleSort(currentSort(), column, secondary));
+  const sortBy = useStableCallback((column: string, secondary: boolean = false) =>
+    applySort(cycleSort(currentSort(), column, secondary)),
+  );
   /** Header menu: Sort ascending / descending / Clear sort on one column. */
-  const sortColumn = (column: string, desc: boolean | null) =>
-    applySort(setSortDirection(currentSort(), column, desc));
+  const sortColumn = useStableCallback((column: string, desc: boolean | null) =>
+    applySort(setSortDirection(currentSort(), column, desc)),
+  );
 
   /** Rewrites a table tab's SELECT list without some columns and reruns it. */
   const setHidden = (tab: QueryTab, hidden: string[]) => {
@@ -3030,7 +3047,7 @@ export function Workspace({
   };
 
   /** Header menu: Hide column. The grip left in the header (or Undo) shows it again. */
-  const hideColumn = (column: string) => {
+  const hideColumn = useStableCallback((column: string) => {
     const tab = activeTab;
     const tableKey = tab?.tableKey;
     if (!tab || tab.kind !== "table" || !tableKey) return;
@@ -3051,13 +3068,13 @@ export function Workspace({
         if (cur) setHidden(cur, (cur.hidden ?? []).filter((c) => c !== column));
       },
     });
-  };
+  });
 
   /** A hidden-column grip's menu: one column back, or all of them ("*"). */
-  const showColumn = (column: string) => {
+  const showColumn = useStableCallback((column: string) => {
     if (!activeTab || activeTab.kind !== "table") return;
     setHidden(activeTab, column === "*" ? [] : (activeTab.hidden ?? []).filter((c) => c !== column));
-  };
+  });
 
   /** Where hidden columns were, for the grips in the grid header. */
   const activeGrips = useMemo(
@@ -3068,17 +3085,59 @@ export function Workspace({
   );
 
   /** Cell menu on a query result that reads one table: that table, in a table tab with no filter. */
-  const openResultAsTable = () => {
+  const openResultAsTable = useStableCallback(() => {
     if (!resultTableKey) return;
     const table = findTable(schemaTree, resultTableKey);
     if (table) openTable(table, { keep: true, state: { filter: "", sort: [] } });
-  };
+  });
+  const filterColumn = useStableCallback((column: string) => openChipEditor({ column }));
+  const showStructure = useStableCallback(() => setActiveView("structure"));
 
   const loadMore = () => {
     if (activeTab?.kind !== "table") return;
     if (activeTab.preview) patchTab(activeTab.id, { preview: false });
     void runTable({ ...activeTab, preview: false }, true);
   };
+  /** The grid's note for no rows: memoised, so typing in the editor never re-renders the grid. */
+  const filtered = isTableTab && !!activeTab?.filter?.trim();
+  const clearFilters = useStableCallback(() => {
+    if (activeTab?.kind === "table") setChips(activeTab, [], false);
+  });
+  const addRow = useStableCallback(() => runCommand("insert-row"));
+  const emptyNote = useMemo(
+    () =>
+      filtered ? (
+        <>
+          No rows match.{" "}
+          <button
+            type="button"
+            className="rg-empty-link"
+            data-clear-filters
+            onClick={clearFilters}
+          >
+            Clear filters
+          </button>
+          {/* No paging here, so a new row has its place under the note. */}
+          {rowEdits.rowsEditable && (
+            <button
+              type="button"
+              className="rg-add-row"
+              data-add-row
+              title={commandTip("insert-row", "Add a row")}
+              onClick={addRow}
+            >
+              <PlusIcon size={11} />
+              Add row
+            </button>
+          )}
+        </>
+      ) : busy ? undefined : (
+        // A finished run with no rows says so, so it doesn't read as still loading.
+        <span data-empty-rows>No records</span>
+      ),
+    [filtered, rowEdits.rowsEditable, busy, clearFilters, addRow],
+  );
+
   /** The grid scrolled to its last rows: the next page, when there is one. */
   const loadMoreRef = useRef(loadMore);
   loadMoreRef.current = loadMore;
@@ -4486,7 +4545,7 @@ export function Workspace({
                     onColumnWidthsChange={setColumnWidths}
                     keyColumns={keyColumns}
                     columnComments={commentsByColumn}
-                    sort={isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? [])}
+                    sort={(isTableTab ? activeTab?.sort : activeClientSort) ?? NO_SORT}
                     sortMode={isTableTab ? "server" : "client"}
                     onSort={sortBy}
                     onSortColumn={sortColumn}
@@ -4500,8 +4559,8 @@ export function Workspace({
                     find={!isTableTab && find?.tabId === activeTabId ? find : null}
                     onFindCount={setFindCount}
                     commandState={commandState}
-                    onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
-                    onStructure={isTableTab && activeTable ? () => setActiveView("structure") : undefined}
+                    onFilterColumn={isTableTab ? filterColumn : undefined}
+                    onStructure={isTableTab && activeTable ? showStructure : undefined}
                     markedColumns={markedSet}
                     hiddenColumns={hiddenSet}
                     onMarkColumn={markTable ? markColumn : undefined}
@@ -4512,37 +4571,7 @@ export function Workspace({
                     onCellSelect={onCellSelect}
                     onNearEnd={activeRun.hasMore ? onNearEnd : undefined}
                     scrollKey={`${activeTabId}:${activeRun.runNo ?? 0}`}
-                    emptyNote={
-                      isTableTab && activeTab?.filter?.trim() ? (
-                        <>
-                          No rows match.{" "}
-                          <button
-                            type="button"
-                            className="rg-empty-link"
-                            data-clear-filters
-                            onClick={() => activeTab.kind === "table" && setChips(activeTab, [], false)}
-                          >
-                            Clear filters
-                          </button>
-                          {/* No paging here, so a new row has its place under the note. */}
-                          {rowEdits.rowsEditable && (
-                            <button
-                              type="button"
-                              className="rg-add-row"
-                              data-add-row
-                              title={commandTip("insert-row", "Add a row")}
-                              onClick={() => runCommand("insert-row")}
-                            >
-                              <PlusIcon size={11} />
-                              Add row
-                            </button>
-                          )}
-                        </>
-                      ) : busy ? undefined : (
-                        // A finished run with no rows says so, so it doesn't read as still loading.
-                        <span data-empty-rows>No records</span>
-                      )
-                    }
+                    emptyNote={emptyNote}
                   />
                 </RenderErrorBoundary>
               )}
