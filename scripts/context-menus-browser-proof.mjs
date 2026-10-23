@@ -216,7 +216,7 @@ await page.waitForSelector(menu("grid"));
 const cellRows = await rows("grid");
 check(
   cellRows.join("|") ===
-    "quick-look=Quick Look:Space|edit-cell=Edit cell:↵|set-null=Set NULL:Ctrl+Alt+N|insert-row=Insert row:Ctrl+I|duplicate-row=Duplicate row:Ctrl+D|follow-key=Follow kiosk_id:Ctrl+↵|f-only=Only rows where kiosk_id = 2:|f-hide=Hide rows where kiosk_id = 2:|f-null=Rows where kiosk_id IS NULL:|csv=Copy:Ctrl+C|csv-header=Copy as CSV with headers:Ctrl+Shift+C",
+    "quick-look=Quick Look:Space|edit-cell=Edit cell:↵|set-null=Set NULL:Ctrl+Alt+N|insert-row=Insert row:Ctrl+I|duplicate-row=Duplicate row:Ctrl+D|follow-key=Follow kiosk_id:Ctrl+↵|f-only=Only rows where kiosk_id = 2:|f-hide=Hide rows where kiosk_id = 2:|f-null=Rows where kiosk_id IS NULL:|csv=Copy:Ctrl+C|csv-header=Copy with headers:Ctrl+Shift+C",
   `cell menu on an FK cell: ${cellRows.join(" · ")}`,
 );
 check(cellRows.some((r) => /^edit-cell=/.test(r)), "↵ edit: the table has a primary key");

@@ -64,6 +64,70 @@ Don't send a rejected change again. Before a change, describe_table shows the co
 and enum labels; don't query existing rows just to see example values. Read only what the change \
 depends on, such as the row it updates or an id it references, and select only the columns you need.";
 
+/// The checks a logged query passes again, without a database, before a
+/// `rowkery://open` link puts it in a tab: one read statement, no `U&"…"`
+/// name, no function refused by name and no schema-qualified call outside
+/// `pg_catalog` / `information_schema`. The log is a plain file, so its
+/// verdict alone proves nothing. A bare call to a function defined in the
+/// database still passes: telling it from a built-in needs the catalog.
+pub fn recheck_logged_read(sql: &str) -> Result<(), String> {
+    let sql = guard::single_read(sql)?;
+    let scan = functions::scan_sql(&sql);
+    if scan.unicode_names {
+        return Err(
+            "Refused: names written with Unicode escapes (U&\"…\") can't be checked here.".into(),
+        );
+    }
+    for call in &scan.calls {
+        if let Some(schema) = call.schema.as_deref() {
+            if !matches!(schema, "pg_catalog" | "information_schema") {
+                return Err(format!(
+                    "Refused: {schema}.{}() isn't built into Postgres.",
+                    call.name
+                ));
+            }
+        }
+        if let Some(why) = functions::refused_builtin(&call.name) {
+            return Err(format!("Refused: {} {why}.", call.name));
+        }
+        // An extension that runs SQL in another session, called unqualified.
+        if call.name.starts_with("pg_background_") {
+            return Err(format!(
+                "Refused: {}() isn't built into Postgres.",
+                call.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recheck_tests {
+    use super::recheck_logged_read;
+
+    #[test]
+    fn refuses_hidden_names_and_database_functions() {
+        for sql in [
+            r#"SELECT U&"pg\005fterminate\005fbackend"(pid) FROM pg_stat_activity"#,
+            r#"SELECT U&"set\005fconfig"('a', 'b', false)"#,
+            "SELECT cron.schedule('* * * * *', 'DELETE FROM users')",
+            "SELECT public.purge_all_orders()",
+            "SELECT pg_background_launch('DELETE FROM users')",
+            "SELECT pg_terminate_backend(42)",
+        ] {
+            assert!(recheck_logged_read(sql).is_err(), "{sql}");
+        }
+        for sql in [
+            "select 1",
+            "select lower(name) from users",
+            "select pg_catalog.lower('A')",
+            "select * from information_schema.tables",
+        ] {
+            assert!(recheck_logged_read(sql).is_ok(), "{sql}");
+        }
+    }
+}
+
 /// Runs the server on stdin / stdout until the client disconnects.
 pub fn run_stdio() -> i32 {
     let runtime = match tokio::runtime::Runtime::new() {
@@ -690,6 +754,38 @@ async fn list_sessions(
     Ok(out)
 }
 
+/// Refused when a Postgres plan uses a credentials catalog's secret column
+/// (`guard::credentials_use`); `written` is the SQL as sent.
+pub(crate) async fn refuse_credentials(
+    store: &mut Store,
+    target: &Target,
+    plan: &Json,
+    touched: &[(Option<String>, String)],
+    written: &functions::Scan,
+) -> Result<(), String> {
+    if !touched
+        .iter()
+        .any(|(schema, table)| guard::is_credentials(schema.as_deref(), table))
+    {
+        return Ok(());
+    }
+    let found = store.read(target, guard::CREDENTIAL_COLUMNS_SQL).await?;
+    let columns: Vec<(String, String)> = found
+        .rows
+        .iter()
+        .filter_map(|r| match (r.first(), r.get(1)) {
+            (Some(rowkery_core::Value::Text(t)), Some(rowkery_core::Value::Text(c))) => {
+                Some((t.clone(), c.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    match guard::credentials_use(plan, &columns, &written.call_names()) {
+        Some(why) => Err(why.into()),
+        None => Ok(()),
+    }
+}
+
 /// `explain` and `query`: the same checks, then either the plan or the rows.
 async fn run_read(
     store: &mut Store,
@@ -704,6 +800,8 @@ async fn run_read(
     let alias = guard::wrapper_alias();
     let capped = guard::wrap_limit(&sql, cap + 1, &alias);
     let engine = engine(&target.record);
+    let rule = rule(target);
+    let marks = mask::parse(target.record.masked_columns(&target.database));
 
     // The plan, and the big tables it would read end to end.
     let mut sqlite_eqp: Vec<(i64, i64, String)> = Vec::new();
@@ -732,6 +830,7 @@ async fn run_read(
             let scans: Vec<(Option<String>, String)> =
                 scans.into_iter().map(|s| (s.schema, s.table)).collect();
             let touched = guard::pg_relations(&plan);
+            refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }
         EngineKind::Sqlite => {
@@ -763,7 +862,7 @@ async fn run_read(
                 .map(|t| (None, t))
                 .collect();
             let touched = match &target.record {
-                ConnectionRecord::Sqlite(c) if rule(target).restricts() => {
+                ConnectionRecord::Sqlite(c) if rule.restricts() || !marks.is_empty() => {
                     target::sqlite_tables_read(&c.path, &capped)?
                         .into_iter()
                         .map(|(s, t)| (Some(s), t))
@@ -774,16 +873,21 @@ async fn run_read(
             (details, scans, touched, None)
         }
     };
-    let rule = rule(target);
+    // Statistics give nothing away when every table is shared and nothing
+    // is masked.
+    if (rule.restricts() || !marks.is_empty())
+        && touched
+            .iter()
+            .any(|(schema, table)| guard::is_statistics(schema.as_deref(), table))
+    {
+        return Err(guard::STATISTICS_REFUSAL.into());
+    }
     if rule.restricts() {
         let cached = store.catalog(target, false).await?;
         let catalog = &cached.catalog;
         // Every relation the plan reads (views and CTEs resolved to the
         // tables underneath) must be shared, matched by its exact name.
         let blocked = touched.iter().any(|(schema, table)| {
-            if guard::is_statistics(schema.as_deref(), table) {
-                return true;
-            }
             let schema = schema.as_deref().unwrap_or("main");
             match access::find_exact(catalog, schema, table) {
                 Some(t) => !rule.allows_node(catalog, schema, t),
@@ -796,12 +900,14 @@ async fn run_read(
     }
     // Sensitive columns: refused unless only returned or counted, and the
     // places in the result that hold one.
-    let marks = mask::parse(target.record.masked_columns(&target.database));
     let masked_at = if marks.is_empty() {
         Vec::new()
     } else {
         match (&pg_plan_json, &target.record) {
-            (Some(plan), _) => pg_masked(store, target, &marks, plan, &touched, &alias).await?,
+            (Some(plan), _) => {
+                let written = functions::scan_sql(&sql).call_names();
+                pg_masked(store, target, &marks, plan, &touched, &alias, &written).await?
+            }
             (None, ConnectionRecord::Sqlite(c)) => {
                 let pairs: Vec<(String, String)> = marks
                     .iter()
@@ -1007,6 +1113,7 @@ async fn pg_masked(
     plan: &Json,
     touched: &[(Option<String>, String)],
     alias: &str,
+    written_calls: &[String],
 ) -> Result<Vec<usize>, String> {
     const INDEXES: &str = "SELECT ci.relname, n.nspname || '.' || coalesce(pt.relname, t.relname), pg_get_indexdef(i.indexrelid) \
         FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
@@ -1077,6 +1184,22 @@ async fn pg_masked(
             .collect();
         (columns, partition)
     };
+    // A table with masked columns, by every name its columns have.
+    let columns_of = |schema: Option<&str>, rel: &str| {
+        let (marked, _) = marked_of(schema, rel);
+        if marked.is_empty() {
+            return None;
+        }
+        let schema = schema.unwrap_or("public");
+        // A partition's columns are its parent's.
+        let table = access::find_exact(catalog, schema, &root_of(schema, rel).0);
+        Some(
+            table
+                .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default(),
+        )
+    };
+    mask::pg_renamed(plan, &columns_of, written_calls)?;
     mask::pg_check(
         plan,
         &mask::PgFacts {
@@ -1327,6 +1450,80 @@ mod tests {
         assert_eq!(scope["tables"], 2);
         assert_eq!(scope["databases"], 1);
         assert_eq!(scope["max_rows"], guard::DEFAULT_ROWS);
+
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The env lock spans the whole test, awaits included: each test has its own runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn sqlite_statistics_are_kept_back_while_a_column_is_masked() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-stat4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let db = dir.join("t.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "create table customers(id integer primary key, email text);
+                 create index customers_email on customers(email);
+                 insert into customers(email) values ('mara@fjord.se'), ('tomas@ibarra.dev');
+                 analyze;",
+            )
+            .unwrap();
+        let save = |masked: Vec<String>| {
+            let mut config = AppConfig::default();
+            config.upsert_connection(ConnectionRecord::Sqlite(SqliteConnection {
+                id: "s".into(),
+                name: "s".into(),
+                path: db.to_string_lossy().to_string(),
+                environment: None,
+                safe_mode: Default::default(),
+                sample: false,
+                allow_mcp: true,
+                mcp_hidden_tables: Vec::new(),
+                mcp_until: None,
+                mcp_samples_off: false,
+                mcp_access: Some(
+                    [(
+                        "main".to_string(),
+                        McpDbAccess {
+                            mode: McpTableMode::All,
+                            tables: Vec::new(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                masked_columns: [("main".to_string(), masked)].into_iter().collect(),
+            }));
+            config.save().unwrap();
+        };
+        save(vec!["main.customers.email".into()]);
+        let mcp = RowkeryMcp::default();
+        let q = |sql: &'static str| json!({ "connection": "s", "sql": sql });
+
+        // sqlite_stat4 keeps index samples, the emails among them.
+        for sql in [
+            "select cast(sample as text) from sqlite_stat4",
+            "select * from main.SQLITE_STAT4",
+            "select stat from sqlite_stat1",
+        ] {
+            let err = call(&mcp, "query", q(sql)).await.expect_err(sql);
+            assert_eq!(err, guard::STATISTICS_REFUSAL, "{sql}");
+        }
+        call(&mcp, "query", q("select count(*) from customers"))
+            .await
+            .expect("plain read");
+
+        // Nothing masked: nothing to keep back.
+        save(Vec::new());
+        call(&mcp, "query", q("select count(*) from sqlite_stat4"))
+            .await
+            .expect("statistics with nothing kept back");
 
         std::env::remove_var("ROWKERY_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);

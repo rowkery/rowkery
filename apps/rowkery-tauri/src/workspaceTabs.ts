@@ -48,6 +48,8 @@ export interface QueryTab {
   preview?: boolean;
   /** Table tabs: staged row edits, saved with the tab until Commit or Discard. */
   edits?: EditBuffer;
+  /** Edits staged on other connections, by connection id: back when the window is (`bindEdits`). */
+  parked?: Record<string, EditBuffer>;
   /** Map: the table it is centred on, when not the tab's own (session only). */
   mapCentre?: { key: string; name: string };
 }

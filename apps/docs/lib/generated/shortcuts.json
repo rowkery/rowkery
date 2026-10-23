@@ -131,7 +131,7 @@
           "keys": "⇧⌘P"
         },
         {
-          "title": "Copy the cell, or the block as CSV",
+          "title": "Copy the cell, or the block as TSV",
           "keys": "⌘C"
         },
         {
