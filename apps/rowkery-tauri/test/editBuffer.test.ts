@@ -150,7 +150,14 @@ describe("typed input", () => {
   test("quoted TSV keeps embedded tabs, newlines and quotes", () => {
     expect(parsePaste('a\t"b\tc"\nd')).toEqual([["a", "b\tc"], ["d"]]);
     expect(parsePaste('"line1\nline2"\tx')).toEqual([["line1\nline2", "x"]]);
-    expect(parsePaste('"say ""hi"""')).toEqual([['say "hi"']]);
+  });
+
+  test("no-tab lines keep JSON and decorative quotes literally", () => {
+    expect(parsePaste('"quoted"')).toEqual([['"quoted"']]);
+    expect(parsePaste('"a" b')).toEqual([['"a" b']]);
+    expect(parsePaste('"hello"')).toEqual([['"hello"']]);
+    expect(parsePaste('one\rtwo')).toEqual([["one"], ["two"]]);
+    expect(parsePaste("one\r\ntwo\r\n")).toEqual([["one"], ["two"]]);
   });
 
   test("plain lines stay one value per row (commas are not column breaks)", () => {
@@ -166,7 +173,6 @@ describe("typed input", () => {
     expect(parsePaste('He said "hi", then left')).toEqual([['He said "hi", then left']]);
     expect(parsePaste('5" screen\nnext line')).toEqual([['5" screen'], ["next line"]]);
     expect(parsePaste('5" screen\t3\nb\t4')).toEqual([['5" screen', "3"], ["b", "4"]]);
-    expect(parseDelimited('"line1\nline2"', "\n")).toEqual([["line1\nline2"]]);
   });
 
   test("an unclosed quote re-parses without quote rules", () => {
@@ -188,10 +194,24 @@ describe("pasteCellForGrid", () => {
     expect(pasteCellForGrid(textEd, { fromRoundtrip: true, typed: null, text: "" })).toEqual({ value: null });
   });
 
-  test("bytes on the typed path fall back to clipboard text", () => {
-    const json = '{"a":1,"b":2}';
-    expect(pasteCellForGrid(jsonEd, { fromRoundtrip: true, typed: gridCopyBytes, text: json })).toEqual({
-      value: { Text: json },
+  test("bytes on the typed path refuse (empty clipboard text must not stage NULL)", () => {
+    expect(pasteCellForGrid(jsonEd, { fromRoundtrip: true, typed: gridCopyBytes, text: "" })).toEqual({
+      error: "Can't paste this cell",
+    });
+  });
+
+  test("NULL into NOT NULL is refused", () => {
+    const notNull = { kind: "text" as const, nullable: false, default: null };
+    expect(pasteCellForGrid(notNull, { fromRoundtrip: true, typed: null, text: "" })).toEqual({ error: "Can't be NULL" });
+    expect(pasteCellForGrid(notNull, { fromRoundtrip: false, typed: undefined, text: "NULL" })).toEqual({
+      error: "Can't be NULL",
+    });
+  });
+
+  test("json round trip re-parses so invalid JSON is refused", () => {
+    expect(pasteCellForGrid(jsonEd, { fromRoundtrip: true, typed: { Text: "{a:1}" }, text: "{a:1}" })).toHaveProperty("error");
+    expect(pasteCellForGrid(jsonEd, { fromRoundtrip: true, typed: { Text: '{"a":1}' }, text: '{"a":1}' })).toEqual({
+      value: { Text: '{"a":1}' },
     });
   });
 
