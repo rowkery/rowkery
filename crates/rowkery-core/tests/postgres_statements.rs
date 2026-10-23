@@ -398,3 +398,44 @@ async fn postgres_a_cursor_never_runs_a_hidden_statement() {
         .await
         .unwrap();
 }
+
+/// Past `keep` rows are counted but neither decoded nor passed on, and the
+/// statement still runs to its end (a write's RETURNING finishes).
+#[tokio::test]
+async fn keep_stops_decoding_but_not_the_statement() {
+    let s = session("keep").await;
+    let table = format!("it_keep_{}", std::process::id());
+    session_execute(&s, &format!("CREATE TABLE {table} (n int)"))
+        .await
+        .unwrap();
+    let opts = StreamOptions {
+        keep: Some(3),
+        batch_rows: 2,
+        ..StreamOptions::default()
+    };
+    let mut got = Got::default();
+    let stats = session_query_stream_with(
+        &s,
+        &format!("WITH w AS (INSERT INTO {table} SELECT generate_series(1, 10) RETURNING n) SELECT n FROM w ORDER BY n"),
+        opts,
+        got.take(),
+    )
+    .await
+    .expect("run");
+    assert_eq!(stats.rows, 10);
+    assert_eq!(
+        got.rows,
+        vec![
+            vec![Value::Int(1)],
+            vec![Value::Int(2)],
+            vec![Value::Int(3)]
+        ]
+    );
+    let all = plain(&s, &format!("SELECT count(*)::int8 FROM {table}"))
+        .await
+        .unwrap();
+    assert_eq!(all.rows, vec![vec![Value::Int(10)]]);
+    session_execute(&s, &format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+}

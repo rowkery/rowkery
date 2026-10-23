@@ -550,6 +550,10 @@ pub struct StreamOptions {
     /// slow query shows its first rows (and a live count) without waiting
     /// for a full batch. Checked as rows arrive.
     pub max_wait: std::time::Duration,
+    /// Rows decoded and passed on at most; the rest are read off the wire
+    /// and counted, never decoded (the statement still runs to its end).
+    /// `None` keeps every row.
+    pub keep: Option<u64>,
 }
 
 impl Default for StreamOptions {
@@ -557,6 +561,7 @@ impl Default for StreamOptions {
         Self {
             batch_rows: BATCH_SIZE,
             max_wait: std::time::Duration::from_millis(10),
+            keep: None,
         }
     }
 }
@@ -776,6 +781,7 @@ where
     let mut first_row = None;
     // When the oldest row of the batch being built arrived.
     let mut batch_since = started;
+    let full = |n: u64| opts.keep.is_some_and(|keep| n >= keep);
 
     while let Some(row) = stream
         .try_next()
@@ -785,6 +791,10 @@ where
         let row: Row = row;
         if first_row.is_none() {
             first_row = Some(started.elapsed());
+        }
+        if full(total_rows) {
+            total_rows += 1;
+            continue;
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
@@ -796,7 +806,10 @@ where
         batch_rows.push(values);
         total_rows += 1;
 
-        if batch_rows.len() >= opts.batch_rows || batch_since.elapsed() >= opts.max_wait {
+        if batch_rows.len() >= opts.batch_rows
+            || batch_since.elapsed() >= opts.max_wait
+            || full(total_rows)
+        {
             let batch = RowBatch {
                 columns: columns.clone(),
                 rows: batch_rows,

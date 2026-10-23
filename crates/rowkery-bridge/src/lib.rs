@@ -922,9 +922,9 @@ struct PoolSlot {
     generation: u64,
 }
 
-/// The most rows one run sends a tab. Past it the rest are read and left
-/// out (never cancelled: a write's RETURNING still finishes, and the user's
-/// transaction is untouched), and the run says `capped`. Paged loading stops
+/// The most rows one run sends a tab. Past it the rest are read off the wire
+/// and left out, never decoded (never cancelled: a write's RETURNING still
+/// finishes, and the user's transaction is untouched), and the run says `capped`. Paged loading stops
 /// there too: the webview asks for no more than what is left of it.
 pub const MAX_TAB_ROWS: u64 = 1_000_000;
 
@@ -951,6 +951,17 @@ impl<'a> Forward<'a> {
             had_result_set: false,
             cap,
             capped: false,
+        }
+    }
+
+    /// How to stream for this forward: past what is left of the cap (and one
+    /// more, which says `capped`) rows aren't decoded.
+    fn opts(&self) -> StreamOptions {
+        StreamOptions {
+            keep: self
+                .cap
+                .map(|cap| cap.saturating_sub(self.row_count).saturating_add(1)),
+            ..StreamOptions::default()
         }
     }
 
@@ -1111,7 +1122,6 @@ async fn stream_on_session(
         PgWork::Within { .. } | PgWork::Explain { .. } => None,
     };
     let mut fwd = Forward::new(events, query_id, tab_id, cap);
-    let opts = StreamOptions::default;
     let paged = |fwd: &Forward, r: Result<(StreamStats, bool), DriverError>| {
         let more = r.as_ref().is_ok_and(|(_, more)| *more);
         fwd.outcome(r.map(|(stats, _)| stats))
@@ -1126,7 +1136,7 @@ async fn stream_on_session(
             sql,
             page: Some(rows),
         } if pages_by_cursor(sql) => {
-            let first = session_query_cursor(session, sql, *rows, opts(), |b, first| {
+            let first = session_query_cursor(session, sql, *rows, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1138,7 +1148,7 @@ async fn stream_on_session(
                 // transaction, or Postgres won't take it as one): run it as
                 // written; past MAX_TAB_ROWS its rows are left out.
                 Ok(None) => {
-                    let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+                    let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                         fwd.batch(b, first);
                         Ok(())
                     })
@@ -1149,7 +1159,7 @@ async fn stream_on_session(
         }
         PgWork::Query { sql, .. } => {
             session_close_cursor(session).await;
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1158,7 +1168,7 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
         PgWork::Within { sql } => {
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1166,7 +1176,7 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
         PgWork::More { rows } => {
-            let more = session_fetch_more(session, *rows, opts(), |b, first| {
+            let more = session_fetch_more(session, *rows, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1202,7 +1212,7 @@ async fn stream_on_session(
                 }
             }
             let mut text = String::new();
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 if let Some(Value::Text(t)) = b.rows.first().and_then(|r| r.first()) {
                     text.push_str(t);
                 }
