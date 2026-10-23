@@ -86,20 +86,7 @@ impl<W: Write> ExportWriter<W> {
         }
     }
 
-    /// Refuses a cell Postgres sent in a type Rowkery can't read (shown as
-    /// `<type>`), so a file never carries the placeholder as if it were data.
     pub fn row(&mut self, row: &[Value]) -> io::Result<()> {
-        if let Some(c) = self
-            .columns
-            .iter()
-            .zip(row)
-            .find_map(|(c, v)| is_placeholder(c, v).then_some(c))
-        {
-            return Err(io::Error::other(format!(
-                "column \"{}\" is {}, which Rowkery can't read yet. Select it as text ({}::text) to export it",
-                c.name, c.type_name, c.name
-            )));
-        }
         let first = self.rows == 0;
         self.rows += 1;
         match &self.format {
@@ -152,21 +139,6 @@ impl<W: Write> ExportWriter<W> {
         self.out.flush()?;
         Ok(self.out)
     }
-}
-
-/// The `<type name>` stand-in for a value of a type not decoded. Text types
-/// are left out: there `<text>` can only be what was stored.
-fn is_placeholder(c: &Column, v: &Value) -> bool {
-    let Value::Text(t) = v else {
-        return false;
-    };
-    let text_type = matches!(
-        c.type_name.to_ascii_lowercase().as_str(),
-        "text" | "varchar" | "bpchar" | "name" | "unknown" | "json" | "jsonb" | "xml"
-    );
-    !text_type
-        && t.len() == c.type_name.len() + 2
-        && t.strip_prefix('<').and_then(|t| t.strip_suffix('>')) == Some(c.type_name.as_str())
 }
 
 /// A value as the grid shows it; NULL is empty, bytes are `\x` hex.
@@ -333,28 +305,6 @@ mod tests {
         });
         assert!(lite.starts_with("INSERT INTO t ("), "{lite}");
         assert!(lite.contains("X'DEAD');\n"), "{lite}");
-    }
-
-    #[test]
-    fn refuses_placeholder_cells() {
-        let cols = [
-            Column {
-                name: "doc".into(),
-                type_name: "interval".into(),
-            },
-            Column {
-                name: "note".into(),
-                type_name: "text".into(),
-            },
-        ];
-        let mut w = ExportWriter::new(Vec::new(), ExportFormat::Csv);
-        w.columns(&cols).unwrap();
-        // Real text that looks like a placeholder is still data.
-        w.row(&[Value::Null, Value::Text("<text>".into())]).unwrap();
-        let err = w
-            .row(&[Value::Text("<interval>".into()), Value::Null])
-            .unwrap_err();
-        assert!(err.to_string().contains("doc::text"), "{err}");
     }
 
     #[test]

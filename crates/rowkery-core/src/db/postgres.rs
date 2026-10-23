@@ -2060,6 +2060,9 @@ fn array_element_shown(element: &Type) -> bool {
                 | Type::TIME
                 | Type::TIMESTAMP
                 | Type::TIMESTAMPTZ
+                | Type::JSON
+                | Type::JSONB
+                | Type::XML
         )
 }
 
