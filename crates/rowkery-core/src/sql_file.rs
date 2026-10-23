@@ -208,11 +208,15 @@ pub struct Reader<R> {
     copy: bool,
     copy_line: bool,
     index: u64,
+    /// How statements are split: as the engine that will run them reads
+    /// the text, so each one checked is one the engine runs.
+    dialect: Dialect,
 }
 
 impl<R: Read> Reader<R> {
-    pub fn new(src: R) -> Self {
+    pub fn new(src: R, dialect: Dialect) -> Self {
         Self {
+            dialect,
             src,
             buf: Vec::with_capacity(CHUNK * 2),
             base: 0,
@@ -304,9 +308,7 @@ impl<R: Read> Reader<R> {
                     ));
                 }
             }
-            // Split as either engine may read it; each statement is then
-            // checked as its own engine reads it.
-            let Some((lexeme, end)) = lex(&self.buf, self.pos, self.eof, Dialect::Either) else {
+            let Some((lexeme, end)) = lex(&self.buf, self.pos, self.eof, self.dialect) else {
                 if !self.eof {
                     self.fill()?;
                     continue;
@@ -595,7 +597,7 @@ pub fn scan(
     }
     scan.source = source(&head);
 
-    let mut reader = Reader::new(file);
+    let mut reader = Reader::new(file, engine.into());
     // Labels and their first-seen order.
     let mut kinds: Vec<(KindCount, usize)> = Vec::new();
     let mut count = |label: &str, destructive: bool, n: u64| match kinds
@@ -858,8 +860,9 @@ pub fn preview(sql: &str) -> String {
     out
 }
 
-/// Opens the scanned file for its run, refusing if it changed since.
-pub fn open_scanned(path: &Path, scan: &Scan) -> Result<Reader<File>, String> {
+/// Opens the scanned file for its run on `engine` (the one it was scanned
+/// for), refusing if it changed since.
+pub fn open_scanned(path: &Path, scan: &Scan, engine: EngineKind) -> Result<Reader<File>, String> {
     let file = File::open(path).map_err(|e| format!("Couldn't open the file: {e}"))?;
     let meta = file
         .metadata()
@@ -869,7 +872,7 @@ pub fn open_scanned(path: &Path, scan: &Scan) -> Result<Reader<File>, String> {
             "The file changed since Rowkery read it. Read it again before running it.".into(),
         );
     }
-    Ok(Reader::new(file))
+    Ok(Reader::new(file, engine.into()))
 }
 
 /// Refuses options the scan rules out.
@@ -1039,6 +1042,36 @@ fn classified(sql: &str) -> &str {
     &sql[..end]
 }
 
+/// Runs `sql`, one statement of a file, on SQLite: exactly one statement
+/// as SQLite reads it, which is the one safe mode checked. If SQLite finds
+/// another after it, or a parameter left unbound (which it would read as
+/// NULL), nothing runs. Any rows it returns are read and dropped.
+fn run_one_sqlite(conn: &rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
+    let mut batch = rusqlite::Batch::new(conn, sql);
+    let Some(mut statement) = batch.next()? else {
+        return Ok(());
+    };
+    let refuse = |why: &str| {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(why.to_string()),
+        ))
+    };
+    if batch.next().map_or(true, |more| more.is_some()) {
+        return refuse(
+            "SQLite reads more than one statement here, so it wasn't run: Rowkery checked it as one.",
+        );
+    }
+    if statement.parameter_count() > 0 {
+        return refuse(
+            "This statement has a parameter ($a, :a, ?) with no value, so it wasn't run.",
+        );
+    }
+    let mut rows = statement.raw_query();
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
 /// Runs the scanned file on a SQLite connection ([`open_sqlite`]).
 /// `cancelled` says a cancel was asked for; whoever asks interrupts the
 /// connection too.
@@ -1051,7 +1084,9 @@ pub fn run_sqlite(
     on_progress: impl FnMut(&Progress),
 ) -> RunReport {
     let mut tally = Tally::new(options, on_progress);
-    let mut reader = match check_options(scan, options).and_then(|_| open_scanned(path, scan)) {
+    let mut reader = match check_options(scan, options)
+        .and_then(|_| open_scanned(path, scan, EngineKind::Sqlite))
+    {
         Ok(reader) => reader,
         Err(message) => {
             tally.file_failed(ReadError {
@@ -1087,7 +1122,7 @@ pub fn run_sqlite(
             }
         };
         tally.starting(&statement, reader.offset());
-        match conn.execute_batch(&statement.sql) {
+        match run_one_sqlite(conn, &statement.sql) {
             Ok(()) => {
                 let rows = if counts_rows(&statement.verb) {
                     conn.changes()
@@ -1231,7 +1266,9 @@ pub async fn run_postgres(
     use futures::SinkExt;
 
     let mut tally = Tally::new(options, on_progress);
-    let reader = match check_options(scan, options).and_then(|_| open_scanned(path, scan)) {
+    let reader = match check_options(scan, options)
+        .and_then(|_| open_scanned(path, scan, EngineKind::Postgres))
+    {
         Ok(reader) => reader,
         Err(message) => {
             tally.file_failed(ReadError {
@@ -1373,7 +1410,7 @@ mod tests {
     use crate::safety::split_statements;
 
     fn pieces(sql: &str) -> Vec<Piece> {
-        let mut reader = Reader::new(sql.as_bytes());
+        let mut reader = Reader::new(sql.as_bytes(), Dialect::Either);
         let mut out = Vec::new();
         while let Some(piece) = reader.next_piece().unwrap() {
             out.push(piece);
@@ -1432,7 +1469,7 @@ mod tests {
     #[test]
     fn copy_rows_pass_through_untouched() {
         let sql = "SET x = 1;\nCOPY public.t (a, b) FROM stdin;\n1\t'; DROP\n2\t\\N\n\\.\nSELECT 1;\nCOPY t FROM STDIN;\r\nx\r\n\\.\r\nCOPY u FROM stdin;\nlast";
-        let mut reader = Reader::new(sql.as_bytes());
+        let mut reader = Reader::new(sql.as_bytes(), Dialect::Either);
         let mut got = Vec::new();
         while let Some(piece) = reader.next_piece().unwrap() {
             let Piece::Statement(s) = piece else { panic!() };
@@ -1731,5 +1768,74 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let report = run_sqlite(&conn, &path, &scan, WHOLE, || false, |_| {});
         assert!(report.failed.unwrap().message.contains("changed"));
+    }
+
+    /// A file is split as the engine that runs it reads it, each statement
+    /// is checked that way, and on SQLite each piece runs as exactly one
+    /// statement: what runs is what was checked.
+    #[test]
+    fn sqlite_files_split_check_and_run_as_sqlite_reads_them() {
+        use crate::safety::UNCLEAR_VERB;
+        // Read as either engine, `E'\' …'` is one string hiding the DELETE;
+        // SQLite has no E'…' strings and runs it. Its own statement now.
+        let sql = "CREATE TABLE t(e);\nINSERT INTO t VALUES(1);\nSELECT E'\\' FROM t; DELETE FROM t; --';\n";
+        let scanned = scan_text(sql, EngineKind::Sqlite);
+        assert_eq!(scanned.statements, 4, "{:?}", scanned.kinds);
+        assert!(
+            scanned
+                .kinds
+                .iter()
+                .any(|k| k.label.contains("DELETE") && k.destructive),
+            "{:?}",
+            scanned.kinds
+        );
+        let (report, conn) = sqlite_run(sql, WHOLE, false);
+        assert_eq!((report.done, report.failed), (4, None));
+        assert_eq!(count(&conn, "t"), Some(0));
+
+        // `[a;b]` is one SQLite name, not two statements.
+        let sql =
+            "CREATE TABLE u([a;b]);\nINSERT INTO u([a;b]) VALUES (1);\nSELECT [a;b] FROM u;\n";
+        assert_eq!(scan_text(sql, EngineKind::Sqlite).statements, 3);
+        let (report, conn) = sqlite_run(sql, WHOLE, false);
+        assert_eq!((report.done, report.failed), (3, None));
+        assert_eq!(count(&conn, "u"), Some(1));
+
+        // Two statements as the engine reads them are never classified by
+        // the first alone; a routine's body is one statement.
+        let (check, _) = check_file_statement("SELECT 1; DELETE FROM t", Dialect::Sqlite).unwrap();
+        assert_eq!(check.verb, UNCLEAR_VERB);
+        let (check, _) = check_file_statement(
+            "CREATE TRIGGER g AFTER INSERT ON t BEGIN DELETE FROM t; END",
+            Dialect::Sqlite,
+        )
+        .unwrap();
+        assert!(
+            check.verb != UNCLEAR_VERB && check.changes_data(),
+            "{check:?}"
+        );
+
+        // On SQLite a piece runs only if it is one statement with no
+        // parameter left unbound.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(a); INSERT INTO t VALUES (1);")
+            .unwrap();
+        for sql in [
+            "SELECT 1; DELETE FROM t",
+            "SELECT 1 /* */; DELETE FROM t",
+            "WITH x AS (SELECT $a) DELETE FROM t WHERE 1 OR $a",
+            "DELETE FROM t WHERE a = ?",
+        ] {
+            assert!(run_one_sqlite(&conn, sql).is_err(), "{sql}");
+            assert_eq!(count(&conn, "t"), Some(1), "{sql}");
+        }
+        for sql in [
+            "SELECT a FROM t -- done",
+            "SELECT a FROM t; -- done",
+            "CREATE TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
+            "",
+        ] {
+            assert!(run_one_sqlite(&conn, sql).is_ok(), "{sql}");
+        }
     }
 }

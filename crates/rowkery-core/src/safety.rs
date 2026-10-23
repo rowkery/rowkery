@@ -408,7 +408,16 @@ pub fn check_file_statement(
     sql: &str,
     dialect: Dialect,
 ) -> Option<(StatementCheck, InTransaction)> {
-    let toks = tokenize(sql, dialect).into_iter().find(|s| !s.is_empty())?;
+    let mut statements = tokenize(sql, dialect).into_iter().filter(|s| !s.is_empty());
+    let toks = statements.next()?;
+    // The file was split as the engine reads it, so this is one statement;
+    // if the engine would still find two in it, the text is unclear. A
+    // routine's body (`CREATE TRIGGER … BEGIN …; END`, `BEGIN ATOMIC`)
+    // holds `;` and is one statement to the engine: a schema change.
+    if statements.next().is_some() && !creates_routine(&toks) {
+        let unclear = unclear_check(&[Tok::Unclear]).expect("unclear");
+        return Some((unclear, InTransaction::Fine));
+    }
     let check = check_tokens(&toks);
     let words: Vec<&str> = top_level(&toks).filter_map(Tok::word).take(4).collect();
     let concurrently = || top_level(&toks).any(|t| t.is("CONCURRENTLY"));
@@ -428,6 +437,21 @@ pub fn check_file_statement(
         _ => InTransaction::Fine,
     };
     Some((check, role))
+}
+
+/// `CREATE [OR REPLACE] [TEMP] FUNCTION | PROCEDURE | TRIGGER`, whose body
+/// the SQL file reader keeps whole across its `;`.
+fn creates_routine(toks: &[Tok]) -> bool {
+    let words: Vec<&str> = toks.iter().take(5).filter_map(Tok::word).collect();
+    let rest = match words.as_slice() {
+        ["CREATE", "OR", "REPLACE", rest @ ..] | ["CREATE", rest @ ..] => rest,
+        _ => return false,
+    };
+    let rest = match rest {
+        ["TEMP" | "TEMPORARY", rest @ ..] => rest,
+        _ => rest,
+    };
+    matches!(rest.first(), Some(&("FUNCTION" | "PROCEDURE" | "TRIGGER")))
 }
 
 /// One `SELECT`, `WITH`, `VALUES` or `TABLE` statement without a `LIMIT`,
@@ -677,10 +701,13 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
             done(Lexeme::LineComment, i, i == n)
         }
         b'/' if b.get(i + 1) == Some(&b'*') => {
-            let (end, clear, closed) = skip_block_comment(b, i);
+            let (end, clear, closed) = skip_block_comment(b, i, dialect);
             done(Lexeme::BlockComment { clear }, end, !closed)
         }
         b'-' | b'/' if i + 1 == n => done(Lexeme::Other, n, true),
+        // SQLite has no dollar bodies: `$a` is a parameter name, and what
+        // follows it is SQL.
+        b'$' if dialect == Dialect::Sqlite => Some((Lexeme::Skip, i + 1)),
         b'$' => {
             // `$tag$ … $tag$`: the tag is empty or an identifier, so not
             // `$1`; never inside a word, which takes its own `$`.
@@ -823,14 +850,15 @@ fn skip_string(b: &[u8], mut i: usize, backslash: bool, dialect: Dialect) -> (us
 /// Past the `/* … */` comment opening at `b[i]`, whether every server
 /// reads it the same way, and whether it closed. Postgres nests them
 /// (`/* /* */ */` is one comment); SQLite ends one at the first `*/`. So a
-/// nested one is unclear, and so is one that never ends.
-fn skip_block_comment(b: &[u8], mut i: usize) -> (usize, bool, bool) {
+/// nested one is unclear, and so is one that never ends. Read as SQLite
+/// alone, it simply ends at the first `*/`.
+fn skip_block_comment(b: &[u8], mut i: usize, dialect: Dialect) -> (usize, bool, bool) {
     let n = b.len();
     let mut depth = 1;
     let mut clear = true;
     i += 2;
     while i < n {
-        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+        if dialect != Dialect::Sqlite && b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
             depth += 1;
             clear = false;
             i += 2;
@@ -971,8 +999,11 @@ const PRAGMA_QUERIES: &[&str] = &[
 ];
 
 /// SQLite pragmas that change the database even without a value:
-/// `optimize` runs ANALYZE, `incremental_vacuum` frees pages.
-const PRAGMA_ACTIONS: &[&str] = &["OPTIMIZE", "INCREMENTAL_VACUUM"];
+/// `optimize` runs ANALYZE, `incremental_vacuum` frees pages,
+/// `wal_checkpoint` writes the WAL's pages into the database file. Every
+/// other one without a value only reports (`shrink_memory` frees the
+/// connection's cache and changes nothing stored).
+const PRAGMA_ACTIONS: &[&str] = &["OPTIMIZE", "INCREMENTAL_VACUUM", "WAL_CHECKPOINT"];
 
 /// Object types that follow CREATE / ALTER / DROP (first word only).
 const OBJECT_TYPES: &[&str] = &[
@@ -2115,8 +2146,17 @@ mod tests {
             "PRAGMA writable_schema = 1",
             "PRAGMA optimize",
             "PRAGMA incremental_vacuum",
+            "PRAGMA wal_checkpoint",
+            "PRAGMA main.wal_checkpoint",
+            "PRAGMA \"main\".\"wal_checkpoint\"",
+            "PRAGMA wal_checkpoint(TRUNCATE)",
         ] {
             assert_eq!(kind(sql), StatementKind::Write, "{sql}");
+            assert_eq!(
+                check_sql(sql, Dialect::Sqlite)[0].kind,
+                StatementKind::Write,
+                "{sql}"
+            );
         }
         for sql in [
             "PRAGMA table_info(wallets)",
@@ -2125,6 +2165,7 @@ mod tests {
             "PRAGMA integrity_check(10)",
             "PRAGMA journal_mode",
             "PRAGMA foreign_keys",
+            "PRAGMA shrink_memory",
         ] {
             assert_eq!(kind(sql), StatementKind::Read, "{sql}");
         }
