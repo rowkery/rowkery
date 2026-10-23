@@ -868,9 +868,9 @@ function App() {
 
   /**
    * An agent's SQL in a query tab on its connection: a window already on it,
-   * else a new one. `run`: it runs as it opens (Open in Rowkery from the chat).
+   * else a new one. Never run: the user reads it and presses ⌘↵.
    */
-  const openMcpSql = (connectionId: string, database: string | undefined, sql: string, run = false) => {
+  const openMcpSql = (connectionId: string, database: string | undefined, sql: string) => {
     setAgents(null);
     const conn = connections.find((c) => c.id === connectionId);
     if (!conn) return;
@@ -880,14 +880,13 @@ function App() {
     const on = fits(activeWindow) ? activeWindow : windowsRef.current.find(fits);
     if (on) {
       switchWindow(on.id);
-      window.dispatchEvent(new CustomEvent("rowkery:open-sql", { detail: { windowId: on.id, sql, title: "Agent query", run } }));
+      window.dispatchEvent(new CustomEvent("rowkery:open-sql", { detail: { windowId: on.id, sql, title: "Agent query" } }));
       return;
     }
     const id = `w${nextWindowNo.current++}`;
     const seeded = { tabs: [{ kind: "query" as const, title: "Agent query", sql }], active: 0 };
     restoredTabs.current.set(id, seeded);
     tabsByWindow.current.set(id, seeded);
-    if (run) runOnConnect.current.add(id);
     const blankOnly = !activeWindow.connectionId;
     setWindows((prev) => (blankOnly ? prev.map((w) => (w.id === activeWindow.id ? blankWindow(id) : w)) : [...prev, blankWindow(id)]));
     setActiveWindowId(id);
@@ -904,7 +903,7 @@ function App() {
         if (!connections.some((c) => c.id === link.connection))
           return showToast("That connection isn't in Rowkery any more", undefined, "error");
         setSettings(null);
-        openMcpSql(link.connection, link.database ?? undefined, link.sql, true);
+        openMcpSql(link.connection, link.database ?? undefined, link.sql);
       } else if (link.kind === "proposal") {
         setPopover(null);
         setPaletteOpen(false);
@@ -912,6 +911,8 @@ function App() {
         setAgents({ initial: "proposals", proposal: link.id });
       } else if (link.kind === "decided") {
         showToast("That change isn't waiting for you any more");
+      } else if (link.kind === "refused") {
+        showToast("Rowkery won't open that query: it didn't pass the agent checks", undefined, "error");
       } else {
         showToast("That query isn't in Rowkery's activity log any more", undefined, "error");
       }
