@@ -395,6 +395,43 @@ export function browseTable(
   ).then(([result, started]) => ({ ...result, sql: started.sql }));
 }
 
+/**
+ * Each tab's streaming run (or export), to give up on: Force stop ends a run
+ * whose done frame never comes (`abandonRun`). Keyed by window and tab.
+ */
+const pendingRuns = new Map<string, (e: unknown) => void>();
+
+function runKey(args: Record<string, unknown>): string {
+  return `${String(args.windowId)}/${String(args.tabId)}`;
+}
+
+/** Tracks a run until it settles: `fail` rejects it unless it ended already. */
+function track(args: Record<string, unknown>, reject: (e: unknown) => void) {
+  const key = runKey(args);
+  let open = true;
+  const close = () => {
+    open = false;
+    if (pendingRuns.get(key) === fail) pendingRuns.delete(key);
+  };
+  const fail = (e: unknown) => {
+    if (!open) return;
+    close();
+    reject(e);
+  };
+  pendingRuns.set(key, fail);
+  return { fail, close, isOpen: () => open };
+}
+
+/**
+ * The tab's run still waiting on its done frame, as a function that gives up
+ * on it (its promise rejects with `why`); undefined when none is. Force stop
+ * takes it before asking core, and calls it if core's stop never reports back.
+ */
+export function abandonRun(windowId: string, tabId: number): ((why: string) => void) | undefined {
+  const fail = pendingRuns.get(runKey({ windowId, tabId }));
+  return fail && ((why) => fail(new Error(why)));
+}
+
 /** Runs a streaming command; resolves on its done frame with what `invoke` returned. */
 function stream<Started>(
   command: string,
@@ -413,9 +450,17 @@ function stream<Started>(
   let started: Started | undefined;
   let finished: QueryResultDto | undefined;
   return new Promise((resolve, reject) => {
+    const run = track(args, (e) => {
+      settled = true;
+      if (scheduled) cancelAnimationFrame(scheduled);
+      reject(e);
+    });
     // Frames can beat the invoke's reply: resolve once both are in.
     const settle = () => {
-      if (finished && started !== undefined) resolve([finished, started]);
+      if (finished && started !== undefined && run.isOpen()) {
+        run.close();
+        resolve([finished, started]);
+      }
     };
     let settled = false;
     let jsonRows = false;
@@ -432,7 +477,15 @@ function stream<Started>(
       if (onProgress && !progressed && !scheduled) scheduled = requestAnimationFrame(progress);
     };
     const channel = new Channel<Frame | ArrayBuffer>();
+    // A frame this can't read fails the run, rather than leave it waiting on a done it dropped.
     channel.onmessage = (frame) => {
+      try {
+        onFrame(frame);
+      } catch (e) {
+        run.fail(new Error(`Couldn't read the results: ${e instanceof Error ? e.message : String(e)}`));
+      }
+    };
+    const onFrame = (frame: Frame | ArrayBuffer) => {
       if (settled) return;
       if (frame instanceof ArrayBuffer) {
         const header = result.rows.appendFrame(frame);
@@ -481,11 +534,7 @@ function stream<Started>(
         started = value;
         settle();
       },
-      (e) => {
-        if (settled) return;
-        settled = true;
-        reject(e);
-      },
+      run.fail,
     );
   });
 }
@@ -508,25 +557,34 @@ function exportStream(
   onProgress?: (rows: number) => void,
 ): Promise<ExportDone | null> {
   return new Promise((resolve, reject) => {
+    const run = track(args, reject);
     let done: ExportDone | null = null;
     let started: boolean | null = null;
     const settle = () => {
+      if (!run.isOpen()) return;
       if (started === false) resolve(null);
       else if (started && done) resolve(done);
+      else return;
+      run.close();
     };
     const channel = new Channel<ExportFrame>();
     channel.onmessage = (frame) => {
-      if (frame.t === "progress") onProgress?.(frame.rows);
-      else {
-        const { t: _t, ...rest } = frame;
-        done = rest;
-        settle();
+      if (!run.isOpen()) return;
+      try {
+        if (frame.t === "progress") onProgress?.(frame.rows);
+        else {
+          const { t: _t, ...rest } = frame;
+          done = rest;
+          settle();
+        }
+      } catch (e) {
+        run.fail(e);
       }
     };
     invoke<number | null>(command, { ...args, onFrame: channel }).then((id) => {
       started = id !== null;
       settle();
-    }, reject);
+    }, run.fail);
   });
 }
 

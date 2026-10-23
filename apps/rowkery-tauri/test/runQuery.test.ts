@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/core", () => {
   };
 });
 
-const { runQuery } = await import("../src/api");
+const { runQuery, exportResults, abandonRun } = await import("../src/api");
 
 const columns = [{ t: "columns", query_id: 1, columns: [{ name: "id", type_name: "int4" }] }];
 const done = (extra = {}) => ({
@@ -118,5 +118,38 @@ describe("runQuery", () => {
   test("a failed invoke rejects", async () => {
     plays.push({ frames: [], reject: "This window is not connected" });
     await expect(runQuery("w1", 1, "x")).rejects.toThrow("not connected");
+  });
+
+  test("a frame that can't be read fails the run instead of leaving it running", async () => {
+    plays.push({ frames: [...columns, new ArrayBuffer(64), done()] });
+    await expect(runQuery("w1", 1, "select")).rejects.toThrow("Couldn't read the results: not an INL1 frame");
+    expect(abandonRun("w1", 1)).toBeUndefined();
+  });
+
+  test("Force stop gives up on a run whose done frame never comes", async () => {
+    plays.push({ frames: columns });
+    const run = runQuery("w1", 2, "select pg_sleep(1e6)");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(abandonRun("w1", 1)).toBeUndefined();
+    abandonRun("w1", 2)!("lost");
+    await expect(run).rejects.toThrow("lost");
+    // Settled: nothing left to give up on, and a late done frame changes nothing.
+    expect(abandonRun("w1", 2)).toBeUndefined();
+  });
+
+  test("a run that ended can't be given up on", async () => {
+    plays.push({ frames: [...columns, done()] });
+    await runQuery("w1", 3, "select");
+    expect(abandonRun("w1", 3)).toBeUndefined();
+  });
+
+  test("an export whose done never comes can be given up on", async () => {
+    plays.push({ frames: [{ t: "progress", rows: 10 }] });
+    const progress = vi.fn();
+    const run = exportResults("w1", 4, { sql: "select", engine: "postgres", schema: "public", table: "t" }, progress);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(progress).toHaveBeenCalledWith(10);
+    abandonRun("w1", 4)!("lost");
+    await expect(run).rejects.toThrow("lost");
   });
 });

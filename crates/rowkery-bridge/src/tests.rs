@@ -4983,3 +4983,69 @@ fn sqlite_sql_file_runs_through_safe_mode() {
     assert_eq!(count, 2);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// A run whose worker goes away without a finish (a panic, an early return)
+/// still ends: the guard's drop sends a failed finish, once.
+#[test]
+fn finish_guard_ends_a_run_whose_worker_vanished() {
+    let queue: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let guard = finish_guard(queue.clone(), 7, 3);
+    let worker = guard.clone();
+    let _ = thread::spawn(move || {
+        push_event(
+            &worker,
+            CoreEvent::QueryStarted {
+                query_id: 7,
+                tab_id: 3,
+            },
+        );
+        panic!("worker panicked mid-run");
+    })
+    .join();
+    drop(guard);
+    let errors: Vec<_> = queue
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            CoreEvent::QueryFinished {
+                query_id: 7,
+                tab_id: 3,
+                error,
+                cancelled: false,
+                ..
+            } => error.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors, vec![RUN_LOST_MESSAGE.to_string()]);
+
+    // A run that finished says nothing more when it goes.
+    let queue: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let guard = finish_guard(queue.clone(), 8, 3);
+    finish_query_worker(Ok(QueryOutcome::cancelled(0)), 8, 3, Instant::now(), &guard);
+    drop(guard);
+    assert_eq!(queue.lock().unwrap().len(), 1);
+}
+
+/// ⌘E keeps its own handle on the sink (and so on the sender it waits on):
+/// a plan worker that dies still wakes it, with an error.
+#[test]
+fn explain_wait_ends_when_the_plan_worker_dies() {
+    let (tx, rx) = mpsc::channel();
+    let sink = Arc::new(ExplainSink {
+        rows: Mutex::default(),
+        done: Mutex::new(Some(tx)),
+    });
+    let guard = finish_guard(sink.clone(), 1, 1);
+    let _ = thread::spawn(move || {
+        let _held = guard;
+        panic!("plan worker panicked");
+    })
+    .join();
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(CoreEvent::QueryFinished { error: Some(e), .. }) => assert_eq!(e, RUN_LOST_MESSAGE),
+        other => panic!("expected a failed finish, got {other:?}"),
+    }
+    drop(sink);
+}
