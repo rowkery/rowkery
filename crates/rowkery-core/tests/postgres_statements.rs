@@ -398,3 +398,56 @@ async fn postgres_a_cursor_never_runs_a_hidden_statement() {
         .await
         .unwrap();
 }
+
+/// A locking clause in a CTE (`FOR UPDATE`, `FOR NO KEY UPDATE`,
+/// `FOR UPDATE OF t`) is not the UPDATE verb: the classifier reads these as
+/// reads, and Postgres runs them without changing a row. A real UPDATE
+/// after one is still a write that does change rows.
+#[tokio::test]
+async fn postgres_locking_ctes_read_and_change_nothing() {
+    use rowkery_core::safety::{check_sql, Dialect, StatementKind};
+    let s = session("locking-cte").await;
+    session_execute(
+        &s,
+        "DROP TABLE IF EXISTS rowkery_lock_cte; \
+         CREATE TABLE rowkery_lock_cte (id int PRIMARY KEY, n int); \
+         INSERT INTO rowkery_lock_cte SELECT g, g FROM generate_series(1, 3) g",
+    )
+    .await
+    .expect("table");
+    let snapshot = || async {
+        plain(
+            &s,
+            "SELECT string_agg(id || ':' || n, ',' ORDER BY id) FROM rowkery_lock_cte",
+        )
+        .await
+        .expect("snapshot")
+        .rows
+    };
+    let before = snapshot().await;
+    let kinds = |sql: &str| -> Vec<StatementKind> {
+        check_sql(sql, Dialect::Postgres)
+            .iter()
+            .map(|c| c.kind)
+            .collect()
+    };
+    for sql in [
+        "WITH x AS (SELECT * FROM rowkery_lock_cte FOR UPDATE) SELECT * FROM x",
+        "WITH x AS (SELECT * FROM rowkery_lock_cte FOR NO KEY UPDATE) SELECT * FROM x",
+        "WITH x AS (SELECT * FROM rowkery_lock_cte t FOR UPDATE OF t) SELECT * FROM x",
+        "WITH x AS (SELECT * FROM rowkery_lock_cte t FOR NO KEY UPDATE OF t SKIP LOCKED) SELECT count(*) FROM x",
+    ] {
+        assert_eq!(kinds(sql), [StatementKind::Read], "{sql}");
+        let got = plain(&s, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert!(!got.rows.is_empty(), "{sql}");
+        assert_eq!(snapshot().await, before, "{sql} changed rows");
+    }
+    let write = "WITH x AS (SELECT * FROM rowkery_lock_cte FOR UPDATE) \
+                 UPDATE rowkery_lock_cte SET n = n + 1 WHERE id IN (SELECT id FROM x)";
+    assert_eq!(kinds(write), [StatementKind::Write]);
+    plain(&s, write).await.expect("update");
+    assert_ne!(snapshot().await, before);
+    session_execute(&s, "DROP TABLE rowkery_lock_cte")
+        .await
+        .expect("drop");
+}
