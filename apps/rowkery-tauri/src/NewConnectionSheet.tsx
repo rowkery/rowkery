@@ -48,6 +48,11 @@ interface NewConnectionSheetProps {
   /** Called after the record is saved; the app connects (or reconnects) it. */
   /** `firstShare`: shared with agents here for the first time, no tables picked yet. */
   onSaved: (id: string, name: string, firstShare: boolean) => void;
+  /**
+   * Asked before the record is saved; `false` keeps the sheet open, unsaved
+   * (a reconnect would roll back a tab's open transaction).
+   */
+  beforeSave?: () => Promise<boolean>;
   /** A failed connection's field to focus, with the reason printed under it. */
   markField?: { field: string; message: string } | null;
   /** Called after `editing` was deleted. */
@@ -225,6 +230,7 @@ export function NewConnectionSheet({
   markField,
   onClose,
   onSaved,
+  beforeSave,
   onDeleted,
   prefill,
   mcpStats,
@@ -647,6 +653,7 @@ export function NewConnectionSheet({
         return;
       }
     }
+    if (beforeSave && !(await beforeSave())) return;
     setSaving(true);
     setSaveError(null);
     try {

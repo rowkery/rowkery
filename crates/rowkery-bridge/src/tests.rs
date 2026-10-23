@@ -11,6 +11,9 @@ use tempfile::NamedTempFile;
 
 static TEST_DIR_LOCK: Mutex<()> = Mutex::new(());
 
+/// Force stop sends no cancel request of the tab's own (see `force_stop`).
+pub(super) static NO_TOKEN_CANCEL: AtomicBool = AtomicBool::new(false);
+
 fn test_guard() -> (MutexGuard<'static, ()>, NamedTempFile, String) {
     let guard = TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("rowkery-bridge-test-{}", std::process::id()));
@@ -3264,12 +3267,10 @@ fn postgres_tabs_keep_their_session_between_runs() {
         thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(cancelled);
-    let after_cancel = pid(1);
-    assert!(after_cancel.is_some() && after_cancel == first);
-    assert_eq!(pid(1), after_cancel);
+    assert_eq!(pid(1), first, "a cancel keeps the tab's session");
 
     // A backend killed while parked is replaced without an error.
-    let killed = match after_cancel.clone() {
+    let killed = match first.clone() {
         Some(rowkery_core::db::Value::Int(p)) => p,
         other => panic!("pid {other:?}"),
     };
@@ -3283,7 +3284,7 @@ fn postgres_tabs_keep_their_session_between_runs() {
     thread::sleep(std::time::Duration::from_millis(200));
     let (cell, err, ..) = window_query(&bridge, "w", 1, "SELECT pg_backend_pid()");
     assert_eq!(err, None, "a dead parked session should be replaced");
-    assert!(cell.is_some() && cell != after_cancel);
+    assert!(cell.is_some() && cell != first);
 
     // Re-pointing the window drops its sessions.
     bridge.open_window("w", id, None).expect("reopen");
@@ -5112,13 +5113,18 @@ fn postgres_an_open_transaction_holds_off_a_safe_mode_change() {
     set_safe_mode(&bridge, id, SafeMode::Confirm).expect("changes with none open");
     set_safe_mode(&bridge, id, SafeMode::Off).expect("and back");
 
-    // Re-pointed anyway (the app refuses this too): not silently gone.
+    // Nor does a re-point (another database, Reconnect): core refuses it
+    // as the app does, and the transaction commits afterwards.
     assert_eq!(run(2, "BEGIN").1, None);
     assert_eq!(run(2, "INSERT INTO keepopen_safe VALUES (2)").1, None);
-    bridge.open_window("w", id, None).expect("re-point");
-    let error = run(2, "COMMIT").1.expect("the COMMIT is refused");
-    assert!(error.contains("transaction"), "{error}");
-    assert_eq!(rows(), 1, "the insert went with its transaction");
+    assert_eq!(
+        open_transactions_once_parked(&bridge),
+        vec![("w".to_string(), 2)]
+    );
+    let refused = bridge.open_window("w", id, None).expect_err("refused");
+    assert_eq!(refused, super::REPOINT_IN_TXN);
+    assert_eq!(run(2, "COMMIT").1, None, "the transaction was kept");
+    assert_eq!(rows(), 2);
     assert_eq!(run(9, "DROP TABLE keepopen_safe").1, None);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
@@ -5165,7 +5171,11 @@ fn postgres_a_cancel_keeps_the_transaction_it_hit() {
     );
     assert_eq!(run(1, "ROLLBACK").1, None);
 
-    // A cancel racing a short statement: either way the session stays.
+    // A cancel racing a short statement: either way the session stays, and
+    // when the INSERT won, it is there inside the transaction.
+    let pid = |tab| run(tab, "SELECT pg_backend_pid()").0;
+    let backend = pid(2);
+    assert!(backend.is_some());
     for n in 0..5 {
         assert_eq!(run(2, "BEGIN").1, None);
         let queue = bridge
@@ -5177,14 +5187,23 @@ fn postgres_a_cancel_keeps_the_transaction_it_hit() {
                 false,
             )
             .expect("run");
+        // Later each time, so some cancels land as the INSERT ends.
+        thread::sleep(Duration::from_millis(n * 3));
         bridge.cancel_window_query("w", 2);
-        wait_detail(&queue, Duration::from_secs(5)).expect("done");
-        let after = run(2, "SELECT 1").1;
-        assert!(
-            after.as_deref().is_none_or(|e| e.contains("aborted")),
-            "still the same session: {after:?}"
+        let (_, cancelled, _) = wait_detail(&queue, Duration::from_secs(5)).expect("done");
+        let (seen, error, ..) = run(
+            2,
+            &format!("SELECT count(*)::int FROM keepopen_cancel WHERE id = {n}"),
         );
+        match error {
+            // Not stopped: the INSERT is there, inside the transaction.
+            None if !cancelled => assert_eq!(int_of(seen), 1, "the INSERT is kept"),
+            // Stopped before it ran, or the cancel came as it ended.
+            None => assert!(int_of(seen) <= 1),
+            Some(e) => assert!(e.contains("aborted"), "{e}"),
+        }
         assert_eq!(run(2, "ROLLBACK").1, None);
+        assert_eq!(pid(2), backend, "still the same session");
     }
     assert_eq!(
         int_of(run(9, "SELECT count(*)::int FROM keepopen_cancel").0),
@@ -5212,7 +5231,12 @@ fn postgres_a_force_stop_cancels_on_the_server_too() {
         .run_window_query("w", 1, sql.into(), None, false)
         .expect("run");
     thread::sleep(Duration::from_millis(800));
+    // The tab's own cancel request never arrives: only the one from another
+    // session can stop it.
+    NO_TOKEN_CANCEL.store(true, Ordering::SeqCst);
     bridge.stop_all_queries();
+    thread::sleep(Duration::from_millis(100));
+    NO_TOKEN_CANCEL.store(false, Ordering::SeqCst);
     let (_, cancelled, detail) = wait_detail(&queue, Duration::from_secs(5)).expect("done");
     assert!(cancelled && detail.forced);
     let running = || {
@@ -5234,5 +5258,147 @@ fn postgres_a_force_stop_cancels_on_the_server_too() {
         assert!(Instant::now() < deadline, "still running on the server");
         thread::sleep(Duration::from_millis(100));
     }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// Waits for no tab's session to hold a transaction.
+fn no_open_transactions(bridge: &super::CoreBridge, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !bridge.open_transactions().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "{what}: {:?}",
+            bridge.open_transactions()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A tab closed while its query runs inside a transaction: its session is
+/// dropped when the cancelled run comes back, not parked for a tab that no
+/// longer exists, so nothing is left holding the transaction (or blocking
+/// safe mode).
+#[test]
+fn postgres_a_tab_closed_mid_run_leaves_no_transaction_behind() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "keepopen-closed";
+    if save_pg_at(&bridge, id, None, SafeMode::Off).is_none() {
+        eprintln!(
+            "skip postgres_a_tab_closed_mid_run_leaves_no_transaction_behind (set ROWKERY_PG_HOST)"
+        );
+        return;
+    }
+    bridge.open_window("w", id, None).expect("open");
+    let sql = "SELECT pg_sleep(30) AS keepopen_closed";
+    assert_eq!(window_query(&bridge, "w", 3, "BEGIN").1, None);
+    let queue = bridge
+        .run_window_query("w", 3, sql.into(), None, false)
+        .expect("run");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(bridge.open_transactions(), vec![("w".to_string(), 3)]);
+    bridge.close_window_tab("w", 3);
+    wait_detail(&queue, Duration::from_secs(5)).expect("stopped");
+    no_open_transactions(&bridge, "the closed tab's transaction");
+    set_safe_mode(&bridge, id, SafeMode::Confirm).expect("nothing in the way");
+    set_safe_mode(&bridge, id, SafeMode::Off).expect("and back");
+    // Its backend is gone from the server, not idle in a transaction.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = int_of(
+            window_query(
+                &bridge,
+                "w",
+                9,
+                &format!(
+                    "SELECT count(*)::int FROM pg_stat_activity \
+                     WHERE query = '{sql}' AND pid <> pg_backend_pid()"
+                ),
+            )
+            .0,
+        );
+        if left == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "its session is still there");
+        thread::sleep(Duration::from_millis(100));
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A tab whose session is out running a statement inside the user's
+/// transaction still counts: safe mode doesn't change under it, and the
+/// transaction commits afterwards.
+#[test]
+fn postgres_a_running_tab_holds_off_a_safe_mode_change() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "keepopen-running";
+    if save_pg_at(&bridge, id, None, SafeMode::Off).is_none() {
+        eprintln!("skip postgres_a_running_tab_holds_off_a_safe_mode_change (set ROWKERY_PG_HOST)");
+        return;
+    }
+    bridge.open_window("w", id, None).expect("open");
+    let run = |tab, sql: &str| window_query(&bridge, "w", tab, sql);
+    for sql in [
+        "DROP TABLE IF EXISTS keepopen_running",
+        "CREATE TABLE keepopen_running (id int)",
+    ] {
+        assert_eq!(run(9, sql).1, None, "{sql}");
+    }
+    assert_eq!(run(1, "BEGIN").1, None);
+    assert_eq!(run(1, "INSERT INTO keepopen_running VALUES (1)").1, None);
+    let queue = bridge
+        .run_window_query("w", 1, "SELECT pg_sleep(1)".into(), None, false)
+        .expect("run");
+    thread::sleep(Duration::from_millis(300));
+    let refused = set_safe_mode(&bridge, id, SafeMode::Confirm).expect_err("refused");
+    assert!(refused.contains("transaction open"), "{refused}");
+    let refused = bridge.open_window("w", id, None).expect_err("refused");
+    assert_eq!(refused, super::REPOINT_IN_TXN);
+    let (error, ..) = wait_detail(&queue, Duration::from_secs(5)).expect("done");
+    assert_eq!(error, None);
+    assert_eq!(run(1, "COMMIT").1, None, "the transaction was kept");
+    assert_eq!(
+        int_of(run(9, "SELECT count(*)::int FROM keepopen_running").0),
+        1
+    );
+    assert_eq!(run(9, "DROP TABLE keepopen_running").1, None);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A force stop of a statement that may have opened or ended a transaction
+/// (a write, on a session that held none when the run began) still tells
+/// the tab: its next statement says a transaction may be gone.
+#[test]
+fn postgres_a_force_stop_of_a_write_marks_the_transaction_lost() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "keepopen-forced-write";
+    if save_pg_at(&bridge, id, None, SafeMode::Off).is_none() {
+        eprintln!("skip postgres_a_force_stop_of_a_write_marks_the_transaction_lost (set ROWKERY_PG_HOST)");
+        return;
+    }
+    bridge.open_window("w", id, None).expect("open");
+    let queue = bridge
+        .run_window_query(
+            "w",
+            4,
+            "CREATE TEMP TABLE keepopen_forced AS SELECT 1 AS id FROM pg_sleep(30)".into(),
+            None,
+            false,
+        )
+        .expect("run");
+    thread::sleep(Duration::from_millis(800));
+    bridge.stop_all_queries();
+    let (error, cancelled, detail) = wait_detail(&queue, Duration::from_secs(5)).expect("done");
+    assert!(
+        cancelled && detail.forced,
+        "{error:?} {cancelled} {detail:?}"
+    );
+    let error = window_query(&bridge, "w", 4, "COMMIT")
+        .1
+        .expect("the tab is told");
+    assert_eq!(error, super::pool::LOST_MAYBE_TXN);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }

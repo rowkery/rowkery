@@ -324,6 +324,17 @@ interface WorkspaceProps {
  * connection and database. The app shell owns connecting, the title bar
  * and the switchers at the top of the panel; this owns the rest.
  */
+/** When the last "may finish it" toast showed: a Stop all of many tabs shows one. */
+let forcedToastAt = 0;
+
+/** Force stop closed a run's connection; the server keeps running what it had. */
+function toastForcedStop() {
+  const now = Date.now();
+  if (now - forcedToastAt < 2000) return;
+  forcedToastAt = now;
+  showToast("Stopped here; the server may finish it");
+}
+
 export function Workspace({
   session,
   active,
@@ -2137,8 +2148,7 @@ export function Workspace({
       }
       if (res.cancelled) outcome = null;
       else if (res.error) outcome = "error";
-      // Force stop closed the connection; the server keeps running what it had.
-      if (res.forced) showToast("Stopped here; the server may finish it", undefined, "error");
+      if (res.forced) toastForcedStop();
       end = res.cancelled ? "cancelled" : res.error ? "error" : "done";
       elapsedMs = res.elapsed_ms;
       const answered = !res.error && !res.cancelled;
@@ -2467,8 +2477,9 @@ export function Workspace({
    * and runs as soon as the one in flight ends, whose answer is then dropped
    * if it no longer matches the tab. The run isn't cancelled: after a
    * cancel core holds the tab's session until the cancel has landed, which
-   * would only delay the next run. A Load more asked for mid-run is dropped (scrolling asks
-   * again), and one whose rows no longer match the tab loads a first page.
+   * would only delay the next run. A Load more asked for mid-run is dropped
+   * (scrolling asks again), and one whose rows no longer match the tab loads
+   * a first page.
    */
   const runKey = (t: QueryTab) =>
     JSON.stringify([t.tableKey, t.filter ?? "", t.sort ?? [], t.pageSize ?? DEFAULT_PAGE, t.hidden ?? []]);

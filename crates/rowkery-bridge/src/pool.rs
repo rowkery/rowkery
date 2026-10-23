@@ -44,7 +44,7 @@
 //! and gives its session up when a tab needs the place. The MCP server is a
 //! process of its own, outside this.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -145,6 +145,14 @@ pub(crate) struct SessionPool {
     /// Tabs whose session went while it may have held a transaction:
     /// `true` when it surely did.
     lost: HashMap<Key, bool>,
+    /// Checkouts (by id) whose session may hold the user's transaction:
+    /// one counts while `out` still holds the same id.
+    out_risk: HashMap<Key, u64>,
+    /// Tabs closed while their session was out: it is dropped when it comes
+    /// back, not parked (its transaction goes with it, and nobody is told).
+    closed: HashSet<Key>,
+    /// Windows closed: a session of theirs still out marks nothing lost.
+    closed_windows: HashSet<String>,
     next_checkout: u64,
     /// Numbers each window's Quick Look batches; the newest wins.
     quick_look: HashMap<String, Arc<AtomicU64>>,
@@ -178,6 +186,26 @@ pub(crate) struct Checkout {
 }
 
 impl Checkout {
+    /// The session may hold the user's transaction from now on (`risk` as
+    /// in [`risk_of`]), so a re-point or safe mode change waits for it, and
+    /// if it is lost while out the tab's next statement says so.
+    pub fn mark_risk(&mut self, risk: Option<bool>) {
+        self.risk = match (self.risk, risk) {
+            (Some(a), Some(b)) => Some(a || b),
+            (a, b) => a.or(b),
+        };
+        if let (Some(_), Some(pool)) = (self.risk, &self.pool) {
+            if let Ok(mut p) = pool.lock() {
+                p.out_risk.insert(self.key.clone(), self.id);
+            }
+        }
+    }
+
+    /// The statement about to run may open a transaction (it isn't a read).
+    pub fn may_open_transaction(&mut self) {
+        self.mark_risk(Some(false));
+    }
+
     fn none() -> Self {
         Self {
             pool: None,
@@ -197,7 +225,8 @@ impl Drop for Checkout {
             Ok(mut p) => {
                 if p.out.get(&self.key) == Some(&self.id) {
                     p.out.remove(&self.key);
-                    if let (Some(sure), Slot::Tab(_)) = (self.risk, self.key.1) {
+                    let gone = p.closed.remove(&self.key) || p.closed_windows.contains(&self.key.0);
+                    if let (Some(sure), Slot::Tab(_), false) = (self.risk, self.key.1, gone) {
                         p.lost.insert(self.key.clone(), sure);
                     }
                 }
@@ -228,20 +257,30 @@ impl SessionPool {
         })
     }
 
-    /// The window's query tabs whose parked session may hold the user's
-    /// open transaction, which re-pointing the window would roll back.
+    /// The window's query tabs whose session may hold the user's open
+    /// transaction, which re-pointing the window would roll back: parked,
+    /// or out (running, settling, or kept after a cancel) since a lease that
+    /// found one or a statement that may open one.
     pub fn open_transactions(&self, window_id: &str) -> Vec<u64> {
-        let mut tabs: Vec<u64> = self
-            .parked
-            .iter()
-            .filter_map(|((w, slot), p)| match slot {
-                Slot::Tab(tab) if w == window_id && !p.session.is_closed() => {
-                    at_risk(&p.session).then_some(*tab)
-                }
-                _ => None,
-            })
-            .collect();
+        let parked = self.parked.iter().filter_map(|((w, slot), p)| match slot {
+            Slot::Tab(tab) if w == window_id && !p.session.is_closed() => {
+                at_risk(&p.session).then_some(*tab)
+            }
+            _ => None,
+        });
+        let out = self.out_risk.iter().filter_map(|(key, id)| match key {
+            (w, Slot::Tab(tab))
+                if w == window_id
+                    && self.out.get(key) == Some(id)
+                    && !self.closed.contains(key) =>
+            {
+                Some(*tab)
+            }
+            _ => None,
+        });
+        let mut tabs: Vec<u64> = parked.chain(out).collect();
         tabs.sort_unstable();
+        tabs.dedup();
         tabs
     }
 
@@ -262,6 +301,8 @@ impl SessionPool {
         }
         // Checkouts of the old generation end on their own; nothing waits on them.
         self.out.retain(|(w, _), _| w != window_id);
+        self.out_risk.retain(|(w, _), _| w != window_id);
+        self.closed.retain(|(w, _)| w != window_id);
         self.tags.retain(|_, (w, _)| w != window_id);
         self.returned.notify_waiters();
         let keys: Vec<Key> = self
@@ -285,12 +326,18 @@ impl SessionPool {
     pub fn close_window(&mut self, window_id: &str) -> Vec<PostgresSession> {
         let (_, dropped) = self.reset_window(window_id);
         self.lost.retain(|(w, _), _| w != window_id);
+        self.closed_windows.insert(window_id.to_string());
         dropped
     }
 
+    /// Forgets the tab; its session, parked, is returned to drop, and one
+    /// still out is dropped when it comes back.
     pub fn close_tab(&mut self, window_id: &str, tab_id: u64) -> Option<PostgresSession> {
         let key = (window_id.to_string(), Slot::Tab(tab_id));
         self.lost.remove(&key);
+        if self.out.contains_key(&key) {
+            self.closed.insert(key.clone());
+        }
         self.tags
             .retain(|_, t| *t != (window_id.to_string(), tab_id));
         self.parked.remove(&key).map(|p| p.session)
@@ -430,12 +477,16 @@ impl SessionPool {
         generation: u64,
         mut session: PostgresSession,
     ) -> Option<PostgresSession> {
+        let key = (window_id.to_string(), slot);
+        // Its tab closed while it was out: it goes, and its transaction.
+        if self.closed.remove(&key) {
+            return Some(session);
+        }
         // Re-pointed or closed while it was out: it goes like the rest did.
         if self.generation(window_id) != generation || session.is_closed() {
             self.note_lost(window_id, slot, &session);
             return Some(session);
         }
-        let key = (window_id.to_string(), slot);
         // Past the cap (a schema load or the Sessions tab, which never
         // wait): used once, not kept. The session it would replace hands
         // over its place first.
@@ -471,6 +522,10 @@ impl SessionPool {
 
     /// A tab's session that may have held the user's transaction is gone.
     fn note_lost(&mut self, window_id: &str, slot: Slot, session: &PostgresSession) {
+        // Nobody is left to tell.
+        if self.closed_windows.contains(window_id) {
+            return;
+        }
         if let (Some(sure), Slot::Tab(_)) = (risk_of(session), slot) {
             self.lost.insert((window_id.to_string(), slot), sure);
         }
@@ -576,6 +631,7 @@ impl SessionPool {
         self.next_checkout += 1;
         let id = self.next_checkout;
         self.out.insert(key.clone(), id);
+        self.closed_windows.remove(&key.0);
         Checkout {
             pool: Some(pool.clone()),
             key: key.clone(),
@@ -674,7 +730,7 @@ pub(crate) async fn lease_or_wait(
     // But if it may have held the user's transaction, that is gone: say so.
     match parked {
         Some(parked) if !parked.session.is_closed() => {
-            out.risk = risk_of(&parked.session);
+            out.mark_risk(risk_of(&parked.session));
             return Ok(Lease {
                 session: parked.session,
                 reused: true,

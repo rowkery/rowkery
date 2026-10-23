@@ -303,6 +303,16 @@
   white-space: pre-wrap;
 }
 
+/* Above a result set: one line or a few, then it scrolls. */
+.results-warning-bar {
+  flex: none;
+  margin: 0;
+  padding: 6px 12px;
+  max-height: 4.5em;
+  overflow: auto;
+  border-bottom: 1px solid var(--rowline);
+}
+
 /* "● 100 rows 19 ms" at the right of the results header. */
 .card-meta {
   margin-left: auto;

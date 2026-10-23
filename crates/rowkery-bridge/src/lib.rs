@@ -17,8 +17,9 @@ use rowkery_core::db::postgres::{
     session_catalog_fingerprint, session_close_cursor, session_execute, session_fetch_more,
     session_introspect, session_list_databases, session_note_statement, session_plan_facts,
     session_probe_after_cancel, session_probe_txn, session_query_cursor, session_query_stream_with,
-    session_server_version, session_table_indexes, session_take_warnings, session_test, CancelVia,
-    DatabaseInfo, PostgresSession, StreamOptions, StreamStats, TxnState,
+    session_server_version, session_table_indexes, session_take_cancel_aborted,
+    session_take_warnings, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
+    StreamStats, TxnState,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount};
 use rowkery_core::db::{
@@ -519,16 +520,6 @@ enum WindowTarget {
         connection_id: String,
         config: PostgresConnection,
     },
-}
-
-impl WindowTarget {
-    fn connection_id(&self) -> &str {
-        match self {
-            Self::Sqlite { connection_id, .. } | Self::Postgres { connection_id, .. } => {
-                connection_id
-            }
-        }
-    }
 }
 
 /// Result of opening a window: the database it landed on and its schema.
@@ -1127,6 +1118,7 @@ async fn stream_on_session(
     let opts = StreamOptions::default;
     // Only this run's warnings reach its result.
     session_take_warnings(session);
+    let cancel_aborted = session_take_cancel_aborted(session);
     let paged = |fwd: &Forward, r: Result<(StreamStats, bool), DriverError>| {
         let more = r.as_ref().is_ok_and(|(_, more)| *more);
         fwd.outcome(r.map(|(stats, _)| stats))
@@ -1246,12 +1238,23 @@ async fn stream_on_session(
         }
     };
     let warnings = session_take_warnings(session);
-    let result = result.map(|o| QueryOutcome {
-        warning: (!warnings.is_empty()).then(|| warnings.join("\n")),
-        ..o
-    });
+    let result = result
+        .map(|o| QueryOutcome {
+            warning: (!warnings.is_empty()).then(|| warnings.join("\n")),
+            ..o
+        })
+        .map_err(|mut failure| {
+            // 25P02: the transaction is aborted. Say what aborted it.
+            if cancel_aborted && failure.sqlstate.as_deref() == Some("25P02") {
+                failure.message.push_str(CANCEL_ABORTED);
+            }
+            failure
+        });
     (result, fwd.had_result_set)
 }
+
+/// After "current transaction is aborted" when a cancel aborted it.
+const CANCEL_ABORTED: &str = " (The last Cancel reached the server after your statement had finished, and aborted the transaction. ROLLBACK to go on.)";
 
 /// Every statement only reads: it can't open or end a transaction.
 fn reads_only(sql: &str) -> bool {
@@ -1332,7 +1335,7 @@ fn run_postgres_query_on_runtime(
             let Lease {
                 mut session,
                 reused,
-                out,
+                mut out,
             } = match leased {
                 Ok(lease) => lease,
                 Err(err) => {
@@ -1367,6 +1370,11 @@ fn run_postgres_query_on_runtime(
                 );
                 drop(out);
                 return;
+            }
+            // A statement that may open a transaction: from now on the tab
+            // counts as holding one, and a force stop marks it lost.
+            if matches!(&work, PgWork::Query { sql, .. } if !reads_only(sql)) {
+                out.may_open_transaction();
             }
             let (result, sent_rows) =
                 stream_on_session(&mut session, &work, query_id, tab_id, &events).await;
@@ -1975,6 +1983,9 @@ fn open_window_now(
     }
 }
 
+/// Why a window wasn't re-pointed.
+pub const REPOINT_IN_TXN: &str = "A query tab in this window has a transaction open, and switching would roll it back. COMMIT or ROLLBACK it first.";
+
 /// Why safe mode didn't change.
 pub const SAFE_MODE_IN_TXN: &str = "A query tab on this connection has a transaction open, and changing safe mode would roll it back. COMMIT or ROLLBACK it first.";
 
@@ -2396,7 +2407,14 @@ fn with_postgres<T, F, Fut>(
 }
 
 fn force_stop(runtime: &Handle, slot: &CancelSlot) {
-    request_cancel(runtime, slot);
+    // A test stands in for a cancel request that never reaches the server.
+    #[cfg(test)]
+    let skip = tests::NO_TOKEN_CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(test))]
+    let skip = false;
+    if !skip {
+        request_cancel(runtime, slot);
+    }
     if let Ok(guard) = slot.lock() {
         guard.stop.notify_one();
     }
@@ -2450,8 +2468,14 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     .connections
                     .iter()
                     .any(|c| c.id() == id && c.safe_mode() != mode);
+                // One lock for the check and the resets: nothing opens a
+                // transaction in between.
+                let mut pool = state.pool.lock().ok();
                 let held = state.windows.iter().any(|(w, target)| {
-                    target.connection_id() == id && !window_transactions(state, w).is_empty()
+                    matches!(target, WindowTarget::Postgres { connection_id, .. } if *connection_id == id)
+                        && pool
+                            .as_ref()
+                            .is_some_and(|p| !p.open_transactions(w).is_empty())
                 });
                 if changes_mode && held {
                     break 'event Event::Error(SAFE_MODE_IN_TXN.into());
@@ -2469,13 +2493,15 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             config,
                         } if *connection_id == id && config.safe_mode != mode => {
                             config.safe_mode = mode;
-                            if let Ok(mut pool) = state.pool.lock() {
+                            if let Some(pool) = pool.as_mut() {
                                 stale.extend(pool.reset_window(window_id).1);
                             }
                         }
                         _ => {}
                     }
                 }
+                // The sessions close outside the lock.
+                drop(pool);
                 drop(stale);
                 state.config.upsert_connection(connection);
                 config_snapshot(state)
@@ -2523,6 +2549,14 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     });
                     return;
                 }
+            }
+            // Re-pointing (another connection or database, Reconnect) starts
+            // the window's sessions afresh: never over a tab's transaction.
+            if state.windows.contains_key(&window_id)
+                && !window_transactions(state, &window_id).is_empty()
+            {
+                let _ = respond_to.send(Err(REPOINT_IN_TXN.into()));
+                return;
             }
             open_window_now(state, window_id, connection_id, database, respond_to);
         }

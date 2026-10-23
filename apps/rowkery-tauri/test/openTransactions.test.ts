@@ -46,4 +46,9 @@ test("a statement that warned says so in the list of a run", () => {
   });
   assert.equal(statementOutcome({ result: result("there is no transaction in progress"), tableKey: null, ranSql: "COMMIT" }), "Warning");
   assert.equal(statementOutcome({ result: result(null), tableKey: null, ranSql: "COMMIT" }), "Done");
+  // A count stays beside the warning.
+  const wrote = { ...result("value truncated"), affected_rows: 1 };
+  assert.equal(statementOutcome({ result: wrote, tableKey: null, ranSql: "UPDATE t SET a = 1" }), "1 row changed · Warning");
+  const read = { ...result("from RAISE"), columns: [{ name: "a", type_name: "int4" }], row_count: 2 };
+  assert.equal(statementOutcome({ result: read, tableKey: null, ranSql: "SELECT f()" }), "2 rows · Warning");
 });

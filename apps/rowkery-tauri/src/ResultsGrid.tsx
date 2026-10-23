@@ -1122,6 +1122,12 @@ function ResultsGridView({
 
   return (
     <>
+      {/* A RAISE WARNING from a query that returns rows, above them. */}
+      {result.warning && (
+        <div className="results-warning results-warning-bar" data-warning>
+          Warning: {result.warning}
+        </div>
+      )}
       <div
         data-testid="results-grid-wrap"
         className={`results-grid-wrap${revealing ? " rg-reveal" : ""}`}

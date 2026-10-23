@@ -1534,6 +1534,12 @@ function App() {
             openAgents(tab);
           }}
           onClose={() => setNewConnOpen(false)}
+          beforeSave={async () => {
+            // Saving an edit reconnects its windows: never over a tab's open transaction.
+            if (!editingId) return true;
+            const on = windowsRef.current.filter((w) => w.connectionId === editingId && w.state === "connected");
+            return !(await transactionInTheWay(on.map((w) => w.id)));
+          }}
           onDeleted={(id) => {
             setNewConnOpen(false);
             void onConnectionDeleted(id);

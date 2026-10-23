@@ -127,6 +127,10 @@ pub struct PostgresSession {
     statements: std::sync::Mutex<std::collections::VecDeque<(String, Statement)>>,
     /// In its `application_name` after [`APP_NAME`].
     tag: String,
+    /// A cancel meant for a finished statement landed on one of ours inside
+    /// the user's transaction and aborted it (see
+    /// [`session_take_cancel_aborted`]).
+    cancel_aborted: bool,
     /// Whatever the owner ties to the session's life (the bridge keeps its
     /// place under the per-connection cap here): dropped with the session.
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
@@ -420,6 +424,7 @@ pub async fn open_session_via(
         txn: TxnState::None,
         statements: Default::default(),
         tag,
+        cancel_aborted: false,
         guard: None,
     })
 }
@@ -980,23 +985,49 @@ pub async fn session_probe_txn(session: &mut PostgresSession, limit: Duration) -
 
 /// After a cancel, what the cancelled statement left: a transaction it
 /// opened, ended or failed (a failed one is still open: the user must roll
-/// it back). A paged result's cursor is closed first. The cancel may have
-/// arrived only after the statement finished and land on the probe instead
-/// (57014); the probe then asks once more. `Unknown` when the server
-/// doesn't answer within `limit`.
+/// it back). A paged result's cursor goes first: our own cursor
+/// transaction is rolled back whatever the cancel left it in, and one in the
+/// user's transaction is closed. The cancel may have arrived only after the
+/// statement finished and land on one of these statements instead (57014):
+/// each is tried again, and if that aborted the user's transaction, the
+/// tab's next statement says why (`session_take_cancel_aborted`). `Unknown`
+/// when the server doesn't answer within `limit`.
 pub async fn session_probe_after_cancel(
     session: &mut PostgresSession,
     limit: Duration,
 ) -> TxnState {
-    session_close_cursor(session).await;
-    session.txn = TxnState::Unknown;
-    for _ in 0..2 {
-        if let Some(state) = probe_txn(session, limit).await {
-            session.txn = state;
-            break;
+    let mut hit = false;
+    if let Some(cursor) = session.cursor.take() {
+        let sql = if cursor.ours {
+            "ROLLBACK".to_string()
+        } else {
+            format!("CLOSE {CURSOR}")
+        };
+        for _ in 0..2 {
+            match tokio::time::timeout(limit, session.client.batch_execute(&sql)).await {
+                Ok(Err(err)) if err.code() == Some(&SqlState::QUERY_CANCELED) => hit = true,
+                _ => break,
+            }
         }
     }
+    session.txn = TxnState::Unknown;
+    for _ in 0..3 {
+        match probe_txn(session, limit).await {
+            Some(state) => {
+                session.txn = state;
+                break;
+            }
+            None => hit = true,
+        }
+    }
+    session.cancel_aborted = hit && session.txn == TxnState::Users;
     session.txn
+}
+
+/// Whether a cancel aborted the user's transaction after their statement
+/// had finished (see [`session_probe_after_cancel`]); asking clears it.
+pub fn session_take_cancel_aborted(session: &mut PostgresSession) -> bool {
+    std::mem::take(&mut session.cancel_aborted)
 }
 
 /// [`session_probe_txn`]'s question; `None` when a cancel stopped it.
@@ -1015,10 +1046,10 @@ async fn probe_txn(session: &PostgresSession, limit: Duration) -> Option<TxnStat
                     .batch_execute("RELEASE SAVEPOINT rowkery_probe"),
             )
             .await;
-            if matches!(released, Ok(Ok(()))) {
-                TxnState::Users
-            } else {
-                TxnState::Unknown
+            match released {
+                Ok(Ok(())) => TxnState::Users,
+                Ok(Err(err)) if err.code() == Some(&SqlState::QUERY_CANCELED) => return None,
+                _ => TxnState::Unknown,
             }
         }
         Ok(Err(err)) if err.code() == Some(&SqlState::QUERY_CANCELED) => return None,
