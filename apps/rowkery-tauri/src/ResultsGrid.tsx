@@ -22,6 +22,7 @@ import { isMacPlatform } from "./platform";
 import { showToast, toastPreview } from "./notify";
 import { cellsToCsv } from "./resultsExport";
 import { parsePaste } from "./editBuffer";
+import { gridCopyRoundtrip, recordGridCopy } from "./gridClipboard";
 import { GridMenu, type GridMenuItem } from "./GridMenu";
 import { cellMenu, headerMenu as headerMenuRows } from "./contextMenus";
 import type { CommandState } from "./commands";
@@ -163,9 +164,16 @@ function isSetNull(e: { code: string; metaKey: boolean; ctrlKey: boolean; altKey
   return !!chord && eventMatches(e, chord, isMacPlatform());
 }
 
-async function copyText(text: string) {
+function copyCellValue(shown: { isNull: (r: number, c: number) => boolean; get: (r: number, c: number) => Value }, r: number, c: number): Value | null {
+  if (shown.isNull(r, c)) return null;
+  const v = shown.get(r, c);
+  return !v || "Null" in v ? null : v;
+}
+
+async function copyText(text: string, cells?: (Value | null)[][]) {
   try {
     await navigator.clipboard.writeText(text);
+    if (cells) recordGridCopy(text, cells, false);
     showToast("Copied", toastPreview(text) || "empty");
   } catch {
     // Clipboard can be unavailable (permissions, headless proof runs).
@@ -764,7 +772,8 @@ function ResultsGridView({
       if (!multi && !withHeader) {
         // One cell copies its value as is, unquoted.
         const { row, col } = sel.active;
-        void copyText(shown.isNull(row, col) ? "NULL" : shown.text(row, col));
+        const text = shown.isNull(row, col) ? "NULL" : shown.text(row, col);
+        void copyText(text, [[copyCellValue(shown, row, col)]]);
         return;
       }
       const nRows = r1 - r0 + 1;
@@ -774,13 +783,21 @@ function ResultsGridView({
           ? `Copied ${nRows.toLocaleString()} ${nRows === 1 ? "row" : "rows"}`
           : `Copied ${(nRows * nCols).toLocaleString()} ${nRows * nCols === 1 ? "cell" : "cells"}`;
       const detail = withHeader ? "CSV with header" : "CSV";
-      navigator.clipboard
-        .writeText(cellsToCsv(result, r0, r1, c0, c1, withHeader, shown.text))
-        .then(
-          () => showToast(label, detail),
-          // Clipboard can be unavailable (permissions, headless proof runs).
-          () => showToast("Couldn't copy", undefined, "error"),
-        );
+      const csvText = cellsToCsv(result, r0, r1, c0, c1, withHeader, shown.text);
+      const cells: (Value | null)[][] = [];
+      for (let r = r0; r <= r1; r++) {
+        const line: (Value | null)[] = [];
+        for (let c = c0; c <= c1; c++) line.push(copyCellValue(shown, r, c));
+        cells.push(line);
+      }
+      navigator.clipboard.writeText(csvText).then(
+        () => {
+          recordGridCopy(csvText, cells, withHeader);
+          showToast(label, detail);
+        },
+        // Clipboard can be unavailable (permissions, headless proof runs).
+        () => showToast("Couldn't copy", undefined, "error"),
+      );
     },
     [result, rect, sel, multi, shown, columns.length],
   );
@@ -1138,7 +1155,11 @@ function ResultsGridView({
           if (!editing || !sel || editor) return;
           e.preventDefault();
           if (editing.refusal) editing.onRefused();
-          else editing.paste(sel.active.row, sel.active.col, parsePaste(e.clipboardData.getData("text/plain")));
+          else {
+            const plain = e.clipboardData.getData("text/plain");
+            const typed = gridCopyRoundtrip(plain);
+            editing.paste(sel.active.row, sel.active.col, typed ? typed.map((row) => row.map(() => "")) : parsePaste(plain), typed);
+          }
         }}
       >
         <GridMenu at={menuAt} items={menuItems} name="grid" label="Cell" onPick={pickMenu} onClose={closeMenu} />

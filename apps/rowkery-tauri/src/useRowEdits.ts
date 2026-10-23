@@ -182,30 +182,50 @@ export function useRowEdits(o: Options) {
 
   /** A pasted block, cell by cell from the ring; what falls outside, or doesn't parse, is left. */
   const paste = useCallback(
-    (row: number, col: number, block: string[][]) => {
+    (row: number, col: number, block: string[][], typed?: (Value | null)[][] | null) => {
       let total = 0;
       let staged = 0;
+      let outside = 0;
+      let refused = 0;
+      const grid = typed ?? block;
       update((b) => {
         let next = b;
-        block.forEach((line, i) =>
-          line.forEach((text, j) => {
+        grid.forEach((line, i) =>
+          line.forEach((_cell, j) => {
             total++;
             const r = row + i;
             const c = col + j;
             const ed = editors[c];
             const key = r < rows.length ? keyOf(r) : null;
-            if (!ed || !key || states.get(r)?.mark === "delete") return;
+            if (!ed || !key || states.get(r)?.mark === "delete") {
+              outside++;
+              return;
+            }
+            if (typed) {
+              const value = typed[i][j];
+              next = stageCell(next, key, names[c], value, rows.isNull(r, c) ? null : rows.get(r, c), ed.kind);
+              staged++;
+              return;
+            }
+            const text = block[i][j];
             const asNull = text === "NULL" || (text === "" && ed.kind !== "text");
             const parsed = asNull ? { value: null } : parseInput(ed.kind, text);
-            if ("error" in parsed) return;
+            if ("error" in parsed) {
+              refused++;
+              return;
+            }
             next = stageCell(next, key, names[c], parsed.value, rows.isNull(r, c) ? null : rows.get(r, c), ed.kind);
             staged++;
           }),
         );
         return next;
       });
-      if (staged < total) showToast(`Pasted ${staged} of ${total} cells · the rest fell outside the table`);
-      else showToast(`Pasted ${staged} ${staged === 1 ? "cell" : "cells"}`);
+      if (staged < total) {
+        const rest: string[] = [];
+        if (outside) rest.push(`${outside} outside the table`);
+        if (refused) rest.push(`${refused} didn't parse`);
+        showToast(`Pasted ${staged} of ${total} cells · ${rest.join(" · ")}`);
+      } else showToast(`Pasted ${staged} ${staged === 1 ? "cell" : "cells"}`);
     },
     [editors, rows, keyOf, names, states, update],
   );

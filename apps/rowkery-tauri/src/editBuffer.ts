@@ -394,8 +394,69 @@ export function editorStartText(kind: EditorKind, initial: Value | null): string
   return kind === "json" ? jsonEditorText(raw) : raw;
 }
 
-/** A pasted block: TSV when it has tabs, else one value per line. */
+/** Spreadsheet-style fields: `"` quotes; `""` is a literal quote; newlines and tabs may sit inside quotes. */
+export function parseDelimited(text: string, sep: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let i = 0;
+  let quoted = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          quoted = false;
+          i++;
+        }
+      } else {
+        field += ch;
+        i++;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      quoted = true;
+      i++;
+      continue;
+    }
+    if (ch === sep) {
+      row.push(field);
+      field = "";
+      i++;
+      continue;
+    }
+    if (ch === "\n") {
+      row.push(field);
+      field = "";
+      rows.push(row);
+      row = [];
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  row.push(field);
+  rows.push(row);
+  return rows;
+}
+
+/**
+ * A pasted block: quote-aware TSV when it has tabs; else CSV when every row
+ * shares the same field count (>1); else one value per line (quoted newlines
+ * still parse as one field).
+ */
 export function parsePaste(text: string): string[][] {
-  const lines = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
-  return lines.map((l) => (l.includes("\t") ? l.split("\t") : [l]));
+  const s = text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+  if (s.includes("\t")) return parseDelimited(s, "\t");
+  const csv = parseDelimited(s, ",");
+  const w = csv[0]?.length ?? 0;
+  if (w > 1 && csv.length > 1 && csv.every((r) => r.length === w)) return csv;
+  if (s.includes('"')) return csv;
+  if (s === "") return [[""]];
+  return s.split("\n").map((l) => [l]);
 }

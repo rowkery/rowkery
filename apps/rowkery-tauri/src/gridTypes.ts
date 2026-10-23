@@ -58,7 +58,7 @@ export interface GridEditing {
   removeInsert: (id: number) => void;
   duplicate: (rows: number[]) => void;
   toggleDelete: (rows: number[]) => void;
-  paste: (row: number, col: number, block: string[][]) => void;
+  paste: (row: number, col: number, block: string[][], typed?: (Value | null)[][] | null) => void;
   /** The foreign key picker's search of the referenced table. */
   searchKey?: (col: number, query: string) => Promise<KeyChoice[]>;
   /** A new row ⌘I just added: its first column's editor opens. */

@@ -142,6 +142,23 @@ describe("typed input", () => {
     expect(parsePaste("a\tb\r\nc\td\n")).toEqual([["a", "b"], ["c", "d"]]);
     expect(parsePaste("one\ntwo")).toEqual([["one"], ["two"]]);
   });
+
+  test("quoted TSV keeps embedded tabs, newlines and quotes", () => {
+    expect(parsePaste('a\t"b\tc"\nd')).toEqual([["a", "b\tc"], ["d"]]);
+    expect(parsePaste('"line1\nline2"\tx')).toEqual([["line1\nline2", "x"]]);
+    expect(parsePaste('"say ""hi"""')).toEqual([['say "hi"']]);
+  });
+
+  test("CSV without tabs when every row shares more than one field", () => {
+    expect(parsePaste("a,b\nc,d")).toEqual([["a", "b"], ["c", "d"]]);
+    expect(parsePaste('"a,b",c')).toEqual([["a,b", "c"]]);
+  });
+
+  test("plain lines stay one value per row", () => {
+    expect(parsePaste("only")).toEqual([["only"]]);
+    expect(parsePaste("x\ny\n")).toEqual([["x"], ["y"]]);
+    expect(parsePaste("one,two")).toEqual([["one,two"]]);
+  });
 });
 
 describe("a value closed as it opened stages nothing", () => {
