@@ -37,9 +37,10 @@ export const MAX_BODY_BYTES = 20_000;
 const LABEL = "user-report";
 
 /**
- * The app's own webview origins (Tauri 2 without useHttpsScheme): macOS, then
- * Windows/Linux, then `npm run tauri dev` (devUrl in tauri.conf.json, and dev
- * builds read the report URL from .env too). Any other website gets no CORS
+ * The app's own webview origins (Tauri 2 without useHttpsScheme): macOS and
+ * Linux, then Windows, then `npm run tauri dev` (devUrl in tauri.conf.json, and
+ * dev builds read the report URL from .env too; a TAURI_DEV_HOST other than
+ * localhost can't send reports). Any other website gets no CORS
  * headers and a 403, so it can't make its visitors' browsers file reports.
  * Requests with no Origin (curl) aren't a browser; the rate limit covers them.
  */
@@ -142,48 +143,59 @@ async function createIssue(env: Env, issue: { title: string; body: string; label
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const origin = request.headers.get("origin");
-    const foreign = origin !== null && !APP_ORIGINS.has(origin);
-    if (request.method === "OPTIONS") return new Response(null, { status: foreign ? 403 : 204, headers: cors(origin) });
-    const json = (status: number, body: unknown) => reply(status, body, origin);
-    const url = new URL(request.url);
-    // The root also takes reports, so a build whose report URL left off /report still works.
-    if (url.pathname !== "/report" && url.pathname !== "/") return json(404, { ok: false, error: "Not found" });
-    if (request.method !== "POST") return json(405, { ok: false, error: "Use POST" });
-
-    if (foreign) return json(403, { ok: false, error: "Reports come from the Rowkery app" });
-
-    // Fail closed: without a limiter, or a client IP to key it by, anyone could
-    // file reports without limit (or share one bucket with everyone else).
-    if (!env.REPORT_LIMITER) {
-      console.error("REPORT_LIMITER binding is missing");
-      return json(503, { ok: false, error: "Reporting is unavailable right now" });
-    }
-    const ip = request.headers.get("cf-connecting-ip");
-    if (!ip) return json(400, { ok: false, error: "Missing client address" });
-    if (!(await env.REPORT_LIMITER.limit({ key: ip })).success) {
-      return json(429, { ok: false, error: "Too many reports, try again in a minute" });
-    }
-
-    const raw = await request.text();
-    if (new TextEncoder().encode(raw).length > MAX_BODY_BYTES) {
-      return json(413, { ok: false, error: "The report is too long" });
-    }
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return json(400, { ok: false, error: "Expected JSON" });
+      return await handle(request, env);
+    } catch (e) {
+      // A throw would reach the app as Cloudflare's error page with no CORS
+      // headers, which the sheet can only show as "couldn't reach".
+      console.error("relay failed", e);
+      return reply(500, { ok: false, error: "Couldn't file the report" }, request.headers.get("origin"));
     }
-    const report = parseReport(parsed);
-    if (typeof report === "string") return json(400, { ok: false, error: report });
-
-    const res = await createIssue(env, { ...issueFor(report), labels: [KINDS[report.kind].label] });
-    if (!res.ok) {
-      console.error("GitHub refused the issue", res.status, await res.text());
-      return json(502, { ok: false, error: "Couldn't file the report" });
-    }
-    const { number } = (await res.json()) as { number: number };
-    return json(200, { ok: true, number });
   },
 };
+
+async function handle(request: Request, env: Env): Promise<Response> {
+  const origin = request.headers.get("origin");
+  const foreign = origin !== null && !APP_ORIGINS.has(origin);
+  if (request.method === "OPTIONS") return new Response(null, { status: foreign ? 403 : 204, headers: cors(origin) });
+  const json = (status: number, body: unknown) => reply(status, body, origin);
+  const url = new URL(request.url);
+  // The root also takes reports, so a build whose report URL left off /report still works.
+  if (url.pathname !== "/report" && url.pathname !== "/") return json(404, { ok: false, error: "Not found" });
+  if (request.method !== "POST") return json(405, { ok: false, error: "Use POST" });
+
+  if (foreign) return json(403, { ok: false, error: "Reports come from the Rowkery app" });
+
+  // Fail closed: without a limiter, or a client IP to key it by, anyone could
+  // file reports without limit (or share one bucket with everyone else).
+  if (!env.REPORT_LIMITER) {
+    console.error("REPORT_LIMITER binding is missing");
+    return json(503, { ok: false, error: "Reporting is unavailable right now" });
+  }
+  const ip = request.headers.get("cf-connecting-ip");
+  if (!ip) return json(400, { ok: false, error: "Missing client address" });
+  if (!(await env.REPORT_LIMITER.limit({ key: ip })).success) {
+    return json(429, { ok: false, error: "Too many reports, try again in a minute" });
+  }
+
+  const raw = await request.text();
+  if (new TextEncoder().encode(raw).length > MAX_BODY_BYTES) {
+    return json(413, { ok: false, error: "The report is too long" });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return json(400, { ok: false, error: "Expected JSON" });
+  }
+  const report = parseReport(parsed);
+  if (typeof report === "string") return json(400, { ok: false, error: report });
+
+  const res = await createIssue(env, { ...issueFor(report), labels: [KINDS[report.kind].label] });
+  if (!res.ok) {
+    console.error("GitHub refused the issue", res.status, await res.text());
+    return json(502, { ok: false, error: "Couldn't file the report" });
+  }
+  const { number } = (await res.json()) as { number: number };
+  return json(200, { ok: true, number });
+}
