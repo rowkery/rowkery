@@ -2296,6 +2296,7 @@ fn sqlite_tabs_keep_their_connection_between_runs() {
     let out = bridge
         .apply_changes(
             "w1",
+            "cancel-sqlite",
             1,
             orders.clone(),
             vec![update(1, "item", Value::Text("y".into()))],
@@ -2327,6 +2328,7 @@ fn sqlite_tabs_keep_their_connection_between_runs() {
     let out = bridge
         .apply_changes(
             "w1",
+            "cancel-sqlite",
             1,
             orders,
             vec![update(1, "item", Value::Text("y".into()))],
