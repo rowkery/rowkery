@@ -28,12 +28,22 @@ function sslFrom(mode: string | null | undefined): PgForm["ssl"] | undefined {
   return "prefer";
 }
 
-/** Percent-decodes, keeping the text as typed when it isn't valid (`p%zz`): this runs during render. */
+/**
+ * Percent-decodes; where the text isn't all valid (`a%41%zz`), each run of
+ * escapes that is decodes and the rest stays as typed (`aA%zz`). This runs
+ * during render, so it never throws.
+ */
 function decode(s: string): string {
   try {
     return decodeURIComponent(s);
   } catch {
-    return s;
+    return s.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    });
   }
 }
 
