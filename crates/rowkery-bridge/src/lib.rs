@@ -150,6 +150,8 @@ enum Command {
     /// Staged row edits, committed as one transaction on the tab's session.
     ApplyChanges {
         window_id: String,
+        /// The connection the edits were staged on: refused unless the window is still on it.
+        connection_id: String,
         tab_id: u64,
         table: EditTable,
         changes: Vec<Change>,
@@ -1467,6 +1469,7 @@ impl EventSink for InvalidateOnFinish {
 fn apply_changes_now(
     state: &mut CoreState,
     window_id: String,
+    staged_on: &str,
     tab_id: u64,
     table: EditTable,
     changes: Vec<Change>,
@@ -1477,10 +1480,26 @@ fn apply_changes_now(
         let _ = respond_to.send(Err("This window is not connected".into()));
         return;
     };
-    let (engine, safe_mode) = match &target {
-        WindowTarget::Sqlite { safe_mode, .. } => (EngineKind::Sqlite, *safe_mode),
-        WindowTarget::Postgres { config, .. } => (EngineKind::Postgres, config.safe_mode),
+    let (engine, safe_mode, connection_id) = match &target {
+        WindowTarget::Sqlite {
+            safe_mode,
+            connection_id,
+            ..
+        } => (EngineKind::Sqlite, *safe_mode, connection_id),
+        WindowTarget::Postgres {
+            config,
+            connection_id,
+        } => (EngineKind::Postgres, config.safe_mode, connection_id),
     };
+    // Edits staged on one server never run on another the window moved to
+    // (a table of the same name there is not the same rows).
+    if connection_id != staged_on {
+        let _ = respond_to.send(Err(
+            "These edits were staged on another connection. Switch back to it to commit them."
+                .into(),
+        ));
+        return;
+    }
     let statements = match build_row_changes(engine, &table, &changes) {
         Ok(s) if s.is_empty() => {
             let _ = respond_to.send(Err("Nothing to commit".into()));
@@ -2975,13 +2994,21 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
         }
         Command::ApplyChanges {
             window_id,
+            connection_id,
             tab_id,
             table,
             changes,
             confirmed,
             respond_to,
         } => apply_changes_now(
-            state, window_id, tab_id, table, changes, confirmed, respond_to,
+            state,
+            window_id,
+            &connection_id,
+            tab_id,
+            table,
+            changes,
+            confirmed,
+            respond_to,
         ),
         Command::ImportCsv {
             window_id,
@@ -3714,10 +3741,12 @@ impl CoreBridge {
     /// (see `rowkery_core::edits`). Every statement must change exactly one
     /// row or nothing is kept. Safe mode decides first: Confirm writes holds
     /// the batch until it comes back with `confirmed` set to the `sql` the
-    /// hold returned; Read-only refuses it.
+    /// hold returned; Read-only refuses it. `connection_id` is the connection
+    /// the edits were staged on: refused when the window is on another.
     pub fn apply_changes(
         &self,
         window_id: &str,
+        connection_id: &str,
         tab_id: u64,
         table: EditTable,
         changes: Vec<Change>,
@@ -3725,6 +3754,7 @@ impl CoreBridge {
     ) -> Result<ApplyOutcome, String> {
         self.send_command(|respond_to| Command::ApplyChanges {
             window_id: window_id.to_string(),
+            connection_id: connection_id.to_string(),
             tab_id,
             table,
             changes,

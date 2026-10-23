@@ -55,7 +55,7 @@ export function liveOffer(): Offer | null {
  * whose button (or ↵ where the text went) does `run`. Any other toast drops it.
  */
 export function showOfferToast(message: string, label: string, detail: string | undefined, o: Offer) {
-  commitPending();
+  commitUnlessLasting();
   shown++;
   window.dispatchEvent(
     new CustomEvent<ToastMessage>(EVENT, { detail: { message, detail, tone: o.tone ?? "ok", offer: label, offerMouseOnly: o.mouseOnly } }),
@@ -68,15 +68,44 @@ export interface Undoable {
   undo: () => void;
   /** The deferred part (removing keychain entries…); runs when the toast leaves any way but Undo. */
   commit?: () => void;
+  /**
+   * A toast that isn't another Undo leaves it pending (Discard edits): ⌥⌘Z
+   * still takes it, and its toast comes back once the other one goes.
+   */
+  lasting?: boolean;
 }
 
 let pending: Undoable | null = null;
+/** The live Undo's own toast, to show again after a toast that didn't end it. */
+let pendingToast: ToastMessage | null = null;
 
 /** Makes the pending action final (a new toast replaced it, or it timed out). */
 export function commitPending() {
   const p = pending;
   pending = null;
+  pendingToast = null;
   p?.commit?.();
+}
+
+/** A plain toast or an offer: ends the pending action unless it is `lasting`. */
+function commitUnlessLasting() {
+  if (!pending?.lasting) commitPending();
+}
+
+/** Makes `action` final if it is still the pending one (another edit made its Undo stale). */
+export function settlePending(action: Undoable) {
+  if (pending === action) commitPending();
+}
+
+/**
+ * A toast went and a `lasting` Undo is still pending: its toast shows again
+ * (for its full 10 s). False when there is none.
+ */
+export function resumeLastingUndo(): boolean {
+  if (!pending?.lasting || !pendingToast) return false;
+  shown++;
+  window.dispatchEvent(new CustomEvent<ToastMessage>(EVENT, { detail: pendingToast }));
+  return true;
 }
 
 /** Undo for the live toast; false when nothing is pending. */
@@ -84,6 +113,7 @@ export function undoPending(): boolean {
   const p = pending;
   if (!p) return false;
   pending = null;
+  pendingToast = null;
   p.undo();
   return true;
 }
@@ -100,10 +130,10 @@ export function showUndoToast(message: string, detail: string | undefined, actio
   commitPending();
   offer = null;
   shown++;
-  window.dispatchEvent(
-    new CustomEvent<ToastMessage>(EVENT, { detail: { message, detail, tone: "ok", undoable: true } }),
-  );
+  const toast: ToastMessage = { message, detail, tone: "ok", undoable: true };
+  window.dispatchEvent(new CustomEvent<ToastMessage>(EVENT, { detail: toast }));
   pending = action;
+  pendingToast = toast;
 }
 
 const EVENT = "rowkery:toast";
@@ -114,7 +144,7 @@ export function showToast(
   detail?: string,
   tone: ToastTone = "ok",
 ) {
-  commitPending();
+  commitUnlessLasting();
   offer = null;
   shown++;
   window.dispatchEvent(

@@ -91,7 +91,7 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
-import { showOfferToast, showToast, showUndoToast } from "./notify";
+import { settlePending, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -124,7 +124,18 @@ import { Presence, useSlidingThumb, useTabPresence } from "./motion";
 import { EnvTag } from "./EnvTag";
 import { GridMenu, useContextMenu } from "./GridMenu";
 import { tabMenu as tabMenuRows } from "./contextMenus";
-import { bufferChanges, changeCount, editTableOf, savedBuffer, withoutCommitted, type EditBuffer } from "./editBuffer";
+import {
+  bindEdits,
+  bufferChanges,
+  changeCount,
+  editTableOf,
+  escMayDiscard,
+  REVIEW_DELETES_OVER,
+  savedBuffer,
+  savedParked,
+  withoutCommitted,
+  type EditBuffer,
+} from "./editBuffer";
 import { EditTray, type TrayState } from "./EditTray";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
 import { SqlFilePanel } from "./SqlFilePanel";
@@ -362,7 +373,9 @@ export function Workspace({
           id: i + 1,
           sort: sortKeys(t.sort),
           chips: t.kind === "table" ? (savedChips(t.chips) ?? chipsFromFilter(t.filter)) : undefined,
-          edits: t.kind === "table" ? savedBuffer(t.edits) : undefined,
+          // A buffer saved before buffers named their connection is the window's saved one's.
+          edits: t.kind === "table" ? savedBuffer(t.edits, session.connectionId) : undefined,
+          parked: t.kind === "table" ? savedParked(t.parked) : undefined,
         }))
       : [queryTab(1, "Query 1", "SELECT 1;")],
   );
@@ -405,6 +418,7 @@ export function Workspace({
       pageSize: t.pageSize,
       preview: t.preview,
       edits: t.edits,
+      parked: t.parked,
     }));
     onTabsChange(
       session.id,
@@ -434,6 +448,11 @@ export function Workspace({
   const renderError = activeRun.error;
   const runStartedAt = activeRun.startedAt;
   const cancelling = activeRun.cancelling;
+  /** When the shown tab last stopped running: an Esc just after it was meant for the run (`escMayDiscard`). */
+  const runEnd = useRef<{ running: boolean; endedAt: number | null }>({ running: false, endedAt: null });
+  if (runEnd.current.running !== (runStartedAt !== null)) {
+    runEnd.current = { running: runStartedAt !== null, endedAt: runStartedAt !== null ? null : performance.now() };
+  }
   const busy = runStartedAt !== null;
   /** A short confirmation in the results header ("Copied 100 rows as CSV"). */
   const [notice, setNotice] = useState<string | null>(null);
@@ -1011,6 +1030,7 @@ export function Workspace({
   // Staged row edits on a table tab (editBuffer.ts): the grid's editors and marks.
   const rowEdits = useRowEdits({
     windowId,
+    connectionId: activeId,
     tab: activeTab,
     setEdits: (tabId, edits) => setTabEdits(tabId, edits),
     result: isTableTab ? result : null,
@@ -1063,6 +1083,12 @@ export function Workspace({
     tabId: number,
     next: EditBuffer | undefined | ((cur: EditBuffer | undefined) => EditBuffer | undefined),
   ) => {
+    // Another edit on the tab: the last Discard's Undo would now overwrite it.
+    const discarded = discardUndo.current;
+    if (discarded && discarded.tabId === tabId) {
+      discardUndo.current = null;
+      settlePending(discarded.action);
+    }
     setTabs((prev) =>
       prev.map((t) => {
         if (t.id !== tabId) return t;
@@ -1101,6 +1127,18 @@ export function Workspace({
   const commitEdits = async (confirmed?: string) => {
     const target = editTarget();
     if (!target || committing.current.has(target.tab.id)) return;
+    // Many deletes, or every loaded row (⌘A ⌫): Review SQL first, even with
+    // safe mode off; its Commit sends back the SQL it showed.
+    if (confirmed === undefined && rowEdits.reviewFirst) {
+      const n = Object.keys(target.buffer.deletes).length;
+      openReview();
+      showToast(
+        n > REVIEW_DELETES_OVER
+          ? `Review ${n} deletes before they commit`
+          : "Every loaded row is marked for delete · review before it commits",
+      );
+      return;
+    }
     committing.current.add(target.tab.id);
     try {
       await commitBuffer(target, confirmed);
@@ -1113,7 +1151,7 @@ export function Workspace({
     setTray(tab.id, { kind: "committing" });
     let out;
     try {
-      out = await applyChanges(windowId, tab.id, table, bufferChanges(buffer), confirmed);
+      out = await applyChanges(windowId, buffer.connectionId, tab.id, table, bufferChanges(buffer), confirmed);
     } catch (e) {
       return setTray(tab.id, { kind: "failed", message: String(e) });
     }
@@ -1163,17 +1201,25 @@ export function Workspace({
       (e) => setReview((cur) => (cur?.tabId === tabId ? { ...cur, error: String(e) } : cur)),
     );
   };
-  /** Discard: the buffer goes at once; Undo (⌥⌘Z) puts it back. */
+  /**
+   * Discard: the buffer goes at once; Undo (⌥⌘Z) puts it back. The Undo
+   * outlasts unrelated toasts and lasts until the next edit on the tab.
+   */
+  const discardUndo = useRef<{ tabId: number; action: Undoable } | null>(null);
   const discardEdits = () => {
     const tab = activeTab;
-    const prev = tab?.edits;
+    const prev = rowEdits.buffer ?? undefined;
     const n = changeCount(prev);
     if (!tab || !n) return;
     setTabEdits(tab.id, undefined);
     setTray(tab.id, null);
-    showUndoToast(`Discarded ${n} ${n === 1 ? "edit" : "edits"}`, undefined, {
-      undo: () => setTabEdits(tab.id, prev),
-    });
+    const action: Undoable = {
+      // Puts it back as it was, and only into a tab with nothing staged since.
+      undo: () => setTabEdits(tab.id, (cur) => cur ?? prev),
+      lasting: true,
+    };
+    showUndoToast(`Discarded ${n} ${n === 1 ? "edit" : "edits"}`, undefined, action);
+    discardUndo.current = { tabId: tab.id, action };
   };
   const trayUp = isTableTab && resultsView === "data" && (rowEdits.count > 0 || !!trays[activeTabId]);
   const editKeysRef = useRef({ review: openReview });
@@ -1909,10 +1955,11 @@ export function Workspace({
         );
         return;
       }
-      // Esc, last (2026-10-13): with no cell open, no query running
-      // and nothing else to dismiss, it discards the tab's pending edits; the
-      // toast offers Undo, so there is no confirm. (A staged cell under the
-      // ring reverts alone first, in the grid.)
+      // Esc, last (2026-10-13): with no cell open, no query running (or
+      // just ended: that Esc was meant to cancel it) and nothing else to
+      // dismiss, it discards the tab's pending edits; the toast offers Undo,
+      // so there is no confirm. (A staged cell under the ring reverts alone
+      // first, in the grid.)
       if (
         e.key === "Escape" &&
         !paletteOpen &&
@@ -1920,7 +1967,8 @@ export function Workspace({
         !isTypingTarget(e.target) &&
         !escLeftSelection.has(e) &&
         isTableTabRef.current &&
-        rowEditsRef.current.count > 0
+        rowEditsRef.current.count > 0 &&
+        escMayDiscard(runEnd.current.running, runEnd.current.endedAt, performance.now())
       ) {
         e.preventDefault();
         runCommandRef.current("discard-edits");
@@ -2572,6 +2620,46 @@ export function Workspace({
    * The first connect only binds: restored tabs are this window's own.
    */
   const boundTo = useRef<string | null>(null);
+  /**
+   * Staged edits belong to the connection they were staged on (another
+   * server's table of the same name is not the same rows): on any other
+   * connection they are parked, kept with the tab but never shown or
+   * committed, and they come back when the window does. Also catches a
+   * reopened tab or an Undo that brings another connection's edits.
+   */
+  useEffect(() => {
+    if (!activeId) return;
+    let parkedN = 0;
+    let parkedOn: string | undefined;
+    let restoredN = 0;
+    let moved = false;
+    const next = tabsRef.current.map((t) => {
+      if (!t.edits && !t.parked) return t;
+      const b = bindEdits(t, activeId);
+      if (b.same) return t;
+      moved = true;
+      if (b.parkedNow) {
+        parkedN += changeCount(b.parkedNow);
+        parkedOn = b.parkedNow.connectionId;
+      }
+      if (b.restored) restoredN += changeCount(b.restored);
+      return { ...t, edits: b.edits, parked: b.parked };
+    });
+    if (!moved) return;
+    tabsRef.current = next;
+    setTabs(next);
+    // A review or a held commit showed the old connection's SQL.
+    if (parkedN) {
+      setReview(null);
+      setHeldEdits({});
+    }
+    if (!active) return;
+    const name = (id: string | undefined) => connections.find((c) => c.id === id)?.name ?? "the other connection";
+    const edits = (n: number) => `${n} ${n === 1 ? "edit" : "edits"}`;
+    if (parkedN) showToast(`Parked ${edits(parkedN)} staged on ${name(parkedOn)}`, "back when you switch to it");
+    else if (restoredN) showToast(`Restored ${edits(restoredN)} staged on ${name(activeId)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, tabs]);
   const boundKey = connState === "connected" && schema ? `${activeId}\0${session.database ?? ""}` : null;
   useEffect(() => {
     if (boundKey === null || boundTo.current === boundKey) return;

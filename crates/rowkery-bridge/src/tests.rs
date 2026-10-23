@@ -3462,6 +3462,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             1,
             k.clone(),
             vec![
@@ -3486,6 +3487,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     // A statement that matches no row rolls the whole batch back.
     let out = bridge
         .apply_changes(
+            "off",
             "off",
             1,
             k.clone(),
@@ -3514,6 +3516,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             1,
             dup,
             vec![
@@ -3537,6 +3540,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             1,
             t,
             vec![Change::Update {
@@ -3552,7 +3556,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     // Confirm writes: held with the exact text; only that text runs.
     let change = vec![update(2, "name", Value::Text("confirmed".into()))];
     let out = bridge
-        .apply_changes("confirm", 1, k.clone(), change.clone(), None)
+        .apply_changes("confirm", "confirm", 1, k.clone(), change.clone(), None)
         .expect("apply");
     let ApplyOutcome::Held { hold, sql } = out else {
         panic!("{out:?}")
@@ -3566,6 +3570,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     assert!(bridge
         .apply_changes(
             "confirm",
+            "confirm",
             1,
             k.clone(),
             change.clone(),
@@ -3573,7 +3578,14 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
         )
         .is_err());
     let out = bridge
-        .apply_changes("confirm", 1, k.clone(), change.clone(), Some(sql))
+        .apply_changes(
+            "confirm",
+            "confirm",
+            1,
+            k.clone(),
+            change.clone(),
+            Some(sql),
+        )
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
     assert_eq!(name_of(2), Some(Value::Text("confirmed".into())));
@@ -3582,7 +3594,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     let change = vec![update(2, "name", Value::Text("refused".into()))];
     let sql = review_changes(EngineKind::Sqlite, &k, &change).unwrap().sql;
     let out = bridge
-        .apply_changes("ro", 1, k.clone(), change, Some(sql))
+        .apply_changes("ro", "ro", 1, k.clone(), change, Some(sql))
         .expect("apply");
     let ApplyOutcome::Held { hold, .. } = out else {
         panic!("{out:?}")
@@ -3590,13 +3602,29 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     assert_eq!(hold.action, HoldAction::Refuse);
     assert_eq!(name_of(2), Some(Value::Text("confirmed".into())));
 
+    // Staged on another connection than the window's: refused, nothing runs,
+    // even with safe mode off and a table of the same name here.
+    let err = bridge
+        .apply_changes(
+            "off",
+            "confirm",
+            1,
+            k.clone(),
+            vec![update(2, "name", Value::Text("elsewhere".into()))],
+            None,
+        )
+        .expect_err("another connection's edits");
+    assert!(err.contains("another connection"), "{err}");
+    assert_eq!(name_of(2), Some(Value::Text("confirmed".into())));
+
     // Nothing to commit, or no key: refused before anything runs.
     assert!(bridge
-        .apply_changes("off", 1, k.clone(), vec![], None)
+        .apply_changes("off", "off", 1, k.clone(), vec![], None)
         .is_err());
     let keyless = edit_table("main", "k", &[("id", "INTEGER")], &[]);
     assert!(bridge
         .apply_changes(
+            "off",
             "off",
             1,
             keyless,
@@ -3693,6 +3721,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             1,
             table.clone(),
             vec![
@@ -3720,6 +3749,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     // Every literal kind round-trips through a committed batch.
     let out = bridge
         .apply_changes(
+            "off",
             "off",
             1,
             table.clone(),
@@ -3775,6 +3805,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             1,
             table.clone(),
             vec![update(1, "meta", Value::Null)],
@@ -3790,6 +3821,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     // A server error names the statement and keeps nothing.
     let out = bridge
         .apply_changes(
+            "off",
             "off",
             1,
             table.clone(),
@@ -3821,6 +3853,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             7,
             table.clone(),
             vec![update(10, "name", text("x"))],
@@ -3835,6 +3868,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     let out = bridge
         .apply_changes(
             "off",
+            "off",
             7,
             table.clone(),
             vec![update(10, "name", text("x"))],
@@ -3846,7 +3880,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     // Confirm writes: held with the statements, then exactly those run.
     let change = vec![update(10, "name", text("confirmed"))];
     let out = bridge
-        .apply_changes("confirm", 1, table.clone(), change.clone(), None)
+        .apply_changes("confirm", "confirm", 1, table.clone(), change.clone(), None)
         .expect("apply");
     let ApplyOutcome::Held { hold, sql } = out else {
         panic!("{out:?}")
@@ -3859,7 +3893,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
         Some(text("x"))
     );
     let out = bridge
-        .apply_changes("confirm", 1, table.clone(), change, Some(sql))
+        .apply_changes("confirm", "confirm", 1, table.clone(), change, Some(sql))
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
     assert_eq!(
@@ -3873,7 +3907,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
         .unwrap()
         .sql;
     let out = bridge
-        .apply_changes("ro", 1, table.clone(), change, Some(sql))
+        .apply_changes("ro", "ro", 1, table.clone(), change, Some(sql))
         .expect("apply");
     let ApplyOutcome::Held { hold, .. } = out else {
         panic!("{out:?}")
@@ -4341,6 +4375,7 @@ fn postgres_apply_changes_times_out_before_commit() {
     let out = bridge
         .apply_changes(
             "w",
+            "fixb-apply-timeout",
             1,
             table.clone(),
             vec![update(1, "name", Value::Text("edited".into()))],
@@ -4364,6 +4399,7 @@ fn postgres_apply_changes_times_out_before_commit() {
     let out = bridge
         .apply_changes(
             "w",
+            "fixb-apply-timeout",
             1,
             table,
             vec![update(1, "name", Value::Text("edited".into()))],

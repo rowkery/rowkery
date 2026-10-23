@@ -1320,18 +1320,27 @@ fn review_changes(
 }
 
 /// Commits staged edits as one transaction on the tab's session; held by
-/// Confirm writes until `confirmed` carries the SQL the user saw.
+/// Confirm writes until `confirmed` carries the SQL the user saw; refused
+/// when the window is no longer on `connection_id`, the edits' connection.
 #[tauri::command]
 async fn apply_changes(
     app: AppHandle,
     window_id: String,
+    connection_id: String,
     tab_id: u64,
     table: EditTable,
     changes: Vec<Change>,
     confirmed: Option<String>,
 ) -> Result<rowkery_bridge::ApplyOutcome, String> {
     on_blocking_pool(app, move |bridge| {
-        bridge.apply_changes(&window_id, tab_id, table, changes, confirmed)
+        bridge.apply_changes(
+            &window_id,
+            &connection_id,
+            tab_id,
+            table,
+            changes,
+            confirmed,
+        )
     })
     .await?
 }

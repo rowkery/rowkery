@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
 import { Presence } from "./motion";
-import { commitPending, hasPendingUndo, liveOffer, onToast, runOffer, takeOffer, undoPending, type ToastMessage } from "./notify";
+import {
+  commitPending,
+  hasPendingUndo,
+  liveOffer,
+  onToast,
+  resumeLastingUndo,
+  runOffer,
+  takeOffer,
+  undoPending,
+  type ToastMessage,
+} from "./notify";
 import { isMacPlatform } from "./platform";
 import { Keys } from "./Keys";
 
@@ -46,10 +56,12 @@ export function ToastHost() {
   useEffect(() => {
     if (!open || !toast) return;
     const timer = window.setTimeout(() => {
+      if (toast.offer) takeOffer();
+      // A toast shown over a lasting Undo (Discard edits) hands the place back to it.
+      if (!toast.undoable && resumeLastingUndo()) return;
       setOpen(false);
       // Gone without Undo: the action is final.
       if (toast.undoable) commitPending();
-      if (toast.offer) takeOffer();
     }, toast.undoable || toast.offer ? UNDO_MS : TOAST_MS);
     return () => window.clearTimeout(timer);
   }, [open, toast]);
