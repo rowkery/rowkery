@@ -7,7 +7,7 @@ export interface Env {
   GITHUB_TOKEN: string;
   /** "owner/name" that reports are filed in (private), set in wrangler.toml. */
   GITHUB_REPO: string;
-  /** Optional Cloudflare rate limiting binding, keyed by client IP. */
+  /** Cloudflare rate limiting binding, keyed by client IP (required in production). */
   REPORT_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
 }
 
@@ -36,17 +36,33 @@ const KINDS: Record<Kind, { label: string; name: string }> = {
 export const MAX_BODY_BYTES = 20_000;
 const LABEL = "user-report";
 
-const CORS = {
-  "access-control-allow-origin": "*",
+/** Webview and Vite dev origins that may POST reports from the browser. */
+export const ALLOWED_ORIGINS = new Set([
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+  "http://localhost:1420",
+]);
+
+const CORS_BASE = {
   "access-control-allow-methods": "POST, OPTIONS",
   "access-control-allow-headers": "content-type",
   "access-control-max-age": "86400",
+  vary: "Origin",
 };
 
-function json(status: number, body: unknown): Response {
+function corsHeaders(origin: string | null): Record<string, string> {
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    return { ...CORS_BASE, "access-control-allow-origin": origin };
+  }
+  return { ...CORS_BASE };
+}
+
+function json(status: number, body: unknown, request?: Request): Response {
+  const origin = request?.headers.get("Origin") ?? null;
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", ...CORS },
+    headers: { "content-type": "application/json", ...corsHeaders(origin) },
   });
 }
 
@@ -122,38 +138,62 @@ async function createIssue(env: Env, issue: { title: string; body: string; label
   return plain.status === 422 ? send([]) : plain;
 }
 
+function isJsonContentType(request: Request): boolean {
+  const ct = request.headers.get("content-type");
+  if (!ct) return false;
+  const media = ct.split(";")[0].trim().toLowerCase();
+  return media === "application/json";
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    const origin = request.headers.get("Origin");
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    }
+
     const url = new URL(request.url);
     // The root also takes reports, so a build whose report URL left off /report still works.
-    if (url.pathname !== "/report" && url.pathname !== "/") return json(404, { ok: false, error: "Not found" });
-    if (request.method !== "POST") return json(405, { ok: false, error: "Use POST" });
+    if (url.pathname !== "/report" && url.pathname !== "/") return json(404, { ok: false, error: "Not found" }, request);
+    if (request.method !== "POST") return json(405, { ok: false, error: "Use POST" }, request);
 
-    const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-    if (env.REPORT_LIMITER && !(await env.REPORT_LIMITER.limit({ key: ip })).success) {
-      return json(429, { ok: false, error: "Too many reports, try again in a minute" });
+    if (origin && !ALLOWED_ORIGINS.has(origin)) {
+      return json(403, { ok: false, error: "Forbidden" }, request);
+    }
+
+    if (!isJsonContentType(request)) {
+      return json(415, { ok: false, error: "Content-Type must be application/json" }, request);
+    }
+
+    if (!env.REPORT_LIMITER) {
+      return json(503, { ok: false, error: "Reporting is temporarily unavailable" }, request);
+    }
+
+    const rateKey = request.headers.get("cf-connecting-ip") ?? "no-client-ip";
+    if (!(await env.REPORT_LIMITER.limit({ key: rateKey })).success) {
+      return json(429, { ok: false, error: "Too many reports, try again in a minute" }, request);
     }
 
     const raw = await request.text();
     if (new TextEncoder().encode(raw).length > MAX_BODY_BYTES) {
-      return json(413, { ok: false, error: "The report is too long" });
+      return json(413, { ok: false, error: "The report is too long" }, request);
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return json(400, { ok: false, error: "Expected JSON" });
+      return json(400, { ok: false, error: "Expected JSON" }, request);
     }
     const report = parseReport(parsed);
-    if (typeof report === "string") return json(400, { ok: false, error: report });
+    if (typeof report === "string") return json(400, { ok: false, error: report }, request);
 
     const res = await createIssue(env, { ...issueFor(report), labels: [KINDS[report.kind].label] });
     if (!res.ok) {
       console.error("GitHub refused the issue", res.status, await res.text());
-      return json(502, { ok: false, error: "Couldn't file the report" });
+      return json(502, { ok: false, error: "Couldn't file the report" }, request);
     }
     const { number } = (await res.json()) as { number: number };
-    return json(200, { ok: true, number });
+    return json(200, { ok: true, number }, request);
   },
 };

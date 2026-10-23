@@ -2,7 +2,7 @@
 
 A Cloudflare Worker that files reports from Rowkery's **Help > Report an Issue…** sheet as issues in the private repo `rowkery/reports` (`GITHUB_REPO` in `wrangler.toml`), labelled `user-report`. The GitHub token stays in the Worker as a secret, so the app never holds one, and users need no GitHub account. The Worker stores nothing.
 
-`POST /report` takes JSON `{ description, app, database?, error?, query? }` (at most 20 KB) and answers `{ ok: true, number }` or `{ ok: false, error }`. Each IP may send 3 reports a minute (`[[ratelimits]]` in `wrangler.toml`).
+`POST /report` takes JSON `{ description, app, database?, error?, query? }` with `Content-Type: application/json` (at most 20 KB) and answers `{ ok: true, number }` or `{ ok: false, error }`. Browser requests must come from the Rowkery app (`tauri://localhost`, `http(s)://tauri.localhost`, or `http://localhost:1420` in dev); other `Origin` values get 403. Requests with no `Origin` (e.g. `curl`) are accepted. CORS reflects an allowed origin and sends `Vary: Origin`. Each IP may send 3 reports a minute (`[[ratelimits]]` in `wrangler.toml`); the Worker returns 503 if that binding is missing.
 
 Reports go to a private repo because they can carry a user's error text and query. Public issues on `rowkery/rowkery` stay open for anyone with a GitHub account (2026-10-16).
 
@@ -37,4 +37,4 @@ npm test          # Node 22+, fake GitHub, nothing is filed
 
    For the **Create DMG** workflow, add the same URL as a repository secret named `VITE_ROWKERY_REPORT_URL` (Settings > Secrets and variables > Actions > New repository secret).
 
-Check it with `curl -X POST <url> -d '{"description":"relay test","app":"curl"}'`, which should file an issue in `rowkery/reports`.
+Check it with `curl -X POST <url> -H 'Content-Type: application/json' -d '{"description":"relay test","app":"curl"}'` (no `Origin` header), which should file an issue in `rowkery/reports`.

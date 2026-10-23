@@ -17,12 +17,17 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 
-const env: Env = { GITHUB_TOKEN: "t", GITHUB_REPO: "rowkery/reports" };
-const post = (body: unknown, e: Env = env) =>
+const okLimiter = { limit: async () => ({ success: true }) };
+const env: Env = { GITHUB_TOKEN: "t", GITHUB_REPO: "rowkery/reports", REPORT_LIMITER: okLimiter };
+const post = (body: unknown, e: Env = env, extra: Record<string, string> = {}) =>
   relay.fetch(
     new Request("https://relay.example/report", {
       method: "POST",
-      headers: { "cf-connecting-ip": "1.2.3.4" },
+      headers: {
+        "cf-connecting-ip": "1.2.3.4",
+        "content-type": "application/json",
+        ...extra,
+      },
       body: typeof body === "string" ? body : JSON.stringify(body),
     }),
     e,
@@ -34,7 +39,7 @@ const report = {
 };
 
 test("files an issue with the user-report label and returns its number", async () => {
-  const res = await post(report);
+  const res = await post(report, env, { Origin: "http://localhost:1420" });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true, number: 7 });
   assert.equal(calls.length, 1);
@@ -43,7 +48,8 @@ test("files an issue with the user-report label and returns its number", async (
   assert.match(calls[0].body.body, /\| Type \| Bug \|/);
   assert.equal(calls[0].body.title, "Report: Structure shows no indexes");
   assert.match(calls[0].body.body, /\| Database \| PostgreSQL 16\.4 \|/);
-  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  assert.equal(res.headers.get("access-control-allow-origin"), "http://localhost:1420");
+  assert.equal(res.headers.get("vary"), "Origin");
 });
 
 test("retries with fewer labels when GitHub rejects them", async () => {
@@ -61,14 +67,62 @@ test("rejects empty, oversized and malformed reports without calling GitHub", as
   assert.equal(calls.length, 0);
 });
 
-test("only POST /report, and CORS preflight answers", async () => {
+test("only POST /report, and CORS preflight answers for allowed origins", async () => {
   const get = await relay.fetch(new Request("https://relay.example/report"), env);
   assert.equal(get.status, 405);
   const other = await relay.fetch(new Request("https://relay.example/other", { method: "POST" }), env);
   assert.equal(other.status, 404);
-  const pre = await relay.fetch(new Request("https://relay.example/report", { method: "OPTIONS" }), env);
+  const pre = await relay.fetch(
+    new Request("https://relay.example/report", {
+      method: "OPTIONS",
+      headers: { Origin: "tauri://localhost" },
+    }),
+    env,
+  );
   assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get("access-control-allow-origin"), "tauri://localhost");
   assert.equal(pre.headers.get("access-control-allow-methods"), "POST, OPTIONS");
+  const foreignPre = await relay.fetch(
+    new Request("https://relay.example/report", {
+      method: "OPTIONS",
+      headers: { Origin: "https://evil.example" },
+    }),
+    env,
+  );
+  assert.equal(foreignPre.status, 204);
+  assert.equal(foreignPre.headers.get("access-control-allow-origin"), null);
+});
+
+test("rejects a browser POST from a foreign Origin without calling GitHub", async () => {
+  const res = await post(report, env, { Origin: "https://evil.example" });
+  assert.equal(res.status, 403);
+  assert.equal(calls.length, 0);
+});
+
+test("rejects non-JSON Content-Type without calling GitHub", async () => {
+  const res = await relay.fetch(
+    new Request("https://relay.example/report", {
+      method: "POST",
+      headers: { "cf-connecting-ip": "1.2.3.4", "content-type": "text/plain" },
+      body: JSON.stringify(report),
+    }),
+    env,
+  );
+  assert.equal(res.status, 415);
+  assert.equal(calls.length, 0);
+});
+
+test("allows POST with no Origin (e.g. curl) without CORS allow-origin", async () => {
+  const res = await post(report);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("access-control-allow-origin"), null);
+});
+
+test("returns 503 when the rate limiter binding is missing", async () => {
+  const { REPORT_LIMITER: _, ...noLimiter } = env;
+  const res = await post(report, noLimiter as Env);
+  assert.equal(res.status, 503);
+  assert.equal(calls.length, 0);
 });
 
 test("rate limiter blocks by client IP", async () => {
@@ -81,6 +135,24 @@ test("rate limiter blocks by client IP", async () => {
   assert.equal(res.status, 429);
   assert.deepEqual(keys, ["1.2.3.4"]);
   assert.equal(calls.length, 0);
+});
+
+test("rate limiter uses a fixed key when cf-connecting-ip is absent", async () => {
+  const keys: string[] = [];
+  const limited: Env = {
+    ...env,
+    REPORT_LIMITER: { limit: async ({ key }) => (keys.push(key), { success: false }) },
+  };
+  const res = await relay.fetch(
+    new Request("https://relay.example/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(report),
+    }),
+    limited,
+  );
+  assert.equal(res.status, 429);
+  assert.deepEqual(keys, ["no-client-ip"]);
 });
 
 test("GitHub failure is a 502 without leaking GitHub's reply", async () => {
@@ -123,7 +195,7 @@ test("takes reports at the root too, for builds whose URL left off /report", asy
   const res = await relay.fetch(
     new Request("https://relay.example/", {
       method: "POST",
-      headers: { "cf-connecting-ip": "5.6.7.8" },
+      headers: { "cf-connecting-ip": "5.6.7.8", "content-type": "application/json" },
       body: JSON.stringify(report),
     }),
     env,
