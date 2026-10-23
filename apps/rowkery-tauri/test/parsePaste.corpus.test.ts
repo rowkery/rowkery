@@ -1,29 +1,12 @@
 // External paste strings: new parsePaste must match origin/main's legacy splitter
 // except where quote rules intentionally improve spreadsheet-style fields.
 import { describe, expect, test } from "vitest";
-import { parsePaste, stripTrailingLineBreak } from "../src/editBuffer";
+import { parsePaste } from "../src/editBuffer";
 
+/** origin/main's parsePaste, verbatim. */
 function legacyParsePaste(text: string): string[][] {
-  const trimmed = stripTrailingLineBreak(text.replace(/\r\n?/g, "\n"));
-  if (trimmed.includes("\t")) {
-    return trimmed.split("\n").map((l) => l.split("\t"));
-  }
-  if (trimmed === "") return [[""]];
-  const rows: string[][] = [];
-  let field = "";
-  const push = () => {
-    rows.push([field]);
-    field = "";
-  };
-  for (let i = 0; i < trimmed.length; i++) {
-    if (trimmed[i] === "\n") {
-      push();
-      continue;
-    }
-    field += trimmed[i];
-  }
-  push();
-  return rows;
+  const lines = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
+  return lines.map((l) => (l.includes("\t") ? l.split("\t") : [l]));
 }
 
 const CORPUS = [
