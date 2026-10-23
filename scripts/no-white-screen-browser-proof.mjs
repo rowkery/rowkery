@@ -135,7 +135,7 @@ await page.waitForTimeout(500);
 check((await page.$(`${ws} [data-cancel="force"]`)) !== null, "an unanswered Cancel leaves it running, offering Force stop");
 await page.click(`${ws} [data-cancel="force"]`);
 await page.waitForSelector(`${ws} [data-cancel]`, { state: "detached", timeout: 5000 });
-check(/let it go/.test((await page.textContent(`${ws} [data-testid="results-card"]`)) ?? ""), "Force stop clears a run core never reports back on, and says so");
+check(/Stopped waiting for this query; it may still have run/.test((await page.textContent(`${ws} [data-testid="results-card"]`)) ?? ""), "Force stop clears a run core never reports back on, and says so");
 await shot("4-force-stopped");
 
 // The editor still runs after both.

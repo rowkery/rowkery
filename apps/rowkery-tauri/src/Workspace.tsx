@@ -2010,7 +2010,7 @@ export function Workspace({
     } catch (e) {
       flash(String(e));
     }
-    if (giveUp) setTimeout(() => giveUp("The query stopped answering, so Rowkery let it go"), FORCE_STOP_GRACE_MS);
+    if (giveUp) setTimeout(() => giveUp("Stopped waiting for this query; it may still have run"), FORCE_STOP_GRACE_MS);
   };
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
@@ -2204,7 +2204,7 @@ export function Workspace({
     } catch (e) {
       outcome = "error";
       end = "error";
-      patchRun(tabId, { error: String(e) });
+      patchRun(tabId, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       patchRun(tabId, {
         startedAt: null,
@@ -2518,7 +2518,7 @@ export function Workspace({
       ran = current();
       if (ran && !append) shownKey.current[tab.id] = key;
     } catch (e) {
-      patchRun(tab.id, { error: String(e) });
+      patchRun(tab.id, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       loading.current.delete(tab.id);
       const next = queued.current.get(tab.id);
@@ -4605,7 +4605,7 @@ export function Workspace({
           data-deleted={inspectorKind === "quicklook" && qlView?.edit?.mark === "delete" ? "" : undefined}
         >
           <RenderErrorBoundary
-            resetKeys={[inspectorKind, activeTabId]}
+            resetKeys={[inspectorKind, activeTabId, qlView]}
             fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
           >
           {inspectorKind === "sqlfile" && sqlFile ? (
