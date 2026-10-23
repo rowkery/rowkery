@@ -2147,6 +2147,281 @@ fn sqlite_query_tabs_page() {
     assert_eq!(paged(3, "SELECT count(*) FROM t", 10).1, int(2400));
 }
 
+/// A SQLite tab keeps its connection between runs, like a Postgres tab its
+/// session: BEGIN … ROLLBACK across runs undoes the DELETE, its pages read
+/// inside its transaction, edits refuse to join it, closing the tab rolls
+/// it back, and a restart is warned about while one is open.
+#[test]
+fn sqlite_tabs_keep_their_connection_between_runs() {
+    let (_guard, _file, path) = test_guard();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30)
+             INSERT INTO orders SELECT i, 'x' FROM n;",
+        )
+        .expect("seed");
+    }
+    let bridge = super::CoreBridge::spawn();
+    connect_sqlite(&bridge, path.clone());
+    let run = |tab: u64, sql: &str| window_query(&bridge, "w1", tab, sql);
+    let count = |tab: u64| run(tab, "SELECT count(*) FROM orders").0;
+    let on_disk = || {
+        Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+
+    // Three runs: the rollback undoes the delete.
+    assert_eq!(run(1, "BEGIN").1, None);
+    assert_eq!(run(1, "DELETE FROM orders").4, Some(30));
+    assert_eq!(count(1), Some(Value::Int(0)), "inside the transaction");
+    assert!(bridge.holds_transaction());
+    assert_eq!(on_disk(), 30, "not committed");
+    assert_eq!(run(1, "ROLLBACK").1, None);
+    assert_eq!(count(1), Some(Value::Int(30)));
+    assert!(!bridge.holds_transaction());
+
+    // Connection state carries too: a temp table, a pragma.
+    run(1, "CREATE TEMP TABLE scratch (n)");
+    run(1, "INSERT INTO scratch VALUES (1), (2)");
+    assert_eq!(
+        run(1, "SELECT count(*) FROM scratch").0,
+        Some(Value::Int(2))
+    );
+    assert!(
+        run(2, "SELECT count(*) FROM scratch").1.is_some(),
+        "tab 2's own"
+    );
+
+    // A page and the next one read inside the tab's transaction.
+    run(1, "BEGIN");
+    run(1, "DELETE FROM orders WHERE id > 25");
+    let queue: EventQueue = Arc::default();
+    bridge
+        .run_window_query_paged(
+            "w1",
+            1,
+            "SELECT id FROM orders ORDER BY id".into(),
+            None,
+            Some(20),
+            false,
+            queue.clone(),
+        )
+        .expect("run");
+    assert_eq!(drain_paged(&queue).0, 20);
+    let queue: EventQueue = Arc::default();
+    bridge
+        .fetch_more_to("w1", 1, 20, queue.clone())
+        .expect("fetch");
+    assert_eq!(drain_paged(&queue).0, 5, "the uncommitted delete shows");
+
+    // Edits never join it.
+    let orders = edit_table(
+        "main",
+        "orders",
+        &[("id", "INTEGER"), ("item", "TEXT")],
+        &["id"],
+    );
+    let out = bridge
+        .apply_changes(
+            "w1",
+            1,
+            orders.clone(),
+            vec![update(1, "item", Value::Text("y".into()))],
+            None,
+        )
+        .expect("apply");
+    let ApplyOutcome::RolledBack { failure, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(failure.message.contains("transaction open"), "{failure:?}");
+    assert_eq!(count(1), Some(Value::Int(25)));
+
+    // Closing the tab rolls it back; its next run starts fresh.
+    bridge.close_window_tab("w1", 1);
+    assert_eq!(on_disk(), 30);
+    assert_eq!(count(1), Some(Value::Int(30)));
+    assert!(run(1, "SELECT count(*) FROM scratch").1.is_some());
+
+    // Re-pointing the window does too.
+    run(1, "BEGIN");
+    run(1, "DELETE FROM orders");
+    bridge
+        .open_window("w1", "cancel-sqlite", None)
+        .expect("reopen");
+    assert_eq!(count(1), Some(Value::Int(30)));
+    assert!(run(1, "ROLLBACK").1.is_some(), "no transaction is open");
+
+    // With none open, edits save on the tab's connection.
+    let out = bridge
+        .apply_changes(
+            "w1",
+            1,
+            orders,
+            vec![update(1, "item", Value::Text("y".into()))],
+            None,
+        )
+        .expect("apply");
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A SQLite file with 30 orders, open in window `w1`.
+fn sqlite_orders() -> (
+    MutexGuard<'static, ()>,
+    NamedTempFile,
+    String,
+    super::CoreBridge,
+) {
+    let (guard, file, path) = test_guard();
+    Connection::open(&path)
+        .expect("open")
+        .execute_batch(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30)
+             INSERT INTO orders SELECT i, 'x' FROM n;",
+        )
+        .expect("seed");
+    let bridge = super::CoreBridge::spawn();
+    connect_sqlite(&bridge, path.clone());
+    (guard, file, path, bridge)
+}
+
+fn orders_on_disk(path: &str) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM orders", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// SQLite rolls back the whole transaction when a write inside it is
+/// cancelled or fails a certain way; the tab says so, instead of
+/// "Cancelled" or the bare error. A read cancelled inside one keeps it.
+#[test]
+fn sqlite_says_when_a_run_rolled_back_the_tabs_transaction() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |sql: &str| window_query(&bridge, "w1", 1, sql);
+
+    // An error: INSERT OR ROLLBACK on a duplicate key.
+    run("BEGIN");
+    assert_eq!(run("DELETE FROM orders WHERE id > 20").4, Some(10));
+    let error = run("INSERT OR ROLLBACK INTO orders VALUES (1, 'dup')")
+        .1
+        .expect("fails");
+    assert!(error.contains("UNIQUE"), "{error}");
+    assert!(error.ends_with(SQLITE_ERROR_ROLLED_BACK), "{error}");
+    assert!(!bridge.holds_transaction());
+    assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
+
+    // A plain error leaves the transaction open and says nothing more.
+    run("BEGIN");
+    let error = run("INSERT INTO orders VALUES (1, 'dup')")
+        .1
+        .expect("fails");
+    assert!(!error.contains(SQLITE_ERROR_ROLLED_BACK), "{error}");
+    assert!(bridge.holds_transaction());
+
+    // A cancelled read keeps it.
+    let queue = bridge
+        .run_window_query("w1", 1, SLOW_SQLITE.into(), None, false)
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w1", 1);
+    let (error, cancelled) =
+        wait_query_finished(&queue, std::time::Duration::from_secs(5)).expect("finish");
+    assert!(cancelled, "{error:?}");
+    assert!(bridge.holds_transaction());
+
+    // A cancelled write ends it.
+    assert_eq!(run("DELETE FROM orders WHERE id > 20").4, Some(10));
+    let queue = bridge
+        .run_window_query(
+            "w1",
+            1,
+            "INSERT INTO orders (item) \
+             WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT 'z' FROM n"
+                .into(),
+            None,
+            false,
+        )
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w1", 1);
+    let (error, cancelled) =
+        wait_query_finished(&queue, std::time::Duration::from_secs(5)).expect("finish");
+    assert!(!cancelled);
+    assert_eq!(error.as_deref(), Some(SQLITE_CANCEL_ROLLED_BACK));
+    assert!(!bridge.holds_transaction());
+    assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
+    assert_eq!(orders_on_disk(&path), 30);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// Switching a SQLite connection to Read-only drops its tabs' connections,
+/// as Postgres resets its sessions: a later COMMIT can't write what the
+/// tab deleted before (`query_only` doesn't refuse COMMIT).
+#[test]
+fn sqlite_read_only_ends_an_open_transaction() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |sql: &str| window_query(&bridge, "w1", 1, sql);
+    run("BEGIN");
+    assert_eq!(run("DELETE FROM orders").4, Some(30));
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Sqlite(SqliteConnection {
+            environment: None,
+            safe_mode: SafeMode::ReadOnly,
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            id: "cancel-sqlite".into(),
+            name: "cancel".into(),
+            path: path.clone(),
+            sample: false,
+        }),
+        ConnectionSecrets::default(),
+    )
+    .expect("save");
+    assert!(run("COMMIT").1.is_some(), "no transaction is open");
+    assert_eq!(orders_on_disk(&path), 30);
+    assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A write that waits out another tab's transaction says which tab holds
+/// it, and a file replaced under a tab's open transaction refuses the
+/// tab's next run instead of writing to the deleted copy.
+#[cfg(unix)]
+#[test]
+fn sqlite_names_the_tab_holding_the_lock_and_notices_a_replaced_file() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |tab: u64, sql: &str| window_query(&bridge, "w1", tab, sql);
+    run(1, "BEGIN");
+    assert_eq!(run(1, "DELETE FROM orders WHERE id > 20").4, Some(10));
+    // Waits out the busy timeout (5 s), then names the other tab.
+    assert_eq!(
+        run(2, "DELETE FROM orders").1.as_deref(),
+        Some(SQLITE_HELD_HERE)
+    );
+
+    let fresh = path.clone() + ".fresh";
+    std::fs::copy(&path, &fresh).expect("copy");
+    std::fs::rename(&fresh, &path).expect("replace");
+    assert_eq!(run(1, "COMMIT").1.as_deref(), Some(SQLITE_FILE_REPLACED));
+    assert_eq!(
+        run(1, "SELECT count(*) FROM orders").0,
+        Some(Value::Int(30))
+    );
+    assert!(!bridge.holds_transaction());
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// What a paged run or `fetch_more` streamed: rows, first cell, error,
 /// and the done event's `paged` / `more`.
 fn drain_paged(
