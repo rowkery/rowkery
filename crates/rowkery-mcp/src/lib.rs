@@ -704,6 +704,8 @@ async fn run_read(
     let alias = guard::wrapper_alias();
     let capped = guard::wrap_limit(&sql, cap + 1, &alias);
     let engine = engine(&target.record);
+    let rule = rule(target);
+    let marks = mask::parse(target.record.masked_columns(&target.database));
 
     // The plan, and the big tables it would read end to end.
     let mut sqlite_eqp: Vec<(i64, i64, String)> = Vec::new();
@@ -763,7 +765,7 @@ async fn run_read(
                 .map(|t| (None, t))
                 .collect();
             let touched = match &target.record {
-                ConnectionRecord::Sqlite(c) if rule(target).restricts() => {
+                ConnectionRecord::Sqlite(c) if rule.restricts() || !marks.is_empty() => {
                     target::sqlite_tables_read(&c.path, &capped)?
                         .into_iter()
                         .map(|(s, t)| (Some(s), t))
@@ -774,16 +776,27 @@ async fn run_read(
             (details, scans, touched, None)
         }
     };
-    let rule = rule(target);
+    if touched
+        .iter()
+        .any(|(schema, table)| guard::is_credentials(schema.as_deref(), table))
+    {
+        return Err(guard::CREDENTIALS_REFUSAL.into());
+    }
+    // Statistics give nothing away when every table is shared and nothing
+    // is masked.
+    if (rule.restricts() || !marks.is_empty())
+        && touched
+            .iter()
+            .any(|(schema, table)| guard::is_statistics(schema.as_deref(), table))
+    {
+        return Err(guard::STATISTICS_REFUSAL.into());
+    }
     if rule.restricts() {
         let cached = store.catalog(target, false).await?;
         let catalog = &cached.catalog;
         // Every relation the plan reads (views and CTEs resolved to the
         // tables underneath) must be shared, matched by its exact name.
         let blocked = touched.iter().any(|(schema, table)| {
-            if guard::is_statistics(schema.as_deref(), table) {
-                return true;
-            }
             let schema = schema.as_deref().unwrap_or("main");
             match access::find_exact(catalog, schema, table) {
                 Some(t) => !rule.allows_node(catalog, schema, t),
@@ -796,7 +809,6 @@ async fn run_read(
     }
     // Sensitive columns: refused unless only returned or counted, and the
     // places in the result that hold one.
-    let marks = mask::parse(target.record.masked_columns(&target.database));
     let masked_at = if marks.is_empty() {
         Vec::new()
     } else {
@@ -1327,6 +1339,80 @@ mod tests {
         assert_eq!(scope["tables"], 2);
         assert_eq!(scope["databases"], 1);
         assert_eq!(scope["max_rows"], guard::DEFAULT_ROWS);
+
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The env lock spans the whole test, awaits included: each test has its own runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn sqlite_statistics_are_kept_back_while_a_column_is_masked() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-stat4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let db = dir.join("t.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "create table customers(id integer primary key, email text);
+                 create index customers_email on customers(email);
+                 insert into customers(email) values ('mara@fjord.se'), ('tomas@ibarra.dev');
+                 analyze;",
+            )
+            .unwrap();
+        let save = |masked: Vec<String>| {
+            let mut config = AppConfig::default();
+            config.upsert_connection(ConnectionRecord::Sqlite(SqliteConnection {
+                id: "s".into(),
+                name: "s".into(),
+                path: db.to_string_lossy().to_string(),
+                environment: None,
+                safe_mode: Default::default(),
+                sample: false,
+                allow_mcp: true,
+                mcp_hidden_tables: Vec::new(),
+                mcp_until: None,
+                mcp_samples_off: false,
+                mcp_access: Some(
+                    [(
+                        "main".to_string(),
+                        McpDbAccess {
+                            mode: McpTableMode::All,
+                            tables: Vec::new(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                masked_columns: [("main".to_string(), masked)].into_iter().collect(),
+            }));
+            config.save().unwrap();
+        };
+        save(vec!["main.customers.email".into()]);
+        let mcp = RowkeryMcp::default();
+        let q = |sql: &'static str| json!({ "connection": "s", "sql": sql });
+
+        // sqlite_stat4 keeps index samples, the emails among them.
+        for sql in [
+            "select cast(sample as text) from sqlite_stat4",
+            "select * from main.SQLITE_STAT4",
+            "select stat from sqlite_stat1",
+        ] {
+            let err = call(&mcp, "query", q(sql)).await.expect_err(sql);
+            assert_eq!(err, guard::STATISTICS_REFUSAL, "{sql}");
+        }
+        call(&mcp, "query", q("select count(*) from customers"))
+            .await
+            .expect("plain read");
+
+        // Nothing masked: nothing to keep back.
+        save(Vec::new());
+        call(&mcp, "query", q("select count(*) from sqlite_stat4"))
+            .await
+            .expect("statistics with nothing kept back");
 
         std::env::remove_var("ROWKERY_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);

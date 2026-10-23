@@ -188,12 +188,38 @@ pub fn pg_relations(explain_json: &Json) -> Vec<(Option<String>, String)> {
     out
 }
 
-/// Postgres statistics hold sample values of every column (`pg_stats`'
-/// most common values), so with tables hidden they're off limits too.
+/// Statistics hold sample values of every column (Postgres's `pg_stats`
+/// and `pg_stats_ext` most common values and histograms, read from these
+/// two catalogs; SQLite's `sqlite_stat3` / `sqlite_stat4` index samples),
+/// so with tables hidden or columns masked they're off limits too. SQLite
+/// reserves the `sqlite_` prefix, so the name alone says it's the catalog.
 pub fn is_statistics(schema: Option<&str>, table: &str) -> bool {
-    schema.is_none_or(|s| s == "pg_catalog")
-        && matches!(table, "pg_statistic" | "pg_statistic_ext_data")
+    let pg = schema.is_none_or(|s| s == "pg_catalog")
+        && matches!(table, "pg_statistic" | "pg_statistic_ext_data");
+    let sqlite = schema != Some("pg_catalog")
+        && table
+            .get(..11)
+            .is_some_and(|p| p.eq_ignore_ascii_case("sqlite_stat"));
+    pg || sqlite
 }
+
+/// Postgres catalogs that hold credentials: role password hashes
+/// (`pg_authid`, under `pg_shadow`), foreign servers' user mappings with
+/// their passwords (`pg_user_mapping`, under `pg_user_mappings` and
+/// `information_schema.user_mapping_options`) and subscriptions' connection
+/// strings (`pg_subscription`). Never read for an agent, whatever is shared:
+/// the plan names the catalog under every view over it, so `pg_roles` and
+/// `pg_user` (which show `********`) are refused along with them.
+pub fn is_credentials(schema: Option<&str>, table: &str) -> bool {
+    schema.is_none_or(|s| s == "pg_catalog")
+        && matches!(table, "pg_authid" | "pg_user_mapping" | "pg_subscription")
+}
+
+pub const STATISTICS_REFUSAL: &str =
+    "Refused: column statistics (pg_stats, pg_statistic, sqlite_stat4) hold sample values of every column, including ones the user masked or hasn't shared. Leave them out of the query.";
+
+pub const CREDENTIALS_REFUSAL: &str =
+    "Refused: this reads a catalog that holds passwords or connection strings (pg_authid, pg_user_mapping or pg_subscription, or a view over one such as pg_roles, pg_shadow or pg_user_mappings). Agents never read these. pg_get_userbyid(oid) names a role.";
 
 pub const HIDDEN_REFUSAL: &str =
     "Refused: this reads a table the user hasn't shared with agents in Rowkery. A view or join needs every table it reads shared. Leave it out of the query, or ask the user to share it.";
@@ -401,6 +427,12 @@ mod tests {
         assert!(rule.allows("public", "api_keys"));
         assert!(is_statistics(Some("pg_catalog"), "pg_statistic"));
         assert!(!is_statistics(Some("public"), "pg_statistic"));
+        assert!(is_statistics(Some("main"), "sqlite_stat4"));
+        assert!(is_statistics(Some("other"), "SQLITE_STAT1"));
+        assert!(!is_statistics(Some("main"), "sqlite_master"));
+        assert!(is_credentials(Some("pg_catalog"), "pg_authid"));
+        assert!(is_credentials(Some("pg_catalog"), "pg_user_mapping"));
+        assert!(!is_credentials(Some("public"), "pg_authid"));
     }
 
     #[test]

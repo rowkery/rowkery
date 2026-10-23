@@ -2,7 +2,8 @@
 //! before the app previews or commits it: plain INSERT / UPDATE / DELETE
 //! statements (`safety::row_changes`) on shared tables, on a connection
 //! that isn't Read-only, calling only the built-in functions agents may
-//! call (`functions`) and never naming a masked column. Postgres plans each statement (EXPLAIN
+//! call (`functions`; the table's own column defaults, such as a serial
+//! key's nextval, aside) and never naming a masked column. Postgres plans each statement (EXPLAIN
 //! without ANALYZE, which runs nothing, on the read-only session); SQLite's
 //! authorizer reports what each one touches while it is prepared.
 
@@ -49,7 +50,26 @@ pub async fn check(
                     _ => return Err("EXPLAIN returned no plan.".into()),
                 };
                 let plan: Json = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-                functions::check_pg(store, target, &functions::scan_plan(&plan), false).await?;
+                // The plan also holds what the table fills in itself (a
+                // serial key's nextval), which the agent didn't write.
+                let fills = match written_table(&plan) {
+                    Some((schema, table)) if change.verb != "DELETE" => {
+                        let found = store.read(target, &defaults_sql(&schema, &table)).await?;
+                        found
+                            .rows
+                            .iter()
+                            .filter_map(|r| match r.first() {
+                                Some(rowkery_core::Value::Text(t)) if t.contains('(') => {
+                                    Some(t.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let own = without_fills(&plan, &fills);
+                functions::check_pg(store, target, &functions::scan_plan(&own), false).await?;
                 let touched = guard::pg_relations(&plan);
                 refuse_unshared(store, target, &touched).await?;
                 masked_mention(store, target, &marks, &touched, change, &text).await?;
@@ -80,6 +100,73 @@ pub async fn check(
     Ok(changes)
 }
 
+/// The table a plan writes: its ModifyTable node's relation.
+fn written_table(plan: &Json) -> Option<(String, String)> {
+    let root = plan.get(0)?.get("Plan")?;
+    if root.get("Node Type")?.as_str()? != "ModifyTable" {
+        return None;
+    }
+    Some((
+        root.get("Schema")?.as_str()?.to_string(),
+        root.get("Relation Name")?.as_str()?.to_string(),
+    ))
+}
+
+/// The default and identity expressions of `schema.table`, deparsed the way
+/// the plan writes them: `pg_attrdef` (a serial's
+/// `nextval('t_id_seq'::regclass)`, `now()`), and `nextval('t_id_seq')`
+/// for an identity column.
+fn defaults_sql(schema: &str, table: &str) -> String {
+    let rel = format!(
+        "(SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relname = {})",
+        functions::text_literal(schema),
+        functions::text_literal(table)
+    );
+    format!(
+        "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d WHERE d.adrelid = {rel} \
+         UNION ALL SELECT 'nextval(' || quote_literal(s.oid::regclass::text) || ')' \
+         FROM pg_depend p JOIN pg_class s ON s.oid = p.objid AND s.relkind = 'S' \
+         WHERE p.classid = 'pg_class'::regclass AND p.refclassid = 'pg_class'::regclass \
+         AND p.refobjid = {rel} AND p.deptype = 'i'"
+    )
+}
+
+/// `plan` with each of `fills` replaced by NULL wherever it stands whole
+/// (not run into a longer name), for the function check only. What the
+/// agent wrote was checked on the SQL as sent, so an explicit nextval()
+/// is still refused there.
+fn without_fills(plan: &Json, fills: &[String]) -> Json {
+    fn strip(text: &str, fill: &str) -> String {
+        let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '"');
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(p) = text[i..].find(fill) {
+            let (start, end) = (i + p, i + p + fill.len());
+            out.push_str(&text[i..start]);
+            let joined = text[..start].chars().next_back().is_some_and(name)
+                || text[end..].chars().next().is_some_and(name);
+            out.push_str(if joined { fill } else { "NULL" });
+            i = end;
+        }
+        out.push_str(&text[i..]);
+        out
+    }
+    if fills.is_empty() {
+        return plan.clone();
+    }
+    match plan {
+        Json::String(s) => Json::String(fills.iter().fold(s.clone(), |s, f| strip(&s, f))),
+        Json::Array(items) => Json::Array(items.iter().map(|v| without_fills(v, fills)).collect()),
+        Json::Object(map) => Json::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), without_fills(v, fills)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn masked_refusal(m: &mask::Marked) -> String {
     format!(
         "Refused: {} is masked, and a proposed change can't read, write or filter on a masked column.",
@@ -87,7 +174,8 @@ fn masked_refusal(m: &mask::Marked) -> String {
     )
 }
 
-/// Every relation a statement touches must be shared (statistics never are).
+/// Every relation a statement touches must be shared (statistics and the
+/// catalogs that hold credentials never are).
 async fn refuse_unshared(
     store: &mut Store,
     target: &Target,
@@ -95,11 +183,17 @@ async fn refuse_unshared(
 ) -> Result<(), String> {
     let rule =
         access::tables(&target.record, &target.database).unwrap_or(access::Tables::Only(&[]));
+    if touched
+        .iter()
+        .any(|(s, t)| guard::is_credentials(s.as_deref(), t))
+    {
+        return Err(guard::CREDENTIALS_REFUSAL.into());
+    }
     let statistics = touched
         .iter()
         .any(|(s, t)| guard::is_statistics(s.as_deref(), t));
     if statistics {
-        return Err(guard::HIDDEN_REFUSAL.into());
+        return Err(guard::STATISTICS_REFUSAL.into());
     }
     if !rule.restricts() {
         return Ok(());
@@ -270,6 +364,28 @@ mod tests {
         assert_eq!(f.tables.len(), 2);
         let f = sqlite_facts(&p, "DELETE FROM o WHERE id = 3").unwrap();
         assert!(f.tables.contains(&("main".to_string(), "o".to_string())));
+    }
+
+    #[test]
+    fn defaults_leave_the_plan_only_where_they_stand_whole() {
+        let plan = serde_json::json!([{ "Plan": {
+            "Node Type": "ModifyTable", "Schema": "public", "Relation Name": "t",
+            "Plans": [{ "Node Type": "Result", "Output": [
+                "nextval('t_id_seq'::regclass)", "'x'::text",
+                "xnextval('t_id_seq'::regclass)",
+                "lower('nextval(''t_id_seq''::regclass)'::text)"
+            ]}]
+        }}]);
+        assert_eq!(written_table(&plan), Some(("public".into(), "t".into())));
+        let own = without_fills(&plan, &["nextval('t_id_seq'::regclass)".into()]);
+        let (out, was) = (
+            &own[0]["Plan"]["Plans"][0]["Output"],
+            &plan[0]["Plan"]["Plans"][0]["Output"],
+        );
+        assert_eq!(out[0], "NULL");
+        assert_eq!(out[1], was[1]);
+        assert_eq!(out[2], was[2]);
+        assert_eq!(out[3], was[3]);
     }
 
     #[test]
