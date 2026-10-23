@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // A config.json core couldn't read (stubbed `invoke`): the launch says so
-// once, in an error toast that names the copy kept aside and offers to copy
-// its path (a button only: nobody asked for it), and holds long enough to
-// read. Copy path puts the full path on the clipboard. A reload, where core
+// once, in an error toast that names the copy kept aside (from ~) and offers
+// to copy its path (a button only: nobody asked for it), and holds long
+// enough to read. Copy path puts the full path on the clipboard and says to
+// quit before putting the file back. A reload, where core
 // has no notice left (`take_config_notice` answers once), shows none.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -34,7 +35,8 @@ function stubTauri(kept) {
       if (cmd === "take_config_notice") {
         if (sessionStorage.getItem("proof.taken")) return null;
         sessionStorage.setItem("proof.taken", "1");
-        return { message: "Couldn't read config.json, so Rowkery started fresh", kept };
+        const detail = kept.replace("/home/me", "~");
+        return { message: "Couldn't read config.json, so Rowkery started fresh", kept, detail };
       }
       if (cmd === "list_connections") return { connections: [], active_connection_id: null };
       return null;
@@ -63,7 +65,7 @@ check(!!toast, "the launch shows an error toast");
 const message = await page.textContent('[data-toast="error"] [data-testid="toast-message"]');
 check(message?.includes("config.json") ?? false, `it says config.json couldn't be read (${message})`);
 const detail = await page.textContent('[data-toast="error"]');
-check(detail?.includes("config.json.bad-1761200000") ?? false, "it names the copy kept aside");
+check(detail?.includes("~/.config/rowkery/config.json.bad-") ?? false, `it names the copy kept aside, from ~ (${detail})`);
 check((await page.$('[data-toast="error"][data-held] [data-toast-offer]')) !== null, "it offers Copy path and holds");
 await page.screenshot({ path: `${OUT}/1-notice.png` });
 await page.waitForTimeout(3500);
@@ -71,6 +73,8 @@ check((await page.$('[data-toast="error"]')) !== null, "still there after a plai
 await page.click("[data-toast-offer]");
 await page.waitForSelector('[data-toast="ok"]');
 check((await page.evaluate(() => navigator.clipboard.readText())) === KEPT, "Copy path copies the full path");
+const copied = await page.textContent('[data-toast="ok"] [data-testid="toast-message"]');
+check(copied?.includes("Quit Rowkery before") ?? false, `and says how to put it back (${copied})`);
 await page.screenshot({ path: `${OUT}/2-copied.png` });
 
 await page.reload();

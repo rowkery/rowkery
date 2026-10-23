@@ -1232,10 +1232,11 @@ fn take_config_notice(bridge: State<'_, CoreBridge>) -> Option<ConfigNotice> {
 }
 
 /// Replaces the webview's UI state. Returns at once: a writer thread puts it
-/// in config.json within 500 ms (temp file + rename).
+/// in config.json within 500 ms (temp file + rename). Returns an earlier
+/// save's failure for a toast, at most once a minute; `null` otherwise.
 #[tauri::command]
-fn save_ui_state(bridge: State<'_, CoreBridge>, ui: serde_json::Value) {
-    bridge.save_ui_state(ui);
+fn save_ui_state(bridge: State<'_, CoreBridge>, ui: serde_json::Value) -> Option<ConfigNotice> {
+    bridge.save_ui_state(ui)
 }
 
 /// How this launch's window was created: `native` when the system draws the

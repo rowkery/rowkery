@@ -567,6 +567,33 @@ fn a_config_it_cant_read_survives_a_launch() {
     let raw = fs::read_to_string(&config_json).unwrap();
     assert!(raw.contains(r#""kind": "mysql""#), "{raw}");
     assert_eq!(AppConfig::load().unwrap().theme, ThemePreference::Dark);
+
+    // A file it can't read at all: adding a connection is refused before
+    // anything changes, so it isn't listed with nothing saved.
+    fs::remove_file(&config_json).unwrap();
+    fs::create_dir(&config_json).unwrap();
+    let bridge = super::CoreBridge::spawn();
+    assert!(bridge.take_config_notice().is_some());
+    let record = ConnectionRecord::Sqlite(SqliteConnection {
+        id: "new".into(),
+        name: "new".into(),
+        path: path.clone(),
+        environment: None,
+        safe_mode: Default::default(),
+        sample: false,
+        allow_mcp: false,
+        mcp_hidden_tables: Vec::new(),
+        mcp_until: None,
+        mcp_samples_off: false,
+        mcp_access: None,
+        masked_columns: Default::default(),
+    });
+    let refused = bridge.upsert_connection(record, ConnectionSecrets::default());
+    assert!(refused.is_err());
+    assert!(CoreBridge::list_connections(&bridge).is_empty());
+    assert!(config_json.is_dir());
+    drop(bridge);
+    fs::remove_dir(&config_json).unwrap();
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 

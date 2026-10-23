@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { showToast } from "./notify";
 
 /**
  * The webview's saved state (windows and their tabs and SQL, the sidebar,
@@ -13,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
  * write per keystroke. On the first launch of this release the old
  * localStorage keys are imported; for one release every flushed key is also
  * mirrored back to localStorage, so going back a version loses nothing.
+ * State a newer Rowkery saved is never written over (`newerOnDisk`).
  */
 
 const VERSION = 1;
@@ -27,6 +29,11 @@ interface UiState {
 }
 
 let state: UiState = { version: VERSION, keys: {} };
+/**
+ * config.json holds a newer Rowkery's state, which this build can't read:
+ * this launch starts from the localStorage mirror and never saves over it.
+ */
+let newerOnDisk = false;
 let ready: Promise<void> | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
 const changed = new Set<string>();
@@ -59,6 +66,11 @@ function fromLocalStorage(): UiState {
   return { version: VERSION, keys };
 }
 
+function isNewer(v: unknown): boolean {
+  const version = !!v && typeof v === "object" ? (v as { version?: unknown }).version : undefined;
+  return typeof version === "number" && version > VERSION;
+}
+
 function isUiState(v: unknown): v is UiState {
   return !!v && typeof v === "object" && typeof (v as UiState).keys === "object" && (v as UiState).keys !== null;
 }
@@ -78,7 +90,10 @@ export function initPersist(): Promise<void> {
         // An older backend: localStorage below.
       }
     }
-    if (isUiState(saved) && saved.version <= VERSION) {
+    newerOnDisk = isNewer(saved);
+    if (newerOnDisk) {
+      state = proofBuild() ? { version: VERSION, keys: {} } : fromLocalStorage();
+    } else if (isUiState(saved) && saved.version <= VERSION) {
       state = { version: VERSION, keys: { ...saved.keys } };
     } else if (proofBuild()) {
       state = { version: VERSION, keys: {} };
@@ -97,7 +112,15 @@ export function initPersist(): Promise<void> {
 /** What this launch couldn't read in config.json, and where the file as it was is kept. */
 export interface ConfigNotice {
   message: string;
+  /** The full path, to copy. */
   kept: string | null;
+  /** `kept` from `~`, or the error. */
+  detail: string | null;
+}
+
+/** Said once at launch when config.json's windows and tabs are a newer Rowkery's. */
+export function persistNotice(): string | null {
+  return newerOnDisk ? "Windows and tabs are from a newer Rowkery, so this launch won't save them" : null;
 }
 
 /** Core's notice about config.json (`take_config_notice`): once per launch, null when all was read. */
@@ -135,8 +158,12 @@ export function flushPersist() {
   if (changed.size === 0) return;
   const keys = [...changed];
   changed.clear();
-  if (inTauri()) {
-    void invoke("save_ui_state", { ui: state }).catch(() => {});
+  if (inTauri() && !newerOnDisk) {
+    // Core answers with an earlier save's failure, at most once a minute.
+    void invoke<ConfigNotice | null>("save_ui_state", { ui: state }).then(
+      (failed) => failed && showToast(failed.message, failed.detail ?? undefined, "error"),
+      () => {},
+    );
   }
   // The one-release mirror (and the only store when there is no backend).
   if (proofBuild()) return;
@@ -162,6 +189,7 @@ if (typeof document !== "undefined") {
 /** Tests: start over with these keys. */
 export function resetPersistForTests(keys: Record<string, unknown> = {}) {
   state = { version: VERSION, keys: { ...keys } };
+  newerOnDisk = false;
   changed.clear();
   if (timer !== undefined) clearTimeout(timer);
   timer = undefined;

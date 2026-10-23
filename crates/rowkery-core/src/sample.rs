@@ -57,10 +57,12 @@ pub fn sample_record() -> ConnectionRecord {
 }
 
 /// First launch's decision: `None` once taken, else whether to add the
-/// sample (only when there are no saved connections). The caller writes the
-/// file (`write_sample`) off the core thread, then calls `apply_first_run`.
+/// sample (only when there are no saved connections, counting ones this
+/// build can't read). The caller writes the file (`write_sample`) off the
+/// core thread, then calls `apply_first_run`.
 pub fn first_run_plan(config: &AppConfig) -> Option<bool> {
-    (!config.first_run_done).then_some(config.connections.is_empty())
+    (!config.first_run_done)
+        .then_some(config.connections.is_empty() && config.unread_connections.is_empty())
 }
 
 /// Records the decision so a deleted sample stays deleted; with `added`
@@ -73,14 +75,27 @@ pub fn apply_first_run(config: &mut AppConfig, added: bool) {
 }
 
 /// "Open the sample database": its record, put back if it was deleted.
-/// The caller writes the file first when it is missing or being reset.
+/// The caller writes the file first when it is missing or being reset. A
+/// saved connection this build can't read may hold the sample's id: the
+/// record put back takes a free one.
 pub fn upsert_sample(config: &mut AppConfig) -> ConnectionRecord {
+    let taken = |id: &str| config.unread_connections.iter().any(|u| u.id() == Some(id));
     let record = config
         .connections
         .iter()
         .find(|c| matches!(c, ConnectionRecord::Sqlite(s) if s.sample))
         .cloned()
-        .unwrap_or_else(sample_record);
+        .unwrap_or_else(|| {
+            let mut record = sample_record();
+            if let ConnectionRecord::Sqlite(s) = &mut record {
+                let mut n = 1;
+                while taken(&s.id) {
+                    n += 1;
+                    s.id = format!("{SAMPLE_ID}-{n}");
+                }
+            }
+            record
+        });
     config.upsert_connection(record.clone());
     record
 }
@@ -159,6 +174,26 @@ mod tests {
         assert_eq!(count(&path, "daily_takings"), 600);
         // Upserting again doesn't duplicate it.
         upsert_sample(&mut config);
+        assert_eq!(config.connections.len(), 1);
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    /// Saved connections this build can't read count: no sample on top of
+    /// them, and a sample put back never takes one's id.
+    #[test]
+    fn unread_connections_count() {
+        let _guard = test_dir_guard("sample-unread");
+        let mut config = AppConfig::default();
+        config
+            .unread_connections
+            .push(crate::config::UnreadConnection {
+                after: None,
+                entry: serde_json::json!({ "kind": "mysql", "id": SAMPLE_ID }),
+            });
+        assert_eq!(first_run_plan(&config), Some(false));
+        let record = upsert_sample(&mut config);
+        assert_eq!(record.id(), "sample-2");
+        assert_eq!(upsert_sample(&mut config).id(), "sample-2");
         assert_eq!(config.connections.len(), 1);
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }

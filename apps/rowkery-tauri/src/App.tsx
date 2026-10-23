@@ -38,7 +38,7 @@ import type { ReportContext } from "./report";
 import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
 import { hasPendingUndo, liveOffer, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
-import { readKey, takeConfigNotice, writeKey } from "./persist";
+import { persistNotice, readKey, takeConfigNotice, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
 import {
@@ -321,15 +321,19 @@ function App() {
   useEffect(() => {
     if (!loaded) return;
     void takeConfigNotice().then((notice) => {
-      if (!notice) return;
+      // Or the webview's own: its state is a newer Rowkery's (persist.ts).
+      const newer = persistNotice();
+      if (!notice) return newer && showToast(newer, undefined, "error");
       const kept = notice.kept;
-      if (!kept) return showToast(notice.message, undefined, "error");
-      showOfferToast(notice.message, "Copy path", kept.split(/[\\/]/).pop(), {
+      const detail = notice.detail ?? undefined;
+      if (!kept) return showToast(notice.message, detail, "error");
+      showOfferToast(notice.message, "Copy path", detail, {
         tone: "error",
         mouseOnly: true,
         run: () =>
           void navigator.clipboard.writeText(kept).then(
-            () => showToast("Copied", toastPreview(kept)),
+            // Restoring it under a running app: the next save replaces it.
+            () => showToast("Copied. Quit Rowkery before you put it back as config.json", detail ?? toastPreview(kept)),
             () => showToast("Couldn't copy the path", kept, "error"),
           ),
       });
