@@ -21,6 +21,7 @@ export function statementOutcome(s: StatementResult): string {
   if (r.cancelled) return "Cancelled";
   const count = (n: number, word: string) => `${n.toLocaleString()} ${n === 1 ? word : `${word}s`}`;
   if (r.columns.length > 0) return count(r.row_count, "row");
+  if (r.warning) return "Warning";
   const changed = r.affected_rows ?? 0;
   return changed > 0 || WRITES_ROWS.test(s.ranSql ?? "") ? `${count(changed, "row")} changed` : "Done";
 }

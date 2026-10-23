@@ -37,6 +37,10 @@ export interface QueryResultDto {
   error_position?: number | null;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
+  /** The server's warnings, one per line (`there is no transaction in progress`). */
+  warning?: string | null;
+  /** Stopped without the server's answer: it may still finish the statement. */
+  forced?: boolean;
 }
 
 /** Whether writes run, wait for confirmation, or are refused. Only a label

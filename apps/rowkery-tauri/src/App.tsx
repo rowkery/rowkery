@@ -38,6 +38,7 @@ import type { ReportContext } from "./report";
 import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
 import { hasPendingUndo, liveOffer, showOfferToast, showToast, showUndoToast } from "./notify";
+import { transactionInTheWay } from "./openTransactions";
 import { readKey, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
@@ -386,6 +387,9 @@ function App() {
   /** Points a window at a connection (and database), loading its schema. */
   const connectWindow = useCallback(
     async (windowId: string, connectionId: string, database?: string | null) => {
+      // Re-pointing starts the window's sessions afresh: never over a tab's open transaction.
+      const was = windowsRef.current.find((w) => w.id === windowId);
+      if (was?.state === "connected" && (await transactionInTheWay([windowId]))) return;
       const seq = (openSeq.current.get(windowId) ?? 0) + 1;
       openSeq.current.set(windowId, seq);
       catalogUpdates.current.forget(windowId);
@@ -664,8 +668,15 @@ function App() {
 
   const setSafeMode = async (mode: SafeMode) => {
     if (!activeConnection) return;
-    // Open windows pick the change up on their next run; nothing reconnects.
-    await saveConnection({ ...activeConnection, safe_mode: mode }, {});
+    // Open windows pick the change up on their next run; nothing reconnects,
+    // but their sessions start afresh, so not over a tab's open transaction.
+    const on = windowsRef.current.filter((w) => w.connectionId === activeConnection.id).map((w) => w.id);
+    if (await transactionInTheWay(on)) return;
+    try {
+      await saveConnection({ ...activeConnection, safe_mode: mode }, {});
+    } catch (e) {
+      return showToast("Safe mode didn't change", String(e), "error");
+    }
     await refreshConnections();
     const label = SAFE_MODES.find((m) => m.value === mode)?.label ?? mode;
     showToast(`Safe mode: ${label}`, activeConnection.name);

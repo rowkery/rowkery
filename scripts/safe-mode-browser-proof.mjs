@@ -6,7 +6,8 @@
 // warning with the table's row count, Read-only refuses a write even on
 // ⇧⌘↵, the panel head's shield (`data-shield`) shows each window's mode,
 // "Change safe mode…" on a refusal opens the shield's menu, ⌘K switches the
-// mode, a connection with safe mode off runs writes at once, and new
+// mode (refused, with a toast naming the tab, while a transaction is open
+// in one of the connection's tabs), a connection with safe mode off runs writes at once, and new
 // connections start Off. A refusal's Change leads to the shield's menu.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -445,7 +446,15 @@ function stubSafeMode() {
       list.connections = list.connections.map((c) => ({ ...c, safe_mode: modes[c.id] ?? "off" }));
       return list;
     }
+    // Core's list of tabs holding a transaction: `__OPEN_TXNS__` names them by connection.
+    if (cmd === "open_transactions") {
+      return (window.__OPEN_TXNS__ ?? []).map((t) => ({
+        window_id: Object.keys(windowConn).find((w) => windowConn[w] === t.conn),
+        tab_id: t.tab,
+      }));
+    }
     if (cmd === "save_connection") {
+      window.__SAFE_SAVES__ = (window.__SAFE_SAVES__ ?? 0) + 1;
       modes[args.connection.id] = args.connection.safe_mode ?? "off";
       return null;
     }
@@ -575,6 +584,27 @@ check((await page.$('[data-testid="nc-sheet"]')) === null, "no sheet opens");
 await shot(page, "4-safe-mode-menu");
 await page.keyboard.press("Escape");
 await page.waitForSelector(menu, { state: "detached" });
+
+// 6b. A transaction open in the window's first tab: the change is refused and
+// the toast names that tab; nothing is saved.
+await page.evaluate(() => (window.__OPEN_TXNS__ = [{ conn: "stg", tab: 1 }]));
+const firstTab = await text(page, `${visible} [data-testid="query-tab-title"]`);
+const saves = await page.evaluate(() => window.__SAFE_SAVES__ ?? 0);
+await page.keyboard.press("Meta+k");
+await page.keyboard.type(">safe mode off");
+await page.waitForSelector('[data-testid="cp-row"][data-item="cmd:safe:off"]');
+await page.keyboard.press("Enter");
+await page.waitForSelector("[data-toast]");
+const refusal = await page.$$eval("[data-toast] > span", (els) => els.map((e) => e.textContent.trim()).join(" · "));
+check(
+  refusal === `A transaction is open in “${firstTab}” · COMMIT or ROLLBACK it first`,
+  `refusal toast: ${refusal}`,
+);
+check((await page.getAttribute(shield, "data-shield")) === "read_only", "the mode stays Read-only");
+check((await page.evaluate(() => window.__SAFE_SAVES__ ?? 0)) === saves, "nothing was saved");
+await shot(page, "4b-open-transaction-refusal");
+await page.evaluate(() => (window.__OPEN_TXNS__ = []));
+await page.waitForSelector("[data-toast]", { state: "detached" });
 
 // 7. ⌘K turns safe mode off; the same UPDATE now runs at once.
 await page.keyboard.press("Meta+k");

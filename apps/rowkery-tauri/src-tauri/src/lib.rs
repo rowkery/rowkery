@@ -80,6 +80,10 @@ pub struct DoneFrame {
     /// The run reached the most rows a tab holds (`MAX_TAB_ROWS`) and left
     /// the rest out.
     pub capped: bool,
+    /// The server's warnings, one per line.
+    pub warning: Option<String>,
+    /// Stopped without the server's answer: it may still finish the statement.
+    pub forced: bool,
 }
 
 /// Rows frames are sized to arrive in about this long, from the bytes/ms the
@@ -280,6 +284,8 @@ impl EventSink for ChannelSink {
                     paged: detail.paged,
                     more: detail.more,
                     capped: detail.capped,
+                    warning: detail.warning,
+                    forced: detail.forced,
                 };
                 Self::send_json(&self.channel, &Frame::Done(Box::new(done)));
             }
@@ -303,6 +309,8 @@ impl EventSink for ChannelSink {
                     paged: false,
                     more: false,
                     capped: false,
+                    warning: None,
+                    forced: false,
                 };
                 Self::send_json(&self.channel, &Frame::Done(Box::new(done)));
             }
@@ -1137,6 +1145,26 @@ fn stop_all_queries(bridge: State<'_, CoreBridge>) {
 #[tauri::command]
 async fn holds_open_transaction(app: AppHandle) -> Result<bool, String> {
     on_blocking_pool(app, |bridge| bridge.holds_transaction()).await
+}
+
+#[derive(Debug, Serialize)]
+struct OpenTransactionDto {
+    window_id: String,
+    tab_id: u64,
+}
+
+/// The query tabs whose session may hold the user's open transaction:
+/// re-pointing their window would roll it back, so the webview refuses.
+#[tauri::command]
+async fn open_transactions(app: AppHandle) -> Result<Vec<OpenTransactionDto>, String> {
+    on_blocking_pool(app, |bridge| {
+        bridge
+            .open_transactions()
+            .into_iter()
+            .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
+            .collect()
+    })
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -2066,6 +2094,7 @@ pub fn run(mut timings: Timings) {
             open_sample,
             stop_all_queries,
             holds_open_transaction,
+            open_transactions,
             count_rows,
             cancel_count,
             probe_local_servers,

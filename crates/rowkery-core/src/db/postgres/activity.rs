@@ -183,6 +183,26 @@ pub async fn session_stop(
     Ok(row.get(0))
 }
 
+/// Cancels whatever the Rowkery session tagged `tag` is running, from
+/// `session` (another one): after a force stop closed that session's socket,
+/// the server would otherwise run its statement to the end. `Ok(false)` when
+/// no such session is left.
+pub async fn session_cancel_tagged(
+    session: &PostgresSession,
+    tag: &str,
+) -> Result<bool, DriverError> {
+    let row = session
+        .client
+        .query_one(
+            "SELECT coalesce(bool_or(pg_cancel_backend(pid)), false) \
+             FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+            &[&format!("{APP_NAME} {tag}")],
+        )
+        .await
+        .map_err(|e| map_query_error(&e, &session.config.username))?;
+    Ok(row.get(0))
+}
+
 /// The tag in a Rowkery session's `application_name`.
 pub fn rowkery_tag(application: &str) -> Option<&str> {
     application

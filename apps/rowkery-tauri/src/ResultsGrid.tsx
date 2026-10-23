@@ -1110,6 +1110,12 @@ function ResultsGridView({
         {changed > 0
           ? `${changed.toLocaleString()} ${changed === 1 ? "row" : "rows"} changed`
           : "Query finished with no result set"}
+        {/* The server's warning: a COMMIT with nothing to commit says so only here. */}
+        {result.warning && (
+          <div className="results-warning" data-warning>
+            Warning: {result.warning}
+          </div>
+        )}
       </div>
     );
   }

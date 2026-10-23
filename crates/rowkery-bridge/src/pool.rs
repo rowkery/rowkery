@@ -228,12 +228,31 @@ impl SessionPool {
         })
     }
 
+    /// The window's query tabs whose parked session may hold the user's
+    /// open transaction, which re-pointing the window would roll back.
+    pub fn open_transactions(&self, window_id: &str) -> Vec<u64> {
+        let mut tabs: Vec<u64> = self
+            .parked
+            .iter()
+            .filter_map(|((w, slot), p)| match slot {
+                Slot::Tab(tab) if w == window_id && !p.session.is_closed() => {
+                    at_risk(&p.session).then_some(*tab)
+                }
+                _ => None,
+            })
+            .collect();
+        tabs.sort_unstable();
+        tabs
+    }
+
     pub fn generation(&self, window_id: &str) -> u64 {
         self.generations.get(window_id).copied().unwrap_or(0)
     }
 
     /// Forgets the window's sessions and starts a new generation. The caller
-    /// drops the returned sessions outside the lock.
+    /// drops the returned sessions outside the lock. A tab whose session may
+    /// have held the user's transaction is marked lost, so its next statement
+    /// says so instead of running as if nothing happened.
     pub fn reset_window(&mut self, window_id: &str) -> (u64, Vec<PostgresSession>) {
         let generation = self.generation(window_id) + 1;
         self.generations.insert(window_id.to_string(), generation);
@@ -244,7 +263,6 @@ impl SessionPool {
         // Checkouts of the old generation end on their own; nothing waits on them.
         self.out.retain(|(w, _), _| w != window_id);
         self.tags.retain(|_, (w, _)| w != window_id);
-        self.lost.retain(|(w, _), _| w != window_id);
         self.returned.notify_waiters();
         let keys: Vec<Key> = self
             .parked
@@ -252,11 +270,13 @@ impl SessionPool {
             .filter(|(w, _)| w == window_id)
             .cloned()
             .collect();
-        let dropped = keys
-            .into_iter()
-            .filter_map(|k| self.parked.remove(&k))
-            .map(|p| p.session)
-            .collect();
+        let mut dropped = Vec::new();
+        for (w, slot) in keys {
+            if let Some(p) = self.parked.remove(&(w.clone(), slot)) {
+                self.note_lost(&w, slot, &p.session);
+                dropped.push(p.session);
+            }
+        }
         (generation, dropped)
     }
 
@@ -264,6 +284,7 @@ impl SessionPool {
     /// but bumping it keeps in-flight sessions from being parked).
     pub fn close_window(&mut self, window_id: &str) -> Vec<PostgresSession> {
         let (_, dropped) = self.reset_window(window_id);
+        self.lost.retain(|(w, _), _| w != window_id);
         dropped
     }
 
@@ -409,10 +430,8 @@ impl SessionPool {
         generation: u64,
         mut session: PostgresSession,
     ) -> Option<PostgresSession> {
-        if self.generation(window_id) != generation {
-            return Some(session);
-        }
-        if session.is_closed() {
+        // Re-pointed or closed while it was out: it goes like the rest did.
+        if self.generation(window_id) != generation || session.is_closed() {
             self.note_lost(window_id, slot, &session);
             return Some(session);
         }
@@ -853,6 +872,15 @@ pub(crate) fn give_back(
         Err(_) => Some(session),
     };
     drop(rejected);
+}
+
+/// Drops a tab's session that can't be kept; if it may have held the user's
+/// transaction, the tab's next statement says it was lost.
+pub(crate) fn drop_lost(pool: &SharedPool, window_id: &str, slot: Slot, session: PostgresSession) {
+    if let Ok(mut p) = pool.lock() {
+        p.note_lost(window_id, slot, &session);
+    }
+    drop(session);
 }
 
 /// After a statement that may have opened or ended a transaction, asks the
