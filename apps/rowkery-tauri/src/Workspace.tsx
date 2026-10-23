@@ -2949,7 +2949,8 @@ export function Workspace({
 
   /** ⌘F on a query tab: find in the loaded rows (client-side; nothing reruns). */
   const [find, setFind] = useState<{ tabId: number; query: string; index: number } | null>(null);
-  const [findCount, setFindCount] = useState(0);
+  /** Find's matches; null while a big result is still being searched. */
+  const [findCount, setFindCount] = useState<number | null>(0);
   const findRef = useRef<HTMLInputElement>(null);
   const openFind = () => {
     if (!activeTab || activeTab.kind !== "query") return;
@@ -4371,8 +4372,14 @@ export function Workspace({
                     }
                   }}
                 />
-                <span className="find-count" data-find-count={find.query ? findCount : ""}>
-                  {find.query ? (findCount ? `${findAt + 1} of ${findCount.toLocaleString()}` : "No matches") : `↵ next · ${isMacPlatform() ? "⇧↵" : "Shift+↵"} previous`}
+                <span className="find-count" data-find-count={find.query && findCount !== null ? findCount : ""} data-find-searching={find.query && findCount === null ? "" : undefined}>
+                  {find.query
+                    ? findCount === null
+                      ? "Searching…"
+                      : findCount
+                        ? `${findAt + 1} of ${findCount.toLocaleString()}`
+                        : "No matches"
+                    : `↵ next · ${isMacPlatform() ? "⇧↵" : "Shift+↵"} previous`}
                 </span>
               </span>
             )}
