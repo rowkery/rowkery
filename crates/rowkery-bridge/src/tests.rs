@@ -5494,6 +5494,7 @@ fn postgres_work_that_ends_early_stops_counting() {
     refuse.store(true, Ordering::SeqCst);
     let commit = bridge.apply_changes(
         "w",
+        id,
         7,
         edit_table(
             "public",
