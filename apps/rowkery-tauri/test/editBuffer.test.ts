@@ -37,7 +37,7 @@ const kiosks: TableNode = {
 
 describe("staging", () => {
   test("a cell back to its original value is no longer edited", () => {
-    let b = stageCell(emptyBuffer("db.public.kiosks"), key(3), "city", { Text: "PJ" }, { Text: "KL" });
+    let b = stageCell(emptyBuffer("db.public.kiosks", "c1"), key(3), "city", { Text: "PJ" }, { Text: "KL" });
     expect(changeCount(b)).toBe(1);
     b = stageCell(b, key(3), "city", { Text: "Puchong" }, { Text: "ignored: the first original stands" });
     expect(b.updates[rowKey(key(3))].was.city).toEqual({ Text: "KL" });
@@ -46,14 +46,14 @@ describe("staging", () => {
   });
 
   test("Esc reverts one cell and keeps the others", () => {
-    let b = stageCell(emptyBuffer("t"), key(1), "a", { Int: 2 }, { Int: 1 });
+    let b = stageCell(emptyBuffer("t", "c1"), key(1), "a", { Int: 2 }, { Int: 1 });
     b = stageCell(b, key(1), "b", null, { Text: "x" });
     b = revertCell(b, key(1), "a");
     expect(b.updates[rowKey(key(1))].set).toEqual({ b: null });
   });
 
   test("⌫ marks rows and unmarks them when all were marked", () => {
-    let b = toggleDeletes(emptyBuffer("t"), [key(1), key(2)]);
+    let b = toggleDeletes(emptyBuffer("t", "c1"), [key(1), key(2)]);
     expect(Object.keys(b.deletes)).toHaveLength(2);
     b = toggleDeletes(b, [key(1)]);
     expect(Object.keys(b.deletes)).toHaveLength(1);
@@ -69,7 +69,7 @@ describe("staging", () => {
 
 describe("what core gets", () => {
   test("inserts in the order made, then updates, then deletes; a deleted row drops its edits", () => {
-    let b = addInserts(emptyBuffer("t"), [{ id: 1, values: { name: { Text: "first" } } }]);
+    let b = addInserts(emptyBuffer("t", "c1"), [{ id: 1, values: { name: { Text: "first" } } }]);
     b = addInserts(b, [{ id: 2, values: {} }]);
     b = setInsertCell(b, 2, "name", { Text: "second" });
     b = stageCell(b, key(3), "name", { Text: "x" }, { Text: "y" });
@@ -86,7 +86,7 @@ describe("what core gets", () => {
   });
 
   test("a saved buffer comes back, and a broken one doesn't", () => {
-    const b = toggleDeletes(stageCell(emptyBuffer("t"), key(1), "a", { Int: 2 }, { Int: 1 }), [key(5)]);
+    const b = toggleDeletes(stageCell(emptyBuffer("t", "c1"), key(1), "a", { Int: 2 }, { Int: 1 }), [key(5)]);
     expect(savedBuffer(JSON.parse(JSON.stringify(b)))).toEqual(b);
     expect(savedBuffer({ tableKey: "t", inserts: [], updates: {}, deletes: {} })).toBeUndefined();
     expect(savedBuffer({ tableKey: "t", inserts: "x" })).toBeUndefined();
@@ -212,9 +212,9 @@ describe("a value closed as it opened stages nothing", () => {
     expect(sameValue({ Bool: false }, { Int: 0 }, "bool")).toBe(true);
     expect(sameValue({ Bool: false }, { Int: 1 }, "bool")).toBe(false);
     // Staging the value it holds leaves the row unedited.
-    const b = stageCell(emptyBuffer("main.flags"), key(1), "on", { Bool: true }, { Int: 1 }, "bool");
+    const b = stageCell(emptyBuffer("main.flags", "c1"), key(1), "on", { Bool: true }, { Int: 1 }, "bool");
     expect(changeCount(b)).toBe(0);
-    const off = stageCell(emptyBuffer("main.flags"), key(1), "on", { Bool: false }, { Int: 1 }, "bool");
+    const off = stageCell(emptyBuffer("main.flags", "c1"), key(1), "on", { Bool: false }, { Int: 1 }, "bool");
     expect(changeCount(off)).toBe(1);
   });
 
@@ -225,14 +225,14 @@ describe("a value closed as it opened stages nothing", () => {
     expect(sameValue({ Int: 3 }, { Text: "3.0" }, "int")).toBe(true);
     // A text column keeps its spelling: "1.0" isn't "1".
     expect(sameValue({ Text: "1.0" }, { Text: "1" }, "text")).toBe(false);
-    const b = stageCell(emptyBuffer("db.public.t"), key(1), "price", { Text: "2.5" }, { Float: 2.5 }, "number");
+    const b = stageCell(emptyBuffer("db.public.t", "c1"), key(1), "price", { Text: "2.5" }, { Float: 2.5 }, "number");
     expect(changeCount(b)).toBe(0);
   });
 });
 
 describe("a commit takes only what it sent", () => {
   test("edits staged while it ran stay, measured from what it wrote", () => {
-    let sent = stageCell(emptyBuffer("db.public.kiosks"), key(1), "name", { Text: "A" }, { Text: "a" });
+    let sent = stageCell(emptyBuffer("db.public.kiosks", "c1"), key(1), "name", { Text: "A" }, { Text: "a" });
     sent = addInserts(sent, [{ id: 7, values: { name: { Text: "new" } } }]);
     sent = toggleDeletes(sent, [key(2)]);
     // Meanwhile: row 1 edited again, row 3 edited, one more new row.

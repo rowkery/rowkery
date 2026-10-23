@@ -5,6 +5,7 @@ import {
   addInserts,
   changeCount,
   columnEditor,
+  commitNeedsReview,
   editRefusal,
   emptyBuffer,
   parseInput,
@@ -36,6 +37,8 @@ const isNullValue = (v: Value | null | undefined) => !v || "Null" in v;
 
 interface Options {
   windowId: string;
+  /** The connection the window is on: only a buffer staged on it shows, and new edits stage on it. */
+  connectionId: string | null;
   /** The shown tab: a table tab's id, table and buffer. */
   tab: { id: number; kind: string; tableKey?: string; schema?: string; edits?: EditBuffer } | undefined;
   setEdits: (tabId: number, edits: EditBuffer | undefined) => void;
@@ -60,7 +63,10 @@ interface Options {
 export function useRowEdits(o: Options) {
   const { tab, result, table, engine } = o;
   const tableTab = tab?.kind === "table" && !!tab.tableKey && !!result && !result.error && result.columns.length > 0;
-  const buffer = tableTab && tab?.edits?.tableKey === tab?.tableKey ? (tab?.edits ?? null) : null;
+  const buffer =
+    tableTab && tab?.edits?.tableKey === tab?.tableKey && tab?.edits?.connectionId === o.connectionId
+      ? (tab?.edits ?? null)
+      : null;
   const columns = useMemo(() => result?.columns ?? [], [result?.columns]);
   const rows = result?.rows ?? NO_ROWS;
   const rowCount = useResultRows(rows);
@@ -123,9 +129,11 @@ export function useRowEdits(o: Options) {
   }, [buffer, marked, rowCount, keyOf, names]);
 
   const update = useCallback((next: (b: EditBuffer) => EditBuffer) => {
-    const { tab: t, setEdits } = optsRef.current;
-    if (!t?.tableKey) return;
-    const cur = t.edits?.tableKey === t.tableKey ? t.edits : emptyBuffer(t.tableKey);
+    const { tab: t, setEdits, connectionId } = optsRef.current;
+    if (!t?.tableKey || !connectionId) return;
+    // Another connection's buffer is on its way to being parked: never staged over.
+    if (t.edits && t.edits.connectionId !== connectionId) return;
+    const cur = t.edits?.tableKey === t.tableKey ? t.edits : emptyBuffer(t.tableKey, connectionId);
     const b = next(cur);
     setEdits(t.id, changeCount(b) ? b : undefined);
   }, []);
@@ -279,10 +287,14 @@ export function useRowEdits(o: Options) {
   const rowsEditable = !!editing && !refusal;
   const cellEditable = rowsEditable && selection.col >= 0 && !!editors[selection.col];
   const oneRow = selection.rows.length === 1 ? selection.rows[0] : undefined;
+  let loadedDeleted = 0;
+  for (const s of states.values()) if (s.mark === "delete") loadedDeleted++;
   return {
     editing,
     buffer,
     count: changeCount(buffer),
+    /** ⌘S shows Review SQL first: many deletes, or every loaded row marked (⌘A ⌫). */
+    reviewFirst: commitNeedsReview(buffer, rowCount, loadedDeleted),
     refusal: tableTab ? refusal : null,
     rowsEditable,
     cellEditable,
