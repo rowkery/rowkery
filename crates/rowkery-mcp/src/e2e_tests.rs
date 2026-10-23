@@ -540,12 +540,16 @@ async fn masked_columns_hold_against_a_real_postgres() {
         let err = query(&mcp, sql).await.expect_err(sql);
         assert_eq!(err, crate::guard::STATISTICS_REFUSAL, "{sql}");
     }
+    // The secret columns, by name, as a whole row or behind a view.
     for sql in [
         "SELECT rolname, rolpassword FROM pg_authid",
-        "SELECT pw FROM pg_authid AS a(i, n, s, h, r, d, l, c, b, k, pw, u)",
+        "SELECT * FROM pg_authid",
+        "SELECT a::text FROM pg_authid a",
+        "SELECT rolname FROM pg_authid WHERE rolpassword LIKE 'SCRAM%'",
+        "SELECT r.pw FROM (SELECT rolpassword AS pw FROM pg_authid OFFSET 0) r",
+        "SELECT s.pw FROM pg_namespace n JOIN (SELECT oid, rolpassword AS pw FROM pg_authid OFFSET 0) s ON s.oid = n.nspowner",
         "SELECT usename, passwd FROM pg_shadow",
-        "SELECT rolname FROM pg_roles",
-        "SELECT usename FROM pg_user",
+        "SELECT * FROM pg_shadow",
         "SELECT umoptions::text FROM pg_user_mappings",
         "SELECT * FROM pg_user_mapping",
         "SELECT * FROM information_schema.user_mapping_options",
@@ -553,6 +557,39 @@ async fn masked_columns_hold_against_a_real_postgres() {
     ] {
         let err = query(&mcp, sql).await.expect_err(sql);
         assert_eq!(err, crate::guard::CREDENTIALS_REFUSAL, "{sql}");
+    }
+    // Renamed columns can't be followed: refused.
+    for sql in [
+        "SELECT pw FROM pg_authid AS a(i, n, s, h, r, d, l, c, b, k, pw, u)",
+        "SELECT a.rolname FROM pg_authid a(oid, rolpassword, s, h, r, d, l, c, b, k, rolname)",
+        "SELECT x.n FROM pg_namespace n JOIN pg_authid AS x(o, n) ON x.o = n.nspowner",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(err, crate::guard::CREDENTIALS_RENAMED, "{sql}");
+    }
+    // The rest of those catalogs stays open: role names and owners, and the
+    // information_schema views over them.
+    for sql in [
+        "SELECT rolname, rolsuper FROM pg_roles",
+        "SELECT * FROM pg_roles",
+        "SELECT usename, passwd FROM pg_user",
+        "SELECT rolname FROM pg_authid WHERE rolcanlogin",
+        "SELECT n.nspname, r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner",
+        "SELECT c.relname, r.rolname FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE c.relname = 'mcp_mask_orders'",
+        "SELECT s.rolname FROM pg_namespace n JOIN (SELECT * FROM pg_authid OFFSET 0) s ON s.oid = n.nspowner",
+        "SELECT * FROM information_schema.schemata",
+        "SELECT * FROM information_schema.table_privileges WHERE table_name = 'mcp_mask_orders'",
+        "SELECT * FROM information_schema.role_table_grants WHERE table_name = 'mcp_mask_orders'",
+        "SELECT * FROM information_schema.column_privileges WHERE table_name = 'mcp_mask_orders'",
+        "SELECT * FROM information_schema.enabled_roles",
+        "SELECT * FROM information_schema.applicable_roles",
+        "SELECT * FROM pg_group",
+        "SELECT srvname, usename FROM pg_user_mappings",
+        "SELECT subname FROM pg_subscription",
+    ] {
+        query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
     }
     // Views that call functions off the list are refused for those first.
     for sql in [
@@ -619,7 +656,7 @@ async fn masked_columns_hold_against_a_real_postgres() {
     )
     .await
     .expect("statistics with nothing kept back");
-    let err = query(&mcp, "SELECT rolname FROM pg_authid")
+    let err = query(&mcp, "SELECT rolpassword FROM pg_authid")
         .await
         .expect_err("credentials");
     assert_eq!(err, crate::guard::CREDENTIALS_REFUSAL);
@@ -650,8 +687,12 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_p_orders, mcp_p_customers, mcp_p_hidden, mcp_p_log, mcp_p_serial, mcp_p_ident CASCADE;
-         CREATE TABLE mcp_p_serial (id serial PRIMARY KEY, note text, at timestamptz DEFAULT now());
+        "DROP TABLE IF EXISTS mcp_p_orders, mcp_p_customers, mcp_p_hidden, mcp_p_log, mcp_p_serial, mcp_p_ident,
+           mcp_p_peeks, mcp_p_other CASCADE;
+         DROP FUNCTION IF EXISTS mcp_p_peek() CASCADE;
+         DROP SEQUENCE IF EXISTS mcp_p_other_seq;
+         CREATE TABLE mcp_p_serial (id serial PRIMARY KEY, note text, at timestamptz DEFAULT now(),
+           pid int DEFAULT pg_backend_pid());
          CREATE TABLE mcp_p_ident (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note text);
          DROP FUNCTION IF EXISTS mcp_p_fn(int);
          DROP FUNCTION IF EXISTS mcp_p_trg() CASCADE;
@@ -660,6 +701,12 @@ async fn proposed_changes_hold_against_a_real_postgres() {
          CREATE TABLE mcp_p_orders (id int PRIMARY KEY, status text, note text);
          INSERT INTO mcp_p_orders VALUES (1, 'pending', null), (2, 'pending', null), (3, 'paid', null);
          CREATE TABLE mcp_p_hidden (id int PRIMARY KEY);
+         INSERT INTO mcp_p_hidden VALUES (4242);
+         CREATE FUNCTION mcp_p_peek() RETURNS text LANGUAGE plpgsql AS
+           $$ BEGIN RETURN (SELECT max(id)::text FROM mcp_p_hidden); END $$;
+         CREATE TABLE mcp_p_peeks (id serial PRIMARY KEY, note text DEFAULT mcp_p_peek(), n int);
+         CREATE SEQUENCE mcp_p_other_seq;
+         CREATE TABLE mcp_p_other (id bigint PRIMARY KEY DEFAULT nextval('mcp_p_other_seq'), n int);
          CREATE TABLE mcp_p_log (msg text);
          CREATE FUNCTION mcp_p_fn(int) RETURNS int LANGUAGE sql AS 'SELECT $1';
          CREATE FUNCTION mcp_p_trg() RETURNS trigger LANGUAGE plpgsql AS
@@ -684,6 +731,8 @@ async fn proposed_changes_hold_against_a_real_postgres() {
                     "public.mcp_p_customers".into(),
                     "public.mcp_p_serial".into(),
                     "public.mcp_p_ident".into(),
+                    "public.mcp_p_peeks".into(),
+                    "public.mcp_p_other".into(),
                 ],
             },
         )]
@@ -724,8 +773,33 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         assert!(err.starts_with("Refused"), "{sql}: {err}");
     }
 
-    // A table's own defaults fill in a serial or identity key (nextval, in
-    // the plan); a call the agent writes is still refused.
+    // A default written in plpgsql runs what the plan can't show (here it
+    // reads the hidden table), and nextval on another table's sequence
+    // isn't the table's own: both are checked like the agent's SQL.
+    for (sql, said) in [
+        (
+            "INSERT INTO mcp_p_peeks (n) VALUES (1)",
+            "mcp_p_peek() is defined",
+        ),
+        (
+            "UPDATE mcp_p_peeks SET note = DEFAULT WHERE id = 1",
+            "mcp_p_peek() is defined",
+        ),
+        (
+            "INSERT INTO mcp_p_other (n) VALUES (1)",
+            "nextval() changes",
+        ),
+    ] {
+        let err = propose(sql).await.expect_err(sql);
+        assert!(
+            err.starts_with("Refused") && err.contains(said),
+            "{sql}: {err}"
+        );
+    }
+
+    // A table's own compiled defaults fill in a serial or identity key
+    // (nextval, in the plan) or a built-in like pg_backend_pid(); a call
+    // the agent writes is still refused.
     for sql in [
         "INSERT INTO mcp_p_serial (note) VALUES ('a')",
         "INSERT INTO mcp_p_serial VALUES (DEFAULT, 'b')",
@@ -751,6 +825,10 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         (
             "UPDATE mcp_p_serial SET note = nextval('mcp_p_ident_id_seq')::text",
             "nextval() changes",
+        ),
+        (
+            "INSERT INTO mcp_p_ident (note) VALUES (pg_backend_pid()::text)",
+            "pg_backend_pid() isn't one",
         ),
     ] {
         let err = propose(sql).await.expect_err(sql);

@@ -690,6 +690,38 @@ async fn list_sessions(
     Ok(out)
 }
 
+/// Refused when a Postgres plan uses a credentials catalog's secret column
+/// (`guard::credentials_use`); `written` is the SQL as sent.
+pub(crate) async fn refuse_credentials(
+    store: &mut Store,
+    target: &Target,
+    plan: &Json,
+    touched: &[(Option<String>, String)],
+    written: &functions::Scan,
+) -> Result<(), String> {
+    if !touched
+        .iter()
+        .any(|(schema, table)| guard::is_credentials(schema.as_deref(), table))
+    {
+        return Ok(());
+    }
+    let found = store.read(target, guard::CREDENTIAL_COLUMNS_SQL).await?;
+    let columns: Vec<(String, String)> = found
+        .rows
+        .iter()
+        .filter_map(|r| match (r.first(), r.get(1)) {
+            (Some(rowkery_core::Value::Text(t)), Some(rowkery_core::Value::Text(c))) => {
+                Some((t.clone(), c.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    match guard::credentials_use(plan, &columns, &written.call_names()) {
+        Some(why) => Err(why.into()),
+        None => Ok(()),
+    }
+}
+
 /// `explain` and `query`: the same checks, then either the plan or the rows.
 async fn run_read(
     store: &mut Store,
@@ -734,6 +766,7 @@ async fn run_read(
             let scans: Vec<(Option<String>, String)> =
                 scans.into_iter().map(|s| (s.schema, s.table)).collect();
             let touched = guard::pg_relations(&plan);
+            refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }
         EngineKind::Sqlite => {
@@ -776,12 +809,6 @@ async fn run_read(
             (details, scans, touched, None)
         }
     };
-    if touched
-        .iter()
-        .any(|(schema, table)| guard::is_credentials(schema.as_deref(), table))
-    {
-        return Err(guard::CREDENTIALS_REFUSAL.into());
-    }
     // Statistics give nothing away when every table is shared and nothing
     // is masked.
     if (rule.restricts() || !marks.is_empty())

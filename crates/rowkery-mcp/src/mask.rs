@@ -88,7 +88,7 @@ pub fn missing_refusal(table: &str, column: &str) -> String {
 /// A deparsed expression as tokens: names (dotted chains, `c.*` included),
 /// punctuation, and everything else (literals, numbers, `$1`).
 #[derive(Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Name(Vec<String>),
     Punct(char),
     Other,
@@ -131,7 +131,7 @@ fn ident_at(b: &[u8], expr: &str, i: &mut usize) -> Option<String> {
     }
 }
 
-fn tokens(expr: &str) -> Vec<Tok> {
+pub(crate) fn tokens(expr: &str) -> Vec<Tok> {
     let b = expr.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;

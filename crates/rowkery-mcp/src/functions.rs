@@ -334,7 +334,7 @@ pub fn scan_sql(sql: &str) -> Scan {
 }
 
 /// Plan keys whose values are names, not expressions.
-const NAME_KEYS: &[&str] = &[
+pub(crate) const NAME_KEYS: &[&str] = &[
     "Node Type",
     "Relation Name",
     "Schema",

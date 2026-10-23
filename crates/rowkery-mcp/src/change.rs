@@ -2,8 +2,9 @@
 //! before the app previews or commits it: plain INSERT / UPDATE / DELETE
 //! statements (`safety::row_changes`) on shared tables, on a connection
 //! that isn't Read-only, calling only the built-in functions agents may
-//! call (`functions`; the table's own column defaults, such as a serial
-//! key's nextval, aside) and never naming a masked column. Postgres plans each statement (EXPLAIN
+//! call (`functions`; the table's own defaults that call only compiled
+//! code, such as a serial key's nextval, aside) and never naming a masked
+//! column. Postgres plans each statement (EXPLAIN
 //! without ANALYZE, which runs nothing, on the read-only session); SQLite's
 //! authorizer reports what each one touches while it is prepared.
 
@@ -55,22 +56,27 @@ pub async fn check(
                 let fills = match written_table(&plan) {
                     Some((schema, table)) if change.verb != "DELETE" => {
                         let found = store.read(target, &defaults_sql(&schema, &table)).await?;
-                        found
+                        let rows: Vec<Vec<String>> = found
                             .rows
                             .iter()
-                            .filter_map(|r| match r.first() {
-                                Some(rowkery_core::Value::Text(t)) if t.contains('(') => {
-                                    Some(t.clone())
-                                }
-                                _ => None,
+                            .map(|r| {
+                                r.iter()
+                                    .map(|v| match v {
+                                        rowkery_core::Value::Text(t) => t.clone(),
+                                        _ => String::new(),
+                                    })
+                                    .collect()
                             })
-                            .collect()
+                            .collect();
+                        compiled_defaults(&rows)
                     }
                     _ => Vec::new(),
                 };
                 let own = without_fills(&plan, &fills);
                 functions::check_pg(store, target, &functions::scan_plan(&own), false).await?;
                 let touched = guard::pg_relations(&plan);
+                let written = functions::scan_sql(&change.sql);
+                crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
                 refuse_unshared(store, target, &touched).await?;
                 masked_mention(store, target, &marks, &touched, change, &text).await?;
             }
@@ -113,9 +119,13 @@ fn written_table(plan: &Json) -> Option<(String, String)> {
 }
 
 /// The default and identity expressions of `schema.table`, deparsed the way
-/// the plan writes them: `pg_attrdef` (a serial's
-/// `nextval('t_id_seq'::regclass)`, `now()`), and `nextval('t_id_seq')`
-/// for an identity column.
+/// the plan writes them (`pg_attrdef`: a serial's
+/// `nextval('t_id_seq'::regclass)`, `now()`; `nextval('t_id_seq')` for an
+/// identity column), one row per function outside Postgres's own that each
+/// one calls, directly or behind an operator (Postgres records no
+/// dependency on its built-ins): default id, expression, function, whether
+/// it is compiled (C or internal), and whether every sequence the default
+/// names belongs to this table.
 fn defaults_sql(schema: &str, table: &str) -> String {
     let rel = format!(
         "(SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -124,12 +134,56 @@ fn defaults_sql(schema: &str, table: &str) -> String {
         functions::text_literal(table)
     );
     format!(
-        "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d WHERE d.adrelid = {rel} \
-         UNION ALL SELECT 'nextval(' || quote_literal(s.oid::regclass::text) || ')' \
+        "WITH d AS (SELECT d.oid, pg_get_expr(d.adbin, d.adrelid) AS expr FROM pg_attrdef d \
+           WHERE d.adrelid = {rel}), \
+         calls AS (SELECT p.objid, p.refobjid AS fn FROM pg_depend p \
+           WHERE p.classid = 'pg_attrdef'::regclass AND p.refclassid = 'pg_proc'::regclass \
+           UNION ALL SELECT p.objid, o.oprcode::oid FROM pg_depend p JOIN pg_operator o ON o.oid = p.refobjid \
+           WHERE p.classid = 'pg_attrdef'::regclass AND p.refclassid = 'pg_operator'::regclass) \
+         SELECT d.oid::text, d.expr, coalesce(x.proname::text, ''), \
+           coalesce((l.lanname IN ('c', 'internal'))::text, 'false'), \
+           (NOT EXISTS (SELECT 1 FROM pg_depend q JOIN pg_class s ON s.oid = q.refobjid AND s.relkind = 'S' \
+             WHERE q.classid = 'pg_attrdef'::regclass AND q.objid = d.oid AND q.refclassid = 'pg_class'::regclass \
+             AND NOT EXISTS (SELECT 1 FROM pg_depend o WHERE o.classid = 'pg_class'::regclass \
+               AND o.objid = s.oid AND o.refclassid = 'pg_class'::regclass \
+               AND o.refobjid = {rel} AND o.deptype IN ('a', 'i'))))::text \
+         FROM d LEFT JOIN calls k ON k.objid = d.oid LEFT JOIN pg_proc x ON x.oid = k.fn \
+         LEFT JOIN pg_language l ON l.oid = x.prolang \
+         UNION ALL SELECT 'identity ' || s.oid::text, 'nextval(' || quote_literal(s.oid::regclass::text) || ')', \
+           'nextval', 'true', 'true' \
          FROM pg_depend p JOIN pg_class s ON s.oid = p.objid AND s.relkind = 'S' \
          WHERE p.classid = 'pg_class'::regclass AND p.refclassid = 'pg_class'::regclass \
          AND p.refobjid = {rel} AND p.deptype = 'i'"
     )
+}
+
+/// The defaults of [`defaults_sql`]'s rows that the plan check may pass
+/// over: ones that call only Postgres's built-ins and compiled extension
+/// code (`now()`, `gen_random_uuid()`, `uuid_generate_v4()`), and nothing
+/// refused by name (`functions::refused_builtin`, read off the expression)
+/// but `nextval` on the table's own sequence. A default written in SQL or
+/// plpgsql is checked like the agent's own SQL, since its body could read
+/// tables that aren't shared.
+fn compiled_defaults(rows: &[Vec<String>]) -> Vec<String> {
+    let mut seen: Vec<(&str, &str, bool)> = Vec::new();
+    for r in rows {
+        let [id, expr, call, compiled, own] = r.as_slice() else {
+            continue;
+        };
+        let named = functions::scan_sql(expr)
+            .call_names()
+            .iter()
+            .all(|n| functions::refused_builtin(n).is_none() || (n == "nextval" && own == "true"));
+        let ok = named && (call.is_empty() || compiled == "true");
+        match seen.iter_mut().find(|(i, _, _)| i == id) {
+            Some(entry) => entry.2 &= ok,
+            None => seen.push((id, expr, ok)),
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, expr, ok)| *ok && expr.contains('('))
+        .map(|(_, expr, _)| expr.to_string())
+        .collect()
 }
 
 /// `plan` with each of `fills` replaced by NULL wherever it stands whole
@@ -174,8 +228,7 @@ fn masked_refusal(m: &mask::Marked) -> String {
     )
 }
 
-/// Every relation a statement touches must be shared (statistics and the
-/// catalogs that hold credentials never are).
+/// Every relation a statement touches must be shared (statistics never are).
 async fn refuse_unshared(
     store: &mut Store,
     target: &Target,
@@ -183,12 +236,6 @@ async fn refuse_unshared(
 ) -> Result<(), String> {
     let rule =
         access::tables(&target.record, &target.database).unwrap_or(access::Tables::Only(&[]));
-    if touched
-        .iter()
-        .any(|(s, t)| guard::is_credentials(s.as_deref(), t))
-    {
-        return Err(guard::CREDENTIALS_REFUSAL.into());
-    }
     let statistics = touched
         .iter()
         .any(|(s, t)| guard::is_statistics(s.as_deref(), t));
@@ -386,6 +433,41 @@ mod tests {
         assert_eq!(out[1], was[1]);
         assert_eq!(out[2], was[2]);
         assert_eq!(out[3], was[3]);
+    }
+
+    #[test]
+    fn only_compiled_defaults_and_own_sequences_are_passed_over() {
+        let row = |id: &str, expr: &str, call: &str, compiled: bool, own: bool| {
+            vec![
+                id.to_string(),
+                expr.to_string(),
+                call.to_string(),
+                compiled.to_string(),
+                own.to_string(),
+            ]
+        };
+        let rows = vec![
+            row("1", "nextval('t_id_seq'::regclass)", "", false, true),
+            row("2", "nextval('other'::regclass)", "", false, false),
+            row("3", "secret_default()", "secret_default", false, true),
+            row("4", "uuid_generate_v4()", "uuid_generate_v4", true, true),
+            row("5", "pg_backend_pid()", "", false, true),
+            row("6", "setval('t_id_seq'::regclass, 1)", "", false, true),
+            row("7", "pg_read_file('/etc/hostname'::text)", "", false, true),
+            row("8", "(f(1) || g(2))", "f", true, true),
+            row("8", "(f(1) || g(2))", "g", false, true),
+            row("9", "'x'::text", "", false, true),
+            row("identity 1", "nextval('t_x_seq')", "nextval", true, true),
+        ];
+        assert_eq!(
+            compiled_defaults(&rows),
+            vec![
+                "nextval('t_id_seq'::regclass)",
+                "uuid_generate_v4()",
+                "pg_backend_pid()",
+                "nextval('t_x_seq')",
+            ]
+        );
     }
 
     #[test]
