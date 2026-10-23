@@ -756,7 +756,8 @@ export type OpenLink =
   | { kind: "sql"; connection: string; database: string | null; sql: string }
   | { kind: "proposal"; id: string }
   | { kind: "decided" }
-  | { kind: "gone" };
+  | { kind: "gone" }
+  | { kind: "refused" };
 
 /** The link waiting since the OS handed it over (`open-link`), if any; taking it clears it. */
 export async function takeOpenLink(): Promise<OpenLink | null> {

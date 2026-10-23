@@ -64,6 +64,22 @@ Don't send a rejected change again. Before a change, describe_table shows the co
 and enum labels; don't query existing rows just to see example values. Read only what the change \
 depends on, such as the row it updates or an id it references, and select only the columns you need.";
 
+/// The checks a logged query passes again, without a database, before a
+/// `rowkery://open` link puts it in a tab: one read statement, calling no
+/// function refused by name. The log is a plain file, so its verdict alone
+/// proves nothing.
+pub fn recheck_logged_read(sql: &str) -> Result<(), String> {
+    let sql = guard::single_read(sql)?;
+    match functions::scan_sql(&sql)
+        .call_names()
+        .iter()
+        .find_map(|name| functions::refused_builtin(name).map(|why| (name.clone(), why)))
+    {
+        Some((name, why)) => Err(format!("Refused: {name} {why}.")),
+        None => Ok(()),
+    }
+}
+
 /// Runs the server on stdin / stdout until the client disconnects.
 pub fn run_stdio() -> i32 {
     let runtime = match tokio::runtime::Runtime::new() {

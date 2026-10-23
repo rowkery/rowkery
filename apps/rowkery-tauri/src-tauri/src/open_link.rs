@@ -1,10 +1,14 @@
 //! `rowkery://` links from Rowkery's views in the chat (`rowkery_mcp::views`):
-//! `rowkery://open?call=<id>` opens a logged agent query as a query tab, run
-//! at once; `rowkery://review?proposal=<id>` opens that proposal's review.
+//! `rowkery://open?call=<id>` opens a logged agent query as a query tab, not
+//! run (the user presses ⌘↵); `rowkery://review?proposal=<id>` opens that
+//! proposal's review.
 //!
 //! A link names a call by its id and random key, never by SQL, so a web page
 //! can't make Rowkery run anything: the SQL comes from the activity log, and
-//! only a query the guard let through (verdict ok) opens. The page takes the
+//! only a query the guard let through (verdict ok) opens. The log is a plain
+//! file anything on the Mac can append to, so the SQL passes the agent read
+//! guard's static checks again here (`recheck_logged_read`) rather than
+//! trusting the logged verdict. The page takes the
 //! link with `take_open_link` (`open-link` says one is waiting), so a link
 //! that launched the app waits until the page is up.
 // Links arrive only on macOS (`RunEvent::Opened`), where the bundle registers the scheme.
@@ -31,6 +35,8 @@ pub enum OpenLink {
     Decided,
     /// The call isn't in the log (cleared, rotated twice, or a made-up link).
     Gone,
+    /// The logged SQL fails the read guard again, whatever its verdict says.
+    Refused,
 }
 
 /// The link the page hasn't taken yet.
@@ -66,10 +72,13 @@ pub fn resolve(
                     sql: Some(sql),
                     database,
                     ..
-                }) => OpenLink::Sql {
-                    connection,
-                    database,
-                    sql,
+                }) => match rowkery_mcp::recheck_logged_read(&sql) {
+                    Ok(_) => OpenLink::Sql {
+                        connection,
+                        database,
+                        sql,
+                    },
+                    Err(_) => OpenLink::Refused,
                 },
                 _ => OpenLink::Gone,
             })
@@ -114,7 +123,16 @@ mod tests {
         let mut e = Entry::new("query");
         e.connection = Some("pg".into());
         e.database = Some("shop".into());
-        e.sql = Some("select 1".into());
+        e.sql = Some(
+            match id {
+                "delete" => "DELETE FROM users",
+                "multi" => "select 1; delete from users",
+                "cte" => "with gone as (delete from users returning *) select * from gone",
+                "call" => "select pg_terminate_backend(42)",
+                _ => "select 1",
+            }
+            .into(),
+        );
         e.verdict = Some(if id == "refused" {
             "Refused: no".into()
         } else {
@@ -157,6 +175,18 @@ mod tests {
             ),
             Some(OpenLink::Gone)
         );
+        // A forged log line with verdict ok still has to be a single read.
+        for forged in ["delete", "multi", "cte", "call"] {
+            assert_eq!(
+                resolve(
+                    &format!("{LINK_SCHEME}://open?call={forged}"),
+                    logged,
+                    waiting
+                ),
+                Some(OpenLink::Refused),
+                "{forged}"
+            );
+        }
         assert_eq!(
             resolve(
                 &format!("{LINK_SCHEME}://open?sql=select%201"),
