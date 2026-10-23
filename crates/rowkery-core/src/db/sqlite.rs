@@ -25,6 +25,16 @@ pub fn sqlite_version() -> &'static str {
 
 const BATCH_SIZE: usize = 200;
 
+/// How long a statement waits for a lock another connection on the file
+/// holds (another tab's open transaction, an edit being saved, an agent)
+/// before it fails with "database is locked".
+pub const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// SQLite's own objects (`sqlite_sequence`, `sqlite_stat1`, …): names that
+/// start with exactly `sqlite_`. Not `LIKE 'sqlite_%'`, which ignores case
+/// and reads `_` as any character, so it also hid tables like `SqliteLogs`.
+const NOT_INTERNAL: &str = "substr(m.name, 1, 7) <> 'sqlite_'";
+
 /// What a statement did: rows it returned (and whether a page left some),
 /// or rows it changed.
 enum Ran {
@@ -39,6 +49,27 @@ pub struct SqliteDriver {
     interrupt: Option<InterruptHandle>,
     cancelled: Arc<AtomicBool>,
     read_only: bool,
+    /// The file the connection opened, to notice it was replaced.
+    opened: Option<FileId>,
+}
+
+/// Which file a path named when it was opened (device and inode on Unix;
+/// elsewhere only that it exists).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileId(u64, u64);
+
+fn file_id(path: &std::path::Path) -> Option<FileId> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileId(meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Some(FileId(0, 0))
+    }
 }
 
 impl SqliteDriver {
@@ -49,6 +80,7 @@ impl SqliteDriver {
             interrupt: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             read_only: false,
+            opened: None,
         }
     }
 
@@ -67,6 +99,45 @@ impl SqliteDriver {
         self.interrupt.take()
     }
 
+    /// A handle that interrupts whatever runs on the connection next, for a
+    /// connection kept across runs (each run arms its own).
+    pub fn interrupt_handle(&self) -> Option<InterruptHandle> {
+        let conn = self.conn.as_ref()?.lock().ok()?;
+        Some(conn.get_interrupt_handle())
+    }
+
+    /// Turns `PRAGMA query_only` on or off on an open connection, when the
+    /// connection's safe mode changed since it was opened.
+    pub fn set_read_only(&mut self, read_only: bool) -> Result<(), DriverError> {
+        if self.read_only == read_only {
+            return Ok(());
+        }
+        let conn = self.connection()?;
+        let guard = conn
+            .lock()
+            .map_err(|_| DriverError::Message("lock poisoned".into()))?;
+        guard
+            .pragma_update(None, "query_only", read_only)
+            .map_err(|e| DriverError::Message(e.to_string()))?;
+        self.read_only = read_only;
+        Ok(())
+    }
+
+    /// Whether a transaction is open on the connection (BEGIN without its
+    /// COMMIT or ROLLBACK yet). False when it isn't connected.
+    pub fn in_transaction(&self) -> bool {
+        self.conn
+            .as_ref()
+            .and_then(|c| c.lock().ok().map(|c| !c.is_autocommit()))
+            .unwrap_or(false)
+    }
+
+    /// The path no longer names the file the connection opened: it was
+    /// deleted, or replaced (a fresh copy renamed over it).
+    pub fn file_replaced(&self) -> bool {
+        self.opened.is_some() && file_id(&expand_home(&self.path)) != self.opened
+    }
+
     /// Runs staged row edits as one transaction: every statement must change
     /// exactly one row, or the whole batch rolls back and the failure names
     /// the statement.
@@ -79,7 +150,7 @@ impl SqliteDriver {
             .map_err(|_| ApplyFailure::other("lock poisoned"))?;
         if !conn.is_autocommit() {
             return Err(ApplyFailure::other(
-                "A transaction is open. Commit or roll it back before saving edits.",
+                "This tab has a transaction open. Commit or roll it back before saving edits.",
             ));
         }
         // IMMEDIATE takes the write lock now, so no other writer slips in between.
@@ -242,6 +313,8 @@ impl Driver for SqliteDriver {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )
         .map_err(|e| DriverError::Message(e.to_string()))?;
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .map_err(|e| DriverError::Message(e.to_string()))?;
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
@@ -249,6 +322,7 @@ impl Driver for SqliteDriver {
         let interrupt = conn.get_interrupt_handle();
         self.conn = Some(Arc::new(Mutex::new(conn)));
         self.interrupt = Some(interrupt);
+        self.opened = file_id(path);
         self.cancelled.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -329,7 +403,7 @@ impl SqliteDriver {
         for db in databases {
             let tables: Vec<String> = guard
                 .prepare(&format!(
-                    "SELECT name FROM {}sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                    "SELECT m.name FROM {}sqlite_master m WHERE m.type = 'table' AND {NOT_INTERNAL} ORDER BY m.name",
                     sqlite_db_prefix(&db)
                 ))
                 .map_err(msg)?
@@ -408,7 +482,7 @@ fn list_sqlite_tables(
     let prefix = sqlite_db_prefix(db_name);
     let schema_arg = sqlite_string_literal(db_name);
     let master = format!("{prefix}sqlite_master m");
-    let relations = "m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%'";
+    let relations = format!("m.type IN ('table', 'view') AND {NOT_INTERNAL}");
 
     let mut tables: Vec<TableNode> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
@@ -449,29 +523,29 @@ fn list_sqlite_tables(
     }
 
     // Columns, in order; `pk` is the column's place in the primary key.
+    // One query reads every relation's; when it fails (a view whose table
+    // was dropped can't be read), each relation is read on its own and a
+    // broken one is listed without columns rather than failing the catalog.
     {
-        let mut stmt = guard
-            .prepare(&format!(
-                "SELECT m.name, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk
-                 FROM {master} JOIN pragma_table_info(m.name, {schema_arg}) p
-                 WHERE {relations} ORDER BY m.name, p.cid"
-            ))
-            .map_err(msg)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)? != 0,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, i64>(5)?,
-                ))
-            })
-            .map_err(msg)?;
+        let one = format!(
+            "SELECT ?1, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk
+             FROM pragma_table_info(?1, {schema_arg}) p ORDER BY p.cid"
+        );
+        let all = format!(
+            "SELECT m.name, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk
+             FROM {master} JOIN pragma_table_info(m.name, {schema_arg}) p
+             WHERE {relations} ORDER BY m.name, p.cid"
+        );
+        let rows = match column_rows(guard, &all, []) {
+            Ok(rows) => rows,
+            Err(_) => tables
+                .iter()
+                .filter_map(|t| column_rows(guard, &one, [&t.name]).ok())
+                .flatten()
+                .collect(),
+        };
         let mut keys: HashMap<usize, Vec<(i64, String)>> = HashMap::new();
-        for row in rows {
-            let (table, name, type_name, notnull, default, pk) = row.map_err(msg)?;
+        for (table, name, type_name, notnull, default, pk) in rows {
             let Some(&i) = at.get(&table) else { continue };
             if pk > 0 {
                 keys.entry(i).or_default().push((pk, name.clone()));
@@ -522,7 +596,7 @@ fn list_sqlite_tables(
                  FROM {master}
                  JOIN pragma_index_list(m.name, {schema_arg}) il
                  JOIN pragma_index_info(il.name, {schema_arg}) ii
-                 WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+                 WHERE m.type = 'table' AND {NOT_INTERNAL}
                  ORDER BY m.name, il.seq DESC, ii.seqno"
             ))
             .map_err(msg)?;
@@ -566,7 +640,7 @@ fn list_sqlite_tables(
                 "SELECT m.name, fk.id, fk.\"table\", fk.\"from\", fk.\"to\", fk.on_delete
                  FROM {master}
                  JOIN pragma_foreign_key_list(m.name, {schema_arg}) fk
-                 WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+                 WHERE m.type = 'table' AND {NOT_INTERNAL}
                  ORDER BY m.name, fk.id, fk.seq"
             ))
             .map_err(msg)?;
@@ -608,6 +682,28 @@ fn list_sqlite_tables(
     }
 
     Ok(tables)
+}
+
+/// One column of `pragma_table_info`, with its relation's name first.
+type ColumnRow = (String, String, String, bool, Option<String>, i64);
+
+fn column_rows<P: rusqlite::Params>(
+    guard: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<Vec<ColumnRow>> {
+    let mut stmt = guard.prepare(sql)?;
+    let rows = stmt.query_map(params, |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get::<_, i64>(3)? != 0,
+            r.get(4)?,
+            r.get(5)?,
+        ))
+    })?;
+    rows.collect()
 }
 
 /// Rows counted for a plan hint stop here (`PLAN_COUNT_CAP` means "more").
@@ -940,6 +1036,90 @@ mod tests {
         let names: Vec<_> = view.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["id", "name"]);
         assert_eq!(view.row_estimate, RowEstimate::Unknown);
+    }
+
+    #[test]
+    fn a_broken_view_does_not_fail_the_catalog() {
+        let (file, path) = temp_db();
+        Connection::open(file.path())
+            .expect("open")
+            .execute_batch(
+                "CREATE TABLE gone (id INTEGER);
+                 CREATE VIEW orphan AS SELECT id FROM gone;
+                 CREATE VIEW fine AS SELECT name FROM items;
+                 DROP TABLE gone;",
+            )
+            .expect("schema");
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let catalog = driver.introspect_catalog().expect("introspect");
+        let orphan = catalog
+            .find_table("main", "main", "orphan")
+            .expect("listed");
+        assert!(orphan.columns.is_empty(), "it can't be read");
+        let fine = catalog.find_table("main", "main", "fine").expect("fine");
+        assert_eq!(fine.columns.len(), 1);
+        let items = catalog.find_table("main", "main", "items").expect("items");
+        assert_eq!(items.primary_key, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn tables_named_like_sqlite_are_listed() {
+        let (file, path) = temp_db();
+        Connection::open(file.path())
+            .expect("open")
+            .execute_batch(
+                "CREATE TABLE SqliteLogs (id INTEGER PRIMARY KEY AUTOINCREMENT, line TEXT);
+                 CREATE INDEX sqlitelogs_line ON SqliteLogs(line);
+                 INSERT INTO SqliteLogs (line) VALUES ('a');",
+            )
+            .expect("schema");
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let catalog = driver.introspect_catalog().expect("introspect");
+        let logs = catalog
+            .find_table("main", "main", "SqliteLogs")
+            .expect("listed");
+        assert_eq!(logs.columns.len(), 2);
+        assert_eq!(logs.indexes.len(), 1);
+        // SQLite's own table (AUTOINCREMENT made it) stays hidden.
+        assert!(catalog
+            .find_table("main", "main", "sqlite_sequence")
+            .is_none());
+        let counts = driver.table_counts().expect("counts");
+        assert!(counts.iter().any(|c| c.table == "SqliteLogs"));
+        assert!(counts.iter().all(|c| c.table != "sqlite_sequence"));
+    }
+
+    /// A kept connection: a transaction carries across runs, safe mode
+    /// changes reach it, and a file replaced under it is noticed.
+    #[test]
+    fn a_kept_connection_holds_its_transaction() {
+        let (file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path.clone());
+        driver.connect().expect("connect");
+        let run = |driver: &mut SqliteDriver, sql: &str| driver.query_stream(sql, |_, _| Ok(()));
+        run(&mut driver, "BEGIN").expect("begin");
+        assert!(driver.in_transaction());
+        run(&mut driver, "DELETE FROM items").expect("delete");
+        run(&mut driver, "ROLLBACK").expect("rollback");
+        assert!(!driver.in_transaction());
+        assert_eq!(run(&mut driver, "SELECT * FROM items").unwrap(), 2);
+
+        driver.set_read_only(true).expect("read-only");
+        assert!(run(&mut driver, "DELETE FROM items").is_err());
+        driver.set_read_only(false).expect("writable");
+        assert_eq!(
+            run(&mut driver, "DELETE FROM items WHERE qty = 1").unwrap(),
+            1
+        );
+
+        assert!(!driver.file_replaced());
+        let fresh = NamedTempFile::new().expect("temp file");
+        std::fs::rename(fresh.path(), file.path()).expect("replace");
+        assert!(driver.file_replaced());
+        drop(file);
+        let _ = path;
     }
 
     #[test]

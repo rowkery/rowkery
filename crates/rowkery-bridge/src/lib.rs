@@ -613,8 +613,8 @@ struct CoreState {
     next_query_id: AtomicU64,
     /// Warm Postgres sessions per window and query tab.
     pool: SharedPool,
-    /// SQLite query tabs' paged reads.
-    sqlite_pages: SharedSqlitePages,
+    /// SQLite query tabs' own connections and paged reads.
+    sqlite_tabs: SharedSqliteTabs,
     runtime: Handle,
 }
 
@@ -763,8 +763,8 @@ fn driver_error_message(err: DriverError) -> String {
 }
 
 /// A SQLite query tab's paged read. SQLite keeps nothing open between pages
-/// (no lock stays on the file): the next page runs the statement again on a
-/// new connection and steps past the rows already sent.
+/// (no lock stays on the file): the next page runs the statement again on
+/// the tab's connection and steps past the rows already sent.
 #[derive(Clone, Debug)]
 struct SqliteCursor {
     path: String,
@@ -772,37 +772,117 @@ struct SqliteCursor {
     sent: u64,
 }
 
-/// Each SQLite tab's paged read with rows left, and the latest run on each
-/// tab: only that run may leave one.
+/// A SQLite tab's own connection, opened by its first run and kept until
+/// the tab closes or its window is closed or re-pointed, so `PRAGMA`s, temp
+/// tables and `BEGIN … COMMIT` carry across runs, as a Postgres tab's
+/// session does. A run holds the lock for as long as it runs: the tab's
+/// next run (or saving its edits) waits for it. Dropping it rolls back a
+/// transaction left open. An idle one holds no lock on the file, so it is
+/// never swept.
+type TabConn = Arc<Mutex<Option<SqliteDriver>>>;
+
+/// Each SQLite tab's connection and paged read with rows left, and the
+/// latest run on each tab: only that run may leave a page.
 #[derive(Default)]
-struct SqlitePages {
+struct SqliteTabs {
     latest: HashMap<(String, u64), u64>,
     open: HashMap<(String, u64), SqliteCursor>,
+    /// By tab, with the path it was opened for.
+    conns: HashMap<(String, u64), (String, TabConn)>,
 }
 
-type SharedSqlitePages = Arc<Mutex<SqlitePages>>;
+type SharedSqliteTabs = Arc<Mutex<SqliteTabs>>;
 
-impl SqlitePages {
+impl SqliteTabs {
     /// `query_id` is now the tab's run; whatever page it had is gone.
     fn start(&mut self, key: &(String, u64), query_id: u64) -> Option<SqliteCursor> {
         self.latest.insert(key.clone(), query_id);
         self.open.remove(key)
     }
 
+    /// The tab's connection for the file at `path` (opened by the run that
+    /// first locks it).
+    fn conn(&mut self, key: &(String, u64), path: &str) -> TabConn {
+        let entry = self
+            .conns
+            .entry(key.clone())
+            .or_insert_with(|| (path.to_string(), TabConn::default()));
+        if entry.0 != path {
+            *entry = (path.to_string(), TabConn::default());
+        }
+        entry.1.clone()
+    }
+
+    /// Whether a tab's idle connection holds an open transaction (one out
+    /// running something isn't asked; the page knows those).
+    fn holds_user_transaction(&self) -> bool {
+        self.conns.values().any(|(_, conn)| {
+            conn.try_lock()
+                .is_ok_and(|d| d.as_ref().is_some_and(SqliteDriver::in_transaction))
+        })
+    }
+
+    /// Forgets the window's pages and connections (a run still on one
+    /// drops it when it ends).
     fn forget_window(&mut self, window_id: &str) {
         self.latest.retain(|(w, _), _| w != window_id);
         self.open.retain(|(w, _), _| w != window_id);
+        self.conns.retain(|(w, _), _| w != window_id);
     }
 
     fn forget_tab(&mut self, key: &(String, u64)) {
         self.latest.remove(key);
         self.open.remove(key);
+        self.conns.remove(key);
     }
+}
+
+/// The tab's connection, once the run on it (if any) has ended; `None` when
+/// `give_up` says to stop waiting first.
+fn lock_tab(
+    tab: &TabConn,
+    give_up: impl Fn() -> bool,
+) -> Option<std::sync::MutexGuard<'_, Option<SqliteDriver>>> {
+    loop {
+        match tab.try_lock() {
+            Ok(held) => return Some(held),
+            // A run that panicked: its connection is still sound.
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if give_up() => return None,
+            Err(std::sync::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+}
+
+/// Connects the tab's connection if it has none, or none on the file now at
+/// its path (replaced, as a sample reset does) while no transaction is open
+/// on it, and turns read-only on or off to match safe mode.
+fn ready_tab<'a>(
+    held: &'a mut Option<SqliteDriver>,
+    path: &str,
+    read_only: bool,
+) -> Result<&'a mut SqliteDriver, DriverError> {
+    if held
+        .as_ref()
+        .is_some_and(|d| d.file_replaced() && !d.in_transaction())
+    {
+        *held = None;
+    }
+    let driver = match held {
+        Some(driver) => driver,
+        None => {
+            let mut driver = SqliteDriver::new(path).read_only(read_only);
+            driver.connect()?;
+            held.insert(driver)
+        }
+    };
+    driver.set_read_only(read_only)?;
+    Ok(driver)
 }
 
 /// A page of a SQLite tab's read: `take` rows (0: the rest) after `skip`.
 struct SqlitePageRun {
-    pages: SharedSqlitePages,
+    pages: SharedSqliteTabs,
     key: (String, u64),
     skip: u64,
     take: u32,
@@ -810,6 +890,7 @@ struct SqlitePageRun {
 
 #[allow(clippy::too_many_arguments)]
 fn run_sqlite_query_worker(
+    tab: TabConn,
     db_path: String,
     query_id: u64,
     tab_id: u64,
@@ -828,9 +909,11 @@ fn run_sqlite_query_worker(
     };
 
     let result = (|| -> QueryResult {
-        let mut driver = SqliteDriver::new(db_path.clone()).read_only(read_only);
-        driver.connect().map_err(|e| e.to_string())?;
-        if let Some(handle) = driver.take_interrupt_handle() {
+        let Some(mut held) = lock_tab(&tab, || cancel_requested(&interrupt_slot)) else {
+            return Ok(QueryOutcome::cancelled(0));
+        };
+        let driver = ready_tab(&mut held, &db_path, read_only).map_err(|e| e.to_string())?;
+        if let Some(handle) = driver.interrupt_handle() {
             if !arm_cancel(&interrupt_slot, CancelHandle::Sqlite(handle)) {
                 return Ok(QueryOutcome::cancelled(0));
             }
@@ -1461,8 +1544,9 @@ impl EventSink for InvalidateOnFinish {
     }
 }
 
-/// Builds the statements, asks safe mode, then runs them as one transaction:
-/// on SQLite on a fresh connection, on Postgres on the tab's own session.
+/// Builds the statements, asks safe mode, then runs them as one transaction
+/// on the tab's own connection (SQLite) or session (Postgres), refused while
+/// the user's transaction is open there.
 #[allow(clippy::too_many_arguments)]
 fn apply_changes_now(
     state: &mut CoreState,
@@ -1518,11 +1602,23 @@ fn apply_changes_now(
         }
     };
     match target {
-        WindowTarget::Sqlite { path, .. } => {
+        WindowTarget::Sqlite {
+            path, safe_mode, ..
+        } => {
+            let tab = state
+                .sqlite_tabs
+                .lock()
+                .map(|mut tabs| tabs.conn(&(window_id, tab_id), &path))
+                .unwrap_or_default();
             thread::spawn(move || {
                 let result = with_catch(|| {
-                    let mut driver = SqliteDriver::new(path);
-                    driver.connect().map_err(driver_error_message)?;
+                    // Waits (boundedly) for a run on the tab to end.
+                    let until = Instant::now() + APPLY_STEP_TIMEOUT;
+                    let Some(mut held) = lock_tab(&tab, || Instant::now() >= until) else {
+                        return Err("This tab is still busy with a query; nothing was saved. Try again once it ends.".to_string());
+                    };
+                    let driver = ready_tab(&mut held, &path, safe_mode == SafeMode::ReadOnly)
+                        .map_err(driver_error_message)?;
                     Ok(driver.apply_changes(&statements))
                 })
                 .and_then(|r| r);
@@ -1787,6 +1883,9 @@ fn start_early_open(state: &mut CoreState, ui: Option<&serde_json::Value>) {
         Err(_) => (0, Vec::new()),
     };
     drop(stale);
+    if let Ok(mut tabs) = state.sqlite_tabs.lock() {
+        tabs.forget_window(&window_id);
+    }
     let (tx, rx) = oneshot::channel();
     state.next_open_seq += 1;
     // Records the update as well as forwarding it (see `EarlyOpen::update`).
@@ -1842,12 +1941,16 @@ fn open_window_now(
         }
         Ok(target) => {
             state.windows.insert(window_id.clone(), target.clone());
-            // Re-pointing drops the old target's warm sessions.
+            // Re-pointing drops the old target's warm sessions (and SQLite
+            // connections).
             let (generation, stale) = match state.pool.lock() {
                 Ok(mut pool) => pool.reset_window(&window_id),
                 Err(_) => (0, Vec::new()),
             };
             drop(stale);
+            if let Ok(mut tabs) = state.sqlite_tabs.lock() {
+                tabs.forget_window(&window_id);
+            }
             let slot = PoolSlot {
                 pool: state.pool.clone(),
                 window_id,
@@ -1870,7 +1973,7 @@ fn open_window_now(
 /// Forgets a window, closes its sessions and cancels its queries.
 fn close_window_now(state: &mut CoreState, window_id: String) {
     state.windows.remove(&window_id);
-    if let Ok(mut pages) = state.sqlite_pages.lock() {
+    if let Ok(mut pages) = state.sqlite_tabs.lock() {
         pages.forget_window(&window_id);
     }
     let stale = state
@@ -2688,9 +2791,13 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             };
             // A new run ends the tab's SQLite page (an export leaves it).
             let tab_key = (window_id.clone(), tab_id);
-            if !export {
-                if let Ok(mut pages) = state.sqlite_pages.lock() {
-                    pages.start(&tab_key, query_id);
+            let mut tab_conn = None;
+            if let Ok(mut tabs) = state.sqlite_tabs.lock() {
+                if !export {
+                    tabs.start(&tab_key, query_id);
+                }
+                if let WindowTarget::Sqlite { path, .. } = &target {
+                    tab_conn = Some(tabs.conn(&tab_key, path));
                 }
             }
             // A SQLite free-form read pages like a Postgres cursor: the first
@@ -2704,7 +2811,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         && reads_only() =>
                 {
                     Some(SqlitePageRun {
-                        pages: state.sqlite_pages.clone(),
+                        pages: state.sqlite_tabs.clone(),
                         key: tab_key,
                         skip: 0,
                         take,
@@ -2719,9 +2826,11 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     path, safe_mode, ..
                 } => {
                     let events = events.clone();
+                    let tab = tab_conn.unwrap_or_default();
                     thread::spawn(move || {
                         let Some(run) = explain else {
                             run_sqlite_query_worker(
+                                tab,
                                 path,
                                 query_id,
                                 tab_id,
@@ -2737,6 +2846,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         };
                         let held: Arc<HeldEvents> = Arc::default();
                         run_sqlite_query_worker(
+                            tab,
                             path.clone(),
                             query_id,
                             tab_id,
@@ -2893,12 +3003,13 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             }) = target
             {
                 let key = (window_id.clone(), tab_id);
-                let cursor = state
-                    .sqlite_pages
-                    .lock()
-                    .ok()
-                    .and_then(|mut pages| pages.start(&key, query_id))
-                    .filter(|c| c.path == path);
+                let (cursor, tab) = match state.sqlite_tabs.lock() {
+                    Ok(mut tabs) => (
+                        tabs.start(&key, query_id).filter(|c| c.path == path),
+                        tabs.conn(&key, &path),
+                    ),
+                    Err(_) => (None, TabConn::default()),
+                };
                 let slot: CancelSlot = Arc::default();
                 state.window_interrupts.insert(key.clone(), slot.clone());
                 push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
@@ -2915,9 +3026,10 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     let _ = respond_to.send(Ok(query_id));
                     return;
                 };
-                let pages = state.sqlite_pages.clone();
+                let pages = state.sqlite_tabs.clone();
                 thread::spawn(move || {
                     run_sqlite_query_worker(
+                        tab,
                         cursor.path,
                         query_id,
                         tab_id,
@@ -2991,7 +3103,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             respond_to,
         } => import_csv_now(state, window_id, spec, cancel, progress, respond_to),
         Command::CloseWindowTab { window_id, tab_id } => {
-            if let Ok(mut pages) = state.sqlite_pages.lock() {
+            if let Ok(mut pages) = state.sqlite_tabs.lock() {
                 pages.forget_tab(&(window_id.clone(), tab_id));
             }
             if let Some(slot) = state.window_interrupts.remove(&(window_id.clone(), tab_id)) {
@@ -3014,7 +3126,12 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 .pool
                 .lock()
                 .map(|p| p.holds_user_transaction())
-                .unwrap_or(true);
+                .unwrap_or(true)
+                || state
+                    .sqlite_tabs
+                    .lock()
+                    .map(|t| t.holds_user_transaction())
+                    .unwrap_or(true);
             let _ = respond_to.send(held);
         }
         Command::Prefetch {
@@ -3347,7 +3464,7 @@ impl CoreBridge {
                     window_interrupts: HashMap::new(),
                     next_query_id: AtomicU64::new(1),
                     pool: pool.clone(),
-                    sqlite_pages: SharedSqlitePages::default(),
+                    sqlite_tabs: SharedSqliteTabs::default(),
                     runtime: runtime_handle,
                 };
                 // Commands may spawn onto the runtime from this thread
@@ -3899,8 +4016,9 @@ impl CoreBridge {
         let _ = self.command_tx.send(Command::StopAllQueries);
     }
 
-    /// Whether any tab's Postgres session may hold the user's open
-    /// transaction (a restart would roll it back). True when unknown.
+    /// Whether any tab's Postgres session (or SQLite connection) may hold
+    /// the user's open transaction (a restart would roll it back). True
+    /// when unknown.
     pub fn holds_transaction(&self) -> bool {
         self.send_command(|respond_to| Command::HoldsTransaction { respond_to })
             .unwrap_or(true)

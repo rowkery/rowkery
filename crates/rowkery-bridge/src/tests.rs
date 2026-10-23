@@ -2147,6 +2147,128 @@ fn sqlite_query_tabs_page() {
     assert_eq!(paged(3, "SELECT count(*) FROM t", 10).1, int(2400));
 }
 
+/// A SQLite tab keeps its connection between runs, like a Postgres tab its
+/// session: BEGIN … ROLLBACK across runs undoes the DELETE, its pages read
+/// inside its transaction, edits refuse to join it, closing the tab rolls
+/// it back, and a restart is warned about while one is open.
+#[test]
+fn sqlite_tabs_keep_their_connection_between_runs() {
+    let (_guard, _file, path) = test_guard();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30)
+             INSERT INTO orders SELECT i, 'x' FROM n;",
+        )
+        .expect("seed");
+    }
+    let bridge = super::CoreBridge::spawn();
+    connect_sqlite(&bridge, path.clone());
+    let run = |tab: u64, sql: &str| window_query(&bridge, "w1", tab, sql);
+    let count = |tab: u64| run(tab, "SELECT count(*) FROM orders").0;
+    let on_disk = || {
+        Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+
+    // Three runs: the rollback undoes the delete.
+    assert_eq!(run(1, "BEGIN").1, None);
+    assert_eq!(run(1, "DELETE FROM orders").4, Some(30));
+    assert_eq!(count(1), Some(Value::Int(0)), "inside the transaction");
+    assert!(bridge.holds_transaction());
+    assert_eq!(on_disk(), 30, "not committed");
+    assert_eq!(run(1, "ROLLBACK").1, None);
+    assert_eq!(count(1), Some(Value::Int(30)));
+    assert!(!bridge.holds_transaction());
+
+    // Connection state carries too: a temp table, a pragma.
+    run(1, "CREATE TEMP TABLE scratch (n)");
+    run(1, "INSERT INTO scratch VALUES (1), (2)");
+    assert_eq!(
+        run(1, "SELECT count(*) FROM scratch").0,
+        Some(Value::Int(2))
+    );
+    assert!(
+        run(2, "SELECT count(*) FROM scratch").1.is_some(),
+        "tab 2's own"
+    );
+
+    // A page and the next one read inside the tab's transaction.
+    run(1, "BEGIN");
+    run(1, "DELETE FROM orders WHERE id > 25");
+    let queue: EventQueue = Arc::default();
+    bridge
+        .run_window_query_paged(
+            "w1",
+            1,
+            "SELECT id FROM orders ORDER BY id".into(),
+            None,
+            Some(20),
+            false,
+            queue.clone(),
+        )
+        .expect("run");
+    assert_eq!(drain_paged(&queue).0, 20);
+    let queue: EventQueue = Arc::default();
+    bridge
+        .fetch_more_to("w1", 1, 20, queue.clone())
+        .expect("fetch");
+    assert_eq!(drain_paged(&queue).0, 5, "the uncommitted delete shows");
+
+    // Edits never join it.
+    let orders = edit_table(
+        "main",
+        "orders",
+        &[("id", "INTEGER"), ("item", "TEXT")],
+        &["id"],
+    );
+    let out = bridge
+        .apply_changes(
+            "w1",
+            1,
+            orders.clone(),
+            vec![update(1, "item", Value::Text("y".into()))],
+            None,
+        )
+        .expect("apply");
+    let ApplyOutcome::RolledBack { failure, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(failure.message.contains("transaction open"), "{failure:?}");
+    assert_eq!(count(1), Some(Value::Int(25)));
+
+    // Closing the tab rolls it back; its next run starts fresh.
+    bridge.close_window_tab("w1", 1);
+    assert_eq!(on_disk(), 30);
+    assert_eq!(count(1), Some(Value::Int(30)));
+    assert!(run(1, "SELECT count(*) FROM scratch").1.is_some());
+
+    // Re-pointing the window does too.
+    run(1, "BEGIN");
+    run(1, "DELETE FROM orders");
+    bridge
+        .open_window("w1", "cancel-sqlite", None)
+        .expect("reopen");
+    assert_eq!(count(1), Some(Value::Int(30)));
+    assert!(run(1, "ROLLBACK").1.is_some(), "no transaction is open");
+
+    // With none open, edits save on the tab's connection.
+    let out = bridge
+        .apply_changes(
+            "w1",
+            1,
+            orders,
+            vec![update(1, "item", Value::Text("y".into()))],
+            None,
+        )
+        .expect("apply");
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// What a paged run or `fetch_more` streamed: rows, first cell, error,
 /// and the done event's `paged` / `more`.
 fn drain_paged(
