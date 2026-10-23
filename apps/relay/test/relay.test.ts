@@ -100,16 +100,56 @@ test("rejects a browser POST from a foreign Origin without calling GitHub", asyn
 });
 
 test("rejects non-JSON Content-Type without calling GitHub", async () => {
-  const res = await relay.fetch(
+  const bad = (contentType: string) =>
+    relay.fetch(
+      new Request("https://relay.example/report", {
+        method: "POST",
+        headers: { "cf-connecting-ip": "1.2.3.4", "content-type": contentType },
+        body: JSON.stringify(report),
+      }),
+      env,
+    );
+  assert.equal((await bad("text/plain")).status, 415);
+  assert.equal((await bad("text/plain; application/json")).status, 415);
+  assert.equal(calls.length, 0);
+
+  const ok = await relay.fetch(
     new Request("https://relay.example/report", {
       method: "POST",
-      headers: { "cf-connecting-ip": "1.2.3.4", "content-type": "text/plain" },
+      headers: { "cf-connecting-ip": "1.2.3.4", "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify(report),
     }),
     env,
   );
-  assert.equal(res.status, 415);
-  assert.equal(calls.length, 0);
+  assert.equal(ok.status, 200);
+});
+
+test("error responses echo CORS for an allowed Origin", async () => {
+  const origin = "tauri://localhost";
+  const limited: Env = {
+    ...env,
+    REPORT_LIMITER: { limit: async () => ({ success: false }) },
+  };
+  const res = await post(report, limited, { Origin: origin });
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get("access-control-allow-origin"), origin);
+
+  const badType = await relay.fetch(
+    new Request("https://relay.example/report", {
+      method: "POST",
+      headers: { "cf-connecting-ip": "1.2.3.4", Origin: origin, "content-type": "text/plain" },
+      body: JSON.stringify(report),
+    }),
+    env,
+  );
+  assert.equal(badType.status, 415);
+  assert.equal(badType.headers.get("access-control-allow-origin"), origin);
+});
+
+test("allows POST from http://tauri.localhost (Windows webview)", async () => {
+  const res = await post(report, env, { Origin: "http://tauri.localhost" });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("access-control-allow-origin"), "http://tauri.localhost");
 });
 
 test("allows POST with no Origin (e.g. curl) without CORS allow-origin", async () => {
@@ -163,6 +203,16 @@ test("GitHub failure is a 502 without leaking GitHub's reply", async () => {
   console.error = orig;
   assert.equal(res.status, 502);
   assert.doesNotMatch(await res.text(), /credentials/);
+});
+
+test("a failed GitHub fetch is a 502 the app can read", async () => {
+  globalThis.fetch = (async () => {
+    throw new Error("network down");
+  }) as typeof fetch;
+  const res = await post(report, env, { Origin: "tauri://localhost" });
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), { ok: false, error: "Couldn't file the report" });
+  assert.equal(res.headers.get("access-control-allow-origin"), "tauri://localhost");
 });
 
 test("user text can't break out of its code fences or ping people", () => {

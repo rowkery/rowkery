@@ -7,7 +7,7 @@ export interface Env {
   GITHUB_TOKEN: string;
   /** "owner/name" that reports are filed in (private), set in wrangler.toml. */
   GITHUB_REPO: string;
-  /** Cloudflare rate limiting binding, keyed by client IP (required in production). */
+  /** Cloudflare rate limiting binding, keyed by client IP (503 when absent). */
   REPORT_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
 }
 
@@ -58,8 +58,8 @@ function corsHeaders(origin: string | null): Record<string, string> {
   return { ...CORS_BASE };
 }
 
-function json(status: number, body: unknown, request?: Request): Response {
-  const origin = request?.headers.get("Origin") ?? null;
+function json(status: number, body: unknown, request: Request): Response {
+  const origin = request.headers.get("Origin");
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json", ...corsHeaders(origin) },
@@ -188,12 +188,16 @@ export default {
     const report = parseReport(parsed);
     if (typeof report === "string") return json(400, { ok: false, error: report }, request);
 
-    const res = await createIssue(env, { ...issueFor(report), labels: [KINDS[report.kind].label] });
-    if (!res.ok) {
-      console.error("GitHub refused the issue", res.status, await res.text());
+    try {
+      const res = await createIssue(env, { ...issueFor(report), labels: [KINDS[report.kind].label] });
+      if (!res.ok) {
+        console.error("GitHub refused the issue", res.status, await res.text());
+        return json(502, { ok: false, error: "Couldn't file the report" }, request);
+      }
+      const { number } = (await res.json()) as { number: number };
+      return json(200, { ok: true, number }, request);
+    } catch {
       return json(502, { ok: false, error: "Couldn't file the report" }, request);
     }
-    const { number } = (await res.json()) as { number: number };
-    return json(200, { ok: true, number }, request);
   },
 };
