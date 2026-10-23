@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rowkery_core::catalog_cache::{self, CachedCatalog};
-use rowkery_core::config::{AppConfig, ConfigError, ThemePreference};
+use rowkery_core::config::{AppConfig, ConfigError, ConfigNotice, ThemePreference};
 use rowkery_core::config_writer::ConfigWriter;
 use rowkery_core::connections::{
     validate_postgres_target, CloudSqlCredentials, ConnectionRecord, PostgresConnection,
@@ -2281,6 +2281,8 @@ pub struct CoreBridge {
     writer: ConfigWriter,
     /// The webview's UI state as last published (or loaded), for a reload.
     ui: Arc<Mutex<Option<serde_json::Value>>>,
+    /// What loading config.json couldn't read, until the webview takes it.
+    config_notice: Arc<Mutex<Option<ConfigNotice>>>,
     catalog_listener: ListenerSlot,
     launch_warm: LaunchWarmSlot,
 }
@@ -3311,7 +3313,9 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
 impl CoreBridge {
     pub fn spawn() -> Self {
         let (command_tx, command_rx) = mpsc::channel();
-        let initial = AppConfig::load().unwrap_or_default();
+        // Never the defaults over a file it couldn't read: that file is set
+        // aside, or left alone with saving off (`load_for_app`).
+        let (initial, config_notice) = AppConfig::load_for_app();
         let catalog_listener: ListenerSlot = Arc::default();
         let thread_listener = catalog_listener.clone();
         let launch_warm: LaunchWarmSlot = Arc::default();
@@ -3367,9 +3371,16 @@ impl CoreBridge {
             command_tx,
             writer,
             ui,
+            config_notice: Arc::new(Mutex::new(config_notice)),
             catalog_listener,
             launch_warm,
         }
+    }
+
+    /// What loading config.json couldn't read, for the user to hear once;
+    /// None after the first call.
+    pub fn take_config_notice(&self) -> Option<ConfigNotice> {
+        self.config_notice.lock().ok().and_then(|mut n| n.take())
     }
 
     /// Calls `f` with the moment the window opened at launch had its session
@@ -4092,6 +4103,7 @@ impl Clone for CoreBridge {
             command_tx: self.command_tx.clone(),
             writer: self.writer.clone(),
             ui: self.ui.clone(),
+            config_notice: self.config_notice.clone(),
             catalog_listener: self.catalog_listener.clone(),
             launch_warm: self.launch_warm.clone(),
         }

@@ -37,8 +37,8 @@ import { ReportSheet } from "./ReportSheet";
 import type { ReportContext } from "./report";
 import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
-import { hasPendingUndo, liveOffer, showOfferToast, showToast, showUndoToast } from "./notify";
-import { readKey, writeKey } from "./persist";
+import { hasPendingUndo, liveOffer, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
+import { readKey, takeConfigNotice, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
 import {
@@ -57,6 +57,7 @@ import { TitleBar } from "./TitleBar";
 import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall } from "./updates";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
+import { forgetHistory } from "./queryHistory";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
 import { Workspace } from "./Workspace";
 import type { WindowActions, WindowSession } from "./windowSession";
@@ -307,11 +308,33 @@ function App() {
       if (pending.length) {
         writeKey(PENDING_DELETE_KEY, []);
         for (const gone of pending) {
-          if (!ids.has(gone)) void forgetConnectionSecrets(gone).catch(() => {});
+          if (ids.has(gone)) continue;
+          void forgetConnectionSecrets(gone).catch(() => {});
+          forgetHistory(gone);
         }
       }
     })();
   }, [refreshConnections]);
+
+  // config.json held something this build couldn't read: core kept the file
+  // as it was (`AppConfig::load_for_app`); say so once, with its path to copy.
+  useEffect(() => {
+    if (!loaded) return;
+    void takeConfigNotice().then((notice) => {
+      if (!notice) return;
+      const kept = notice.kept;
+      if (!kept) return showToast(notice.message, undefined, "error");
+      showOfferToast(notice.message, "Copy path", kept.split(/[\\/]/).pop(), {
+        tone: "error",
+        mouseOnly: true,
+        run: () =>
+          void navigator.clipboard.writeText(kept).then(
+            () => showToast("Copied", toastPreview(kept)),
+            () => showToast("Couldn't copy the path", kept, "error"),
+          ),
+      });
+    });
+  }, [loaded]);
 
   // The quiet update check: once the first query has had its turn, then every
   // few hours. Rust answers "off" in dev builds and proof runs (updates.rs).
@@ -1086,6 +1109,7 @@ function App() {
         commit: () => {
           settle();
           void forgetConnectionSecrets(id).catch(() => {});
+          forgetHistory(id);
         },
       });
     }

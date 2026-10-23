@@ -94,6 +94,22 @@ export function initPersist(): Promise<void> {
   return ready;
 }
 
+/** What this launch couldn't read in config.json, and where the file as it was is kept. */
+export interface ConfigNotice {
+  message: string;
+  kept: string | null;
+}
+
+/** Core's notice about config.json (`take_config_notice`): once per launch, null when all was read. */
+export async function takeConfigNotice(): Promise<ConfigNotice | null> {
+  if (!inTauri()) return null;
+  try {
+    return (await invoke<ConfigNotice | null>("take_config_notice")) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** A saved value (as the old localStorage JSON held it), or undefined. */
 export function readKey(key: string): unknown {
   return state.keys[key];

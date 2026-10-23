@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use rowkery_bridge::{CoreBridge, EventSink, HeldLock, SessionRow, StopKind, StopOutcome};
-use rowkery_core::config::ThemePreference;
+use rowkery_core::config::{ConfigNotice, ThemePreference};
 use rowkery_core::connections::ConnectionRecord;
 use rowkery_core::db::postgres::DatabaseInfo;
 use rowkery_core::db::{
@@ -1223,6 +1223,14 @@ fn load_ui_state(bridge: State<'_, CoreBridge>) -> Option<serde_json::Value> {
     bridge.ui_state()
 }
 
+/// What this launch couldn't read in config.json and where the file as it
+/// was is kept, for one toast; `null` when all was read, and after the
+/// first call.
+#[tauri::command]
+fn take_config_notice(bridge: State<'_, CoreBridge>) -> Option<ConfigNotice> {
+    bridge.take_config_notice()
+}
+
 /// Replaces the webview's UI state. Returns at once: a writer thread puts it
 /// in config.json within 500 ms (temp file + rename).
 #[tauri::command]
@@ -2111,6 +2119,7 @@ pub fn run(mut timings: Timings) {
             ping_idle,
             load_ui_state,
             save_ui_state,
+            take_config_notice,
             app_info,
             timings_origin,
             rust_marks,
