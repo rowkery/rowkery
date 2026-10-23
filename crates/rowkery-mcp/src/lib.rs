@@ -699,11 +699,11 @@ async fn run_read(
     plan_only: bool,
     entry: &mut audit::Entry,
 ) -> Outcome {
-    let sql = guard::single_read(sql)?;
+    let engine = engine(&target.record);
+    let sql = guard::single_read(sql, engine.into())?;
     let cap = guard::row_cap(max_rows);
     let alias = guard::wrapper_alias();
     let capped = guard::wrap_limit(&sql, cap + 1, &alias);
-    let engine = engine(&target.record);
 
     // The plan, and the big tables it would read end to end.
     let mut sqlite_eqp: Vec<(i64, i64, String)> = Vec::new();

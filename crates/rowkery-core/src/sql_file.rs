@@ -26,7 +26,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use crate::db::EngineKind;
-use crate::safety::{check_file_statement, lex, InTransaction, Lexeme};
+use crate::safety::{check_file_statement, lex, Dialect, InTransaction, Lexeme};
 
 /// Bytes read from the file at a time (at least). Tiny in tests, so every
 /// lexeme gets cut somewhere.
@@ -304,7 +304,9 @@ impl<R: Read> Reader<R> {
                     ));
                 }
             }
-            let Some((lexeme, end)) = lex(&self.buf, self.pos, self.eof) else {
+            // Split as either engine may read it; each statement is then
+            // checked as its own engine reads it.
+            let Some((lexeme, end)) = lex(&self.buf, self.pos, self.eof, Dialect::Either) else {
                 if !self.eof {
                     self.fill()?;
                     continue;
@@ -655,7 +657,8 @@ pub fn scan(
             }
             Piece::Statement(statement) => statement,
         };
-        let Some((check, role)) = check_file_statement(classified(&statement.sql)) else {
+        let Some((check, role)) = check_file_statement(classified(&statement.sql), engine.into())
+        else {
             continue;
         };
         scan.statements += 1;

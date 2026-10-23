@@ -2045,7 +2045,7 @@ fn postgres_safe_mode_change_recycles_warm_sessions() {
         .run_window_query("w", 1, "CREATE TEMP TABLE t (n int)".into(), None, true)
         .expect("run");
     assert!(held(&queue).is_some(), "refused before it ran");
-    // set_config on it is refused; a function doing it is undone after the run.
+    // set_config on it is refused; a function doing it is undone before the next run.
     let queue = bridge
         .run_window_query(
             "w",
@@ -2060,7 +2060,7 @@ fn postgres_safe_mode_change_recycles_warm_sessions() {
         window_query(&bridge, "w", 1, "SELECT rowkery_safe_flip_ro()").0,
         text("off")
     );
-    assert_eq!(read_only(), text("on"), "read-only again after the run");
+    assert_eq!(read_only(), text("on"), "read-only again for the next run");
 
     // And back: Off drops the read-only session.
     save(SafeMode::Off);
@@ -5022,5 +5022,258 @@ fn sqlite_sql_file_runs_through_safe_mode() {
         .query_row("SELECT count(*) FROM imported", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 2);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A Postgres connection to the test server (or to `port`, a proxy in
+/// front of it) with `safe_mode`, saved under `id`.
+fn save_pg_with(bridge: &super::CoreBridge, id: &str, port: Option<u16>, safe_mode: SafeMode) {
+    let (host, port) = match port {
+        Some(p) => ("127.0.0.1".to_string(), p),
+        None => (
+            std::env::var("ROWKERY_PG_HOST").unwrap(),
+            std::env::var("ROWKERY_PG_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(54329),
+        ),
+    };
+    CoreBridge::upsert_connection(
+        bridge,
+        ConnectionRecord::Postgres(PostgresConnection {
+            environment: None,
+            safe_mode,
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            id: id.into(),
+            name: id.into(),
+            host,
+            port,
+            database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+            username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+            ssl_mode: PostgresSslMode::Disable,
+            ssl_root_cert: None,
+            ssh: None,
+            cloud_sql: None,
+        }),
+        ConnectionSecrets {
+            db_password: Some(
+                std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("save");
+}
+
+/// A function the text check can't see into turns the session's read-only
+/// default off: the next transaction still starts read-only, after a
+/// plain run, inside the user's transaction (committed or failed and
+/// rolled back) and after paging through a cursor.
+#[test]
+fn postgres_read_only_holds_after_a_function_turns_it_off() {
+    if std::env::var("ROWKERY_PG_HOST").is_err() {
+        eprintln!(
+            "skip postgres_read_only_holds_after_a_function_turns_it_off (set ROWKERY_PG_HOST)"
+        );
+        return;
+    }
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "postgres-ro-holds";
+    save_pg_with(&bridge, id, None, SafeMode::Off);
+    bridge.open_window("w", id, None).expect("open");
+    let run = |sql: &str| window_query(&bridge, "w", 1, sql);
+    for sql in [
+        "DROP TABLE IF EXISTS rowkery_ro_t",
+        "CREATE TABLE rowkery_ro_t (n int)",
+        "CREATE OR REPLACE FUNCTION rowkery_ro_flip() RETURNS text LANGUAGE sql \
+         AS $$ SELECT set_config('default_transaction_read_only', 'off', false) $$",
+        "CREATE OR REPLACE FUNCTION rowkery_ro_write() RETURNS int LANGUAGE sql \
+         AS $$ INSERT INTO rowkery_ro_t VALUES (1) RETURNING 1 $$",
+    ] {
+        assert_eq!(run(sql).1, None, "{sql}");
+    }
+
+    save_pg_with(&bridge, id, None, SafeMode::ReadOnly);
+    let text = |v: &str| Some(Value::Text(v.into()));
+    let refused = |what: &str| {
+        let (_, err, ..) = run("SELECT rowkery_ro_write()");
+        assert!(
+            err.as_deref().is_some_and(|e| e.contains("read-only")),
+            "{what}: {err:?}"
+        );
+        assert_eq!(
+            run("SHOW default_transaction_read_only").0,
+            text("on"),
+            "{what}"
+        );
+    };
+
+    // A plain run.
+    assert_eq!(run("SELECT rowkery_ro_flip()").0, text("off"));
+    refused("after a plain run");
+
+    // Inside the user's transaction, then committed.
+    assert_eq!(run("BEGIN").1, None);
+    assert_eq!(run("SELECT rowkery_ro_flip()").0, text("off"));
+    assert_eq!(run("COMMIT").1, None);
+    refused("after the user's transaction");
+
+    // The user's transaction failed: the SET is refused there (25P02),
+    // and the run's own error is what the tab shows.
+    assert_eq!(run("BEGIN").1, None);
+    assert_eq!(run("SELECT rowkery_ro_flip()").0, text("off"));
+    assert!(run("SELECT 1 / 0").1.is_some());
+    let (_, err, ..) = run("SELECT 1");
+    assert!(
+        err.as_deref().is_some_and(|e| e.contains("aborted")),
+        "{err:?}"
+    );
+    assert_eq!(run("ROLLBACK").1, None);
+    refused("after the failed transaction");
+
+    // Pages of a cursor, each running the function again.
+    let paged = |sql: &str, page: u32| {
+        let queue: EventQueue = Arc::default();
+        bridge
+            .run_window_query_paged("w", 1, sql.into(), None, Some(page), false, queue.clone())
+            .expect("run");
+        drain_paged(&queue)
+    };
+    let more = |rows: u32| {
+        let queue: EventQueue = Arc::default();
+        bridge
+            .fetch_more_to("w", 1, rows, queue.clone())
+            .expect("fetch");
+        drain_paged(&queue)
+    };
+    let sql = "SELECT g, rowkery_ro_flip() FROM generate_series(1, 300) g";
+    let (rows, _, err, is_paged, left) = paged(sql, 100);
+    assert_eq!((rows, err, is_paged, left), (100, None, true, true));
+    let (rows, _, err, _, left) = more(100);
+    assert_eq!((rows, err, left), (100, None, true));
+    // Mid-cursor: the next run starts read-only.
+    let (_, err, ..) = run("SELECT rowkery_ro_write()");
+    assert!(
+        err.as_deref().is_some_and(|e| e.contains("read-only")),
+        "{err:?}"
+    );
+    assert_eq!(paged(sql, 100).2, None);
+    let (rows, _, err, _, _) = more(0);
+    assert_eq!((rows, err), (200, None));
+    refused("after paging");
+
+    // The cursor's own BEGIN, right after a run that turned the default
+    // off: its transaction starts read-only too.
+    assert_eq!(run("SELECT rowkery_ro_flip()").0, text("off"));
+    let (_, _, err, ..) = paged(
+        "SELECT g, rowkery_ro_write() FROM generate_series(1, 3) g",
+        100,
+    );
+    assert!(
+        err.as_deref().is_some_and(|e| e.contains("read-only")),
+        "{err:?}"
+    );
+
+    save_pg_with(&bridge, id, None, SafeMode::Off);
+    assert_eq!(
+        run("SELECT count(*) FROM rowkery_ro_t").0,
+        Some(Value::Int(0))
+    );
+    run("DROP FUNCTION rowkery_ro_flip()");
+    run("DROP FUNCTION rowkery_ro_write()");
+    run("DROP TABLE rowkery_ro_t");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A TCP proxy to Postgres whose open sockets can be broken: once
+/// `break_now` is called, each socket open then is closed the moment its
+/// client next sends, before anything reaches the server, like a warm
+/// session whose link died while it was parked. Later sockets pass.
+fn breaking_proxy(upstream: String) -> (u16, impl Fn()) {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::atomic::AtomicUsize;
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let broken_below = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted_in, broken_in) = (accepted.clone(), broken_below.clone());
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let Ok(server) = TcpStream::connect(&upstream) else {
+                continue;
+            };
+            let n = accepted_in.fetch_add(1, Ordering::SeqCst);
+            let pump = |mut from: TcpStream, mut to: TcpStream, check: bool| {
+                let broken = broken_in.clone();
+                thread::spawn(move || {
+                    let mut buf = [0u8; 16384];
+                    while let Ok(read) = from.read(&mut buf) {
+                        if read == 0 {
+                            break;
+                        }
+                        if check && n < broken.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if to.write_all(&buf[..read]).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = from.shutdown(Shutdown::Both);
+                    let _ = to.shutdown(Shutdown::Both);
+                });
+            };
+            pump(
+                client.try_clone().unwrap(),
+                server.try_clone().unwrap(),
+                true,
+            );
+            pump(server, client, false);
+        }
+    });
+    let break_now = move || broken_below.store(accepted.load(Ordering::SeqCst), Ordering::SeqCst);
+    (port, break_now)
+}
+
+/// A read whose parked session died unnoticed is sent again on a fresh
+/// one when it calls only built-ins that compute (`count(*)`), never when
+/// it calls any other function.
+#[test]
+fn postgres_a_read_on_a_dead_parked_session_is_retried() {
+    let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+        eprintln!("skip postgres_a_read_on_a_dead_parked_session_is_retried (set ROWKERY_PG_HOST)");
+        return;
+    };
+    let pg_port = std::env::var("ROWKERY_PG_PORT").unwrap_or_else(|_| "54329".into());
+    let (port, break_now) = breaking_proxy(format!("{host}:{pg_port}"));
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    save_pg_with(&bridge, "postgres-retry", Some(port), SafeMode::Off);
+    bridge
+        .open_window("w", "postgres-retry", None)
+        .expect("open");
+    let run = |sql: &str| window_query(&bridge, "w", 1, sql);
+    let pid = || match run("SELECT pg_backend_pid()") {
+        (Some(Value::Int(p)), None, ..) => p,
+        other => panic!("pid: {other:?}"),
+    };
+
+    let first = pid();
+    break_now();
+    let (count, err, ..) = run("SELECT count(*) FROM generate_series(1, 3)");
+    assert_eq!((count, err), (Some(Value::Int(3)), None), "retried");
+    let second = pid();
+    assert_ne!(second, first, "on a fresh session");
+
+    break_now();
+    let (_, err, ..) = run("SELECT pg_backend_pid()");
+    assert!(err.is_some(), "another function: not sent again");
+    assert_ne!(pid(), second);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }

@@ -5,14 +5,37 @@
 //! (`'…'`, Postgres `E'…'` with its backslash escapes, `"…"`, `` `…` ``,
 //! `--` and nested `/* */` comments, Postgres `$tag$` bodies), so reads pay
 //! nothing measurable. Text it can't be sure of (a string, comment or
-//! dollar body that never ends, a nested comment, `\'` in a string, a
-//! SQLite `[…]` name that Postgres would read past its `]`: places where
-//! servers disagree) makes its statement a write, never a read. It guards
-//! against slips, not against a determined user: `SELECT delete_user(1)`
-//! reads as a read. Read-only connections are also read-only at the
-//! server, which catches those.
+//! dollar body that never ends, a nested comment, `\'` in a string: places
+//! where servers disagree) makes its statement a write, never a read. The
+//! [`Dialect`] settles what only one engine has: SQLite's `[…]` names and
+//! Postgres's `E'…'` strings. It guards against slips, not against a
+//! determined user: `SELECT delete_user(1)` reads as a read. Read-only
+//! connections are also read-only at the server, which catches those.
 
 use serde::{Deserialize, Serialize};
+
+use crate::db::EngineKind;
+
+/// Whose SQL a text is, where the engines read it differently. SQLite takes
+/// `[…]` as a quoted name up to the first `]` and has no `E'…'` strings;
+/// to Postgres `[` is a subscript or an array, and `E'\''` is one quote.
+/// `Either` (the engine isn't known) reads it both ways, and text the two
+/// read differently fails closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialect {
+    Postgres,
+    Sqlite,
+    Either,
+}
+
+impl From<EngineKind> for Dialect {
+    fn from(engine: EngineKind) -> Self {
+        match engine {
+            EngineKind::Postgres => Dialect::Postgres,
+            EngineKind::Sqlite => Dialect::Sqlite,
+        }
+    }
+}
 
 /// A connection's safe mode. Saved on the connection; separate from its
 /// environment label.
@@ -92,11 +115,16 @@ pub struct SafetyHold {
 
 /// What `mode` does with `sql`: `None` runs it. `confirmed` is the user's
 /// go-ahead for this run; it never lets a read-only connection write.
-pub fn hold_for(mode: SafeMode, sql: &str, confirmed: bool) -> Option<SafetyHold> {
+pub fn hold_for(
+    mode: SafeMode,
+    sql: &str,
+    confirmed: bool,
+    dialect: Dialect,
+) -> Option<SafetyHold> {
     if mode == SafeMode::Off || (mode == SafeMode::Confirm && confirmed) {
         return None;
     }
-    let statements: Vec<StatementCheck> = check_sql(sql)
+    let statements: Vec<StatementCheck> = check_sql(sql, dialect)
         .into_iter()
         .filter(|s| s.changes_data() || (mode == SafeMode::ReadOnly && s.unlocks_writes))
         .collect();
@@ -115,8 +143,8 @@ pub fn hold_for(mode: SafeMode, sql: &str, confirmed: bool) -> Option<SafetyHold
 }
 
 /// Checks every statement in `sql`.
-pub fn check_sql(sql: &str) -> Vec<StatementCheck> {
-    tokenize(sql)
+pub fn check_sql(sql: &str, dialect: Dialect) -> Vec<StatementCheck> {
+    tokenize(sql, dialect)
         .iter()
         .filter(|s| !s.is_empty())
         .map(|s| check_tokens(s))
@@ -134,12 +162,12 @@ fn check_tokens(toks: &[Tok]) -> StatementCheck {
     check
 }
 
-/// Only reads, and calls no function: as far as its text can tell, running
-/// it changes nothing, so running it twice is the same as once. A read that
-/// calls one (`SELECT write_fn()`) may write, or turn the session's
-/// read-only default off from inside the function.
-pub fn plain_read(sql: &str) -> bool {
-    let statements: Vec<Vec<Tok>> = tokenize(sql)
+/// Only reads, and calls no function but the built-ins that only compute
+/// ([`COMPUTING_FUNCTIONS`]): as far as its text can tell, running it
+/// changes nothing, so running it twice is the same as once. A read that
+/// calls another (`SELECT write_fn()`) may write from inside it.
+pub fn plain_read(sql: &str, dialect: Dialect) -> bool {
+    let statements: Vec<Vec<Tok>> = tokenize(sql, dialect)
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
@@ -194,14 +222,107 @@ const BEFORE_PARENS: &[&str] = &[
     "WHERE",
 ];
 
-/// A name (bare or quoted) right before `(` that isn't a keyword taking
-/// parentheses: a function call, or what may be one (`AS t(a, b)` and
-/// `numeric(10, 2)` count too).
+/// Built-in functions (and type names taking a modifier, `numeric(10, 2)`)
+/// that only compute from their arguments: called bare, they write
+/// nothing and change no setting. A schema-qualified or quoted name may be
+/// anyone's function, so it never counts as one of these. A user who puts
+/// their own schema ahead of `pg_catalog` in `search_path` can shadow
+/// them; that only costs the retry after a dropped connection
+/// ([`plain_read`]'s one use) its certainty, never safe mode.
+const COMPUTING_FUNCTIONS: &[&str] = &[
+    "ABS",
+    "AGE",
+    "ARRAY_AGG",
+    "ARRAY_LENGTH",
+    "AVG",
+    "BOOL_AND",
+    "BOOL_OR",
+    "BTRIM",
+    "CAST",
+    "CEIL",
+    "CEILING",
+    "CHAR",
+    "CHARACTER",
+    "CHAR_LENGTH",
+    "COALESCE",
+    "CONCAT",
+    "CONCAT_WS",
+    "COUNT",
+    "DATE_PART",
+    "DATE_TRUNC",
+    "DECIMAL",
+    "DENSE_RANK",
+    "EXTRACT",
+    "FIRST_VALUE",
+    "FLOOR",
+    "GENERATE_SERIES",
+    "GREATEST",
+    "IFNULL",
+    "INTERVAL",
+    "JSONB_AGG",
+    "JSONB_BUILD_OBJECT",
+    "JSON_AGG",
+    "JSON_BUILD_OBJECT",
+    "LAG",
+    "LAST_VALUE",
+    "LEAD",
+    "LEAST",
+    "LEFT",
+    "LENGTH",
+    "LOWER",
+    "LTRIM",
+    "MAX",
+    "MD5",
+    "MIN",
+    "MOD",
+    "NOW",
+    "NULLIF",
+    "NUMERIC",
+    "POSITION",
+    "POWER",
+    "RANK",
+    "REGEXP_REPLACE",
+    "REPLACE",
+    "RIGHT",
+    "ROUND",
+    "ROW_NUMBER",
+    "RTRIM",
+    "SPLIT_PART",
+    "SQRT",
+    "STRING_AGG",
+    "STRPOS",
+    "SUBSTR",
+    "SUBSTRING",
+    "SUM",
+    "TIME",
+    "TIMESTAMP",
+    "TO_CHAR",
+    "TO_DATE",
+    "TO_NUMBER",
+    "TO_TIMESTAMP",
+    "TRIM",
+    "TRUNC",
+    "UNNEST",
+    "UPPER",
+    "VARCHAR",
+];
+
+/// A name right before `(` that may call a function: not a keyword taking
+/// parentheses, not a [`COMPUTING_FUNCTIONS`] built-in called bare, and
+/// not a column list after `AS` (`AS t(a, b)`). A quoted or qualified name
+/// always may.
 fn calls_function(toks: &[Tok]) -> bool {
-    toks.windows(2).any(|w| {
+    toks.windows(2).enumerate().any(|(k, w)| {
         w[1] == Tok::Open
             && match &w[0] {
-                Tok::Word(word, _) => !BEFORE_PARENS.contains(&word.as_str()),
+                Tok::Word(word, _) => {
+                    let before = k.checked_sub(1).map(|b| &toks[b]);
+                    let qualified = before == Some(&Tok::Dot);
+                    qualified
+                        || !(BEFORE_PARENS.contains(&word.as_str())
+                            || COMPUTING_FUNCTIONS.binary_search(&word.as_str()).is_ok()
+                            || before.is_some_and(|t| t.is("AS")))
+                }
                 Tok::Quoted(_) => true,
                 _ => false,
             }
@@ -283,8 +404,11 @@ pub enum InTransaction {
 
 /// A SQL file statement as safe mode sees it, and how it sits with a
 /// transaction (one tokenizing pass for both).
-pub fn check_file_statement(sql: &str) -> Option<(StatementCheck, InTransaction)> {
-    let toks = tokenize(sql).into_iter().find(|s| !s.is_empty())?;
+pub fn check_file_statement(
+    sql: &str,
+    dialect: Dialect,
+) -> Option<(StatementCheck, InTransaction)> {
+    let toks = tokenize(sql, dialect).into_iter().find(|s| !s.is_empty())?;
     let check = check_tokens(&toks);
     let words: Vec<&str> = top_level(&toks).filter_map(Tok::word).take(4).collect();
     let concurrently = || top_level(&toks).any(|t| t.is("CONCURRENTLY"));
@@ -309,8 +433,8 @@ pub fn check_file_statement(sql: &str) -> Option<(StatementCheck, InTransaction)
 /// One `SELECT`, `WITH`, `VALUES` or `TABLE` statement without a `LIMIT`,
 /// `OFFSET`, `FETCH` or `INTO` of its own at the top level: what a query tab
 /// pages through a cursor. Queries that bound themselves are left alone.
-pub fn pages_by_cursor(sql: &str) -> bool {
-    let statements: Vec<Vec<Tok>> = tokenize(sql)
+pub fn pages_by_cursor(sql: &str, dialect: Dialect) -> bool {
+    let statements: Vec<Vec<Tok>> = tokenize(sql, dialect)
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
@@ -346,7 +470,7 @@ pub fn pages_by_cursor(sql: &str) -> bool {
 /// `FOR KEY SHARE`) anywhere: through a cursor it would lock only the rows
 /// fetched so far, not every row it matches.
 pub fn locks_rows(sql: &str) -> bool {
-    tokenize(sql).iter().any(|statement| {
+    tokenize(sql, Dialect::Postgres).iter().any(|statement| {
         statement.windows(2).any(|pair| {
             pair[0].is("FOR") && matches!(pair[1].word(), Some("UPDATE" | "SHARE" | "NO" | "KEY"))
         })
@@ -387,6 +511,13 @@ impl Tok {
     fn name(&self) -> Option<String> {
         match self {
             Tok::Word(w, _) => Some(w.clone()),
+            // SQLite's `[…]` has no escapes.
+            Tok::Quoted(text) if text.starts_with('[') => Some(
+                text[1..]
+                    .strip_suffix(']')
+                    .unwrap_or(&text[1..])
+                    .to_ascii_uppercase(),
+            ),
             Tok::Quoted(text) if text.len() >= 2 => {
                 let q = &text[..1];
                 Some(
@@ -402,18 +533,18 @@ impl Tok {
 
 /// Statements (split on top-level `;`) as tokens. Strings, numbers and
 /// comments are dropped; dollar-quoted bodies are dropped too.
-fn tokenize(sql: &str) -> Vec<Vec<Tok>> {
-    tokenize_spans(sql).0
+fn tokenize(sql: &str, dialect: Dialect) -> Vec<Vec<Tok>> {
+    tokenize_spans(sql, dialect).0
 }
 
 /// `tokenize`, with each statement's byte range in `sql` (its `;` left out).
-fn tokenize_spans(sql: &str) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
+fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
     let b = sql.as_bytes();
     let mut out = vec![Vec::new()];
     let mut spans = Vec::new();
     let mut start = 0;
     let mut i = 0;
-    while let Some((lexeme, end)) = lex(b, i, true) {
+    while let Some((lexeme, end)) = lex(b, i, true, dialect) {
         let toks = out.last_mut().unwrap();
         match lexeme {
             Lexeme::String { clear } => push_string(toks, clear, &sql[i..end]),
@@ -465,7 +596,7 @@ fn tokenize_spans(sql: &str) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
 /// left out: what the SQL file reader must agree with.
 #[cfg(test)]
 pub(crate) fn split_statements(sql: &str) -> Vec<String> {
-    let (toks, spans) = tokenize_spans(sql);
+    let (toks, spans) = tokenize_spans(sql, Dialect::Either);
     toks.iter()
         .zip(spans)
         .filter(|(t, _)| !t.is_empty())
@@ -480,7 +611,7 @@ pub(crate) enum Lexeme {
     String {
         clear: bool,
     },
-    /// `"…"` or `` `…` ``.
+    /// `"…"`, `` `…` ``, or SQLite's `[…]`.
     Quoted {
         closed: bool,
     },
@@ -495,9 +626,10 @@ pub(crate) enum Lexeme {
     },
     /// A `$` that opens no body: nothing.
     Skip,
-    /// A `[`: a subscript to Postgres, a quoted name up to the first `]` to
-    /// SQLite. `clear` when both read the text up to that `]` alike
-    /// ([`bracket_clear`]); what follows is read as Postgres reads it.
+    /// A `[` read as Postgres reads it: a subscript or an array. With
+    /// [`Dialect::Either`] SQLite may read a quoted name up to the first
+    /// `]`; `clear` when both read the text up to that `]` alike
+    /// ([`bracket_clear`]).
     Bracket {
         clear: bool,
     },
@@ -516,7 +648,7 @@ pub(crate) enum Lexeme {
 /// rules; `None` at the end of `b`. Unless `eof`, more text may follow `b`:
 /// a lexeme that might go on past it is `None` too, for the caller to read
 /// more and ask again from `i` (the SQL file reader streams this way).
-pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> {
+pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option<(Lexeme, usize)> {
     let n = b.len();
     let start = i;
     // A lexeme that ran into the end of `b` is final only when nothing follows.
@@ -525,12 +657,14 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> 
     match c {
         b'\'' => {
             // Even a string closed by the last byte may go on: `''` is a quote.
-            let (end, clear, _) = skip_string(b, i, false);
+            let (end, clear, _) = skip_string(b, i, false, dialect);
             done(Lexeme::String { clear }, end, end == n)
         }
-        b'"' | b'`' => {
+        b'"' | b'`' | b'[' if c != b'[' || dialect == Dialect::Sqlite => {
+            // SQLite's `[…]` ends at the first `]`, with no escape.
+            let close = if c == b'[' { b']' } else { c };
             i += 1;
-            while i < n && b[i] != c {
+            while i < n && b[i] != close {
                 i += 1;
             }
             let closed = i < n;
@@ -566,6 +700,7 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> 
                 None => done(Lexeme::Dollar { closed: false }, n, true),
             }
         }
+        b'[' if dialect == Dialect::Postgres => Some((Lexeme::Bracket { clear: true }, i + 1)),
         b'[' => {
             let to = n.min(i + 1 + BRACKET_SPAN);
             let clear = match memchr::memchr(b']', &b[i + 1..to]) {
@@ -591,9 +726,13 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> 
             if i == n {
                 return done(Lexeme::Word, i, true);
             }
-            if i == start + 1 && (c == b'E' || c == b'e') && b[i] == b'\'' {
+            if i == start + 1
+                && (c == b'E' || c == b'e')
+                && b[i] == b'\''
+                && dialect != Dialect::Sqlite
+            {
                 // `E'…'` takes backslash escapes: `E'\''` is one quote.
-                let (end, clear, _) = skip_string(b, i, true);
+                let (end, clear, _) = skip_string(b, i, true, dialect);
                 return done(Lexeme::String { clear }, end, end == n);
             }
             Some((Lexeme::Word, i))
@@ -627,7 +766,7 @@ fn bracket_clear(b: &[u8], mut j: usize) -> bool {
             j += 1;
             continue;
         }
-        let Some((lexeme, end)) = lex(b, j, true) else {
+        let Some((lexeme, end)) = lex(b, j, true, Dialect::Either) else {
             break;
         };
         match lexeme {
@@ -651,23 +790,24 @@ fn bracket_clear(b: &[u8], mut j: usize) -> bool {
 /// Past the string opening at `b[i]` (a `'`), whether every server reads
 /// it the same way, and whether it closed. `''` is a quote; with `backslash`
 /// (an `E'…'` string) `\` escapes the next byte too. Unclear: it never ends,
-/// or it holds `\'`. Postgres with `standard_conforming_strings` off reads
-/// that as a quote that doesn't end a plain string; SQLite, which has no
-/// `E'…'`, ends an `E'…'` string at it.
-fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool, bool) {
+/// or it holds `\'` where that may read differently. Postgres with
+/// `standard_conforming_strings` off reads it as a quote that doesn't end a
+/// plain string (SQLite has no such escape); SQLite, which has no `E'…'`,
+/// ends an `E'…'` string at it.
+fn skip_string(b: &[u8], mut i: usize, backslash: bool, dialect: Dialect) -> (usize, bool, bool) {
     let n = b.len();
     let mut clear = true;
     i += 1;
     while i < n {
         match b[i] {
             b'\\' if backslash => {
-                if b.get(i + 1) == Some(&b'\'') {
+                if b.get(i + 1) == Some(&b'\'') && dialect == Dialect::Either {
                     clear = false;
                 }
                 i += 2;
                 continue;
             }
-            b'\\' if b.get(i + 1) == Some(&b'\'') => clear = false,
+            b'\\' if b.get(i + 1) == Some(&b'\'') && dialect != Dialect::Sqlite => clear = false,
             b'\'' if b.get(i + 1) == Some(&b'\'') => {
                 i += 2;
                 continue;
@@ -682,8 +822,8 @@ fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool, bool) {
 
 /// Past the `/* … */` comment opening at `b[i]`, whether every server
 /// reads it the same way, and whether it closed. Postgres nests them
-/// (`/* /* */ */` is one comment); SQLite ends one at the first `*/`. So a nested one is unclear,
-/// and so is one that never ends.
+/// (`/* /* */ */` is one comment); SQLite ends one at the first `*/`. So a
+/// nested one is unclear, and so is one that never ends.
 fn skip_block_comment(b: &[u8], mut i: usize) -> (usize, bool, bool) {
     let n = b.len();
     let mut depth = 1;
@@ -741,7 +881,7 @@ pub struct RowChange {
 /// its own to preview it), no RETURNING (Rowkery adds its own), and no
 /// UPDATE … FROM or DELETE … USING (the preview matches rows of one table).
 pub fn row_changes(sql: &str) -> Result<Vec<RowChange>, String> {
-    let (statements, spans) = tokenize_spans(sql);
+    let (statements, spans) = tokenize_spans(sql, Dialect::Either);
     let mut out = Vec::new();
     for (toks, span) in statements.iter().zip(spans) {
         if toks.is_empty() {
@@ -801,10 +941,10 @@ pub fn row_changes(sql: &str) -> Result<Vec<RowChange>, String> {
 /// comments left out): which columns a statement names.
 pub fn identifiers(sql: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for tok in tokenize(sql).iter().flatten() {
+    for tok in tokenize(sql, Dialect::Either).iter().flatten() {
         let name = match tok {
             Tok::Word(_, text) => text.to_lowercase(),
-            Tok::Quoted(text) => text.trim_matches(|c| c == '"' || c == '`').to_lowercase(),
+            Tok::Quoted(_) => tok.name().unwrap_or_default().to_lowercase(),
             _ => continue,
         };
         if !out.contains(&name) {
@@ -1063,8 +1203,11 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
             // A data-modifying CTE or main statement makes the whole run a
             // write, and so do `… SELECT … INTO new_table` (Postgres) and
             // `… REPLACE INTO t` (SQLite; `replace(…)` is a function).
+            // `FOR [NO KEY] UPDATE` locks rows; it changes none.
             let found = toks.iter().enumerate().find_map(|(p, t)| {
+                let locking = p > 0 && (toks[p - 1].is("FOR") || toks[p - 1].is("KEY"));
                 let verb = match t.word()? {
+                    "UPDATE" if locking => return None,
                     w @ ("INSERT" | "UPDATE" | "DELETE" | "MERGE") => w,
                     "REPLACE" if toks.get(p + 1).is_some_and(|t| t.is("INTO")) => "REPLACE",
                     "INTO" => "SELECT INTO",
@@ -1347,7 +1490,7 @@ mod tests {
     }
 
     fn one(sql: &str) -> StatementCheck {
-        let mut all = check_sql(sql);
+        let mut all = check_sql(sql, Dialect::Either);
         assert_eq!(all.len(), 1, "{sql}: {all:?}");
         all.remove(0)
     }
@@ -1522,7 +1665,10 @@ mod tests {
 
     #[test]
     fn splits_statements_like_the_editor() {
-        let all = check_sql("SELECT ';'; -- ; \n DELETE FROM t; /* ; */ ;; SELECT $x$ ; $x$");
+        let all = check_sql(
+            "SELECT ';'; -- ; \n DELETE FROM t; /* ; */ ;; SELECT $x$ ; $x$",
+            Dialect::Either,
+        );
         let kinds: Vec<_> = all.iter().map(|c| c.kind).collect();
         assert_eq!(
             kinds,
@@ -1537,26 +1683,47 @@ mod tests {
     #[test]
     fn modes() {
         let sql = "SELECT 1; UPDATE t SET a = 1 WHERE id = 2";
-        assert_eq!(hold_for(SafeMode::Off, sql, false), None);
+        assert_eq!(hold_for(SafeMode::Off, sql, false, Dialect::Either), None);
         assert_eq!(
-            hold_for(SafeMode::Confirm, "SELECT 1; SET x = 1", false),
+            hold_for(
+                SafeMode::Confirm,
+                "SELECT 1; SET x = 1",
+                false,
+                Dialect::Either
+            ),
             None
         );
-        let held = hold_for(SafeMode::Confirm, sql, false).unwrap();
+        let held = hold_for(SafeMode::Confirm, sql, false, Dialect::Either).unwrap();
         assert_eq!(held.action, HoldAction::Confirm);
         assert_eq!(held.statements.len(), 1);
         assert_eq!(held.statements[0].verb, "UPDATE");
-        assert_eq!(hold_for(SafeMode::Confirm, sql, true), None);
+        assert_eq!(
+            hold_for(SafeMode::Confirm, sql, true, Dialect::Either),
+            None
+        );
         // Confirming never lets a read-only connection write.
-        let refused = hold_for(SafeMode::ReadOnly, sql, true).unwrap();
+        let refused = hold_for(SafeMode::ReadOnly, sql, true, Dialect::Either).unwrap();
         assert_eq!(refused.action, HoldAction::Refuse);
         // Unlocking writes is fine to confirm, refused when read-only.
         assert_eq!(
-            hold_for(SafeMode::Confirm, "SET transaction_read_only = off", false),
+            hold_for(
+                SafeMode::Confirm,
+                "SET transaction_read_only = off",
+                false,
+                Dialect::Either
+            ),
             None
         );
-        assert!(hold_for(SafeMode::ReadOnly, "RESET ALL", false).is_some());
-        assert_eq!(hold_for(SafeMode::ReadOnly, "SELECT * FROM t", false), None);
+        assert!(hold_for(SafeMode::ReadOnly, "RESET ALL", false, Dialect::Either).is_some());
+        assert_eq!(
+            hold_for(
+                SafeMode::ReadOnly,
+                "SELECT * FROM t",
+                false,
+                Dialect::Either
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1578,19 +1745,29 @@ mod tests {
             "select pg_cancel_backend(pid) from pg_stat_activity where state = 'active'",
             "WITH x AS (SELECT pg_catalog.pg_terminate_backend(1)) SELECT * FROM x",
         ] {
-            let checks = check_sql(sql);
+            let checks = check_sql(sql, Dialect::Either);
             assert_eq!(checks[0].kind, StatementKind::Write, "{sql}");
-            assert!(hold_for(SafeMode::ReadOnly, sql, true).is_some(), "{sql}");
-            assert!(hold_for(SafeMode::Confirm, sql, false).is_some(), "{sql}");
+            assert!(
+                hold_for(SafeMode::ReadOnly, sql, true, Dialect::Either).is_some(),
+                "{sql}"
+            );
+            assert!(
+                hold_for(SafeMode::Confirm, sql, false, Dialect::Either).is_some(),
+                "{sql}"
+            );
         }
-        assert!(check_sql("SELECT pg_terminate_backend(1)")[0].destructive);
-        assert!(!check_sql("SELECT pg_cancel_backend(1)")[0].destructive);
+        assert!(check_sql("SELECT pg_terminate_backend(1)", Dialect::Either)[0].destructive);
+        assert!(!check_sql("SELECT pg_cancel_backend(1)", Dialect::Either)[0].destructive);
         // Named, not called: still a read.
         for sql in [
             "SELECT 'pg_terminate_backend(1)'",
             "SELECT proname FROM pg_proc WHERE proname = 'pg_cancel_backend'",
         ] {
-            assert_eq!(check_sql(sql)[0].kind, StatementKind::Read, "{sql}");
+            assert_eq!(
+                check_sql(sql, Dialect::Either)[0].kind,
+                StatementKind::Read,
+                "{sql}"
+            );
         }
     }
 
@@ -1626,7 +1803,7 @@ mod tests {
             "SELECT 'limit 5; offset 1' AS s",
             "SELECT \"limit\" FROM t",
         ] {
-            assert!(pages_by_cursor(sql), "{sql}");
+            assert!(pages_by_cursor(sql, Dialect::Either), "{sql}");
         }
         for sql in [
             "SELECT * FROM t LIMIT 10",
@@ -1639,12 +1816,15 @@ mod tests {
             "BEGIN",
             "",
         ] {
-            assert!(!pages_by_cursor(sql), "{sql}");
+            assert!(!pages_by_cursor(sql, Dialect::Either), "{sql}");
         }
     }
 
     fn kinds(sql: &str) -> Vec<StatementKind> {
-        check_sql(sql).iter().map(|c| c.kind).collect()
+        check_sql(sql, Dialect::Either)
+            .iter()
+            .map(|c| c.kind)
+            .collect()
     }
 
     #[test]
@@ -1709,12 +1889,18 @@ mod tests {
             "SELECT '\\'; DELETE FROM t; --'",
             "SELECT 'C:\\'",
         ] {
-            let c = check_sql(sql).remove(0);
+            let c = check_sql(sql, Dialect::Either).remove(0);
             assert_eq!(c.kind, StatementKind::Write, "{sql}");
             assert_eq!(c.verb, UNCLEAR_VERB, "{sql}");
-            assert!(hold_for(SafeMode::ReadOnly, sql, true).is_some(), "{sql}");
-            assert!(hold_for(SafeMode::Confirm, sql, false).is_some(), "{sql}");
-            assert!(!pages_by_cursor(sql), "{sql}");
+            assert!(
+                hold_for(SafeMode::ReadOnly, sql, true, Dialect::Either).is_some(),
+                "{sql}"
+            );
+            assert!(
+                hold_for(SafeMode::Confirm, sql, false, Dialect::Either).is_some(),
+                "{sql}"
+            );
+            assert!(!pages_by_cursor(sql, Dialect::Either), "{sql}");
         }
         assert!(row_changes("UPDATE t SET a = 'x\\' WHERE id = 1").is_err());
         // A backslash elsewhere in a plain string is plain text.
@@ -1727,22 +1913,27 @@ mod tests {
     #[test]
     fn hidden_writes_are_seen() {
         let sql = "SELECT E'\\''; COMMIT; BEGIN READ WRITE; DELETE FROM t; COMMIT; --'";
-        let checks = check_sql(sql);
+        let checks = check_sql(sql, Dialect::Either);
         assert_eq!(checks.len(), 5, "{checks:?}");
         assert!(checks.iter().any(|c| c.verb == "DELETE" && c.destructive));
         assert!(checks.iter().any(|c| c.unlocks_writes));
-        let held = hold_for(SafeMode::Confirm, sql, false).unwrap();
+        let held = hold_for(SafeMode::Confirm, sql, false, Dialect::Either).unwrap();
         assert!(held.statements.iter().any(|c| c.verb == "DELETE"));
         assert_eq!(
-            hold_for(SafeMode::ReadOnly, sql, true).unwrap().action,
+            hold_for(SafeMode::ReadOnly, sql, true, Dialect::Either)
+                .unwrap()
+                .action,
             HoldAction::Refuse
         );
-        assert!(!pages_by_cursor(sql));
+        assert!(!pages_by_cursor(sql, Dialect::Either));
         for sql in [
             "SELECT 1 /* /* */ ; DELETE FROM t; */",
             "SELECT $a1$ $$; DELETE FROM t; --$a1$; DELETE FROM t",
         ] {
-            assert!(hold_for(SafeMode::Confirm, sql, false).is_some(), "{sql}");
+            assert!(
+                hold_for(SafeMode::Confirm, sql, false, Dialect::Either).is_some(),
+                "{sql}"
+            );
         }
 
         // The `--` swallows the WHERE to Postgres, while SQLite ends the
@@ -1775,18 +1966,25 @@ mod tests {
         ] {
             let c = one(sql);
             assert!(c.unlocks_writes, "{sql}");
-            assert!(hold_for(SafeMode::ReadOnly, sql, true).is_some(), "{sql}");
-            assert!(!plain_read(sql), "{sql}");
+            assert!(
+                hold_for(SafeMode::ReadOnly, sql, true, Dialect::Either).is_some(),
+                "{sql}"
+            );
+            assert!(!plain_read(sql, Dialect::Either), "{sql}");
         }
         // Other settings are fine, and Confirm writes lets them all run.
         let sql = "SELECT set_config('search_path', 'app', false)";
         assert!(!one(sql).unlocks_writes);
-        assert_eq!(hold_for(SafeMode::ReadOnly, sql, false), None);
+        assert_eq!(
+            hold_for(SafeMode::ReadOnly, sql, false, Dialect::Either),
+            None
+        );
         assert_eq!(
             hold_for(
                 SafeMode::Confirm,
                 "SELECT set_config('default_transaction_read_only','off',false)",
-                false
+                false,
+                Dialect::Either
             ),
             None
         );
@@ -1798,7 +1996,7 @@ mod tests {
         // would hide the DELETE that SQLite runs.
         let sql = "WITH a AS (SELECT 1 AS [it's]) DELETE FROM t --']";
         assert_eq!(one(sql).verb, UNCLEAR_VERB);
-        assert!(hold_for(SafeMode::Confirm, sql, false).is_some());
+        assert!(hold_for(SafeMode::Confirm, sql, false, Dialect::Either).is_some());
         for sql in [
             "SELECT [a;b] FROM t",
             "SELECT [a--] FROM t",
@@ -1808,8 +2006,15 @@ mod tests {
             "SELECT [(] FROM t",
             "SELECT [)] INTO t FROM s",
         ] {
-            assert_eq!(check_sql(sql)[0].verb, UNCLEAR_VERB, "{sql}");
-            assert!(hold_for(SafeMode::Confirm, sql, false).is_some(), "{sql}");
+            assert_eq!(
+                check_sql(sql, Dialect::Either)[0].verb,
+                UNCLEAR_VERB,
+                "{sql}"
+            );
+            assert!(
+                hold_for(SafeMode::Confirm, sql, false, Dialect::Either).is_some(),
+                "{sql}"
+            );
         }
         let long = format!("SELECT [{}] FROM t", "x".repeat(BRACKET_SPAN + 1));
         assert_eq!(kind(&long), StatementKind::Write);
@@ -1979,22 +2184,126 @@ mod tests {
             "SHOW search_path",
             "EXPLAIN (FORMAT JSON) SELECT * FROM t",
             "SELECT 'f(x)' AS s",
+            // Built-ins that only compute, type modifiers and column lists.
+            "SELECT count(*) FROM t",
+            "SELECT count(*) FROM generate_series(1, 3), unnest(ARRAY[1])",
+            "SELECT now(), coalesce(a, 0), lower(b), length(b) FROM t",
+            "SELECT CAST(a AS numeric(10, 2)), a::varchar(20) FROM t",
+            "SELECT max(a) OVER (PARTITION BY b) FROM t",
+            "SELECT * FROM (VALUES (1)) AS v(n)",
         ] {
-            assert!(plain_read(sql), "{sql}");
+            assert!(plain_read(sql, Dialect::Postgres), "{sql}");
         }
         for sql in [
             "SELECT write_fn()",
-            "SELECT count(*) FROM t",
             "SELECT nextval('s')",
             "SELECT \"f\"(1)",
+            "SELECT \"count\"(1)",
             "SELECT * FROM s.f(1)",
+            "SELECT s.count(1) FROM t",
+            "SELECT count(write_fn())",
             "EXPLAIN (ANALYZE) INSERT INTO t VALUES (1)",
             "EXPLAIN ANALYZE SELECT f()",
             "SELECT 1; DELETE FROM t",
             "BEGIN",
             "",
         ] {
-            assert!(!plain_read(sql), "{sql}");
+            assert!(!plain_read(sql, Dialect::Postgres), "{sql}");
         }
+        // Kept sorted: it is searched by halves.
+        assert!(COMPUTING_FUNCTIONS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// What only one engine has is read as that engine reads it, so
+    /// neither's ordinary reads fail closed.
+    #[test]
+    fn each_engine_reads_its_own_syntax() {
+        use StatementKind::*;
+        let pg = |sql: &str| -> Vec<StatementKind> {
+            check_sql(sql, Dialect::Postgres)
+                .iter()
+                .map(|c| c.kind)
+                .collect()
+        };
+        let lite = |sql: &str| -> Vec<StatementKind> {
+            check_sql(sql, Dialect::Sqlite)
+                .iter()
+                .map(|c| c.kind)
+                .collect()
+        };
+        // Postgres arrays and subscripts, however long or whatever they hold.
+        let ids = (1..=400)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let any = format!("SELECT * FROM t WHERE id = ANY(ARRAY[{ids}])");
+        assert!(any.len() > BRACKET_SPAN);
+        for sql in [
+            any.as_str(),
+            "SELECT * FROM t WHERE tags && ARRAY['[urgent]', '[bug]']",
+            "SELECT * FROM t WHERE label = ANY(ARRAY['[urgent]','[bug]'])",
+            "SELECT d['a]b'] FROM t",
+            "SELECT m['it''s'], a[1:2] FROM t",
+        ] {
+            assert_eq!(pg(sql), [Read], "{sql}");
+            assert!(plain_read(sql, Dialect::Postgres), "{sql}");
+            assert!(hold_for(SafeMode::ReadOnly, sql, false, Dialect::Postgres).is_none());
+        }
+        assert!(pages_by_cursor(&any, Dialect::Postgres));
+        // E'…' takes `\'` as a quote on Postgres.
+        assert_eq!(pg("SELECT E'it\\'s'"), [Read]);
+        assert_eq!(pg("SELECT E'\\'; DELETE FROM t; \\''"), [Read]);
+        // Plain strings still fail closed on `\'` there
+        // (standard_conforming_strings may be off).
+        assert_eq!(
+            check_sql("SELECT 'a\\'", Dialect::Postgres)[0].verb,
+            UNCLEAR_VERB
+        );
+
+        // SQLite names end at the first `]`, whatever is inside.
+        assert_eq!(lite("SELECT [it's], [a;b], [x--] FROM [My Table]"), [Read]);
+        assert_eq!(lite("SELECT x [it's]; DELETE FROM t; --'"), [Read, Write]);
+        assert_eq!(
+            lite("WITH a AS (SELECT 1 AS [it's]) DELETE FROM t --']"),
+            [Write]
+        );
+        assert_eq!(
+            check_sql("DELETE FROM [my t] WHERE 1", Dialect::Sqlite)[0].target,
+            Some("[my t]".into())
+        );
+        // No E'…' strings: E is a name, and the string ends where SQLite ends it.
+        assert_eq!(
+            lite("WITH a AS (SELECT CAST(1 AS E'\\')) DELETE FROM t --')"),
+            [Write]
+        );
+        assert_eq!(lite("SELECT 'C:\\'"), [Read]);
+        // Unknown engine: both readings, as before.
+        assert_eq!(kind("SELECT d['a]b'] FROM t"), Write);
+        assert_eq!(kind("SELECT x [it's]; DELETE FROM t; --'"), Write);
+        assert_eq!(
+            identifiers("SELECT [Email] FROM t"),
+            vec!["select", "email", "from", "t"]
+        );
+    }
+
+    #[test]
+    fn locking_clauses_in_a_cte_are_reads() {
+        use StatementKind::*;
+        for sql in [
+            "WITH x AS (SELECT * FROM t FOR UPDATE) SELECT * FROM x",
+            "WITH x AS (SELECT * FROM t FOR NO KEY UPDATE SKIP LOCKED) SELECT * FROM x",
+            "WITH x AS (SELECT * FROM t FOR UPDATE OF t NOWAIT) SELECT * FROM x",
+        ] {
+            assert_eq!(kind(sql), Read, "{sql}");
+        }
+        assert_eq!(kind("WITH x AS (SELECT 1) UPDATE t SET a = 1"), Write);
+        assert_eq!(
+            kind("WITH x AS (SELECT * FROM t FOR UPDATE) UPDATE t SET a = 1"),
+            Write
+        );
+        assert_eq!(
+            kind("WITH x AS (SELECT * FROM t FOR UPDATE) SELECT * INTO u FROM x"),
+            Write
+        );
     }
 }

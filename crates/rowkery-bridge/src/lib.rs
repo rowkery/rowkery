@@ -15,10 +15,10 @@ use rowkery_core::connections::{
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session, open_session_with_secrets, session_apply_changes_within,
     session_catalog_fingerprint, session_close_cursor, session_execute, session_fetch_more,
-    session_introspect, session_keep_read_only, session_list_databases, session_note_statement,
-    session_plan_facts, session_probe_txn, session_query_cursor, session_query_stream_with,
-    session_server_version, session_table_indexes, session_test, CancelVia, DatabaseInfo,
-    PostgresSession, StreamOptions, StreamStats, TxnState,
+    session_introspect, session_list_databases, session_note_statement, session_plan_facts,
+    session_probe_txn, session_query_cursor, session_query_stream_with, session_server_version,
+    session_table_indexes, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
+    StreamStats, TxnState,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount};
 use rowkery_core::db::{
@@ -33,7 +33,7 @@ use rowkery_core::import::{ImportCounts, ImportError, ImportSpec};
 use rowkery_core::plan::{self, Plan, PlanFacts};
 use rowkery_core::query_util::apply_browse_limit;
 use rowkery_core::safety::{
-    check_sql, hold_for, pages_by_cursor, plain_read, SafeMode, SafetyHold, StatementKind,
+    check_sql, hold_for, pages_by_cursor, plain_read, Dialect, SafeMode, SafetyHold, StatementKind,
 };
 use rowkery_core::sample;
 use rowkery_core::secrets::{
@@ -1114,7 +1114,7 @@ async fn stream_on_session(
         PgWork::Query {
             sql,
             page: Some(rows),
-        } if pages_by_cursor(sql) => {
+        } if pages_by_cursor(sql, Dialect::Postgres) => {
             let first = session_query_cursor(session, sql, *rows, opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
@@ -1224,23 +1224,8 @@ async fn stream_on_session(
 
 /// Every statement only reads: it can't open or end a transaction.
 fn reads_only(sql: &str) -> bool {
-    let checks = check_sql(sql);
+    let checks = check_sql(sql, Dialect::Postgres);
     !checks.is_empty() && checks.iter().all(|c| c.kind == StatementKind::Read)
-}
-
-impl PgWork {
-    /// As far as its text can tell, it can't have changed anything: not
-    /// the data, and not the session's read-only default either (a
-    /// function could turn that off). A page of a cursor runs its query's
-    /// functions again, so it may have.
-    fn plain_read(&self) -> bool {
-        match self {
-            PgWork::Query { sql, .. } | PgWork::Within { sql } | PgWork::Explain { sql, .. } => {
-                plain_read(sql)
-            }
-            PgWork::More { .. } => false,
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1351,8 +1336,7 @@ fn run_postgres_query_on_runtime(
                 && !sent_rows
                 && session.is_closed()
                 && session.txn_state() == TxnState::None
-                && matches!(&work, PgWork::Query { .. })
-                && work.plain_read()
+                && matches!(&work, PgWork::Query { sql, .. } if plain_read(sql, Dialect::Postgres))
             {
                 disarm_cancel(&interrupt_slot);
                 if cancel_requested(&interrupt_slot) {
@@ -1373,16 +1357,6 @@ fn run_postgres_query_on_runtime(
             // After a cancel the request may still be on its way to this
             // backend; parking the session could let it hit the next run.
             if !cancelled {
-                // Read-only at the server too: a function the text check
-                // can't see into (`SELECT f()`) may have turned that off for
-                // the session. Turned back on after any run that could have,
-                // off the result's path; a session that won't take it goes.
-                if config.safe_mode == SafeMode::ReadOnly
-                    && !work.plain_read()
-                    && session_keep_read_only(&session).await.is_err()
-                {
-                    return;
-                }
                 // A statement that may have opened or ended a transaction:
                 // ask which, off the result's path, so the pool knows
                 // whether this session may ever be closed on its own.
@@ -1516,7 +1490,7 @@ fn apply_changes_now(
         ));
         return;
     }
-    if let Some(hold) = hold_for(safe_mode, &sql, confirmed.is_some()) {
+    if let Some(hold) = hold_for(safe_mode, &sql, confirmed.is_some(), engine.into()) {
         let _ = respond_to.send(Ok(ApplyOutcome::Held { hold, sql }));
         return;
     }
@@ -2620,7 +2594,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             let sql = match &explain {
                 None => sql,
                 Some(run) => {
-                    let checks = check_sql(&sql);
+                    let checks = check_sql(&sql, engine.into());
                     if checks.len() != 1 {
                         let _ = respond_to
                             .send(Err("Explain works on one statement at a time.".into()));
@@ -2648,7 +2622,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 user_sql = sql.clone();
             }
             let reads_only = || {
-                let checks = check_sql(&sql);
+                let checks = check_sql(&sql, engine.into());
                 !checks.is_empty() && checks.iter().all(|c| c.kind == StatementKind::Read)
             };
             if export && !reads_only() && explain.is_none() {
@@ -2661,7 +2635,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             };
             // Safe mode: nothing reaches the database until the user confirms
             // (or ever, on a read-only connection).
-            if let Some(hold) = hold_for(safe_mode, &user_sql, confirmed) {
+            if let Some(hold) = hold_for(safe_mode, &user_sql, confirmed, engine.into()) {
                 push_event(
                     &sink,
                     CoreEvent::QueryHeld {
@@ -2714,7 +2688,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     if !export
                         && explain.is_none()
                         && apply_limit.is_none()
-                        && pages_by_cursor(&sql)
+                        && pages_by_cursor(&sql, Dialect::Sqlite)
                         && reads_only() =>
                 {
                     Some(SqlitePageRun {
@@ -3047,10 +3021,10 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             // A browse only reads, but safe mode has the last word; and only
             // one statement that reads is ever kept open as a cursor.
             let one_read = {
-                let checks = check_sql(&sql);
+                let checks = check_sql(&sql, Dialect::Postgres);
                 checks.len() == 1 && checks[0].kind == StatementKind::Read
             };
-            if hold_for(config.safe_mode, &sql, false).is_some() || !one_read {
+            if hold_for(config.safe_mode, &sql, false, Dialect::Postgres).is_some() || !one_read {
                 let _ = respond_to.send(Ok(false));
                 return;
             }
@@ -3871,7 +3845,7 @@ impl CoreBridge {
             }
         }
         // One statement that only reads; anything else is never counted.
-        let checks = check_sql(&sql);
+        let checks = check_sql(&sql, Dialect::Either);
         if checks.len() != 1 || checks[0].kind != StatementKind::Read {
             return Err("Only a single read can be counted".into());
         }
