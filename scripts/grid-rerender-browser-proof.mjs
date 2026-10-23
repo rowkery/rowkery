@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // The results grid stays put while the editor changes (stubbed `invoke`, a
 // 40-column, 50,000-row result): typing in the editor re-renders the grid
-// zero times; a client sort of the loaded rows orders them right (NULLs
+// zero times; a client sort of the loaded rows orders them right (numbers
 // by value) as an order over the rows it already holds, not a copy of every
-// cell; Find over the 2,000,000 cells never holds a frame much longer than a
-// slice, and still counts every match. Render counts come from React's
+// cell; Find over the 2,000,000 cells runs in slices ("Searching…" until
+// it ends), counts every match on sorted rows, and leaves a cell picked
+// meanwhile selected. Render counts come from React's
 // devtools hook (the dev server's build names its components).
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -155,18 +156,66 @@ const topDesc = await page.$$eval(`${ws} [data-row] [data-col="1"]`, (els) => el
 check(Number(topDesc[0]) >= Number(topDesc[1]) && Number(topDesc[0]) > 10000 - 50, `then descending (${topDesc.join(", ")})`);
 await page.screenshot({ path: `${OUT}/2-sorted.png` });
 
-// 3. Find across 2,000,000 cells: no long task much past a slice, every match counted.
+// 3. Find across 2,000,000 cells on the sorted rows: sliced (no task holds
+// the page for a real share of the scan), "Searching…" until it ends, all 10
+// matches counted, and the current one is a cell that holds the text.
+const countSel = `${ws} [data-find] [data-find-count]`;
+const findCount = () => page.getAttribute(countSel, "data-find-count");
+const currentText = () =>
+  page.evaluate((ws) => document.querySelector(`${ws} .rg-find-current`)?.textContent ?? null, ws);
 await page.click(`${ws} [data-row="0"] [data-col="0"]`);
 await page.keyboard.press("Control+f");
 await page.waitForSelector(`${ws} [data-find-input]`);
 // Find focuses its field on the next frame.
 await page.waitForFunction(() => document.activeElement?.hasAttribute("data-find-input"));
 await page.evaluate(() => (window.__LONG__ = []));
+const t0 = Date.now();
 await page.keyboard.type("needle");
-await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-find-count") === "10", `${ws} [data-find] [data-find-count]`, { timeout: 30000 });
+const searching = await page
+  .waitForSelector(`${ws} [data-find-searching]`, { timeout: 2000 })
+  .then((el) => el.textContent())
+  .catch(() => null);
+check(searching === "Searching…", `says "Searching…" while the scan runs, not "No matches" (${searching})`);
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-find-count") !== "", countSel, { timeout: 30000 });
+const scanMs = Date.now() - t0;
+const count = await findCount();
+check(count === "10", `Find counted all 10 matches (${count})`);
 const longest = await page.evaluate(() => Math.max(0, ...window.__LONG__));
-check(true, "Find counted all 10 matches");
-console.log(`  longest task while finding: ${Math.round(longest)} ms`);
-check(longest < 200, `Find never blocks the page for long (longest task ${Math.round(longest)} ms)`);
+console.log(`  scan ${scanMs} ms; longest task ${Math.round(longest)} ms`);
+// Unsliced, one task is the whole scan (668 ms of ~700 before this fix).
+check(longest < scanMs / 3 && longest < 250, `no task holds the page for long (longest ${Math.round(longest)} ms of a ${scanMs} ms scan)`);
+await page.waitForSelector(`${ws} .rg-find-current`);
+check(/needle/.test((await currentText()) ?? ""), `after a sort, the current match holds the text (${await currentText()})`);
 await page.screenshot({ path: `${OUT}/3-find.png` });
+
+// 4. Re-sorting with Find open finds again in the new order.
+// (The match scrolled the grid to the last column: back to amount's header.)
+await page.evaluate((ws) => {
+  const el = document.querySelector(`${ws} [data-testid="results-grid-wrap"]`);
+  el.scrollLeft = 0;
+  el.dispatchEvent(new Event("scroll"));
+}, ws);
+await page.click(`${ws} [data-header="amount"]`);
+await page.waitForSelector(`${ws} [data-header="amount"]:not([data-sort])`);
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-find-count") === "10", countSel, { timeout: 30000 });
+await page.focus(`${ws} [data-find-input]`);
+await page.keyboard.press("Enter");
+await page.waitForTimeout(300);
+check(/needle/.test((await currentText()) ?? ""), `after the sort is cleared, ↵ lands on a match (${await currentText()})`);
+
+// 5. A cell picked while a scan runs keeps the selection when it ends.
+await page.fill(`${ws} [data-find-input]`, "needle 45");
+const pick = await page.evaluate((ws) => {
+  const rows = [...document.querySelectorAll(`${ws} [data-row]`)];
+  const c = rows[3]?.querySelector("[data-col]:not(.rg-find)");
+  return c ? { row: c.closest("[data-row]").getAttribute("data-row"), col: c.getAttribute("data-col") } : null;
+}, ws);
+await page.click(`${ws} [data-row="${pick.row}"] [data-col="${pick.col}"]`);
+await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("data-find-count") === "1", countSel, { timeout: 30000 });
+await page.waitForTimeout(300);
+const active = await page.evaluate((ws) => {
+  const c = document.querySelector(`${ws} [data-active]`);
+  return c ? `${c.closest("[data-row]")?.getAttribute("data-row")}:${c.getAttribute("data-col")}` : null;
+}, ws);
+check(active === `${pick.row}:${pick.col}`, `the scan's end didn't move the cell picked meanwhile (${active})`);
 await browser.close();
