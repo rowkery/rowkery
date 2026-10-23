@@ -142,6 +142,27 @@ describe("typed input", () => {
     expect(parsePaste("a\tb\r\nc\td\n")).toEqual([["a", "b"], ["c", "d"]]);
     expect(parsePaste("one\ntwo")).toEqual([["one"], ["two"]]);
   });
+
+  test("quoted TSV keeps line breaks, tabs and quotes in one cell", () => {
+    expect(parsePaste('"Kuala\nLumpur"\tx\n"a\tb"\t"say ""hi"""\n')).toEqual([
+      ["Kuala\nLumpur", "x"],
+      ["a\tb", 'say "hi"'],
+    ]);
+    expect(parsePaste("a\t\nb\tc")).toEqual([["a", ""], ["b", "c"]]);
+    // A stray quote isn't a quoted field: split on tabs as is.
+    expect(parsePaste('5" pipe\tx')).toEqual([['5" pipe', "x"]]);
+  });
+
+  test("CSV when every line has the same two or more fields", () => {
+    expect(parsePaste('a,b\n"c,d","e\nf"')).toEqual([["a", "b"], ["c,d", "e\nf"]]);
+    // Lines that disagree aren't CSV: one value per line.
+    expect(parsePaste("Hopper, Grace\nTuring")).toEqual([["Hopper, Grace"], ["Turing"]]);
+  });
+
+  test("one column: a value per line, a quoted one keeps its line break", () => {
+    expect(parsePaste('"two\nlines"\nNULL\n')).toEqual([["two\nlines"], ["NULL"]]);
+    expect(parsePaste("")).toEqual([[""]]);
+  });
 });
 
 describe("a value closed as it opened stages nothing", () => {

@@ -1,7 +1,7 @@
 // int8 beyond JavaScript's exact range arrives as { BigInt: "<digits>" }
 // (rowkery-core's Value serializer) and every reader keeps it exact.
 import { describe, expect, test } from "vitest";
-import { cellsToCsv, resultsToText } from "../src/resultsExport";
+import { cellsToTsv, resultsToText } from "../src/resultsExport";
 import { rowToJson, sqlLiteral } from "../src/QuickLook";
 import { columnProfiles as profilesOf, summarizeRows } from "../src/columnProfile";
 import { ResultRows } from "../src/resultStore";
@@ -46,7 +46,7 @@ describe("BigInt cells", () => {
   });
 
   test("a copied block keeps them exact", () => {
-    expect(cellsToCsv(result, 0, 0, 0, 1, true)).toBe(`id,note\n${MAX},max`);
+    expect(cellsToTsv(result, 0, 0, 0, 1, true).text).toBe(`id\tnote\n${MAX}\tmax`);
   });
 
   test("Quick Look's JSON writes them as bare exact numbers", () => {

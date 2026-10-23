@@ -394,8 +394,55 @@ export function editorStartText(kind: EditorKind, initial: Value | null): string
   return kind === "json" ? jsonEditorText(raw) : raw;
 }
 
-/** A pasted block: TSV when it has tabs, else one value per line. */
+/**
+ * Rows of fields split on `sep`, where a field opening with a quote runs to its closing quote
+ * (tabs, commas and line breaks inside it kept, `""` a quote). Null when a quote is malformed.
+ */
+function splitQuoted(text: string, sep: string): string[][] | null {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let i = 0;
+  for (;;) {
+    let field = "";
+    if (text[i] === '"') {
+      i++;
+      for (;;) {
+        const q = text.indexOf('"', i);
+        if (q < 0) return null;
+        field += text.slice(i, q);
+        i = q + 1;
+        if (text[i] !== '"') break;
+        field += '"';
+        i++;
+      }
+      if (i < text.length && text[i] !== sep && text[i] !== "\n") return null;
+    } else {
+      let end = i;
+      while (end < text.length && text[end] !== sep && text[end] !== "\n") end++;
+      field = text.slice(i, end);
+      i = end;
+    }
+    row.push(field);
+    if (i >= text.length) break;
+    if (text[i] === "\n") {
+      rows.push(row);
+      row = [];
+    }
+    i++;
+  }
+  rows.push(row);
+  return rows;
+}
+
+/**
+ * A pasted block: TSV when it has tabs, else CSV when every line has the same two or more
+ * fields, else one value per line. Quoted fields keep their tabs, commas and line breaks.
+ */
 export function parsePaste(text: string): string[][] {
-  const lines = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
-  return lines.map((l) => (l.includes("\t") ? l.split("\t") : [l]));
+  const t = text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+  const lines = () => t.split("\n");
+  if (t.includes("\t")) return splitQuoted(t, "\t") ?? lines().map((l) => l.split("\t"));
+  const csv = splitQuoted(t, ",");
+  if (csv && csv[0].length > 1 && csv.every((r) => r.length === csv[0].length)) return csv;
+  return splitQuoted(t, "\t") ?? lines().map((l) => [l]);
 }

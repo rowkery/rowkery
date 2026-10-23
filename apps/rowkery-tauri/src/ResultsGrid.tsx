@@ -20,7 +20,7 @@ import { CellEditor, type EditMove } from "./CellEditor";
 import { commandById, eventMatches } from "./commands";
 import { isMacPlatform } from "./platform";
 import { showToast, toastPreview } from "./notify";
-import { cellsToCsv } from "./resultsExport";
+import { cellsToTsv, copiedCells, rememberCopy } from "./resultsExport";
 import { parsePaste } from "./editBuffer";
 import { GridMenu, type GridMenuItem } from "./GridMenu";
 import { cellMenu, headerMenu as headerMenuRows } from "./contextMenus";
@@ -764,7 +764,10 @@ function ResultsGridView({
       if (!multi && !withHeader) {
         // One cell copies its value as is, unquoted.
         const { row, col } = sel.active;
-        void copyText(shown.isNull(row, col) ? "NULL" : shown.text(row, col));
+        const nul = shown.isNull(row, col);
+        const text = nul ? "NULL" : shown.text(row, col);
+        rememberCopy({ text, cells: [[nul ? null : text]] });
+        void copyText(text);
         return;
       }
       const nRows = r1 - r0 + 1;
@@ -773,9 +776,11 @@ function ResultsGridView({
         nCols === columns.length
           ? `Copied ${nRows.toLocaleString()} ${nRows === 1 ? "row" : "rows"}`
           : `Copied ${(nRows * nCols).toLocaleString()} ${nRows * nCols === 1 ? "cell" : "cells"}`;
-      const detail = withHeader ? "CSV with header" : "CSV";
+      const detail = withHeader ? "TSV with header" : "TSV";
+      const copy = cellsToTsv(result, r0, r1, c0, c1, withHeader, shown.text, shown.isNull);
+      rememberCopy(copy);
       navigator.clipboard
-        .writeText(cellsToCsv(result, r0, r1, c0, c1, withHeader, shown.text))
+        .writeText(copy.text)
         .then(
           () => showToast(label, detail),
           // Clipboard can be unavailable (permissions, headless proof runs).
@@ -1138,7 +1143,10 @@ function ResultsGridView({
           if (!editing || !sel || editor) return;
           e.preventDefault();
           if (editing.refusal) editing.onRefused();
-          else editing.paste(sel.active.row, sel.active.col, parsePaste(e.clipboardData.getData("text/plain")));
+          else {
+            const text = e.clipboardData.getData("text/plain");
+            editing.paste(sel.active.row, sel.active.col, copiedCells(text) ?? parsePaste(text));
+          }
         }}
       >
         <GridMenu at={menuAt} items={menuItems} name="grid" label="Cell" onPick={pickMenu} onClose={closeMenu} />

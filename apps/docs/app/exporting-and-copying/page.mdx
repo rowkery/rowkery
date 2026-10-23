@@ -28,12 +28,16 @@ In a table tab, selecting two or more cells shows their count, sum and average o
 | Key | What it copies |
 | --- | --- |
 | <kbd>⌘C</kbd> on one cell | The value as it is, with no quoting. A NULL copies as `NULL` |
-| <kbd>⌘C</kbd> on a block | The block as CSV |
-| <kbd>⇧⌘C</kbd> | The block as CSV with the column names as its first line |
+| <kbd>⌘C</kbd> on a block | The block as tab-separated text (TSV) |
+| <kbd>⇧⌘C</kbd> | The block as TSV with the column names as its first line |
 
-The CSV quotes values the standard way (RFC 4180), leaves NULL cells empty, and uses the values you've staged but not yet committed. A toast confirms what was copied, such as **Copied 6 cells · CSV**, or **Copied 3 rows · CSV** when you selected whole rows.
+TSV pastes straight into Numbers, Excel or Google Sheets, and back into the grid. A value holding a tab, a line break or a quote is wrapped in quotes the way spreadsheets do it. NULL cells are left empty, and the copy uses the values you've staged but not yet committed. A toast confirms what was copied, such as **Copied 6 cells · TSV**, or **Copied 3 rows · TSV** when you selected whole rows.
 
-Right-click a cell for **Copy** and **Copy as CSV with headers** too.
+Right-click a cell for **Copy** and **Copy with headers** too.
+
+### Pasting into the grid
+
+<kbd>⌘V</kbd> over editable cells stages the pasted block cell by cell. Rowkery reads tab-separated text, CSV, or one value per line, and keeps quoted values with line breaks in one cell. A block copied from the grid pastes its NULLs back as NULL; from anywhere else, the text `NULL` is just text, and an empty value sets NULL in a column that isn't text.
 
 While you're presenting, sensitive values show as dots on screen, but copying puts the real value on the clipboard. See [Sensitive columns and presenting](/sensitive-columns-and-presenting/).
 

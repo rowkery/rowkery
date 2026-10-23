@@ -182,7 +182,7 @@ export function useRowEdits(o: Options) {
 
   /** A pasted block, cell by cell from the ring; what falls outside, or doesn't parse, is left. */
   const paste = useCallback(
-    (row: number, col: number, block: string[][]) => {
+    (row: number, col: number, block: (string | null)[][]) => {
       let total = 0;
       let staged = 0;
       update((b) => {
@@ -195,8 +195,8 @@ export function useRowEdits(o: Options) {
             const ed = editors[c];
             const key = r < rows.length ? keyOf(r) : null;
             if (!ed || !key || states.get(r)?.mark === "delete") return;
-            const asNull = text === "NULL" || (text === "" && ed.kind !== "text");
-            const parsed = asNull ? { value: null } : parseInput(ed.kind, text);
+            // NULL only from the grid's own copy (`null`); the text "NULL" stays text.
+            const parsed = text === null || (text === "" && ed.kind !== "text") ? { value: null } : parseInput(ed.kind, text);
             if ("error" in parsed) return;
             next = stageCell(next, key, names[c], parsed.value, rows.isNull(r, c) ? null : rows.get(r, c), ed.kind);
             staged++;

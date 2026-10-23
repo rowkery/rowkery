@@ -278,7 +278,7 @@ const zoneCommands = (): Command[] => [
   },
   {
     id: "copy-cells-with-headers",
-    title: "Copy as CSV with headers",
+    title: "Copy with headers",
     section: "Grid",
     chord: { mac: "Mod+Shift+C" },
     palette: false,
