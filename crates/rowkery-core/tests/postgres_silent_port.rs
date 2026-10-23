@@ -1,12 +1,14 @@
+#![cfg(feature = "postgres-integration")]
 //! A port that takes the connection and then says nothing (a dead `kubectl
-//! port-forward`): opening a session gives up after `CONNECT_TIMEOUT`
-//! instead of waiting on the handshake for good. No Postgres needed.
+//! port-forward`): opening a session gives up after `OPEN_TIMEOUT`
+//! instead of waiting on the handshake for good. Needs no Postgres, but
+//! waits 30 s, so it runs with the Postgres tests.
 
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 use rowkery_core::connections::{PostgresConnection, PostgresSslMode};
-use rowkery_core::db::postgres::{open_session_with_secrets, CONNECT_TIMEOUT};
+use rowkery_core::db::postgres::{open_session_with_secrets, OPEN_TIMEOUT};
 use rowkery_core::ConnectionSecrets;
 
 fn config(port: u16, ssl_mode: PostgresSslMode) -> PostgresConnection {
@@ -65,12 +67,9 @@ async fn a_silent_port_times_out() {
     for result in [plain, tls] {
         let err = result.err().expect("a silent port can't open a session");
         let message = err.into_message();
-        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("did not finish connecting"), "{message}");
         assert!(message.contains(&format!("127.0.0.1:{port}")), "{message}");
     }
-    assert!(waited >= CONNECT_TIMEOUT, "{waited:?}");
-    assert!(
-        waited < CONNECT_TIMEOUT + Duration::from_secs(5),
-        "{waited:?}"
-    );
+    assert!(waited >= OPEN_TIMEOUT, "{waited:?}");
+    assert!(waited < OPEN_TIMEOUT + Duration::from_secs(5), "{waited:?}");
 }
