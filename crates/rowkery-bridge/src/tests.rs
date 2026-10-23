@@ -1049,6 +1049,24 @@ fn postgres_explain_estimates_times_and_rolls_back_writes() {
     assert!(plan.timed && plan.execution_ms.is_some());
     assert_eq!(plan.rows, Some(1.0));
 
+    // A timed read that writes through a function: rolled back too.
+    assert_eq!(
+        window_query(
+            &bridge,
+            "s",
+            9,
+            "CREATE OR REPLACE FUNCTION plan_orders_trim() RETURNS int LANGUAGE sql \
+             AS $$ DELETE FROM plan_orders WHERE id <= 10 RETURNING 1 $$"
+        )
+        .1,
+        None
+    );
+    let out = bridge
+        .explain("w", 1, "SELECT plan_orders_trim()".into(), true, false)
+        .expect("timed function");
+    assert!(matches!(out, ExplainOutcome::Plan { .. }), "{out:?}");
+    assert_eq!(rows(&bridge), 60000, "the function's delete rolled back");
+
     // Timed write: held, then run and rolled back.
     let delete = "DELETE FROM plan_orders WHERE id <= 10".to_string();
     let out = bridge
@@ -1084,6 +1102,7 @@ fn postgres_explain_estimates_times_and_rolls_back_writes() {
         59999,
         "the user's delete kept, ours rolled back"
     );
+    window_query(&bridge, "s", 9, "DROP FUNCTION plan_orders_trim()");
     window_query(&bridge, "s", 9, "DROP TABLE plan_orders");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
@@ -2012,6 +2031,11 @@ fn postgres_safe_mode_change_recycles_warm_sessions() {
     let read_only = || window_query(&bridge, "w", 1, "SHOW default_transaction_read_only").0;
     let text = |v: &str| Some(rowkery_core::db::Value::Text(v.into()));
     assert_eq!(read_only(), text("off"));
+    // A function that turns the session's read-only default off, out of
+    // sight of the text check.
+    let flip = "CREATE OR REPLACE FUNCTION rowkery_safe_flip_ro() RETURNS text LANGUAGE sql \
+                AS $$ SELECT set_config('default_transaction_read_only', 'off', false) $$";
+    assert_eq!(window_query(&bridge, "w", 1, flip).1, None);
 
     // The tab's warm session was opened read-write: switching to
     // Read-only gives it a fresh, read-only one.
@@ -2021,6 +2045,22 @@ fn postgres_safe_mode_change_recycles_warm_sessions() {
         .run_window_query("w", 1, "CREATE TEMP TABLE t (n int)".into(), None, true)
         .expect("run");
     assert!(held(&queue).is_some(), "refused before it ran");
+    // set_config on it is refused; a function doing it is undone after the run.
+    let queue = bridge
+        .run_window_query(
+            "w",
+            1,
+            "SELECT set_config('default_transaction_read_only', 'off', false)".into(),
+            None,
+            true,
+        )
+        .expect("run");
+    assert!(held(&queue).is_some(), "set_config refused");
+    assert_eq!(
+        window_query(&bridge, "w", 1, "SELECT rowkery_safe_flip_ro()").0,
+        text("off")
+    );
+    assert_eq!(read_only(), text("on"), "read-only again after the run");
 
     // And back: Off drops the read-only session.
     save(SafeMode::Off);
@@ -2029,6 +2069,7 @@ fn postgres_safe_mode_change_recycles_warm_sessions() {
         window_query(&bridge, "w", 1, "CREATE TEMP TABLE t (n int)").1,
         None
     );
+    window_query(&bridge, "w", 1, "DROP FUNCTION rowkery_safe_flip_ro()");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 

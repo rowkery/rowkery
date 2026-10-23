@@ -27,6 +27,12 @@ pub fn single_read(sql: &str) -> Result<String, String> {
     match checks.as_slice() {
         [] => Err("Empty query.".into()),
         [check] => {
+            if check.unlocks_writes {
+                return Err(
+                    "Refused: this changes a read-only setting. This server only runs SELECT queries."
+                        .into(),
+                );
+            }
             if check.kind != StatementKind::Read {
                 return Err(format!(
                     "Refused: {} is not a read. This server only runs SELECT queries.",
@@ -294,6 +300,29 @@ mod tests {
         ] {
             assert!(single_read(sql).is_err(), "{sql} should be refused");
         }
+    }
+
+    /// reports#12: the classifier read each of these as a read.
+    #[test]
+    fn classifier_bypasses_are_refused() {
+        let deep_explain = "EXPLAIN ".repeat(50_000) + "SELECT 1";
+        for sql in [
+            "SELECT set_config('default_transaction_read_only','off',false)",
+            "SELECT \"set_config\"('transaction_read_only', 'off', true)",
+            "WITH a AS (SELECT 1 AS [it's]) DELETE FROM t --']",
+            "WITH x AS (SELECT 1) SELECT * INTO stolen FROM x",
+            "WITH a AS (SELECT 1) REPLACE INTO t SELECT * FROM a",
+            "SELECT \"pg_terminate_backend\"(42)",
+            "SELECT CAST(1 AS E'\\'')",
+            "COPY (SELECT 1) TO PROGRAM 'true'",
+            "EXPLAIN (",
+            deep_explain.as_str(),
+        ] {
+            let err = single_read(sql).expect_err(sql);
+            assert!(err.starts_with("Refused"), "{sql}: {err}");
+        }
+        assert!(single_read("SELECT set_config('search_path', 'app', false)").is_ok());
+        assert!(single_read("SELECT m['key'], [x] FROM t").is_ok());
     }
 
     #[test]

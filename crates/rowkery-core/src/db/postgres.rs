@@ -384,7 +384,7 @@ pub async fn open_session_via(
     // safe mode's text check misses (a function call in a SELECT) still fails.
     if config.safe_mode == SafeMode::ReadOnly {
         client
-            .batch_execute("SET default_transaction_read_only = on")
+            .batch_execute(READ_ONLY_DEFAULT)
             .await
             .map_err(humanize)?;
     }
@@ -637,6 +637,21 @@ pub async fn session_execute(session: &PostgresSession, sql: &str) -> Result<(),
         .batch_execute(sql)
         .await
         .map_err(|e| map_query_error(&e, &session.config.username))
+}
+
+/// What makes a read-only connection's sessions read-only at the server.
+const READ_ONLY_DEFAULT: &str = "SET default_transaction_read_only = on";
+
+/// Turns a read-only connection's session read-only again, after a run
+/// that may have turned that off (`set_config` inside a function the text
+/// check can't see into). In the user's failed transaction the server
+/// refuses the SET; that counts as done, since the rollback the
+/// transaction needs undoes whatever turned it off.
+pub async fn session_keep_read_only(session: &PostgresSession) -> Result<(), DriverError> {
+    match session.client.batch_execute(READ_ONLY_DEFAULT).await {
+        Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Ok(()),
+        done => done.map_err(|e| map_query_error(&e, &session.config.username)),
+    }
 }
 
 /// Runs one statement of a SQL file in the simple protocol, as psql does,

@@ -15,10 +15,10 @@ use rowkery_core::connections::{
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session, open_session_with_secrets, session_apply_changes_within,
     session_catalog_fingerprint, session_close_cursor, session_execute, session_fetch_more,
-    session_introspect, session_list_databases, session_note_statement, session_plan_facts,
-    session_probe_txn, session_query_cursor, session_query_stream_with, session_server_version,
-    session_table_indexes, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
-    StreamStats, TxnState,
+    session_introspect, session_keep_read_only, session_list_databases, session_note_statement,
+    session_plan_facts, session_probe_txn, session_query_cursor, session_query_stream_with,
+    session_server_version, session_table_indexes, session_test, CancelVia, DatabaseInfo,
+    PostgresSession, StreamOptions, StreamStats, TxnState,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount};
 use rowkery_core::db::{
@@ -33,7 +33,7 @@ use rowkery_core::import::{ImportCounts, ImportError, ImportSpec};
 use rowkery_core::plan::{self, Plan, PlanFacts};
 use rowkery_core::query_util::apply_browse_limit;
 use rowkery_core::safety::{
-    check_sql, hold_for, pages_by_cursor, SafeMode, SafetyHold, StatementKind,
+    check_sql, hold_for, pages_by_cursor, plain_read, SafeMode, SafetyHold, StatementKind,
 };
 use rowkery_core::sample;
 use rowkery_core::secrets::{
@@ -1075,8 +1075,8 @@ enum PgWork {
     /// A read run whole on the session as it is: an open page cursor and its
     /// transaction stay (an export of the tab's result).
     Within { sql: String },
-    /// `EXPLAIN …` of a statement. A timed plan of a write runs inside a
-    /// transaction (or a savepoint in the user's) that is always rolled back;
+    /// `EXPLAIN …` of a statement. A timed plan runs inside a transaction
+    /// (or a savepoint in the user's) that is always rolled back;
     /// then the facts the hints need are read into `side`.
     Explain {
         sql: String,
@@ -1228,14 +1228,19 @@ fn reads_only(sql: &str) -> bool {
     !checks.is_empty() && checks.iter().all(|c| c.kind == StatementKind::Read)
 }
 
-/// Safe to send again after the connection dropped under it: it can't have
-/// changed anything.
-fn is_read_only(sql: &str) -> bool {
-    let lower = sql.trim_start().to_ascii_lowercase();
-    ["select", "show", "explain", "table", "values"]
-        .iter()
-        .any(|kw| lower.starts_with(kw))
-        && !lower.contains("explain analyze")
+impl PgWork {
+    /// As far as its text can tell, it can't have changed anything: not
+    /// the data, and not the session's read-only default either (a
+    /// function could turn that off). A page of a cursor runs its query's
+    /// functions again, so it may have.
+    fn plain_read(&self) -> bool {
+        match self {
+            PgWork::Query { sql, .. } | PgWork::Within { sql } | PgWork::Explain { sql, .. } => {
+                plain_read(sql)
+            }
+            PgWork::More { .. } => false,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1346,7 +1351,8 @@ fn run_postgres_query_on_runtime(
                 && !sent_rows
                 && session.is_closed()
                 && session.txn_state() == TxnState::None
-                && matches!(&work, PgWork::Query { sql, .. } if is_read_only(sql))
+                && matches!(&work, PgWork::Query { .. })
+                && work.plain_read()
             {
                 disarm_cancel(&interrupt_slot);
                 if cancel_requested(&interrupt_slot) {
@@ -1367,6 +1373,16 @@ fn run_postgres_query_on_runtime(
             // After a cancel the request may still be on its way to this
             // backend; parking the session could let it hit the next run.
             if !cancelled {
+                // Read-only at the server too: a function the text check
+                // can't see into (`SELECT f()`) may have turned that off for
+                // the session. Turned back on after any run that could have,
+                // off the result's path; a session that won't take it goes.
+                if config.safe_mode == SafeMode::ReadOnly
+                    && !work.plain_read()
+                    && session_keep_read_only(&session).await.is_err()
+                {
+                    return;
+                }
                 // A statement that may have opened or ended a transaction:
                 // ask which, off the result's path, so the pool knows
                 // whether this session may ever be closed on its own.
@@ -2597,8 +2613,8 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 WindowTarget::Postgres { .. } => EngineKind::Postgres,
             };
             // ⌘E: the statement's plan instead. Only a timed plan runs it, so
-            // only a timed plan of a write goes through safe mode, and it is
-            // rolled back.
+            // only a timed plan goes through safe mode, and it is always
+            // rolled back: a read can call a function that writes.
             let mut plan_rollback = false;
             let mut user_sql = sql.clone();
             let sql = match &explain {
@@ -2613,9 +2629,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     if let Ok(mut side) = run.side.lock() {
                         side.engine = Some(engine);
                     }
-                    plan_rollback = run.timed
-                        && engine == EngineKind::Postgres
-                        && checks[0].kind != StatementKind::Read;
+                    plan_rollback = run.timed && engine == EngineKind::Postgres;
                     match plan::explain_sql(engine, &sql, run.timed) {
                         Ok(explain_sql) => explain_sql,
                         Err(e) => {
