@@ -791,6 +791,15 @@ impl<W: std::io::Write + Send> ExportSink<W> {
         }
     }
 
+    /// A write's failure: a file's names the file; the clipboard's (Copy all
+    /// results, shown under "Couldn't copy") is the cause alone.
+    fn write_error(&self, e: std::io::Error) -> String {
+        match self.path {
+            Some(_) => format!("Couldn't write the file: {e}"),
+            None => e.to_string(),
+        }
+    }
+
     fn send(&self, frame: &ExportFrame) {
         if let Ok(json) = serde_json::to_string(frame) {
             let _ = self.channel.send(InvokeResponseBody::Json(json));
@@ -816,7 +825,7 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
                     .and_then(|_| batch.rows.iter().try_for_each(|r| writer.row(r)));
                 let rows = writer.rows_written();
                 if let Err(e) = written {
-                    st.error = Some(format!("Couldn't write the file: {e}"));
+                    st.error = Some(self.write_error(e));
                 } else if st.last_progress.elapsed() >= Duration::from_millis(100) {
                     st.last_progress = std::time::Instant::now();
                     self.send(&ExportFrame::Progress { rows });
@@ -831,7 +840,7 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
                     if error.is_none() && !cancelled {
                         if let Err(e) = writer
                             .finish()
-                            .map_err(|e| format!("Couldn't write the file: {e}"))
+                            .map_err(|e| self.write_error(e))
                             .and_then(done)
                         {
                             error = Some(e);
@@ -940,6 +949,33 @@ async fn export_results(
     .map(Some)
 }
 
+/// The most Copy all results holds in memory. Past it the copy fails and
+/// says to export instead: the text is held twice at the end (here and in
+/// the clipboard), and a pasteboard that size helps no one.
+const CLIPBOARD_MAX_BYTES: usize = 100 * 1024 * 1024;
+
+/// Copy all results' text as it is written, refusing to grow past
+/// [`CLIPBOARD_MAX_BYTES`].
+#[derive(Default)]
+struct ClipboardBuf(Vec<u8>);
+
+impl std::io::Write for ClipboardBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buf.len() > CLIPBOARD_MAX_BYTES {
+            return Err(std::io::Error::other(format!(
+                "The result is over {} MB; use Export… to write it to a file",
+                CLIPBOARD_MAX_BYTES / (1024 * 1024)
+            )));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Copy all results: runs `sql` whole in the tab into memory as CSV (or TSV
 /// for `format: "tsv"`) and puts it on the clipboard from here, since the
 /// webview's clipboard only writes inside the user's gesture.
@@ -958,16 +994,20 @@ async fn copy_all_results(
     } else {
         rowkery_core::export::ExportFormat::Csv
     };
-    let writer = rowkery_core::export::ExportWriter::new(Vec::new(), format);
+    let writer = rowkery_core::export::ExportWriter::new(ClipboardBuf::default(), format);
     let clip = app.clone();
     let sink = Arc::new(ExportSink::new(
         on_frame,
         writer,
         None,
-        Box::new(move |bytes: Vec<u8>| {
-            let text = String::from_utf8_lossy(&bytes);
+        Box::new(move |buf: ClipboardBuf| {
+            // Valid UTF-8 (the writer only writes `str`s) becomes the
+            // clipboard's text in place, without a second copy.
+            let mut text = String::from_utf8(buf.0)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            text.truncate(text.trim_end_matches('\n').len());
             clip.clipboard()
-                .write_text(text.trim_end_matches('\n'))
+                .write_text(text)
                 .map_err(|e| format!("Couldn't copy: {e}"))
         }),
     ));
@@ -2430,5 +2470,15 @@ mod tests {
                 "Help"
             ]
         );
+    }
+
+    #[test]
+    fn copy_all_stops_at_its_byte_cap() {
+        use std::io::Write;
+        let mut buf = ClipboardBuf::default();
+        buf.write_all(&vec![b'x'; CLIPBOARD_MAX_BYTES]).unwrap();
+        let err = buf.write_all(b"y").unwrap_err();
+        assert!(err.to_string().contains("use Export"), "{err}");
+        assert_eq!(buf.0.len(), CLIPBOARD_MAX_BYTES);
     }
 }
