@@ -78,17 +78,33 @@ export interface Undoable {
 let pending: Undoable | null = null;
 /** The live Undo's own toast, to show again after a toast that didn't end it. */
 let pendingToast: ToastMessage | null = null;
+/** A `lasting` Undo goes final on its own at `lastingUntil` (`LASTING_UNDO_MS` after its toast). */
+let lastingTimer: ReturnType<typeof setTimeout> | undefined;
+let lastingUntil = 0;
+
+/**
+ * The longest a `lasting` Undo outlives its toast: after this it is final,
+ * even when no other Undo, edit on the tab or run ended it first.
+ */
+export const LASTING_UNDO_MS = 2 * 60_000;
 
 /** Makes the pending action final (a new toast replaced it, or it timed out). */
 export function commitPending() {
   const p = pending;
   pending = null;
   pendingToast = null;
+  clearTimeout(lastingTimer);
   p?.commit?.();
+}
+
+/** A `lasting` Undo past its limit is final (a throttled timer may not have fired yet). */
+function expireLasting() {
+  if (pending?.lasting && Date.now() >= lastingUntil) commitPending();
 }
 
 /** A plain toast or an offer: ends the pending action unless it is `lasting`. */
 function commitUnlessLasting() {
+  expireLasting();
   if (!pending?.lasting) commitPending();
 }
 
@@ -98,10 +114,12 @@ export function settlePending(action: Undoable) {
 }
 
 /**
- * A toast went and a `lasting` Undo is still pending: its toast shows again
- * (for its full 10 s). False when there is none.
+ * A toast that wasn't an Undo went, by any way (timed out, Esc, ↵, its
+ * button): a `lasting` Undo still pending shows its toast again, for its
+ * full 10 s. False when there is none, and the host closes.
  */
 export function resumeLastingUndo(): boolean {
+  expireLasting();
   if (!pending?.lasting || !pendingToast) return false;
   shown++;
   window.dispatchEvent(new CustomEvent<ToastMessage>(EVENT, { detail: pendingToast }));
@@ -110,21 +128,25 @@ export function resumeLastingUndo(): boolean {
 
 /** Undo for the live toast; false when nothing is pending. */
 export function undoPending(): boolean {
+  expireLasting();
   const p = pending;
   if (!p) return false;
   pending = null;
   pendingToast = null;
+  clearTimeout(lastingTimer);
   p.undo();
   return true;
 }
 
 export function hasPendingUndo(): boolean {
+  expireLasting();
   return pending !== null;
 }
 
 /**
  * "Closed Query 2 · Undo": the action already happened; Undo puts it back
- * while the toast is live (10 s). Any other toast commits it first.
+ * while the toast is live (10 s). Any other toast commits it first, except
+ * a `lasting` one's, which ends `LASTING_UNDO_MS` after its toast at the latest.
  */
 export function showUndoToast(message: string, detail: string | undefined, action: Undoable) {
   commitPending();
@@ -134,6 +156,10 @@ export function showUndoToast(message: string, detail: string | undefined, actio
   window.dispatchEvent(new CustomEvent<ToastMessage>(EVENT, { detail: toast }));
   pending = action;
   pendingToast = toast;
+  if (action.lasting) {
+    lastingUntil = Date.now() + LASTING_UNDO_MS;
+    lastingTimer = setTimeout(() => settlePending(action), LASTING_UNDO_MS);
+  }
 }
 
 const EVENT = "rowkery:toast";

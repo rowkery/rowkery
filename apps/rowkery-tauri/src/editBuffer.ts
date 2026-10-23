@@ -231,14 +231,23 @@ const isKey = (v: unknown): v is KeyCells =>
 
 /**
  * A buffer read back from config.json, or undefined when it doesn't hold
- * together. One saved before buffers named their connection belongs to
- * `savedOn`, the connection its window was saved with; with none, it is dropped
- * rather than left to commit on whichever server the window opens next.
+ * together. One saved before buffers named their connection is dropped
+ * (`legacyEditCount` counts it for the toast): the window's saved connection
+ * is exactly what the old bug got wrong, so nothing says where it belongs.
  */
-export function savedBuffer(raw: unknown, savedOn?: string | null): EditBuffer | undefined {
-  if (!isRecord(raw) || typeof raw.tableKey !== "string") return undefined;
-  const connectionId = typeof raw.connectionId === "string" ? raw.connectionId : savedOn;
-  if (!connectionId) return undefined;
+export function savedBuffer(raw: unknown): EditBuffer | undefined {
+  if (!isRecord(raw) || typeof raw.connectionId !== "string" || !raw.connectionId) return undefined;
+  return parseBuffer(raw, raw.connectionId);
+}
+
+/** How many edits a saved buffer with no connection held (dropped on restore); 0 for any other. */
+export function legacyEditCount(raw: unknown): number {
+  if (!isRecord(raw) || typeof raw.connectionId === "string") return 0;
+  return changeCount(parseBuffer(raw, ""));
+}
+
+function parseBuffer(raw: Record<string, unknown>, connectionId: string): EditBuffer | undefined {
+  if (typeof raw.tableKey !== "string") return undefined;
   if (!Array.isArray(raw.inserts) || !isRecord(raw.updates) || !isRecord(raw.deletes)) return undefined;
   const inserts = raw.inserts.filter(
     (r): r is PendingInsert => isRecord(r) && typeof r.id === "number" && isRecord(r.values),
@@ -297,6 +306,46 @@ export function bindEdits(
   }
   if (parked && !Object.keys(parked).length) parked = undefined;
   return { edits, parked, same: !parkedNow && !restored, parkedNow, restored };
+}
+
+/** Edits a tab holds that aren't shown here: parked on other connections. */
+export function parkedCount(tab: TabEdits): number {
+  let n = 0;
+  for (const b of Object.values(tab.parked ?? {})) n += changeCount(b);
+  return n;
+}
+
+/**
+ * A tab's edits once `sent` committed, wherever the rest of them now are:
+ * its shown buffer, or the one parked for the connection `sent` went to,
+ * so that switching back never brings what already committed (`withoutCommitted`).
+ */
+export function withoutCommittedTab(tab: TabEdits, sent: EditBuffer): TabEdits {
+  const edits = withoutCommitted(tab.edits, sent);
+  let parked = tab.parked;
+  const there = parked?.[sent.connectionId];
+  if (parked && there) {
+    const left = withoutCommitted(there, sent);
+    const { [sent.connectionId]: _done, ...rest } = parked;
+    parked = left ? { ...rest, [sent.connectionId]: left } : rest;
+    if (!Object.keys(parked).length) parked = undefined;
+  }
+  return { edits, parked };
+}
+
+/**
+ * Parked buffers whose connection is gone (deleted): no switch ever brings
+ * them back, so they go. `live` is every saved connection's id.
+ */
+export function pruneParked(
+  parked: Record<string, EditBuffer> | undefined,
+  live: ReadonlySet<string>,
+): Record<string, EditBuffer> | undefined {
+  if (!parked) return parked;
+  const ids = Object.keys(parked);
+  if (ids.every((id) => live.has(id))) return parked;
+  const kept = Object.fromEntries(ids.filter((id) => live.has(id)).map((id) => [id, parked[id]]));
+  return Object.keys(kept).length ? kept : undefined;
 }
 
 /** More staged deletes than this, and ⌘S shows Review SQL before it commits (safe mode or not). */

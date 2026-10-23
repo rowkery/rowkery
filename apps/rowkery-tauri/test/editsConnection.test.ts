@@ -7,14 +7,29 @@ import {
   emptyBuffer,
   escMayDiscard,
   ESC_AFTER_RUN_MS,
+  legacyEditCount,
+  parkedCount,
+  pruneParked,
   REVIEW_DELETES_OVER,
   savedBuffer,
   savedParked,
   stageCell,
   toggleDeletes,
   withoutCommitted,
+  withoutCommittedTab,
 } from "../src/editBuffer";
-import { commitPending, hasPendingUndo, onToast, resumeLastingUndo, settlePending, showOfferToast, showToast, showUndoToast, undoPending } from "../src/notify";
+import {
+  commitPending,
+  hasPendingUndo,
+  LASTING_UNDO_MS,
+  onToast,
+  resumeLastingUndo,
+  settlePending,
+  showOfferToast,
+  showToast,
+  showUndoToast,
+  undoPending,
+} from "../src/notify";
 
 const key = (id: number) => [{ column: "id", value: { Int: id } }];
 const staged = (connectionId: string) =>
@@ -53,12 +68,38 @@ describe("edits belong to their connection", () => {
     expect(withoutCommitted(other, sent)).toBe(other);
   });
 
-  test("a buffer saved without a connection is the window's saved one's, or dropped", () => {
+  test("a commit that ran over a switch trims the parked copy too", () => {
+    const sent = staged("staging");
+    // Staged while it ran: a second cell, which stays.
+    const more = stageCell(sent, key(2), "name", { Text: "later" }, { Text: "was" });
+    const tab = withoutCommittedTab({ parked: { staging: more, prod: staged("prod") } }, sent);
+    expect(Object.keys(tab.parked ?? {}).sort()).toEqual(["prod", "staging"]);
+    expect(Object.keys(tab.parked?.staging?.updates ?? {})).toHaveLength(1);
+    expect(tab.parked?.prod).toEqual(staged("prod"));
+    // Exactly what was sent, parked: nothing comes back on switching back.
+    expect(withoutCommittedTab({ parked: { staging: sent } }, sent).parked).toBeUndefined();
+    expect(withoutCommittedTab({ edits: sent }, sent).edits).toBeUndefined();
+  });
+
+  test("parked edits count as the tab's, and a deleted connection's go", () => {
+    const tab = { edits: staged("a"), parked: { b: staged("b"), gone: toggleDeletes(staged("gone"), [key(5)]) } };
+    expect(parkedCount(tab)).toBe(3);
+    const live = new Set(["a", "b"]);
+    expect(pruneParked(tab.parked, live)).toEqual({ b: staged("b") });
+    expect(pruneParked({ b: staged("b") }, new Set(["a"]))).toBeUndefined();
+    const all = { b: staged("b") };
+    expect(pruneParked(all, live)).toBe(all);
+  });
+
+  test("a buffer saved without a connection is dropped, and counted for the toast", () => {
     const { connectionId: _old, ...legacy } = toggleDeletes(staged("x"), [key(5)]);
-    expect(savedBuffer(JSON.parse(JSON.stringify(legacy)), "saved-conn")?.connectionId).toBe("saved-conn");
-    expect(savedBuffer(JSON.parse(JSON.stringify(legacy)), null)).toBeUndefined();
-    // A buffer that names its connection keeps it whatever the window says.
-    expect(savedBuffer(JSON.parse(JSON.stringify(staged("staging"))), "prod")?.connectionId).toBe("staging");
+    const raw = JSON.parse(JSON.stringify(legacy));
+    // Never bound to the window's saved connection: that was the old bug's state.
+    expect(savedBuffer(raw)).toBeUndefined();
+    expect(legacyEditCount(raw)).toBe(2);
+    expect(legacyEditCount(JSON.parse(JSON.stringify(staged("staging"))))).toBe(0);
+    expect(legacyEditCount(undefined)).toBe(0);
+    expect(savedBuffer(JSON.parse(JSON.stringify(staged("staging"))))?.connectionId).toBe("staging");
     // Parked buffers come back only under their own connection's id.
     const parked = JSON.parse(JSON.stringify({ staging: staged("staging"), prod: staged("other"), junk: 3 }));
     expect(Object.keys(savedParked(parked) ?? {})).toEqual(["staging"]);
@@ -131,6 +172,41 @@ describe("Discard's Undo outlasts other toasts", () => {
     settlePending(action);
     expect(hasPendingUndo()).toBe(false);
     expect(action.undo).not.toHaveBeenCalled();
+  });
+
+  test("it ends on its own after LASTING_UNDO_MS, without undoing", () => {
+    vi.useFakeTimers();
+    try {
+      const action = { undo: vi.fn(), commit: vi.fn(), lasting: true };
+      showUndoToast("Discarded 3 edits", undefined, action);
+      showToast("Copied");
+      vi.advanceTimersByTime(LASTING_UNDO_MS - 1);
+      expect(hasPendingUndo()).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(hasPendingUndo()).toBe(false);
+      expect(action.commit).toHaveBeenCalledOnce();
+      // Nothing left for ⌥⌘Z, nor a toast to show again.
+      expect(undoPending()).toBe(false);
+      expect(resumeLastingUndo()).toBe(false);
+      expect(action.undo).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("past its limit it is final even when the timer hasn't fired", () => {
+    vi.useFakeTimers();
+    try {
+      const action = { undo: vi.fn(), lasting: true };
+      showUndoToast("Discarded 3 edits", undefined, action);
+      // The clock moves on, timers don't (a throttled window).
+      vi.setSystemTime(Date.now() + LASTING_UNDO_MS);
+      expect(resumeLastingUndo()).toBe(false);
+      expect(undoPending()).toBe(false);
+      expect(action.undo).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("an ordinary Undo still ends at the next toast", () => {

@@ -57,14 +57,23 @@ export function ToastHost() {
     if (!open || !toast) return;
     const timer = window.setTimeout(() => {
       if (toast.offer) takeOffer();
-      // A toast shown over a lasting Undo (Discard edits) hands the place back to it.
-      if (!toast.undoable && resumeLastingUndo()) return;
-      setOpen(false);
-      // Gone without Undo: the action is final.
-      if (toast.undoable) commitPending();
+      if (toast.undoable) {
+        setOpen(false);
+        // Gone without Undo: the action is final.
+        commitPending();
+      } else closeOrResume();
     }, toast.undoable || toast.offer ? UNDO_MS : TOAST_MS);
     return () => window.clearTimeout(timer);
   }, [open, toast]);
+
+  /**
+   * A toast that isn't an Undo goes, whichever way (its time, Esc, ↵, its
+   * button): one shown over a lasting Undo (Discard edits) hands the place
+   * back to it, so that Undo never stays pending with no toast to say so.
+   */
+  const closeOrResume = () => {
+    if (!resumeLastingUndo()) setOpen(false);
+  };
 
   const undo = () => {
     if (undoPending()) setOpen(false);
@@ -87,10 +96,10 @@ export function ToastHost() {
       if (e.key === "Enter" && inScope) {
         e.preventDefault();
         e.stopPropagation();
-        if (runOffer()) setOpen(false);
+        if (runOffer()) closeOrResume();
       } else if (e.key === "Escape") {
         takeOffer();
-        setOpen(false);
+        closeOrResume();
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -125,7 +134,7 @@ export function ToastHost() {
                 className="toast-undo"
                 data-toast-offer
                 onClick={() => {
-                  if (runOffer()) setOpen(false);
+                  if (runOffer()) closeOrResume();
                 }}
               >
                 {/* A space before the key, as Undo has ("Connect ↵"). */}
