@@ -623,9 +623,17 @@ fn pg_config(pg: &PostgresConnection, database: &str) -> PostgresConnection {
     config
 }
 
-/// `'…'` with quotes doubled.
+/// A Postgres string literal: `'…'` with quotes doubled, or, when the text
+/// holds a backslash, `E'…'` with backslashes doubled too. The target comes
+/// from the agent's SQL (a quoted identifier can hold `\'`), and a plain
+/// `'…'` reads `\'` as a quote that doesn't end it on a server with
+/// `standard_conforming_strings` off. Core's `sql_literal` does the same.
 fn literal(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
+    if text.contains('\\') {
+        format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    }
 }
 
 fn text(v: Option<&Value>) -> String {
@@ -1027,6 +1035,17 @@ fn to_sqlite(v: &Value) -> rusqlite::types::Value {
 mod tests {
     use super::*;
     use rowkery_core::connections::{McpDbAccess, McpTableMode, SqliteConnection};
+
+    /// A target with `\'` (a quoted identifier can hold one) stays inside
+    /// its literal whatever `standard_conforming_strings` says.
+    #[test]
+    fn a_target_with_a_backslash_is_an_e_string() {
+        assert_eq!(literal(r#"public."it's""#), r#"'public."it''s"'"#);
+        assert_eq!(
+            literal(r#"public."a\') OR (1=1""#),
+            r#"E'public."a\\'') OR (1=1"'"#
+        );
+    }
 
     fn sqlite_setup(dir: &std::path::Path) -> String {
         let path = dir.join("shop.sqlite");
