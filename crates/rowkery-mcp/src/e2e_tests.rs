@@ -394,8 +394,20 @@ async fn masked_columns_hold_against_a_real_postgres() {
     .await
     .expect("fixtures");
 
+    // Shared as "All tables": nothing hidden, only the columns masked.
     let mut pg = pg_config();
     pg.allow_mcp = true;
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::All,
+                tables: Vec::new(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
     pg.masked_columns = [(
         pg.database.clone(),
         vec![
@@ -483,6 +495,27 @@ async fn masked_columns_hold_against_a_real_postgres() {
         assert!(err.starts_with("Refused"), "{sql}: {err}");
         assert!(!err.contains("mara@"), "{sql}: {err}");
     }
+    // A column alias list renames the masked column in the plan, so a
+    // filter on it would go unseen: refused. A plain alias is fine.
+    for sql in [
+        "SELECT i FROM mcp_mask_customers AS c(i, e) WHERE e LIKE 'm%'",
+        "SELECT e FROM mcp_mask_customers c(i, e) ORDER BY e",
+        "SELECT o.total FROM mcp_mask_orders o JOIN mcp_mask_customers AS x(i, e) ON x.i = o.customer_id WHERE x.e = 'mara@fjord.se'",
+        "SELECT i FROM mcp_mask_events AS ev(i, m) WHERE m LIKE 'm%'",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused: this renames"), "{sql}: {err}");
+    }
+    for sql in [
+        "SELECT c.id, c.email FROM mcp_mask_customers c WHERE c.plan = 'pro'",
+        "SELECT c.email FROM mcp_mask_customers AS c JOIN mcp_mask_orders o ON o.customer_id = c.id",
+        "SELECT x.n FROM (SELECT id AS n FROM mcp_mask_orders) AS x(n)",
+    ] {
+        let out = query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert!(!out["rows"].to_string().contains('@'), "{sql}: {out}");
+    }
     // The explain tool holds to the same rule.
     let err = call(
         &mcp,
@@ -505,6 +538,106 @@ async fn masked_columns_hold_against_a_real_postgres() {
     .await
     .expect_err("index order");
     assert!(err.starts_with("Refused"), "{err}");
+
+    // Statistics hold the column's own values (the ANALYZE above put
+    // mara@ in pg_stats' most common values): refused, with every table
+    // shared, through each view over them. So are the catalogs that hold
+    // credentials, through theirs.
+    let stats = rowkery_core::db::postgres::session_query_stream(
+        &setup,
+        "SELECT 1 FROM pg_stats WHERE tablename = 'mcp_mask_customers' AND attname = 'email' AND most_common_vals::text LIKE '%mara@%'",
+        |_, _| Ok(()),
+    )
+    .await
+    .expect("stats");
+    assert_eq!(stats, 1, "the fixture puts the email in the statistics");
+    for sql in [
+        "SELECT most_common_vals::text FROM pg_stats WHERE tablename = 'mcp_mask_customers' AND attname = 'email'",
+        "SELECT histogram_bounds::text FROM pg_catalog.pg_stats",
+        "SELECT stavalues1::text FROM pg_statistic",
+        "SELECT stxdmcv::text FROM pg_statistic_ext_data",
+        "SELECT s.most_common_vals::text FROM mcp_mask_orders o, pg_stats s LIMIT 1",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(err, crate::guard::STATISTICS_REFUSAL, "{sql}");
+    }
+    // The secret columns, by name, as a whole row or behind a view.
+    for sql in [
+        "SELECT rolname, rolpassword FROM pg_authid",
+        "SELECT * FROM pg_authid",
+        "SELECT a::text FROM pg_authid a",
+        "SELECT rolname FROM pg_authid WHERE rolpassword LIKE 'SCRAM%'",
+        "SELECT r.pw FROM (SELECT rolpassword AS pw FROM pg_authid OFFSET 0) r",
+        "SELECT s.pw FROM pg_namespace n JOIN (SELECT oid, rolpassword AS pw FROM pg_authid OFFSET 0) s ON s.oid = n.nspowner",
+        "SELECT usename, passwd FROM pg_shadow",
+        "SELECT * FROM pg_shadow",
+        "SELECT umoptions::text FROM pg_user_mappings",
+        "SELECT * FROM pg_user_mapping",
+        "SELECT * FROM information_schema.user_mapping_options",
+        "SELECT subconninfo FROM pg_subscription",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(err, crate::guard::CREDENTIALS_REFUSAL, "{sql}");
+    }
+    // Renamed columns can't be followed: refused.
+    for sql in [
+        "SELECT pw FROM pg_authid AS a(i, n, s, h, r, d, l, c, b, k, pw, u)",
+        "SELECT a.rolname FROM pg_authid a(oid, rolpassword, s, h, r, d, l, c, b, k, rolname)",
+        "SELECT x.n FROM pg_namespace n JOIN pg_authid AS x(o, n) ON x.o = n.nspowner",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(err, crate::guard::CREDENTIALS_RENAMED, "{sql}");
+    }
+    // The rest of those catalogs stays open: role names and owners, and the
+    // information_schema views over them.
+    for sql in [
+        "SELECT rolname, rolsuper FROM pg_roles",
+        "SELECT * FROM pg_roles",
+        "SELECT usename, passwd FROM pg_user",
+        "SELECT rolname FROM pg_authid WHERE rolcanlogin",
+        "SELECT n.nspname, r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner",
+        "SELECT c.relname, r.rolname FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE c.relname = 'mcp_mask_orders'",
+        "SELECT s.rolname FROM pg_namespace n JOIN (SELECT * FROM pg_authid OFFSET 0) s ON s.oid = n.nspowner",
+        "SELECT * FROM information_schema.schemata",
+        "SELECT * FROM information_schema.table_privileges WHERE table_name = 'mcp_mask_orders'",
+        "SELECT * FROM information_schema.role_table_grants WHERE table_name = 'mcp_mask_orders'",
+        "SELECT * FROM information_schema.column_privileges WHERE table_name = 'mcp_mask_orders'",
+        "SELECT * FROM information_schema.enabled_roles",
+        "SELECT * FROM information_schema.applicable_roles",
+        "SELECT * FROM pg_group",
+        "SELECT srvname, usename FROM pg_user_mappings",
+        "SELECT subname FROM pg_subscription",
+    ] {
+        query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+    // Views that call functions off the list are refused for those first.
+    for sql in [
+        "SELECT * FROM pg_stats_ext",
+        "SELECT * FROM pg_stats_ext_exprs",
+        "SELECT * FROM pg_stat_subscription",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused"), "{sql}: {err}");
+    }
+    let err = call(
+        &mcp,
+        "explain",
+        json!({ "connection": ID, "sql": "SELECT * FROM pg_stats" }),
+    )
+    .await
+    .expect_err("explain stats");
+    assert_eq!(err, crate::guard::STATISTICS_REFUSAL);
+    // The views that describe tables stay open.
+    for sql in [
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'mcp_mask_orders'",
+        "SELECT tablename, tableowner FROM pg_tables WHERE tablename = 'mcp_mask_orders'",
+    ] {
+        query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
 
     // describe_table names the masked columns, so agents don't try.
     let described = call(
@@ -534,6 +667,21 @@ async fn masked_columns_hold_against_a_real_postgres() {
         .expect_err("renamed");
     assert!(err.contains("no longer in the table"), "{err}");
 
+    // Nothing masked and nothing hidden: statistics show nothing the agent
+    // can't read anyway, but credentials stay refused.
+    pg.masked_columns = Default::default();
+    save(pg);
+    query(
+        &mcp,
+        "SELECT attname FROM pg_stats WHERE tablename = 'mcp_mask_customers'",
+    )
+    .await
+    .expect("statistics with nothing kept back");
+    let err = query(&mcp, "SELECT rolpassword FROM pg_authid")
+        .await
+        .expect_err("credentials");
+    assert_eq!(err, crate::guard::CREDENTIALS_REFUSAL);
+
     session_execute(
         &setup,
         "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events CASCADE;
@@ -560,7 +708,13 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_p_orders, mcp_p_customers, mcp_p_hidden, mcp_p_log CASCADE;
+        "DROP TABLE IF EXISTS mcp_p_orders, mcp_p_customers, mcp_p_hidden, mcp_p_log, mcp_p_serial, mcp_p_ident,
+           mcp_p_peeks, mcp_p_other CASCADE;
+         DROP FUNCTION IF EXISTS mcp_p_peek() CASCADE;
+         DROP SEQUENCE IF EXISTS mcp_p_other_seq;
+         CREATE TABLE mcp_p_serial (id serial PRIMARY KEY, note text, at timestamptz DEFAULT now(),
+           pid int DEFAULT pg_backend_pid());
+         CREATE TABLE mcp_p_ident (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note text);
          DROP FUNCTION IF EXISTS mcp_p_fn(int);
          DROP FUNCTION IF EXISTS mcp_p_trg() CASCADE;
          CREATE TABLE mcp_p_customers (id int PRIMARY KEY, email text, plan text, seats int);
@@ -568,6 +722,12 @@ async fn proposed_changes_hold_against_a_real_postgres() {
          CREATE TABLE mcp_p_orders (id int PRIMARY KEY, status text, note text);
          INSERT INTO mcp_p_orders VALUES (1, 'pending', null), (2, 'pending', null), (3, 'paid', null);
          CREATE TABLE mcp_p_hidden (id int PRIMARY KEY);
+         INSERT INTO mcp_p_hidden VALUES (4242);
+         CREATE FUNCTION mcp_p_peek() RETURNS text LANGUAGE plpgsql AS
+           $$ BEGIN RETURN (SELECT max(id)::text FROM mcp_p_hidden); END $$;
+         CREATE TABLE mcp_p_peeks (id serial PRIMARY KEY, note text DEFAULT mcp_p_peek(), n int);
+         CREATE SEQUENCE mcp_p_other_seq;
+         CREATE TABLE mcp_p_other (id bigint PRIMARY KEY DEFAULT nextval('mcp_p_other_seq'), n int);
          CREATE TABLE mcp_p_log (msg text);
          CREATE FUNCTION mcp_p_fn(int) RETURNS int LANGUAGE sql AS 'SELECT $1';
          CREATE FUNCTION mcp_p_trg() RETURNS trigger LANGUAGE plpgsql AS
@@ -590,6 +750,10 @@ async fn proposed_changes_hold_against_a_real_postgres() {
                 tables: vec![
                     "public.mcp_p_orders".into(),
                     "public.mcp_p_customers".into(),
+                    "public.mcp_p_serial".into(),
+                    "public.mcp_p_ident".into(),
+                    "public.mcp_p_peeks".into(),
+                    "public.mcp_p_other".into(),
                 ],
             },
         )]
@@ -623,10 +787,85 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         "UPDATE mcp_p_orders SET note = pg_read_file('/etc/hostname')",
         "TRUNCATE mcp_p_orders",
         "SELECT 1",
+        "UPDATE mcp_p_orders SET note = (SELECT rolpassword FROM pg_authid LIMIT 1)",
+        "UPDATE mcp_p_orders SET note = (SELECT most_common_vals::text FROM pg_stats LIMIT 1)",
+        "UPDATE mcp_p_orders SET note = (SELECT e FROM mcp_p_customers AS c(i, e) WHERE i = 1)",
     ] {
         let err = propose(sql).await.expect_err(sql);
         assert!(err.starts_with("Refused"), "{sql}: {err}");
     }
+
+    // A default written in plpgsql runs what the plan can't show (here it
+    // reads the hidden table), and nextval on another table's sequence
+    // isn't the table's own: both are checked like the agent's SQL.
+    for (sql, said) in [
+        (
+            "INSERT INTO mcp_p_peeks (n) VALUES (1)",
+            "mcp_p_peek() is defined",
+        ),
+        (
+            "UPDATE mcp_p_peeks SET note = DEFAULT WHERE id = 1",
+            "mcp_p_peek() is defined",
+        ),
+        (
+            "INSERT INTO mcp_p_other (n) VALUES (1)",
+            "nextval() changes",
+        ),
+    ] {
+        let err = propose(sql).await.expect_err(sql);
+        assert!(
+            err.starts_with("Refused") && err.contains(said),
+            "{sql}: {err}"
+        );
+    }
+
+    // A table's own compiled defaults fill in a serial or identity key
+    // (nextval, in the plan) or a built-in like pg_backend_pid(); a call
+    // the agent writes is still refused.
+    for sql in [
+        "INSERT INTO mcp_p_serial (note) VALUES ('a')",
+        "INSERT INTO mcp_p_serial VALUES (DEFAULT, 'b')",
+        "INSERT INTO mcp_p_ident (note) VALUES ('c')",
+        "INSERT INTO mcp_p_ident (note) SELECT status FROM mcp_p_orders WHERE id = 1",
+    ] {
+        let sent = propose(sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+        proposals::reject(sent["id"].as_str().unwrap(), None).expect("reject");
+    }
+    for (sql, said) in [
+        (
+            "INSERT INTO mcp_p_serial (id, note) VALUES (nextval('mcp_p_serial_id_seq'), 'd')",
+            "nextval() changes",
+        ),
+        (
+            "INSERT INTO mcp_p_serial (note) VALUES (setval('mcp_p_serial_id_seq', 1)::text)",
+            "setval() changes",
+        ),
+        (
+            "INSERT INTO mcp_p_ident (note) VALUES (pg_read_file('/etc/hostname'))",
+            "pg_read_file() reads",
+        ),
+        (
+            "UPDATE mcp_p_serial SET note = nextval('mcp_p_ident_id_seq')::text",
+            "nextval() changes",
+        ),
+        (
+            "INSERT INTO mcp_p_ident (note) VALUES (pg_backend_pid()::text)",
+            "pg_backend_pid() isn't one",
+        ),
+    ] {
+        let err = propose(sql).await.expect_err(sql);
+        assert!(
+            err.starts_with("Refused") && err.contains(said),
+            "{sql}: {err}"
+        );
+    }
+    let serial = propose("INSERT INTO mcp_p_serial (note) VALUES ('e')")
+        .await
+        .expect("serial insert");
+    let serial = serial["id"].as_str().unwrap();
+    let run = proposals::dry_run(serial).await.expect("serial dry run");
+    assert_eq!(run.statements[0].rows, 1);
+    proposals::reject(serial, None).expect("reject");
     // A blank reason is asked for, not reported as a missing argument.
     let blank = call(
         &mcp,
