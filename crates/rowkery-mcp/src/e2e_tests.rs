@@ -495,6 +495,27 @@ async fn masked_columns_hold_against_a_real_postgres() {
         assert!(err.starts_with("Refused"), "{sql}: {err}");
         assert!(!err.contains("mara@"), "{sql}: {err}");
     }
+    // A column alias list renames the masked column in the plan, so a
+    // filter on it would go unseen: refused. A plain alias is fine.
+    for sql in [
+        "SELECT i FROM mcp_mask_customers AS c(i, e) WHERE e LIKE 'm%'",
+        "SELECT e FROM mcp_mask_customers c(i, e) ORDER BY e",
+        "SELECT o.total FROM mcp_mask_orders o JOIN mcp_mask_customers AS x(i, e) ON x.i = o.customer_id WHERE x.e = 'mara@fjord.se'",
+        "SELECT i FROM mcp_mask_events AS ev(i, m) WHERE m LIKE 'm%'",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused: this renames"), "{sql}: {err}");
+    }
+    for sql in [
+        "SELECT c.id, c.email FROM mcp_mask_customers c WHERE c.plan = 'pro'",
+        "SELECT c.email FROM mcp_mask_customers AS c JOIN mcp_mask_orders o ON o.customer_id = c.id",
+        "SELECT x.n FROM (SELECT id AS n FROM mcp_mask_orders) AS x(n)",
+    ] {
+        let out = query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert!(!out["rows"].to_string().contains('@'), "{sql}: {out}");
+    }
     // The explain tool holds to the same rule.
     let err = call(
         &mcp,
@@ -768,6 +789,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         "SELECT 1",
         "UPDATE mcp_p_orders SET note = (SELECT rolpassword FROM pg_authid LIMIT 1)",
         "UPDATE mcp_p_orders SET note = (SELECT most_common_vals::text FROM pg_stats LIMIT 1)",
+        "UPDATE mcp_p_orders SET note = (SELECT e FROM mcp_p_customers AS c(i, e) WHERE i = 1)",
     ] {
         let err = propose(sql).await.expect_err(sql);
         assert!(err.starts_with("Refused"), "{sql}: {err}");

@@ -452,6 +452,81 @@ pub fn pg_check(explain_json: &Json, facts: &PgFacts) -> Result<Vec<usize>, Stri
         .collect())
 }
 
+/// A relation's columns when it has masked ones, as the plan names it.
+pub type ColumnsOf<'a> = &'a dyn Fn(Option<&str>, &str) -> Option<Vec<String>>;
+
+pub const RENAMED_REFUSAL: &str = "Refused: this renames the columns of a table that has masked columns (a column alias list such as `customers AS c(i, e)`), so Rowkery can't tell which one it reads. Use the columns' own names; an alias like `customers c` is fine.";
+
+/// Refused when a scan of a table with masked columns has its columns
+/// renamed: the plan then names them by the new names (`c.e`), which the
+/// check above never matches. `columns_of` gives a relation's columns when
+/// it has masked ones (None otherwise); `written_calls` are the `name(`
+/// calls of the SQL as sent, where an alias list (`c(i, e)`) shows. A
+/// column the scan names that the table doesn't have (an alias list in a
+/// view) is refused too.
+pub fn pg_renamed(
+    explain_json: &Json,
+    columns_of: ColumnsOf<'_>,
+    written_calls: &[String],
+) -> Result<(), String> {
+    fn walk(
+        node: &Json,
+        columns_of: ColumnsOf<'_>,
+        written_calls: &[String],
+    ) -> Result<(), String> {
+        if let Some(rel) = text(node, "Relation Name") {
+            if let Some(columns) = columns_of(text(node, "Schema"), rel) {
+                let alias = text(node, "Alias").unwrap_or(rel);
+                // Postgres tells a repeated alias apart with `_1`, `_2`.
+                let base = match alias.rsplit_once('_') {
+                    Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => b,
+                    _ => alias,
+                };
+                if written_calls.iter().any(|c| c == alias || c == base) {
+                    return Err(RENAMED_REFUSAL.into());
+                }
+                let known = |name: &str| {
+                    columns.iter().any(|c| c == name)
+                        || matches!(name, "*" | "null" | "true" | "false")
+                        // System columns (an UPDATE's plan reads ctid).
+                        || matches!(name, "ctid" | "tableoid" | "xmin" | "xmax" | "cmin" | "cmax")
+                };
+                for (key, value) in node.as_object().into_iter().flatten() {
+                    if key == "Plans" || NAME_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
+                    let list: Vec<&str> = match value {
+                        Json::String(s) => vec![s.as_str()],
+                        Json::Array(items) => items.iter().filter_map(Json::as_str).collect(),
+                        _ => continue,
+                    };
+                    for entry in list {
+                        let toks = tokens(entry);
+                        let renamed = toks.iter().any(|t| {
+                            matches!(t, Tok::Name(chain)
+                                if chain.len() == 2 && chain[0] == alias && !known(&chain[1]))
+                        }) || (key == "Output"
+                            && matches!(toks.as_slice(),
+                                [Tok::Name(chain)] if chain.len() == 1 && !known(&chain[0])));
+                        if renamed {
+                            return Err(RENAMED_REFUSAL.into());
+                        }
+                    }
+                }
+            }
+        }
+        for child in children(node) {
+            walk(child, columns_of, written_calls)?;
+        }
+        Ok(())
+    }
+    let root = explain_json
+        .get(0)
+        .and_then(|p| p.get("Plan"))
+        .unwrap_or(explain_json);
+    walk(root, columns_of, written_calls)
+}
+
 /// Whether an index definition (`pg_get_indexdef`) covers `column`: in its
 /// key, an expression, INCLUDE or its WHERE.
 pub fn index_covers(definition: &str, column: &str) -> bool {
@@ -626,6 +701,31 @@ mod tests {
         let root = json!({ "Node Type": "Limit", "Output": ["o.email"], "Filter": "(o.email ~~ 'a%')",
             "Plans": [scan("o", "orders", &["o.email"])] });
         assert_eq!(run(root), Ok(vec![]));
+    }
+
+    #[test]
+    fn renamed_columns_of_a_marked_table_are_refused() {
+        let columns_of = |_: Option<&str>, rel: &str| {
+            (rel == "customers").then(|| vec!["id".to_string(), "email".to_string()])
+        };
+        let renamed = |root: Json, calls: &[&str]| {
+            let calls: Vec<String> = calls.iter().map(|c| c.to_string()).collect();
+            pg_renamed(&plan(root), &columns_of, &calls)
+        };
+        // `customers AS c(i, e) WHERE e LIKE 'm%'`: the plan says `c.e`.
+        let aliased = json!({ "Node Type": "Seq Scan", "Relation Name": "customers",
+            "Alias": "c", "Output": ["i"], "Filter": "(c.e ~~ 'm%'::text)" });
+        assert_eq!(
+            renamed(aliased.clone(), &["c"]),
+            Err(RENAMED_REFUSAL.into())
+        );
+        assert_eq!(renamed(aliased, &[]), Err(RENAMED_REFUSAL.into()));
+        // `customers c`, and other tables, pass.
+        let plain = json!({ "Node Type": "Seq Scan", "Relation Name": "customers",
+            "Alias": "c", "Output": ["c.id", "c.email", "ctid"] });
+        assert_eq!(renamed(plain, &["lower"]), Ok(()));
+        let other = scan("o", "orders", &["o.x"]);
+        assert_eq!(renamed(other, &["o"]), Ok(()));
     }
 
     #[test]

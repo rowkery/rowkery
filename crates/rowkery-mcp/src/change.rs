@@ -295,6 +295,26 @@ async fn masked_mention(
         }
         name
     };
+    // Postgres: a column alias list on a table with masked columns hides
+    // their names from the plan (`mask::pg_renamed`).
+    if let Ok(plan) = serde_json::from_str::<Json>(plan_text) {
+        let columns_of = |schema: Option<&str>, rel: &str| {
+            let schema = schema.unwrap_or(default);
+            let table = root(schema, rel);
+            if !marks.iter().any(|m| m.schema == schema && m.table == table) {
+                return None;
+            }
+            // A partition's columns are its parent's.
+            let found = access::find_exact(catalog, schema, &table);
+            Some(
+                found
+                    .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_default(),
+            )
+        };
+        let written = functions::scan_sql(&change.sql).call_names();
+        mask::pg_renamed(&plan, &columns_of, &written)?;
+    }
     let named = safety::identifiers(&change.sql);
     let plan_words = words(plan_text);
     for m in marks {

@@ -840,7 +840,10 @@ async fn run_read(
         Vec::new()
     } else {
         match (&pg_plan_json, &target.record) {
-            (Some(plan), _) => pg_masked(store, target, &marks, plan, &touched, &alias).await?,
+            (Some(plan), _) => {
+                let written = functions::scan_sql(&sql).call_names();
+                pg_masked(store, target, &marks, plan, &touched, &alias, &written).await?
+            }
             (None, ConnectionRecord::Sqlite(c)) => {
                 let pairs: Vec<(String, String)> = marks
                     .iter()
@@ -1046,6 +1049,7 @@ async fn pg_masked(
     plan: &Json,
     touched: &[(Option<String>, String)],
     alias: &str,
+    written_calls: &[String],
 ) -> Result<Vec<usize>, String> {
     const INDEXES: &str = "SELECT ci.relname, n.nspname || '.' || coalesce(pt.relname, t.relname), pg_get_indexdef(i.indexrelid) \
         FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
@@ -1116,6 +1120,22 @@ async fn pg_masked(
             .collect();
         (columns, partition)
     };
+    // A table with masked columns, by every name its columns have.
+    let columns_of = |schema: Option<&str>, rel: &str| {
+        let (marked, _) = marked_of(schema, rel);
+        if marked.is_empty() {
+            return None;
+        }
+        let schema = schema.unwrap_or("public");
+        // A partition's columns are its parent's.
+        let table = access::find_exact(catalog, schema, &root_of(schema, rel).0);
+        Some(
+            table
+                .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default(),
+        )
+    };
+    mask::pg_renamed(plan, &columns_of, written_calls)?;
     mask::pg_check(
         plan,
         &mask::PgFacts {
