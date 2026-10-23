@@ -529,6 +529,74 @@ fn config_and_ui_state_survive_a_restart() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// Regression: a config.json that didn't parse was replaced by the defaults
+/// on the first UI-state write, losing every saved connection and tab. Now
+/// it is set aside before anything writes, the user hears about it once,
+/// and a connection this build can't read survives a launch that saves.
+#[test]
+fn a_config_it_cant_read_survives_a_launch() {
+    let (_guard, _file, path) = test_guard();
+    let dir = rowkery_core::config::config_dir();
+    let config_json = dir.join("config.json");
+    let broken = r#"{ "version": 2, "theme": "system", "connections": [ { "kind": "#;
+    fs::write(&config_json, broken).unwrap();
+    let bridge = super::CoreBridge::spawn();
+    assert_eq!(bridge.first_run(), Ok(false));
+    let notice = bridge.take_config_notice().expect("a notice");
+    assert_eq!(bridge.take_config_notice(), None);
+    let kept = notice.kept.expect("kept");
+    bridge.save_ui_state(serde_json::json!({ "version": 1, "keys": {} }));
+    bridge.flush_config();
+    drop(bridge);
+    assert_eq!(fs::read_to_string(&kept).unwrap(), broken);
+
+    // One entry a newer build wrote beside one this build reads.
+    let sqlite = format!(r#"{{ "kind": "sqlite", "id": "ok", "name": "ok", "path": {path:?} }}"#);
+    let future = r#"{"kind":"mysql","id":"m1","name":"shop"}"#;
+    fs::write(
+        &config_json,
+        format!(r#"{{ "version": 2, "theme": "system", "first_run_done": true, "connections": [{future}, {sqlite}] }}"#),
+    )
+    .unwrap();
+    let bridge = super::CoreBridge::spawn();
+    let listed = CoreBridge::list_connections(&bridge);
+    assert_eq!(listed.iter().map(|c| c.id()).collect::<Vec<_>>(), ["ok"]);
+    assert!(bridge.take_config_notice().is_some());
+    bridge.save_theme(ThemePreference::Dark).expect("theme");
+    drop(bridge);
+    let raw = fs::read_to_string(&config_json).unwrap();
+    assert!(raw.contains(r#""kind": "mysql""#), "{raw}");
+    assert_eq!(AppConfig::load().unwrap().theme, ThemePreference::Dark);
+
+    // A file it can't read at all: adding a connection is refused before
+    // anything changes, so it isn't listed with nothing saved.
+    fs::remove_file(&config_json).unwrap();
+    fs::create_dir(&config_json).unwrap();
+    let bridge = super::CoreBridge::spawn();
+    assert!(bridge.take_config_notice().is_some());
+    let record = ConnectionRecord::Sqlite(SqliteConnection {
+        id: "new".into(),
+        name: "new".into(),
+        path: path.clone(),
+        environment: None,
+        safe_mode: Default::default(),
+        sample: false,
+        allow_mcp: false,
+        mcp_hidden_tables: Vec::new(),
+        mcp_until: None,
+        mcp_samples_off: false,
+        mcp_access: None,
+        masked_columns: Default::default(),
+    });
+    let refused = bridge.upsert_connection(record, ConnectionSecrets::default());
+    assert!(refused.is_err());
+    assert!(CoreBridge::list_connections(&bridge).is_empty());
+    assert!(config_json.is_dir());
+    drop(bridge);
+    fs::remove_dir(&config_json).unwrap();
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// First launch writes the sample and lists it; a second launch doesn't
 /// bring a deleted sample back; "Open the sample database" does, and a
 /// reset puts its rows back.
