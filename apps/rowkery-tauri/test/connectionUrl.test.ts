@@ -50,4 +50,16 @@ describe("parsePostgresUrl", () => {
     expect(parsePostgresUrl("https://example.com")).toBeNull();
     expect(parsePostgresUrl("")).toBeNull();
   });
+
+  test("a stray % never throws: the field keeps the text as typed", () => {
+    expect(parsePostgresUrl("postgres://u:p%zz@db/app")).toEqual({
+      host: "db",
+      port: "5432",
+      database: "app",
+      username: "u",
+      password: "p%zz",
+    });
+    expect(parsePostgresUrl("postgres://u%:p@db/a%e9b")).toMatchObject({ username: "u%", database: "a%e9b" });
+    expect(parsePostgresUrl("DATABASE_URL=postgres://u:100%@db/app")).toMatchObject({ password: "100%" });
+  });
 });
