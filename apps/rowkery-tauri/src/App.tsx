@@ -912,7 +912,7 @@ function App() {
       } else if (link.kind === "decided") {
         showToast("That change isn't waiting for you any more");
       } else if (link.kind === "refused") {
-        showToast("Rowkery won't open that query: it isn't a single read", undefined, "error");
+        showToast("Rowkery won't open that query: it didn't pass the agent checks", undefined, "error");
       } else {
         showToast("That query isn't in Rowkery's activity log any more", undefined, "error");
       }

@@ -135,19 +135,19 @@ await shot("1-launched-by-link");
 const tabsBefore = await page.locator(`${ws} [data-testid="query-tab"]`).count();
 await link({ kind: "sql", connection: "shop", database: "shop", sql: "SELECT count(*) FROM payment_providers" });
 await page.waitForFunction((n) => document.querySelectorAll('[data-testid="workspace"]:not([hidden]) [data-testid="query-tab"]').length === n, tabsBefore + 1);
-check(true, "a second link opens a new tab in the same window");
+check((await page.locator(`${ws} [data-testid="query-tab"]`).count()) === tabsBefore + 1, "a second link opens a new tab in the same window");
 await page.waitForTimeout(500);
 check((await ranSql()).length === 0, "the second link's SQL did not run by itself");
 await page.keyboard.press("ControlOrMeta+Enter");
 await page.waitForFunction(() => window.__ROWKERY_CALLS__.some(([c, a]) => c === "run_query" && JSON.stringify(a).includes("payment_providers")));
-check(true, "⌘↵ runs it");
+check((await ranSql()).some((sql) => sql.includes("payment_providers")), "⌘↵ runs it");
 check((await page.locator('[data-testid="workspace"]').count()) === 1, "no second window");
 await shot("2-second-link");
 
 // 3. Review in Rowkery: the Agents page on that proposal.
 await link({ kind: "proposal", id: "p_000000000002" });
 await page.waitForSelector('[data-testid="agents-page"][data-proposal="p_000000000002"]');
-check(true, "Review opens the Agents page on the card's proposal, not the oldest");
+check((await page.getAttribute('[data-testid="agents-page"]', "data-proposal")) === "p_000000000002", "Review opens the Agents page on the card's proposal, not the oldest");
 await shot("3-review-link");
 await page.keyboard.press("Escape");
 await page.waitForSelector('[data-testid="agents-page"]', { state: "detached" });
@@ -159,8 +159,11 @@ await page.waitForSelector('[data-toast="error"]');
 check(/activity log/.test(await page.textContent('[data-testid="toast-message"]')), "a gone call says so");
 await shot("4-gone");
 await link({ kind: "refused" });
-await page.waitForFunction(() => /isn't a single read/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));
-check(true, "a forged log entry that fails the guard says so");
+await page.waitForFunction(() => /agent checks/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));
+check(
+  (await page.textContent('[data-testid="toast-message"]')) === "Rowkery won't open that query: it didn't pass the agent checks",
+  "a forged log entry that fails the guard says so",
+);
 await shot("4b-refused");
 await link({ kind: "decided" });
 await page.waitForFunction(() => /isn't waiting/.test(document.querySelector('[data-testid="toast-message"]')?.textContent ?? ""));

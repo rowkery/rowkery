@@ -57,6 +57,7 @@ pub fn resolve(
     url: &str,
     find_call: impl Fn(&str) -> Option<rowkery_mcp::audit::Entry>,
     waiting: impl Fn(&str) -> bool,
+    shared: impl Fn(&str) -> bool,
 ) -> Option<OpenLink> {
     // Only this build's own scheme: Rowkery Dev's links are `rowkery-dev://`.
     let rest = url.strip_prefix(LINK_SCHEME)?.strip_prefix("://")?;
@@ -73,6 +74,8 @@ pub fn resolve(
                     database,
                     ..
                 }) => match rowkery_mcp::recheck_logged_read(&sql) {
+                    // A forged line could name a connection never shared with agents.
+                    Ok(_) if !shared(&connection) => OpenLink::Refused,
                     Ok(_) => OpenLink::Sql {
                         connection,
                         database,
@@ -95,7 +98,13 @@ pub fn resolve(
 /// A link the OS handed us: keep it for the page and bring the window up.
 pub fn opened(app: &AppHandle, url: &str) {
     let waiting = |id: &str| rowkery_mcp::proposals::waiting().iter().any(|p| p.id == id);
-    let Some(link) = resolve(url, rowkery_mcp::audit::find_call, waiting) else {
+    let config = rowkery_core::config::AppConfig::load().ok();
+    let shared = |id: &str| {
+        config
+            .as_ref()
+            .is_some_and(|c| c.connections.iter().any(|r| r.id() == id && r.allow_mcp()))
+    };
+    let Some(link) = resolve(url, rowkery_mcp::audit::find_call, waiting, shared) else {
         return;
     };
     if let Ok(mut slot) = app.state::<PendingLink>().0.lock() {
@@ -121,7 +130,7 @@ mod tests {
 
     fn logged(id: &str) -> Option<Entry> {
         let mut e = Entry::new("query");
-        e.connection = Some("pg".into());
+        e.connection = Some(if id == "unshared" { "secret" } else { "pg" }.into());
         e.database = Some("shop".into());
         e.sql = Some(
             match id {
@@ -129,6 +138,7 @@ mod tests {
                 "multi" => "select 1; delete from users",
                 "cte" => "with gone as (delete from users returning *) select * from gone",
                 "call" => "select pg_terminate_backend(42)",
+                "unicode" => r#"select U&"set\005fconfig"('a', 'b', false)"#,
                 _ => "select 1",
             }
             .into(),
@@ -141,6 +151,10 @@ mod tests {
         (id != "missing").then_some(e)
     }
 
+    fn shared(id: &str) -> bool {
+        id == "pg"
+    }
+
     fn waiting(id: &str) -> bool {
         id == "p_0123456789ab"
     }
@@ -151,7 +165,8 @@ mod tests {
             resolve(
                 &format!("{LINK_SCHEME}://open?call=1-2-ab"),
                 logged,
-                waiting
+                waiting,
+                shared
             ),
             Some(OpenLink::Sql {
                 connection: "pg".into(),
@@ -163,7 +178,8 @@ mod tests {
             resolve(
                 &format!("{LINK_SCHEME}://open?call=refused"),
                 logged,
-                waiting
+                waiting,
+                shared
             ),
             Some(OpenLink::Gone)
         );
@@ -171,17 +187,19 @@ mod tests {
             resolve(
                 &format!("{LINK_SCHEME}://open?call=missing"),
                 logged,
-                waiting
+                waiting,
+                shared
             ),
             Some(OpenLink::Gone)
         );
         // A forged log line with verdict ok still has to be a single read.
-        for forged in ["delete", "multi", "cte", "call"] {
+        for forged in ["delete", "multi", "cte", "call", "unicode", "unshared"] {
             assert_eq!(
                 resolve(
                     &format!("{LINK_SCHEME}://open?call={forged}"),
                     logged,
-                    waiting
+                    waiting,
+                    shared
                 ),
                 Some(OpenLink::Refused),
                 "{forged}"
@@ -191,7 +209,8 @@ mod tests {
             resolve(
                 &format!("{LINK_SCHEME}://open?sql=select%201"),
                 logged,
-                waiting
+                waiting,
+                shared
             ),
             Some(OpenLink::Gone)
         );
@@ -199,7 +218,8 @@ mod tests {
             resolve(
                 &format!("{LINK_SCHEME}://review?proposal=p_0123456789ab"),
                 logged,
-                waiting
+                waiting,
+                shared
             ),
             Some(OpenLink::Proposal {
                 id: "p_0123456789ab".into()
@@ -209,16 +229,22 @@ mod tests {
             resolve(
                 &format!("{LINK_SCHEME}://review?proposal=p_committed000"),
                 logged,
-                waiting
+                waiting,
+                shared
             ),
             Some(OpenLink::Decided)
         );
         assert_eq!(
-            resolve(&format!("{LINK_SCHEME}://elsewhere"), logged, waiting),
+            resolve(
+                &format!("{LINK_SCHEME}://elsewhere"),
+                logged,
+                waiting,
+                shared
+            ),
             None
         );
         assert_eq!(
-            resolve("https://rowkery.com/open?call=1", logged, waiting),
+            resolve("https://rowkery.com/open?call=1", logged, waiting, shared),
             None
         );
     }

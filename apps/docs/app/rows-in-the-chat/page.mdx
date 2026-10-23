@@ -17,7 +17,7 @@ When the agent calls `query`, the chat shows Rowkery's view under the agent's me
 - **Sort** by clicking a column header, or focus it and press <kbd>↵</kbd> or <kbd>Space</kbd>. Click again to reverse. Numbers sort as numbers, and NULLs go last either way.
 - **When the agent hit its row limit**, the head reads "First 200 rows" instead of "200 rows".
 - **Long and wide results** scroll inside the table, down and sideways. Hover a cell to read a long value in full. The button at the top right shows the view full screen, where the client offers it.
-- **Open in Rowkery** brings Rowkery to the front with the agent's query in a new tab on that connection, without running it: read it, then press ⌘↵ to run it. It opens in the window already on that connection and database, or in a new one. Rowkery checks the query again before it opens and refuses anything that isn't a single read. [Safe mode](/environments-and-safe-mode/) applies when you run it, as it does to anything you run.
+- **Open in Rowkery** brings Rowkery to the front with the agent's query in a new tab on that connection, without running it: read it, then press ⌘↵ to run it. It opens in the window already on that connection and database, or in a new one. Before it opens, Rowkery checks the query again without the database: it has to be one read statement on a connection you share with agents, and call no function Rowkery refuses by name and no function named with a schema other than Postgres's own. A plain call to a function defined in your database can still open, so read the query before you run it. [Safe mode](/environments-and-safe-mode/) applies when you run it, as it does to anything you run.
 
 A refused query shows Rowkery's reason instead of a table, the same text the agent gets.
 
@@ -50,4 +50,4 @@ The buttons don't send links through the chat. They ask Rowkery's MCP server, on
 - **A call that's gone** from the log (cleared, or old enough to be rotated out): Rowkery opens and shows a toast, "That query isn't in Rowkery's activity log any more". For a connection you've since deleted, the toast reads "That connection isn't in Rowkery any more".
 - **A change that's no longer waiting**: the toast reads "That change isn't waiting for you any more", and no other change opens in its place.
 - **No network.** The view is one page bundled with Rowkery. It loads nothing from the internet, and the client's sandbox wouldn't let it.
-- Clicks in the view aren't written to the activity log. The query they open runs like any query you run yourself, apart from staying out of Recent queries.
+- Clicks in the view aren't written to the activity log. The query they open doesn't run until you press ⌘↵; then it runs like any query you run yourself, and goes into Recent queries.

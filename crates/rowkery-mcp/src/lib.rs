@@ -65,18 +65,66 @@ and enum labels; don't query existing rows just to see example values. Read only
 depends on, such as the row it updates or an id it references, and select only the columns you need.";
 
 /// The checks a logged query passes again, without a database, before a
-/// `rowkery://open` link puts it in a tab: one read statement, calling no
-/// function refused by name. The log is a plain file, so its verdict alone
-/// proves nothing.
+/// `rowkery://open` link puts it in a tab: one read statement, no `U&"…"`
+/// name, no function refused by name and no schema-qualified call outside
+/// `pg_catalog` / `information_schema`. The log is a plain file, so its
+/// verdict alone proves nothing. A bare call to a function defined in the
+/// database still passes: telling it from a built-in needs the catalog.
 pub fn recheck_logged_read(sql: &str) -> Result<(), String> {
     let sql = guard::single_read(sql)?;
-    match functions::scan_sql(&sql)
-        .call_names()
-        .iter()
-        .find_map(|name| functions::refused_builtin(name).map(|why| (name.clone(), why)))
-    {
-        Some((name, why)) => Err(format!("Refused: {name} {why}.")),
-        None => Ok(()),
+    let scan = functions::scan_sql(&sql);
+    if scan.unicode_names {
+        return Err(
+            "Refused: names written with Unicode escapes (U&\"…\") can't be checked here.".into(),
+        );
+    }
+    for call in &scan.calls {
+        if let Some(schema) = call.schema.as_deref() {
+            if !matches!(schema, "pg_catalog" | "information_schema") {
+                return Err(format!(
+                    "Refused: {schema}.{}() isn't built into Postgres.",
+                    call.name
+                ));
+            }
+        }
+        if let Some(why) = functions::refused_builtin(&call.name) {
+            return Err(format!("Refused: {} {why}.", call.name));
+        }
+        // An extension that runs SQL in another session, called unqualified.
+        if call.name.starts_with("pg_background_") {
+            return Err(format!(
+                "Refused: {}() isn't built into Postgres.",
+                call.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recheck_tests {
+    use super::recheck_logged_read;
+
+    #[test]
+    fn refuses_hidden_names_and_database_functions() {
+        for sql in [
+            r#"SELECT U&"pg\005fterminate\005fbackend"(pid) FROM pg_stat_activity"#,
+            r#"SELECT U&"set\005fconfig"('a', 'b', false)"#,
+            "SELECT cron.schedule('* * * * *', 'DELETE FROM users')",
+            "SELECT public.purge_all_orders()",
+            "SELECT pg_background_launch('DELETE FROM users')",
+            "SELECT pg_terminate_backend(42)",
+        ] {
+            assert!(recheck_logged_read(sql).is_err(), "{sql}");
+        }
+        for sql in [
+            "select 1",
+            "select lower(name) from users",
+            "select pg_catalog.lower('A')",
+            "select * from information_schema.tables",
+        ] {
+            assert!(recheck_logged_read(sql).is_ok(), "{sql}");
+        }
     }
 }
 
