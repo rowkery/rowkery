@@ -22,7 +22,7 @@ import { isMacPlatform } from "./platform";
 import { showToast, toastPreview } from "./notify";
 import { cellsToCsv } from "./resultsExport";
 import { gridCopyBytes, parsePaste, type GridCopyCell } from "./editBuffer";
-import { gridCopyRoundtrip, recordGridCopy } from "./gridClipboard";
+import { clearGridCopy, gridCopyRoundtrip, recordGridCopy } from "./gridClipboard";
 import { GridMenu, type GridMenuItem } from "./GridMenu";
 import { cellMenu, headerMenu as headerMenuRows } from "./contextMenus";
 import type { CommandState } from "./commands";
@@ -393,6 +393,7 @@ function ResultsGridView({
     const before = shownRef.current;
     shownRef.current = result;
     if (isAppend(before, result)) return;
+    clearGridCopy();
     setSel(null);
     setMenuAt(null);
     dragCleanup.current?.();

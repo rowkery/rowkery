@@ -12,3 +12,7 @@ export function gridCopyRoundtrip(text: string): GridCopyCell[][] | null {
   if (!lastGridCopy || lastGridCopy.text !== text) return null;
   return lastGridCopy.cells;
 }
+
+export function clearGridCopy(): void {
+  lastGridCopy = null;
+}
