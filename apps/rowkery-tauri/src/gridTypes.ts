@@ -1,5 +1,5 @@
 import type { KeyChoice } from "./CellEditor";
-import type { ColumnEditor } from "./editBuffer";
+import type { ColumnEditor, GridCopyCell } from "./editBuffer";
 import type { Column, Value } from "./types";
 
 /** Primary and foreign key columns of the table a result came from. */
@@ -58,7 +58,7 @@ export interface GridEditing {
   removeInsert: (id: number) => void;
   duplicate: (rows: number[]) => void;
   toggleDelete: (rows: number[]) => void;
-  paste: (row: number, col: number, block: string[][], typed?: (Value | null)[][] | null) => void;
+  paste: (row: number, col: number, block: string[][], typed?: GridCopyCell[][] | null) => void;
   /** The foreign key picker's search of the referenced table. */
   searchKey?: (col: number, query: string) => Promise<KeyChoice[]>;
   /** A new row ⌘I just added: its first column's editor opens. */

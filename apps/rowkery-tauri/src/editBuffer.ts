@@ -394,8 +394,53 @@ export function editorStartText(kind: EditorKind, initial: Value | null): string
   return kind === "json" ? jsonEditorText(raw) : raw;
 }
 
-/** Spreadsheet-style fields: `"` quotes; `""` is a literal quote; newlines and tabs may sit inside quotes. */
-export function parseDelimited(text: string, sep: string): string[][] {
+/** Binary cells are never pasted from a typed round trip (frames carry a prefix only). */
+export const gridCopyBytes = Symbol("gridCopyBytes");
+export type GridCopyCell = Value | null | typeof gridCopyBytes;
+
+function parseDelimitedPlain(text: string, sep: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === sep) {
+      row.push(field);
+      field = "";
+      if (sep === "\n") {
+        rows.push(row);
+        row = [];
+      }
+      i++;
+      continue;
+    }
+    if (sep !== "\n" && ch === "\r") {
+      if (text[i + 1] === "\n") i++;
+      row.push(field);
+      field = "";
+      rows.push(row);
+      row = [];
+      i++;
+      continue;
+    }
+    if (sep !== "\n" && ch === "\n") {
+      row.push(field);
+      field = "";
+      rows.push(row);
+      row = [];
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  row.push(field);
+  rows.push(row);
+  return rows;
+}
+
+function parseDelimitedQuoted(text: string, sep: string): { rows: string[][]; unclosed: boolean } {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -418,7 +463,7 @@ export function parseDelimited(text: string, sep: string): string[][] {
       }
       continue;
     }
-    if (ch === '"') {
+    if (field === "" && ch === '"') {
       quoted = true;
       i++;
       continue;
@@ -426,10 +471,23 @@ export function parseDelimited(text: string, sep: string): string[][] {
     if (ch === sep) {
       row.push(field);
       field = "";
+      if (sep === "\n") {
+        rows.push(row);
+        row = [];
+      }
       i++;
       continue;
     }
-    if (ch === "\n") {
+    if (sep !== "\n" && ch === "\r") {
+      if (text[i + 1] === "\n") i++;
+      row.push(field);
+      field = "";
+      rows.push(row);
+      row = [];
+      i++;
+      continue;
+    }
+    if (sep !== "\n" && ch === "\n") {
       row.push(field);
       field = "";
       rows.push(row);
@@ -442,21 +500,74 @@ export function parseDelimited(text: string, sep: string): string[][] {
   }
   row.push(field);
   rows.push(row);
-  return rows;
+  return { rows, unclosed: quoted };
 }
 
 /**
- * A pasted block: quote-aware TSV when it has tabs; else CSV when every row
- * shares the same field count (>1); else one value per line (quoted newlines
- * still parse as one field).
+ * Spreadsheet-style fields: a leading `"` opens quoting (RFC 4180 / Excel);
+ * `""` is a literal quote inside; `\r\n` is normalised only outside quotes.
+ * An unclosed quote re-parses the whole input with no quote handling.
  */
+export function parseDelimited(text: string, sep: string): string[][] {
+  const { rows, unclosed } = parseDelimitedQuoted(text, sep);
+  return unclosed ? parseDelimitedPlain(text, sep) : rows;
+}
+
+/** A pasted block: quote-aware TSV when it has tabs; else one value per line. */
 export function parsePaste(text: string): string[][] {
-  const s = text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
-  if (s.includes("\t")) return parseDelimited(s, "\t");
-  const csv = parseDelimited(s, ",");
-  const w = csv[0]?.length ?? 0;
-  if (w > 1 && csv.length > 1 && csv.every((r) => r.length === w)) return csv;
-  if (s.includes('"')) return csv;
-  if (s === "") return [[""]];
-  return s.split("\n").map((l) => [l]);
+  const trimmed = text.endsWith("\n") ? text.slice(0, -1) : text;
+  if (trimmed.includes("\t")) return parseDelimited(trimmed, "\t");
+  if (trimmed === "") return [[""]];
+  return parseDelimited(trimmed, "\n").map((r) => [r.join("\n")]);
+}
+
+/** Whether a copied typed value can stage into this column without re-parsing. */
+export function valueFitsEditor(ed: ColumnEditor, value: Value): boolean {
+  if ("Bytes" in value) return false;
+  switch (ed.kind) {
+    case "int":
+      return "Int" in value || "BigInt" in value;
+    case "bool":
+      return "Bool" in value;
+    case "number":
+      return "Int" in value || "Float" in value || ("Text" in value && NUMBER.test(value.Text));
+    case "enum":
+      return "Text" in value && (!ed.labels?.length || ed.labels.includes(value.Text));
+    case "text":
+    case "date":
+    case "json":
+      return "Text" in value;
+    default:
+      return false;
+  }
+}
+
+function externalPasteText(ed: ColumnEditor, text: string): { value: Value | null } | { error: string } {
+  const asNull = text === "NULL" || (text === "" && ed.kind !== "text");
+  if (asNull) return { value: null };
+  const parsed = parseInput(ed.kind, text);
+  return "error" in parsed ? parsed : { value: parsed.value };
+}
+
+/** One pasted cell: in-app typed round trip, or plain text from outside. */
+export function pasteCellForGrid(
+  ed: ColumnEditor,
+  opts: { fromRoundtrip: boolean; typed: GridCopyCell | undefined; text: string },
+): { value: Value | null } | { error: string } {
+  const { fromRoundtrip, typed, text } = opts;
+  if (!fromRoundtrip || typed === undefined) return externalPasteText(ed, text);
+  if (typed === gridCopyBytes) return externalPasteText(ed, text);
+  if (typed === null) return { value: null };
+  if (valueFitsEditor(ed, typed)) return { value: typed };
+  const reparsed = parseInput(ed.kind, valueText(typed));
+  if ("error" in reparsed) return reparsed;
+  if (
+    ed.kind === "enum" &&
+    ed.labels?.length &&
+    "Text" in reparsed.value &&
+    !ed.labels.includes(reparsed.value.Text)
+  ) {
+    return { error: "Not a valid label" };
+  }
+  return { value: reparsed.value };
 }

@@ -7,7 +7,7 @@ import {
   columnEditor,
   editRefusal,
   emptyBuffer,
-  parseInput,
+  pasteCellForGrid,
   removeInsert,
   revertCell,
   rowKey,
@@ -16,6 +16,7 @@ import {
   toggleDeletes,
   type ColumnEditor,
   type EditBuffer,
+  type GridCopyCell,
   type KeyCells,
 } from "./editBuffer";
 import { showToast } from "./notify";
@@ -182,7 +183,7 @@ export function useRowEdits(o: Options) {
 
   /** A pasted block, cell by cell from the ring; what falls outside, or doesn't parse, is left. */
   const paste = useCallback(
-    (row: number, col: number, block: string[][], typed?: (Value | null)[][] | null) => {
+    (row: number, col: number, block: string[][], typed?: GridCopyCell[][] | null) => {
       let total = 0;
       let staged = 0;
       let outside = 0;
@@ -201,15 +202,12 @@ export function useRowEdits(o: Options) {
               outside++;
               return;
             }
-            if (typed) {
-              const value = typed[i][j];
-              next = stageCell(next, key, names[c], value, rows.isNull(r, c) ? null : rows.get(r, c), ed.kind);
-              staged++;
-              return;
-            }
             const text = block[i][j];
-            const asNull = text === "NULL" || (text === "" && ed.kind !== "text");
-            const parsed = asNull ? { value: null } : parseInput(ed.kind, text);
+            const parsed = pasteCellForGrid(ed, {
+              fromRoundtrip: !!typed,
+              typed: typed?.[i]?.[j],
+              text,
+            });
             if ("error" in parsed) {
               refused++;
               return;

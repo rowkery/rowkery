@@ -21,7 +21,7 @@ import { commandById, eventMatches } from "./commands";
 import { isMacPlatform } from "./platform";
 import { showToast, toastPreview } from "./notify";
 import { cellsToCsv } from "./resultsExport";
-import { parsePaste } from "./editBuffer";
+import { gridCopyBytes, parsePaste, type GridCopyCell } from "./editBuffer";
 import { gridCopyRoundtrip, recordGridCopy } from "./gridClipboard";
 import { GridMenu, type GridMenuItem } from "./GridMenu";
 import { cellMenu, headerMenu as headerMenuRows } from "./contextMenus";
@@ -164,16 +164,21 @@ function isSetNull(e: { code: string; metaKey: boolean; ctrlKey: boolean; altKey
   return !!chord && eventMatches(e, chord, isMacPlatform());
 }
 
-function copyCellValue(shown: { isNull: (r: number, c: number) => boolean; get: (r: number, c: number) => Value }, r: number, c: number): Value | null {
+function copyCellValue(
+  shown: { isNull: (r: number, c: number) => boolean; get: (r: number, c: number) => Value },
+  r: number,
+  c: number,
+): GridCopyCell {
   if (shown.isNull(r, c)) return null;
   const v = shown.get(r, c);
+  if ("Bytes" in v) return gridCopyBytes;
   return !v || "Null" in v ? null : v;
 }
 
-async function copyText(text: string, cells?: (Value | null)[][]) {
+async function copyText(text: string, cells?: GridCopyCell[][]) {
   try {
     await navigator.clipboard.writeText(text);
-    if (cells) recordGridCopy(text, cells, false);
+    if (cells) recordGridCopy(text, cells);
     showToast("Copied", toastPreview(text) || "empty");
   } catch {
     // Clipboard can be unavailable (permissions, headless proof runs).
@@ -784,15 +789,15 @@ function ResultsGridView({
           : `Copied ${(nRows * nCols).toLocaleString()} ${nRows * nCols === 1 ? "cell" : "cells"}`;
       const detail = withHeader ? "CSV with header" : "CSV";
       const csvText = cellsToCsv(result, r0, r1, c0, c1, withHeader, shown.text);
-      const cells: (Value | null)[][] = [];
+      const cells: GridCopyCell[][] = [];
       for (let r = r0; r <= r1; r++) {
-        const line: (Value | null)[] = [];
+        const line: GridCopyCell[] = [];
         for (let c = c0; c <= c1; c++) line.push(copyCellValue(shown, r, c));
         cells.push(line);
       }
       navigator.clipboard.writeText(csvText).then(
         () => {
-          recordGridCopy(csvText, cells, withHeader);
+          recordGridCopy(csvText, cells);
           showToast(label, detail);
         },
         // Clipboard can be unavailable (permissions, headless proof runs).
