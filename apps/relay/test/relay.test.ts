@@ -17,12 +17,14 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 
-const env: Env = { GITHUB_TOKEN: "t", GITHUB_REPO: "rowkery/reports" };
-const post = (body: unknown, e: Env = env) =>
+const allow = { limit: async () => ({ success: true }) };
+const env: Env = { GITHUB_TOKEN: "t", GITHUB_REPO: "rowkery/reports", REPORT_LIMITER: allow };
+const APP = "tauri://localhost";
+const post = (body: unknown, e: Env = env, headers: Record<string, string> = { origin: APP }) =>
   relay.fetch(
     new Request("https://relay.example/report", {
       method: "POST",
-      headers: { "cf-connecting-ip": "1.2.3.4" },
+      headers: { "cf-connecting-ip": "1.2.3.4", ...headers },
       body: typeof body === "string" ? body : JSON.stringify(body),
     }),
     e,
@@ -43,7 +45,7 @@ test("files an issue with the user-report label and returns its number", async (
   assert.match(calls[0].body.body, /\| Type \| Bug \|/);
   assert.equal(calls[0].body.title, "Report: Structure shows no indexes");
   assert.match(calls[0].body.body, /\| Database \| PostgreSQL 16\.4 \|/);
-  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  assert.equal(res.headers.get("access-control-allow-origin"), APP);
 });
 
 test("retries with fewer labels when GitHub rejects them", async () => {
@@ -66,9 +68,58 @@ test("only POST /report, and CORS preflight answers", async () => {
   assert.equal(get.status, 405);
   const other = await relay.fetch(new Request("https://relay.example/other", { method: "POST" }), env);
   assert.equal(other.status, 404);
-  const pre = await relay.fetch(new Request("https://relay.example/report", { method: "OPTIONS" }), env);
+  const pre = await relay.fetch(
+    new Request("https://relay.example/report", { method: "OPTIONS", headers: { origin: APP } }),
+    env,
+  );
   assert.equal(pre.status, 204);
   assert.equal(pre.headers.get("access-control-allow-methods"), "POST, OPTIONS");
+  assert.equal(pre.headers.get("access-control-allow-origin"), APP);
+});
+
+test("allows each of the app's webview origins", async () => {
+  for (const origin of ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://localhost:1420"]) {
+    const res = await post(report, env, { origin });
+    assert.equal(res.status, 200, origin);
+    assert.equal(res.headers.get("access-control-allow-origin"), origin);
+  }
+});
+
+test("refuses other websites: no CORS headers, 403, nothing filed", async () => {
+  const pre = await relay.fetch(
+    new Request("https://relay.example/report", { method: "OPTIONS", headers: { origin: "https://evil.example" } }),
+    env,
+  );
+  assert.equal(pre.status, 403);
+  assert.equal(pre.headers.get("access-control-allow-origin"), null);
+  for (const origin of ["https://evil.example", "null", "http://localhost:3000"]) {
+    const res = await post(report, env, { origin });
+    assert.equal(res.status, 403, origin);
+    assert.equal(res.headers.get("access-control-allow-origin"), null);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("a request with no Origin (curl) is left to the rate limit", async () => {
+  const res = await post(report, env, {});
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("access-control-allow-origin"), null);
+});
+
+test("fails closed without the limiter binding or a client IP", async () => {
+  const orig = console.error;
+  console.error = () => {};
+  const noLimiter = await post(report, { GITHUB_TOKEN: "t", GITHUB_REPO: "rowkery/reports" });
+  console.error = orig;
+  assert.equal(noLimiter.status, 503);
+  const keys: string[] = [];
+  const noIp = await relay.fetch(
+    new Request("https://relay.example/report", { method: "POST", headers: { origin: APP }, body: JSON.stringify(report) }),
+    { ...env, REPORT_LIMITER: { limit: async ({ key }) => (keys.push(key), { success: true }) } },
+  );
+  assert.equal(noIp.status, 400);
+  assert.deepEqual(keys, []);
+  assert.equal(calls.length, 0);
 });
 
 test("rate limiter blocks by client IP", async () => {
