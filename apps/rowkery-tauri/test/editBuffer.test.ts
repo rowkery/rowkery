@@ -13,7 +13,11 @@ import {
   editRefusal,
   emptyBuffer,
   parseInput,
+  parseDelimited,
   parsePaste,
+  pasteCellForGrid,
+  valueFitsEditor,
+  gridCopyBytes,
   revertCell,
   rowKey,
   savedBuffer,
@@ -149,15 +153,56 @@ describe("typed input", () => {
     expect(parsePaste('"say ""hi"""')).toEqual([['say "hi"']]);
   });
 
-  test("CSV without tabs when every row shares more than one field", () => {
-    expect(parsePaste("a,b\nc,d")).toEqual([["a", "b"], ["c", "d"]]);
-    expect(parsePaste('"a,b",c')).toEqual([["a,b", "c"]]);
-  });
-
-  test("plain lines stay one value per row", () => {
+  test("plain lines stay one value per row (commas are not column breaks)", () => {
     expect(parsePaste("only")).toEqual([["only"]]);
     expect(parsePaste("x\ny\n")).toEqual([["x"], ["y"]]);
     expect(parsePaste("one,two")).toEqual([["one,two"]]);
+    expect(parsePaste("Smith, John\nDoe, Jane")).toEqual([["Smith, John"], ["Doe, Jane"]]);
+    expect(parsePaste("1,000\n2,500")).toEqual([["1,000"], ["2,500"]]);
+  });
+
+  test('a quote only opens a field when it is the first character', () => {
+    expect(parsePaste('{"a":1,"b":2}')).toEqual([['{"a":1,"b":2}']]);
+    expect(parsePaste('He said "hi", then left')).toEqual([['He said "hi", then left']]);
+    expect(parsePaste('5" screen\nnext line')).toEqual([['5" screen'], ["next line"]]);
+    expect(parsePaste('5" screen\t3\nb\t4')).toEqual([['5" screen', "3"], ["b", "4"]]);
+    expect(parseDelimited('"line1\nline2"', "\n")).toEqual([["line1\nline2"]]);
+  });
+
+  test("an unclosed quote re-parses without quote rules", () => {
+    expect(parsePaste('"unfinished')).toEqual([['"unfinished']]);
+  });
+});
+
+describe("pasteCellForGrid", () => {
+  const textEd = { kind: "text" as const, nullable: true, default: null };
+  const intEd = { kind: "int" as const, nullable: true, default: null };
+  const jsonEd = { kind: "json" as const, nullable: true, default: null };
+  const enumEd = { kind: "enum" as const, nullable: true, default: null, labels: ["open", "closed"] };
+
+  test("round trip keeps NULL and text NULL; external paste maps NULL to SQL NULL", () => {
+    expect(pasteCellForGrid(textEd, { fromRoundtrip: true, typed: { Text: "NULL" }, text: "NULL" })).toEqual({
+      value: { Text: "NULL" },
+    });
+    expect(pasteCellForGrid(intEd, { fromRoundtrip: false, typed: undefined, text: "NULL" })).toEqual({ value: null });
+    expect(pasteCellForGrid(textEd, { fromRoundtrip: true, typed: null, text: "" })).toEqual({ value: null });
+  });
+
+  test("bytes on the typed path fall back to clipboard text", () => {
+    const json = '{"a":1,"b":2}';
+    expect(pasteCellForGrid(jsonEd, { fromRoundtrip: true, typed: gridCopyBytes, text: json })).toEqual({
+      value: { Text: json },
+    });
+  });
+
+  test("kind mismatches re-parse; enums refuse unknown labels", () => {
+    expect(pasteCellForGrid(textEd, { fromRoundtrip: true, typed: { Int: 7 }, text: "7" })).toEqual({ value: { Text: "7" } });
+    expect(valueFitsEditor(intEd, { Int: 7 })).toBe(true);
+    expect(pasteCellForGrid(intEd, { fromRoundtrip: true, typed: { Text: "nope" }, text: "nope" })).toHaveProperty("error");
+    expect(pasteCellForGrid(enumEd, { fromRoundtrip: true, typed: { Text: "open" }, text: "open" })).toEqual({
+      value: { Text: "open" },
+    });
+    expect(pasteCellForGrid(enumEd, { fromRoundtrip: true, typed: { Text: "maybe" }, text: "maybe" })).toHaveProperty("error");
   });
 });
 

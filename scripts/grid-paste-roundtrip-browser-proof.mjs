@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Grid copy→paste round trip on an editable table tab (stubbed `invoke`):
 // ⌘C on a 2×2 block with NULL and a multi-line cell, then paste into another
-// row, keeps typed NULL vs text, empty text and embedded newlines; the toast
-// counts only cells outside the table, not parse failures from CSV splitting.
+// row, keeps typed NULL vs text, empty text and embedded newlines; external
+// paste keeps JSON and embedded quotes; the toast splits outside vs didn't parse.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/grid-paste-roundtrip-browser-proof.mjs [outDir]
@@ -39,13 +39,15 @@ function stubTauri() {
   });
   const id = col("id", "bigint", { nullable: false });
   const tables = [
-    table("paste_demo", [id, col("city", "text"), col("note", "text")], 6),
+    table("paste_demo", [id, col("city", "text"), col("note", "text"), col("meta", "jsonb"), col("qty", "integer")], 6),
   ];
   const wire = {
     paste_demo: [
       { name: "id", type_name: "int8" },
       { name: "city", type_name: "text" },
       { name: "note", type_name: "text" },
+      { name: "meta", type_name: "jsonb" },
+      { name: "qty", type_name: "int4" },
     ],
   };
   const total = { paste_demo: 6 };
@@ -53,6 +55,8 @@ function stubTauri() {
     { Int: n },
     n === 1 ? { Null: null } : n === 2 ? { Text: "line1\nline2" } : { Text: `city${n}` },
     n === 2 ? { Text: "NULL" } : n === 3 ? { Text: "" } : { Text: `note${n}` },
+    { Text: n === 2 ? '{"a":1,"b":2}' : "{}" },
+    { Int: n * 10 },
   ];
   let nextId = 0;
   window.__TAURI_INTERNALS__ = {
@@ -112,11 +116,21 @@ await page.waitForSelector('[data-testid="conn-popover"]');
 await page.keyboard.press("Enter");
 await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 
-const COLS = ["id", "city", "note"];
+const COLS = ["id", "city", "note", "meta", "qty"];
 const cell = (row, column) => page.locator(`${ws} [data-testid="rg-body"] [data-row="${row}"] [data-col="${COLS.indexOf(column)}"]`);
 const edited = async (row, column) => (await cell(row, column).getAttribute("data-edited")) === "";
 const nullPill = (row, column) => cell(row, column).locator('[data-testid="rg-null"]');
 const toastText = () => page.locator("[data-toast]").last().textContent();
+const dispatchPaste = (text) =>
+  page.evaluate(
+    ([ws, text]) => {
+      const grid = document.querySelector(`${ws} [data-testid="results-grid-wrap"]`);
+      const dt = new DataTransfer();
+      dt.setData("text/plain", text);
+      grid.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true }));
+    },
+    [ws, text],
+  );
 
 await page.click(`${ws} [data-table="rowkery.public.paste_demo"] [data-testid="sb-row-main"]`);
 await page.waitForFunction(([ws]) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "6", [ws]);
@@ -139,8 +153,20 @@ check(await edited(3, "note"), "pasted note1 is staged");
 check(await edited(4, "city"), "pasted multi-line cell is one staged edit");
 check((await cell(4, "city").textContent()).includes("line1"), "multi-line text survived paste");
 check(await edited(4, "note"), 'pasted text "NULL" is staged as text');
+check((await nullPill(4, "note").count()) === 0, 'text "NULL" is not a NULL pill');
 let toast = (await toastText()) ?? "";
 check(toast === "Pasted 4 cells", `full block toast (${toast})`);
+
+// Empty text round trip (row id 3 has note "").
+await cell(2, "note").click();
+await page.keyboard.press("Control+c");
+await page.waitForTimeout(50);
+await cell(5, "note").click();
+await page.keyboard.press("Control+v");
+await page.waitForSelector("[data-toast]");
+check((await nullPill(5, "note").count()) === 0, "empty text paste is not NULL");
+check(await edited(5, "note"), "empty text is staged as an edit");
+check((await cell(5, "note").textContent()) === "", "empty text cell shows blank");
 
 await cell(0, "city").click();
 await cell(1, "note").click({ modifiers: ["Shift"] });
@@ -151,6 +177,24 @@ await page.keyboard.press("Control+v");
 await page.waitForSelector("[data-toast]");
 toast = (await toastText()) ?? "";
 check(toast.includes("Pasted 2 of 4") && toast.includes("outside the table") && !toast.includes("didn't parse"), `partial paste toast (${toast})`);
+
+// External paste: JSON into jsonb and a line with embedded quotes.
+await cell(0, "meta").click();
+await dispatchPaste('{"a":1,"b":2}');
+await page.waitForSelector("[data-toast]");
+check(await edited(0, "meta"), "external JSON paste stages");
+check((await cell(0, "meta").textContent()).includes('"a":1'), "JSON pasted intact");
+
+await cell(1, "city").click();
+await dispatchPaste('He said "hi", then left');
+await page.waitForSelector("[data-toast]");
+check((await cell(1, "city").textContent()).includes('"hi"'), "embedded quotes stay in one cell");
+
+await cell(2, "qty").click();
+await dispatchPaste("not-an-int");
+await page.waitForSelector("[data-toast]");
+toast = (await toastText()) ?? "";
+check(toast.includes("didn't parse"), `invalid int toast (${toast})`);
 
 await page.screenshot({ path: `${OUT}/grid-paste-roundtrip.png` });
 await context.close();
