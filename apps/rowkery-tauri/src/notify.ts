@@ -55,7 +55,7 @@ export function liveOffer(): Offer | null {
  * whose button (or ↵ where the text went) does `run`. Any other toast drops it.
  */
 export function showOfferToast(message: string, label: string, detail: string | undefined, o: Offer) {
-  commitPending();
+  commitUnlessLasting();
   shown++;
   window.dispatchEvent(
     new CustomEvent<ToastMessage>(EVENT, { detail: { message, detail, tone: o.tone ?? "ok", offer: label, offerMouseOnly: o.mouseOnly } }),
@@ -68,42 +68,98 @@ export interface Undoable {
   undo: () => void;
   /** The deferred part (removing keychain entries…); runs when the toast leaves any way but Undo. */
   commit?: () => void;
+  /**
+   * A toast that isn't another Undo leaves it pending (Discard edits): ⌥⌘Z
+   * still takes it, and its toast comes back once the other one goes.
+   */
+  lasting?: boolean;
 }
 
 let pending: Undoable | null = null;
+/** The live Undo's own toast, to show again after a toast that didn't end it. */
+let pendingToast: ToastMessage | null = null;
+/** A `lasting` Undo goes final on its own at `lastingUntil` (`LASTING_UNDO_MS` after its toast). */
+let lastingTimer: ReturnType<typeof setTimeout> | undefined;
+let lastingUntil = 0;
+
+/**
+ * The longest a `lasting` Undo outlives its toast: after this it is final,
+ * even when no other Undo, edit on the tab or run ended it first.
+ */
+export const LASTING_UNDO_MS = 2 * 60_000;
 
 /** Makes the pending action final (a new toast replaced it, or it timed out). */
 export function commitPending() {
   const p = pending;
   pending = null;
+  pendingToast = null;
+  clearTimeout(lastingTimer);
   p?.commit?.();
+}
+
+/** A `lasting` Undo past its limit is final (a throttled timer may not have fired yet). */
+function expireLasting() {
+  if (pending?.lasting && Date.now() >= lastingUntil) commitPending();
+}
+
+/** A plain toast or an offer: ends the pending action unless it is `lasting`. */
+function commitUnlessLasting() {
+  expireLasting();
+  if (!pending?.lasting) commitPending();
+}
+
+/** Makes `action` final if it is still the pending one (another edit made its Undo stale). */
+export function settlePending(action: Undoable) {
+  if (pending === action) commitPending();
+}
+
+/**
+ * A toast that wasn't an Undo went, by any way (timed out, Esc, ↵, its
+ * button): a `lasting` Undo still pending shows its toast again, for its
+ * full 10 s. False when there is none, and the host closes.
+ */
+export function resumeLastingUndo(): boolean {
+  expireLasting();
+  if (!pending?.lasting || !pendingToast) return false;
+  shown++;
+  window.dispatchEvent(new CustomEvent<ToastMessage>(EVENT, { detail: pendingToast }));
+  return true;
 }
 
 /** Undo for the live toast; false when nothing is pending. */
 export function undoPending(): boolean {
+  expireLasting();
   const p = pending;
   if (!p) return false;
   pending = null;
+  pendingToast = null;
+  clearTimeout(lastingTimer);
   p.undo();
   return true;
 }
 
 export function hasPendingUndo(): boolean {
+  expireLasting();
   return pending !== null;
 }
 
 /**
  * "Closed Query 2 · Undo": the action already happened; Undo puts it back
- * while the toast is live (10 s). Any other toast commits it first.
+ * while the toast is live (10 s). Any other toast commits it first, except
+ * a `lasting` one's, which ends `LASTING_UNDO_MS` after its toast at the latest.
  */
 export function showUndoToast(message: string, detail: string | undefined, action: Undoable) {
   commitPending();
   offer = null;
   shown++;
-  window.dispatchEvent(
-    new CustomEvent<ToastMessage>(EVENT, { detail: { message, detail, tone: "ok", undoable: true } }),
-  );
+  const toast: ToastMessage = { message, detail, tone: "ok", undoable: true };
+  window.dispatchEvent(new CustomEvent<ToastMessage>(EVENT, { detail: toast }));
   pending = action;
+  pendingToast = toast;
+  if (action.lasting) {
+    lastingUntil = Date.now() + LASTING_UNDO_MS;
+    lastingTimer = setTimeout(() => settlePending(action), LASTING_UNDO_MS);
+  }
 }
 
 const EVENT = "rowkery:toast";
@@ -114,7 +170,7 @@ export function showToast(
   detail?: string,
   tone: ToastTone = "ok",
 ) {
-  commitPending();
+  commitUnlessLasting();
   offer = null;
   shown++;
   window.dispatchEvent(

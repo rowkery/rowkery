@@ -37,9 +37,9 @@ import { ReportSheet } from "./ReportSheet";
 import type { ReportContext } from "./report";
 import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
-import { hasPendingUndo, liveOffer, showErrorToastIfFree, showOfferToast, showToast, showUndoToast } from "./notify";
+import { hasPendingUndo, liveOffer, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
 import { RenderErrorBoundary } from "./ErrorBoundary";
-import { readKey, writeKey } from "./persist";
+import { persistNotice, readKey, takeConfigNotice, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
 import {
@@ -58,6 +58,7 @@ import { TitleBar } from "./TitleBar";
 import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall } from "./updates";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
+import { forgetHistory } from "./queryHistory";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
 import { Workspace } from "./Workspace";
 import type { WindowActions, WindowSession } from "./windowSession";
@@ -308,11 +309,37 @@ function App() {
       if (pending.length) {
         writeKey(PENDING_DELETE_KEY, []);
         for (const gone of pending) {
-          if (!ids.has(gone)) void forgetConnectionSecrets(gone).catch(() => {});
+          if (ids.has(gone)) continue;
+          void forgetConnectionSecrets(gone).catch(() => {});
+          forgetHistory(gone);
         }
       }
     })();
   }, [refreshConnections]);
+
+  // config.json held something this build couldn't read: core kept the file
+  // as it was (`AppConfig::load_for_app`); say so once, with its path to copy.
+  useEffect(() => {
+    if (!loaded) return;
+    void takeConfigNotice().then((notice) => {
+      // Or the webview's own: its state is a newer Rowkery's (persist.ts).
+      const newer = persistNotice();
+      if (!notice) return newer && showToast(newer, undefined, "error");
+      const kept = notice.kept;
+      const detail = notice.detail ?? undefined;
+      if (!kept) return showToast(notice.message, detail, "error");
+      showOfferToast(notice.message, "Copy path", detail, {
+        tone: "error",
+        mouseOnly: true,
+        run: () =>
+          void navigator.clipboard.writeText(kept).then(
+            // Restoring it under a running app: the next save replaces it.
+            () => showToast("Copied. Quit Rowkery before you put it back as config.json", detail ?? toastPreview(kept)),
+            () => showToast("Couldn't copy the path", kept, "error"),
+          ),
+      });
+    });
+  }, [loaded]);
 
   // The quiet update check: once the first query has had its turn, then every
   // few hours. Rust answers "off" in dev builds and proof runs (updates.rs).
@@ -869,9 +896,9 @@ function App() {
 
   /**
    * An agent's SQL in a query tab on its connection: a window already on it,
-   * else a new one. `run`: it runs as it opens (Open in Rowkery from the chat).
+   * else a new one. Never run: the user reads it and presses ⌘↵.
    */
-  const openMcpSql = (connectionId: string, database: string | undefined, sql: string, run = false) => {
+  const openMcpSql = (connectionId: string, database: string | undefined, sql: string) => {
     setAgents(null);
     const conn = connections.find((c) => c.id === connectionId);
     if (!conn) return;
@@ -881,14 +908,13 @@ function App() {
     const on = fits(activeWindow) ? activeWindow : windowsRef.current.find(fits);
     if (on) {
       switchWindow(on.id);
-      window.dispatchEvent(new CustomEvent("rowkery:open-sql", { detail: { windowId: on.id, sql, title: "Agent query", run } }));
+      window.dispatchEvent(new CustomEvent("rowkery:open-sql", { detail: { windowId: on.id, sql, title: "Agent query" } }));
       return;
     }
     const id = `w${nextWindowNo.current++}`;
     const seeded = { tabs: [{ kind: "query" as const, title: "Agent query", sql }], active: 0 };
     restoredTabs.current.set(id, seeded);
     tabsByWindow.current.set(id, seeded);
-    if (run) runOnConnect.current.add(id);
     const blankOnly = !activeWindow.connectionId;
     setWindows((prev) => (blankOnly ? prev.map((w) => (w.id === activeWindow.id ? blankWindow(id) : w)) : [...prev, blankWindow(id)]));
     setActiveWindowId(id);
@@ -905,7 +931,7 @@ function App() {
         if (!connections.some((c) => c.id === link.connection))
           return showToast("That connection isn't in Rowkery any more", undefined, "error");
         setSettings(null);
-        openMcpSql(link.connection, link.database ?? undefined, link.sql, true);
+        openMcpSql(link.connection, link.database ?? undefined, link.sql);
       } else if (link.kind === "proposal") {
         setPopover(null);
         setPaletteOpen(false);
@@ -913,6 +939,8 @@ function App() {
         setAgents({ initial: "proposals", proposal: link.id });
       } else if (link.kind === "decided") {
         showToast("That change isn't waiting for you any more");
+      } else if (link.kind === "refused") {
+        showToast("Rowkery won't open that query: it didn't pass the agent checks", undefined, "error");
       } else {
         showToast("That query isn't in Rowkery's activity log any more", undefined, "error");
       }
@@ -1087,6 +1115,7 @@ function App() {
         commit: () => {
           settle();
           void forgetConnectionSecrets(id).catch(() => {});
+          forgetHistory(id);
         },
       });
     }

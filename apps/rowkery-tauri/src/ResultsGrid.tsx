@@ -20,8 +20,7 @@ import { CellEditor, type EditMove } from "./CellEditor";
 import { commandById, eventMatches } from "./commands";
 import { isMacPlatform } from "./platform";
 import { showToast, toastPreview } from "./notify";
-import { cellsToCsv } from "./resultsExport";
-import { parsePaste } from "./editBuffer";
+import { cellsToTsv, pastedCells, rememberCopy } from "./resultsExport";
 import { GridMenu, type GridMenuItem } from "./GridMenu";
 import { cellMenu, headerMenu as headerMenuRows } from "./contextMenus";
 import type { CommandState } from "./commands";
@@ -65,6 +64,29 @@ export function markReveal(result: QueryResultDto) {
 
 /** How long the cascade runs before the class comes off (last row's delay + its animation; REVEAL_ROWS in GridRow.tsx caps the delay). */
 const REVEAL_MS = 900;
+/** Find reads up to this many cells in one go; a bigger result in slices between frames. */
+const FIND_SYNC_CELLS = 100_000;
+/** One slice of a big Find: well inside a frame. */
+const FIND_SLICE_MS = 8;
+const NO_MATCHES: CellPos[] = [];
+
+/** Find's matches in rows [from, to): every shown cell containing `q` (lowercase). */
+function findIn(
+  shown: { isNull: (r: number, c: number) => boolean; text: (r: number, c: number) => string },
+  q: string,
+  from: number,
+  to: number,
+  hidden: boolean[],
+  out: CellPos[],
+) {
+  const ncols = hidden.length;
+  for (let r = from; r < to; r++) {
+    for (let c = 0; c < ncols; c++) {
+      if (hidden[c]) continue;
+      if (!shown.isNull(r, c) && shown.text(r, c).toLowerCase().includes(q)) out.push({ row: r, col: c });
+    }
+  }
+}
 
 interface Props {
   result: QueryResultDto | null;
@@ -125,7 +147,8 @@ interface Props {
   onTypeKey?: (column: string, key: string) => void;
   /** Find in the loaded rows: cells containing `query` are marked; `index` is the current match. */
   find?: { query: string; index: number } | null;
-  onFindCount?: (matches: number) => void;
+  /** Find's match count; null while a big result's scan is still running. */
+  onFindCount?: (matches: number | null) => void;
   /** What can run now (commands.ts): the cell menu prints ↵ edit and ⌘↵ follow only where they can. */
   commandState?: CommandState;
   /** Header menu: Filter by this column (table tabs) and Structure (a table's result). */
@@ -516,25 +539,54 @@ function ResultsGridView({
   );
   const sampleNote = profileSample(rows);
 
-  // Find: every loaded cell that contains the query (case-insensitive).
-  const findMatches = useMemo(() => {
-    const q = find?.query.toLowerCase();
-    if (!q) return [] as CellPos[];
+  // Find: every loaded cell that contains the query (case-insensitive). A
+  // small result is read at once; a big one in slices between frames, so
+  // typing in Find never holds the page ("Searching…" until the scan ends).
+  const findQuery = find?.query.toLowerCase() ?? "";
+  const findAtOnce = rowCount * columns.length <= FIND_SYNC_CELLS;
+  const syncMatches = useMemo(() => {
+    if (!findQuery || !findAtOnce) return NO_MATCHES;
     const out: CellPos[] = [];
-    for (let r = 0; r < rowCount; r++) {
-      for (let c = 0; c < columns.length; c++) {
-        if (looks.hidden[c]) continue;
-        if (!shown.isNull(r, c) && shown.text(r, c).toLowerCase().includes(q)) out.push({ row: r, col: c });
-      }
-    }
+    findIn(shown, findQuery, 0, rowCount, looks.hidden, out);
     return out;
-  }, [find?.query, rows, shown, rowCount, columns, looks]);
+  }, [findQuery, findAtOnce, shown, rowCount, looks]);
+  const [sliced, setSliced] = useState<{ key: unknown[]; matches: CellPos[] } | null>(null);
+  const slicedKey = [findQuery, shown, rowCount, looks];
+  useEffect(() => {
+    // A new scan (or none) drops the last one's matches and the rows they held.
+    setSliced((prev) => (prev ? null : prev));
+    if (!findQuery || findAtOnce) return;
+    const key = [findQuery, shown, rowCount, looks];
+    const out: CellPos[] = [];
+    let row = 0;
+    let timer = 0;
+    const step = () => {
+      const end = performance.now() + FIND_SLICE_MS;
+      while (row < rowCount && performance.now() < end) {
+        const to = Math.min(rowCount, row + 64);
+        findIn(shown, findQuery, row, to, looks.hidden, out);
+        row = to;
+      }
+      if (row < rowCount) timer = window.setTimeout(step, 0);
+      else setSliced({ key, matches: out });
+    };
+    timer = window.setTimeout(step, 0);
+    return () => window.clearTimeout(timer);
+  }, [findQuery, findAtOnce, shown, rowCount, looks]);
+  const slicedDone = !!sliced && sliced.key.every((k, i) => k === slicedKey[i]);
+  const findScanning = !!findQuery && !findAtOnce && !slicedDone;
+  const findMatches = findAtOnce ? syncMatches : slicedDone ? sliced!.matches : NO_MATCHES;
   const findSet = useMemo(() => new Set(findMatches.map((m) => `${m.row}:${m.col}`)), [findMatches]);
   const findCurrent =
     find && findMatches.length
       ? findMatches[((find.index % findMatches.length) + findMatches.length) % findMatches.length]
       : null;
-  useEffect(() => onFindCount?.(findMatches.length), [onFindCount, findMatches.length]);
+  useEffect(
+    () => onFindCount?.(findScanning ? null : findMatches.length),
+    [onFindCount, findScanning, findMatches.length],
+  );
+  /** The selection when Find was last asked (a query typed, ↵ / ⇧↵): a scan that ends later moves it only if it's still that. */
+  const selWhenAsked = useRef<Selection | null>(null);
 
   const gutterWidth = useMemo(
     () => Math.max(44, String(rowCount).length * 8 + 20),
@@ -764,7 +816,10 @@ function ResultsGridView({
       if (!multi && !withHeader) {
         // One cell copies its value as is, unquoted.
         const { row, col } = sel.active;
-        void copyText(shown.isNull(row, col) ? "NULL" : shown.text(row, col));
+        const nul = shown.isNull(row, col);
+        const text = nul ? "NULL" : shown.text(row, col);
+        rememberCopy({ text, width: 1, nulls: new Set(nul ? [0] : []) });
+        void copyText(text);
         return;
       }
       const nRows = r1 - r0 + 1;
@@ -773,9 +828,11 @@ function ResultsGridView({
         nCols === columns.length
           ? `Copied ${nRows.toLocaleString()} ${nRows === 1 ? "row" : "rows"}`
           : `Copied ${(nRows * nCols).toLocaleString()} ${nRows * nCols === 1 ? "cell" : "cells"}`;
-      const detail = withHeader ? "CSV with header" : "CSV";
+      const detail = withHeader ? "TSV with header" : "TSV";
+      const copy = cellsToTsv(result, r0, r1, c0, c1, withHeader, shown.text, shown.isNull);
+      rememberCopy(copy);
       navigator.clipboard
-        .writeText(cellsToCsv(result, r0, r1, c0, c1, withHeader, shown.text))
+        .writeText(copy.text)
         .then(
           () => showToast(label, detail),
           // Clipboard can be unavailable (permissions, headless proof runs).
@@ -1037,9 +1094,16 @@ function ResultsGridView({
     );
   };
 
-  // ↵ / ⇧↵ in the find field: the ring moves to the current match.
+  // Before the jump below: what was selected when Find was asked.
+  useEffect(() => {
+    selWhenAsked.current = sel;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findQuery, find?.index]);
+  // ↵ / ⇧↵ in the find field: the ring moves to the current match. A big
+  // scan's first match doesn't take the selection from a cell picked since.
   useEffect(() => {
     if (!findCurrent) return;
+    if (!findAtOnce && sel !== selWhenAsked.current) return;
     setSel(single(findCurrent));
     revealCell(findCurrent);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1138,7 +1202,9 @@ function ResultsGridView({
           if (!editing || !sel || editor) return;
           e.preventDefault();
           if (editing.refusal) editing.onRefused();
-          else editing.paste(sel.active.row, sel.active.col, parsePaste(e.clipboardData.getData("text/plain")));
+          else {
+            editing.paste(sel.active.row, sel.active.col, pastedCells(e.clipboardData.getData("text/plain")));
+          }
         }}
       >
         <GridMenu at={menuAt} items={menuItems} name="grid" label="Cell" onPick={pickMenu} onClose={closeMenu} />

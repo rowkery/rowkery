@@ -283,6 +283,23 @@ export class ResultRows {
   version = 0;
   private listeners = new Set<() => void>();
   private notifyScheduled = 0;
+  /** Set by `ordered`: row r here is row `order[r]` of `base`. */
+  private base: ResultRows | null = null;
+  private order: Uint32Array | null = null;
+
+  /**
+   * `base`'s rows in `order` (a client sort): a view that reads base's
+   * storage, so sorting a million rows copies no cells. Fixed: it doesn't
+   * follow rows appended to `base` later.
+   */
+  static ordered(base: ResultRows, order: ArrayLike<number>): ResultRows {
+    const r = new ResultRows();
+    r.base = base.base ?? base;
+    r.order = base.order ? Uint32Array.from(order, (i) => base.order![i]!) : Uint32Array.from(order);
+    r.length = r.order.length;
+    r.profiles = base.profiles;
+    return r;
+  }
 
   /** Rows already decoded into tagged values (tests, JSON frames, proofs). */
   static fromValues(rows: Value[][]): ResultRows {
@@ -323,6 +340,7 @@ export class ResultRows {
 
   /** Appends another result's rows: chunks are shared, not copied. */
   appendRows(other: ResultRows) {
+    if (other.base) throw new Error("A sorted view can't be appended; append the rows it sorts");
     for (const c of other.chunks) this.push({ ...c, start: this.length });
   }
 
@@ -354,6 +372,7 @@ export class ResultRows {
   }
 
   isNull(row: number, col: number): boolean {
+    if (this.base) return this.base.isNull(this.order![row] ?? -1, col);
     const c = this.chunkOf(row);
     if (!c) return true;
     const i = row - c.start;
@@ -367,6 +386,7 @@ export class ResultRows {
 
   /** The cell as a tagged value (one object per call; prefer `text` / `number` in loops). */
   get(row: number, col: number): Value {
+    if (this.base) return this.base.get(this.order![row] ?? -1, col);
     const c = this.chunkOf(row);
     if (!c) return NULL_CELL;
     const i = row - c.start;
@@ -378,6 +398,7 @@ export class ResultRows {
 
   /** Display text; "" for NULL (the grid draws its own NULL pill). */
   text(row: number, col: number): string {
+    if (this.base) return this.base.text(this.order![row] ?? -1, col);
     const c = this.chunkOf(row);
     if (!c) return "";
     const i = row - c.start;

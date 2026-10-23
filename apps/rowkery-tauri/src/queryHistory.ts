@@ -8,6 +8,12 @@ export interface HistoryEntry {
 }
 
 const LIMIT = 50;
+/**
+ * Longer SQL (a pasted dump, a long INSERT) isn't kept: every entry is
+ * written to config.json with the rest of the UI state, and a cut-off copy
+ * would run something else.
+ */
+export const MAX_SQL = 16_000;
 
 function storageKey(connectionId: string) {
   return `rowkery.history.${connectionId}`;
@@ -34,11 +40,16 @@ export function recordHistory(
   sql: string,
 ): HistoryEntry[] {
   const text = sql.trim();
-  if (!connectionId || !text) return history;
+  if (!connectionId || !text || text.length > MAX_SQL) return history;
   const next = [
     { sql: text, at: Date.now() },
     ...history.filter((e) => e.sql !== text),
   ].slice(0, LIMIT);
   writeKey(storageKey(connectionId), next);
   return next;
+}
+
+/** A deleted connection's history goes with it (once its Undo has passed). */
+export function forgetHistory(connectionId: string) {
+  writeKey(storageKey(connectionId), undefined);
 }

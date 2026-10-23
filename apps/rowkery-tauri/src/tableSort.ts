@@ -146,11 +146,24 @@ export function sortedOrder(
 ): number[] {
   const order = Array.from({ length: rowCount }, (_, i) => i);
   if (keys.length === 0) return order;
-  // Read each sorted column once.
+  // Read each sorted column once, and parse a numeric column's text once
+  // (not twice per comparison): the comparisons are most of a sort's time.
   const cols = keys.map((k) => Array.from({ length: rowCount }, (_, r) => get(r, k.col)));
+  const decs = keys.map((k, i) =>
+    k.numeric ? cols[i]!.map((v) => (!isNull(v) && "Text" in v ? decimalOf(v) : null)) : null,
+  );
   order.sort((x, y) => {
     for (let i = 0; i < keys.length; i++) {
-      const c = compareCells(cols[i]![x]!, cols[i]![y]!, keys[i]!.desc, keys[i]!.numeric);
+      const dec = decs[i];
+      const dx = dec?.[x];
+      const dy = dec?.[y];
+      // Both parsed: what compareCells would do, without parsing again.
+      const c =
+        dx && dy
+          ? keys[i]!.desc
+            ? -compareDecimal(dx, dy)
+            : compareDecimal(dx, dy)
+          : compareCells(cols[i]![x]!, cols[i]![y]!, keys[i]!.desc, keys[i]!.numeric);
       if (c !== 0) return c;
     }
     return x - y;
@@ -169,11 +182,8 @@ export function sortResult(result: QueryResultDto, keys: SortKey[]): QueryResult
     .filter((k) => k.col >= 0);
   if (idx.length === 0) return result;
   const rows = result.rows;
-  const n = rows.length;
-  const ncols = result.columns.length;
-  const order = sortedOrder((r, c) => rows.get(r, c), n, idx);
-  const sorted = ResultRows.fromValues(order.map((r) => rows.row(r, ncols)));
-  // Sorting doesn't change a column's shape: the profiles carry over.
-  sorted.profiles = rows.profiles;
-  return { ...result, rows: sorted };
+  const order = sortedOrder((r, c) => rows.get(r, c), rows.length, idx);
+  // A view over the same rows in the new order (no cell is copied); the
+  // profiles carry over, since sorting doesn't change a column's shape.
+  return { ...result, rows: ResultRows.ordered(rows, order) };
 }

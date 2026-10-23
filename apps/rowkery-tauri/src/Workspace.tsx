@@ -92,7 +92,7 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
-import { showErrorToastIfFree, showOfferToast, showToast, showUndoToast } from "./notify";
+import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -125,7 +125,21 @@ import { Presence, useSlidingThumb, useTabPresence } from "./motion";
 import { EnvTag } from "./EnvTag";
 import { GridMenu, useContextMenu } from "./GridMenu";
 import { tabMenu as tabMenuRows } from "./contextMenus";
-import { bufferChanges, changeCount, editTableOf, savedBuffer, withoutCommitted, type EditBuffer } from "./editBuffer";
+import {
+  bindEdits,
+  bufferChanges,
+  changeCount,
+  editTableOf,
+  escMayDiscard,
+  legacyEditCount,
+  parkedCount,
+  pruneParked,
+  REVIEW_DELETES_OVER,
+  savedBuffer,
+  savedParked,
+  withoutCommittedTab,
+  type EditBuffer,
+} from "./editBuffer";
 import { EditTray, type TrayState } from "./EditTray";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
 import { SqlFilePanel } from "./SqlFilePanel";
@@ -225,6 +239,19 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 const NOTICE_MS = 2400;
 /** Force stop: how long core's stop has to report back before the tab lets the run go. */
 const FORCE_STOP_GRACE_MS = 2000;
+/** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
+const NO_SORT: SortState[] = [];
+
+/**
+ * A function with one identity for the component's life that calls the
+ * latest `fn`: handlers passed to the memo'd grid, so a render of the
+ * workspace (an editor keystroke) doesn't re-render it.
+ */
+function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
 
 const PALETTE_EMPTY_GROUPS: PaletteGroup[] = [
   "queries",
@@ -250,6 +277,31 @@ function isTypingTarget(target: EventTarget | null): boolean {
 function tableIdent(schema: string, name: string): string {
   const bare = schema === "public" || schema === "main";
   return bare ? sqlIdent(name) : `${sqlIdent(schema)}.${sqlIdent(name)}`;
+}
+
+/**
+ * A table tab kept open over a switch for its staged edits, its table not
+ * in this catalog: where those edits are, in place of rows it can't show.
+ */
+function AwayEdits({ tab, where, nameOf }: { tab: QueryTab; where: string; nameOf: (id: string) => string }) {
+  const edits = (n: number) => `${n} staged ${n === 1 ? "edit" : "edits"}`;
+  const here = changeCount(tab.edits);
+  const parked = Object.entries(tab.parked ?? {});
+  return (
+    <div className="results-empty" data-testid="away-edits">
+      <p>
+        {tab.title} isn't in {where}. Its edits are kept with this tab, not committed anywhere:
+      </p>
+      <ul>
+        {parked.map(([id, b]) => (
+          <li key={id}>
+            {edits(changeCount(b))} on {nameOf(id)}, back when you switch to it
+          </li>
+        ))}
+        {here > 0 && <li>{edits(here)} on the database they were staged on, back when you switch to it</li>}
+      </ul>
+    </div>
+  );
 }
 
 /** Menu picks that open a sheet, menu or setting over the Agents page, so the page stays. */
@@ -356,6 +408,11 @@ export function Workspace({
 }: WorkspaceProps) {
   const windowId = session.id;
   const activeId = session.connectionId;
+  /** The connection now, for a commit that ends after a switch. */
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  /** Commits ended so far: the edits binding looks again at a tab it skipped while one ran. */
+  const [commitsSettled, setCommitsSettled] = useState(0);
   const schema = session.schema;
   const connState = session.state;
   const [tabs, setTabs] = useState<QueryTab[]>(() =>
@@ -365,10 +422,29 @@ export function Workspace({
           id: i + 1,
           sort: sortKeys(t.sort),
           chips: t.kind === "table" ? (savedChips(t.chips) ?? chipsFromFilter(t.filter)) : undefined,
+          // A buffer saved before buffers named their connection is dropped (`legacyDropped`).
           edits: t.kind === "table" ? savedBuffer(t.edits) : undefined,
+          parked: t.kind === "table" ? savedParked(t.parked) : undefined,
         }))
       : [queryTab(1, "Query 1", "SELECT 1;")],
   );
+  /**
+   * Staged edits saved by a version that didn't record their connection:
+   * nothing says which server they are for, so they were dropped. Said once,
+   * when the window is first shown.
+   */
+  const legacyDropped = useRef(
+    restoredTabs?.tabs.reduce((n, t) => n + (t.kind === "table" ? legacyEditCount(t.edits) : 0), 0) ?? 0,
+  );
+  useEffect(() => {
+    const n = legacyDropped.current;
+    if (!active || !n) return;
+    legacyDropped.current = 0;
+    showToast(
+      `Dropped ${n} staged ${n === 1 ? "edit" : "edits"} saved by an older version`,
+      "they didn't record which connection they were for",
+    );
+  }, [active]);
   const [activeTabId, setActiveTabId] = useState(() =>
     restoredTabs?.tabs.length ? Math.min(restoredTabs.active, restoredTabs.tabs.length - 1) + 1 : 1,
   );
@@ -408,6 +484,7 @@ export function Workspace({
       pageSize: t.pageSize,
       preview: t.preview,
       edits: t.edits,
+      parked: t.parked,
     }));
     onTabsChange(
       session.id,
@@ -437,6 +514,11 @@ export function Workspace({
   const renderError = activeRun.error;
   const runStartedAt = activeRun.startedAt;
   const cancelling = activeRun.cancelling;
+  /** When the shown tab last stopped running: an Esc just after it was meant for the run (`escMayDiscard`). */
+  const runEnd = useRef<{ running: boolean; endedAt: number | null }>({ running: false, endedAt: null });
+  if (runEnd.current.running !== (runStartedAt !== null)) {
+    runEnd.current = { running: runStartedAt !== null, endedAt: runStartedAt !== null ? null : performance.now() };
+  }
   const busy = runStartedAt !== null;
   /** A short confirmation in the results header ("Copied 100 rows as CSV"). */
   const [notice, setNotice] = useState<string | null>(null);
@@ -606,7 +688,8 @@ export function Workspace({
       }
     }
     if (worthKeeping) {
-      const edits = changeCount(tab.edits);
+      // Parked edits (staged on another connection) are as unsaved as shown ones.
+      const edits = changeCount(tab.edits) + parkedCount(tab);
       const unsaved = edits
         ? ` with ${edits} unsaved ${edits === 1 ? "change" : "changes"}`
         : tab.kind === "query" && !!tab.sql.trim()
@@ -992,6 +1075,19 @@ export function Workspace({
   // successful run read, if it read exactly one.
   const activeTableKey = isTableTab ? activeTab?.tableKey : activeRun.tableKey;
   const activeTable = activeTableKey ? findTable(schemaTree, activeTableKey) : undefined;
+  /**
+   * A table tab kept open over a switch only for its staged edits: its table
+   * isn't in this catalog, so it runs nothing and stages nothing, and says
+   * where its edits are instead (`AwayEdits`).
+   */
+  const heldForEdits = (t: QueryTab | undefined): boolean =>
+    t?.kind === "table" &&
+    connState === "connected" &&
+    !!schema &&
+    !!t.tableKey &&
+    !findTable(schemaTree, t.tableKey) &&
+    changeCount(t.edits) + parkedCount(t) > 0;
+  const activeHeld = heldForEdits(activeTab);
   const resultsView: ResultsView =
     isTableTab && activeTable && (activeTab?.view === "structure" || activeTab?.view === "map")
       ? activeTab.view
@@ -1014,9 +1110,11 @@ export function Workspace({
   // Staged row edits on a table tab (editBuffer.ts): the grid's editors and marks.
   const rowEdits = useRowEdits({
     windowId,
+    connectionId: activeId,
     tab: activeTab,
     setEdits: (tabId, edits) => setTabEdits(tabId, edits),
-    result: isTableTab ? result : null,
+    // A tab held for its edits shows none of the old rows, so nothing stages on them.
+    result: isTableTab && !activeHeld ? result : null,
     table: isTableTab ? activeTable?.table : undefined,
     findTable: (schemaName, name) => allTables(schemaTree).find((t) => t.schema === schemaName && t.name === name)?.table,
     engine: activeConnection ? engineForConnection(activeConnection) : "postgres",
@@ -1066,6 +1164,12 @@ export function Workspace({
     tabId: number,
     next: EditBuffer | undefined | ((cur: EditBuffer | undefined) => EditBuffer | undefined),
   ) => {
+    // Another edit on the tab: the last Discard's Undo would now overwrite it.
+    const discarded = discardUndo.current;
+    if (discarded && discarded.tabId === tabId) {
+      discardUndo.current = null;
+      settlePending(discarded.action);
+    }
     setTabs((prev) =>
       prev.map((t) => {
         if (t.id !== tabId) return t;
@@ -1104,11 +1208,25 @@ export function Workspace({
   const commitEdits = async (confirmed?: string) => {
     const target = editTarget();
     if (!target || committing.current.has(target.tab.id)) return;
+    // Many deletes, or every loaded row (⌘A ⌫): Review SQL first, even with
+    // safe mode off; its Commit sends back the SQL it showed.
+    if (confirmed === undefined && rowEdits.reviewFirst) {
+      const n = Object.keys(target.buffer.deletes).length;
+      openReview();
+      showToast(
+        n > REVIEW_DELETES_OVER
+          ? `Review ${n} deletes before they commit`
+          : "Every loaded row is marked for delete · review before it commits",
+      );
+      return;
+    }
     committing.current.add(target.tab.id);
     try {
       await commitBuffer(target, confirmed);
     } finally {
       committing.current.delete(target.tab.id);
+      // The binding below leaves a committing tab alone: it looks again now.
+      setCommitsSettled((n) => n + 1);
     }
   };
   const commitBuffer = async (target: NonNullable<ReturnType<typeof editTarget>>, confirmed?: string) => {
@@ -1116,7 +1234,7 @@ export function Workspace({
     setTray(tab.id, { kind: "committing" });
     let out;
     try {
-      out = await applyChanges(windowId, tab.id, table, bufferChanges(buffer), confirmed);
+      out = await applyChanges(windowId, buffer.connectionId, tab.id, table, bufferChanges(buffer), confirmed);
     } catch (e) {
       return setTray(tab.id, { kind: "failed", message: String(e) });
     }
@@ -1128,8 +1246,12 @@ export function Workspace({
       return;
     }
     if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message });
-    // Only what was sent is done: an edit staged while it ran stays staged.
-    setTabEdits(tab.id, (cur) => withoutCommitted(cur, buffer));
+    // Only what was sent is done: an edit staged while it ran stays staged,
+    // and neither the tab's buffer nor a parked copy of it sends it twice.
+    setTabEdits(tab.id, (cur) => withoutCommittedTab({ edits: cur }, buffer).edits);
+    setTabs((prev) =>
+      prev.map((t) => (t.id === tab.id && t.parked ? { ...t, parked: withoutCommittedTab(t, buffer).parked } : t)),
+    );
     const done = [
       out.updated && `Updated ${out.updated}`,
       out.inserted && `Inserted ${out.inserted}`,
@@ -1137,8 +1259,9 @@ export function Workspace({
       formatMs(out.elapsed_ms),
     ].filter(Boolean);
     setTray(tab.id, { kind: "done", text: done.join(" · ") }, 1600);
-    // The rows as the database has them now (new rows get their keys).
-    void runTable({ ...tab, edits: undefined });
+    // The rows as the database has them now (new rows get their keys), when
+    // the window is still on the connection they went to.
+    if (activeIdRef.current === buffer.connectionId) void runTable({ ...tab, edits: undefined });
   };
   const commitEditsRef = useRef(commitEdits);
   commitEditsRef.current = commitEdits;
@@ -1166,18 +1289,40 @@ export function Workspace({
       (e) => setReview((cur) => (cur?.tabId === tabId ? { ...cur, error: String(e) } : cur)),
     );
   };
-  /** Discard: the buffer goes at once; Undo (⌥⌘Z) puts it back. */
+  /**
+   * Discard: the buffer goes at once; Undo (⌥⌘Z) puts it back. The Undo
+   * outlasts unrelated toasts and lasts until the next edit or run on the
+   * tab, or `LASTING_UNDO_MS` at most (notify.ts).
+   */
+  const discardUndo = useRef<{ tabId: number; action: Undoable } | null>(null);
   const discardEdits = () => {
     const tab = activeTab;
-    const prev = tab?.edits;
+    const prev = rowEdits.buffer ?? undefined;
     const n = changeCount(prev);
     if (!tab || !n) return;
     setTabEdits(tab.id, undefined);
     setTray(tab.id, null);
-    showUndoToast(`Discarded ${n} ${n === 1 ? "edit" : "edits"}`, undefined, {
-      undo: () => setTabEdits(tab.id, prev),
-    });
+    const action: Undoable = {
+      // Puts it back as it was, and only into a tab with nothing staged
+      // since; anything else says why nothing came back.
+      undo: () => {
+        const now = tabsRef.current.find((t) => t.id === tab.id);
+        if (!now) return showToast("Can't undo the discard: its tab is closed");
+        if (changeCount(now.edits) > 0) return showToast("Can't undo the discard: the tab has edits staged since");
+        setTabEdits(tab.id, prev);
+      },
+      lasting: true,
+    };
+    showUndoToast(`Discarded ${n} ${n === 1 ? "edit" : "edits"}`, undefined, action);
+    discardUndo.current = { tabId: tab.id, action };
   };
+  // The next run on that tab shows other rows: the discarded edits stay gone.
+  useEffect(() => {
+    const d = discardUndo.current;
+    if (runStartedAt === null || !d || d.tabId !== activeTabId) return;
+    discardUndo.current = null;
+    settlePending(d.action);
+  }, [runStartedAt, activeTabId]);
   const trayUp = isTableTab && resultsView === "data" && (rowEdits.count > 0 || !!trays[activeTabId]);
   const editKeysRef = useRef({ review: openReview });
   editKeysRef.current = { review: openReview };
@@ -1490,12 +1635,12 @@ export function Workspace({
     [dbMarks, markTable?.schema, markTable?.name],
   );
   const hiddenSet = presenting ? markedSet : null;
-  const markColumn = (column: string, marked: boolean) => {
+  const markColumn = useStableCallback((column: string, marked: boolean) => {
     if (!activeConnection || !marksDb || !markTable) return;
     const name = `${markTable.schema}.${markTable.name}.${column}`;
     actions.setMaskedColumns(activeConnection.id, withMasked(allMarks, marksDb, [name], marked));
     showToast(marked ? "Marked as sensitive" : "No longer sensitive", column);
-  };
+  });
   const resultTable = resultTableItem?.table;
   /** Our single-column foreign keys, by column: what Quick Look and ⌘↵ follow. */
   const outgoing = useMemo(() => {
@@ -1912,10 +2057,11 @@ export function Workspace({
         );
         return;
       }
-      // Esc, last (2026-10-13): with no cell open, no query running
-      // and nothing else to dismiss, it discards the tab's pending edits; the
-      // toast offers Undo, so there is no confirm. (A staged cell under the
-      // ring reverts alone first, in the grid.)
+      // Esc, last (2026-10-13): with no cell open, no query running (or
+      // just ended: that Esc was meant to cancel it) and nothing else to
+      // dismiss, it discards the tab's pending edits; the toast offers Undo,
+      // so there is no confirm. (A staged cell under the ring reverts alone
+      // first, in the grid.)
       if (
         e.key === "Escape" &&
         !paletteOpen &&
@@ -1923,7 +2069,8 @@ export function Workspace({
         !isTypingTarget(e.target) &&
         !escLeftSelection.has(e) &&
         isTableTabRef.current &&
-        rowEditsRef.current.count > 0
+        rowEditsRef.current.count > 0 &&
+        escMayDiscard(runEnd.current.running, runEnd.current.endedAt, performance.now())
       ) {
         e.preventDefault();
         runCommandRef.current("discard-edits");
@@ -2384,18 +2531,6 @@ export function Workspace({
   // The sample's Getting started: its statement has run by the time the
   // window paints its schema, so the first screen already holds rows.
   const ranOnConnect = useRef(false);
-  // Open in Rowkery from the chat (`rowkery:open-sql` with run): the agent's
-  // query runs once its tab is open and the window connected.
-  const runWhenConnected = useRef<{ tabId: number; sql: string } | null>(null);
-  const [runWhenTick, setRunWhenTick] = useState(0);
-  useEffect(() => {
-    const want = runWhenConnected.current;
-    // A window that failed to connect drops it: a later reconnect shouldn't run it unasked.
-    if (connState === "error") runWhenConnected.current = null;
-    if (!want || connState !== "connected") return;
-    runWhenConnected.current = null;
-    void onRunRef.current(want.sql, false, undefined, want.tabId);
-  }, [runWhenTick, connState]);
   useEffect(() => {
     if (!runOnConnect || ranOnConnect.current || connState !== "connected") return;
     ranOnConnect.current = true;
@@ -2478,6 +2613,8 @@ export function Workspace({
   const shownKey = useRef<Record<number, string>>({});
   const runTable = async (tab: QueryTab, append = false): Promise<void> => {
     if (!activeConnection || !tab.tableKey || !tab.table) return;
+    // Its table isn't here: it holds edits for where it is (`AwayEdits` says so).
+    if (heldForEdits(tab)) return;
     const key = runKey(tab);
     if (loading.current.has(tab.id)) {
       if (!append) queued.current.set(tab.id, tab);
@@ -2578,6 +2715,53 @@ export function Workspace({
    * The first connect only binds: restored tabs are this window's own.
    */
   const boundTo = useRef<string | null>(null);
+  /**
+   * Staged edits belong to the connection they were staged on (another
+   * server's table of the same name is not the same rows): on any other
+   * connection they are parked, kept with the tab but never shown or
+   * committed, and they come back when the window does. Also catches a
+   * reopened tab or an Undo that brings another connection's edits.
+   */
+  useEffect(() => {
+    if (!activeId) return;
+    let parkedN = 0;
+    let parkedOn: string | undefined;
+    let restoredN = 0;
+    let moved = false;
+    // Saved connections, once the list is in (it holds this one): edits
+    // parked on a deleted connection can never come back, so they go.
+    const live = connections.some((c) => c.id === activeId) ? new Set(connections.map((c) => c.id)) : null;
+    const next = tabsRef.current.map((t) => {
+      if (!t.edits && !t.parked) return t;
+      // A commit on its way keeps its buffer where it is until it settles
+      // (`commitsSettled`); then what it sent is gone from the buffer too.
+      if (committing.current.has(t.id)) return t;
+      const b = bindEdits(t, activeId);
+      const parked = live ? pruneParked(b.parked, live) : b.parked;
+      if (b.same && parked === t.parked) return t;
+      moved = true;
+      if (b.parkedNow) {
+        parkedN += changeCount(b.parkedNow);
+        parkedOn = b.parkedNow.connectionId;
+      }
+      if (b.restored) restoredN += changeCount(b.restored);
+      return { ...t, edits: b.edits, parked };
+    });
+    if (!moved) return;
+    tabsRef.current = next;
+    setTabs(next);
+    // A review or a held commit showed the old connection's SQL.
+    if (parkedN) {
+      setReview(null);
+      setHeldEdits({});
+    }
+    if (!active) return;
+    const name = (id: string | undefined) => connections.find((c) => c.id === id)?.name ?? "the other connection";
+    const edits = (n: number) => `${n} ${n === 1 ? "edit" : "edits"}`;
+    if (parkedN) showToast(`Parked ${edits(parkedN)} staged on ${name(parkedOn)}`, "back when you switch to it");
+    else if (restoredN) showToast(`Restored ${edits(restoredN)} staged on ${name(activeId)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, tabs, commitsSettled, connections]);
   const boundKey = connState === "connected" && schema ? `${activeId}\0${session.database ?? ""}` : null;
   useEffect(() => {
     if (boundKey === null || boundTo.current === boundKey) return;
@@ -2585,8 +2769,20 @@ export function Workspace({
     boundTo.current = boundKey;
     if (first) return;
     const list = tabsRef.current;
-    const gone = list.filter((t) => t.kind === "table" && (!t.tableKey || !findTable(schemaTree, t.tableKey)));
-    if (!gone.length) return;
+    const missing = list.filter((t) => t.kind === "table" && (!t.tableKey || !findTable(schemaTree, t.tableKey)));
+    // A tab holding staged or parked edits stays, held (`heldForEdits`):
+    // Recently closed isn't saved, and a close must never take edits with it.
+    const holds = (t: QueryTab) => changeCount(t.edits) + parkedCount(t) > 0;
+    const kept = missing.filter(holds);
+    const gone = missing.filter((t) => !holds(t));
+    const where = session.database ?? activeConnection?.name ?? "this connection";
+    const keptNote = kept.length
+      ? `kept ${kept.length === 1 ? kept[0].title : `${kept.length} tabs`} for ${kept.length === 1 ? "its" : "their"} staged edits`
+      : undefined;
+    if (!gone.length) {
+      if (keptNote) showToast(`Not in ${where}: ${keptNote}`, "back when you switch to where they were staged");
+      return;
+    }
     const entries: ClosedTab[] = gone.map((tab) => ({ tab, run: undefined, index: list.indexOf(tab) }));
     closedTabs.current = [...closedTabs.current, ...entries].slice(-MAX_CLOSED_TABS);
     setClosedCount(closedTabs.current.length);
@@ -2610,12 +2806,11 @@ export function Workspace({
     tabsRef.current = rest;
     setTabs(rest);
     setActiveTabId(nextActive);
-    const where = session.database ?? activeConnection?.name ?? "this connection";
     showUndoToast(
       gone.length === 1
         ? `Closed ${gone[0].title}: not in ${where}`
         : `Closed ${gone.length} table tabs not in ${where}`,
-      undefined,
+      keptNote,
       { undo: () => entries.forEach((e) => reopenTabRef.current(e)) },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2628,6 +2823,7 @@ export function Workspace({
     if (boundKey === null || boundTo.current !== boundKey) return;
     const run = runs[tab.id];
     if (run?.result || run?.error || run?.startedAt != null || autoBrowsed.current.has(tab.id)) return;
+    if (heldForEdits(tab)) return;
     autoBrowsed.current.add(tab.id);
     void runTable(tab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2931,18 +3127,19 @@ export function Workspace({
   };
 
   /** A printable key on a selected cell: the chip editor for that column, once unlocked. */
-  const typeToFilter = (column: string, key: string) => {
+  const typeToFilter = useStableCallback((column: string, key: string) => {
     if (readKey(TYPE_TO_FILTER_KEY) !== true) {
       showLockedHint();
       return;
     }
     retireTip("type-to-filter");
     openChipEditor({ column: chipColumns.some((c) => c.name === column) ? column : null, value: key });
-  };
+  });
 
   /** ⌘F on a query tab: find in the loaded rows (client-side; nothing reruns). */
   const [find, setFind] = useState<{ tabId: number; query: string; index: number } | null>(null);
-  const [findCount, setFindCount] = useState(0);
+  /** Find's matches; null while a big result is still being searched. */
+  const [findCount, setFindCount] = useState<number | null>(0);
   const findRef = useRef<HTMLInputElement>(null);
   const openFind = () => {
     if (!activeTab || activeTab.kind !== "query") return;
@@ -2955,8 +3152,9 @@ export function Workspace({
   const findAt = find && findCount ? ((find.index % findCount) + findCount) % findCount : 0;
 
   /** The grid's cell menu, profile segments and histogram drags add chips. */
-  const gridFilter = (column: string, op: ChipDraft["op"], value = "", value2?: string) =>
-    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 });
+  const gridFilter = useStableCallback((column: string, op: ChipDraft["op"], value: string = "", value2?: string) =>
+    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 }),
+  );
 
   /**
    * Query tabs sort the rows they loaded on the client (nothing reruns); a
@@ -3022,10 +3220,13 @@ export function Workspace({
   const currentSort = (): SortState[] => (isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? []));
 
   /** Header click: ascending, then descending, then unsorted; ⇧-click adds a secondary key. */
-  const sortBy = (column: string, secondary = false) => applySort(cycleSort(currentSort(), column, secondary));
+  const sortBy = useStableCallback((column: string, secondary: boolean = false) =>
+    applySort(cycleSort(currentSort(), column, secondary)),
+  );
   /** Header menu: Sort ascending / descending / Clear sort on one column. */
-  const sortColumn = (column: string, desc: boolean | null) =>
-    applySort(setSortDirection(currentSort(), column, desc));
+  const sortColumn = useStableCallback((column: string, desc: boolean | null) =>
+    applySort(setSortDirection(currentSort(), column, desc)),
+  );
 
   /** Rewrites a table tab's SELECT list without some columns and reruns it. */
   const setHidden = (tab: QueryTab, hidden: string[]) => {
@@ -3036,7 +3237,7 @@ export function Workspace({
   };
 
   /** Header menu: Hide column. The grip left in the header (or Undo) shows it again. */
-  const hideColumn = (column: string) => {
+  const hideColumn = useStableCallback((column: string) => {
     const tab = activeTab;
     const tableKey = tab?.tableKey;
     if (!tab || tab.kind !== "table" || !tableKey) return;
@@ -3057,13 +3258,13 @@ export function Workspace({
         if (cur) setHidden(cur, (cur.hidden ?? []).filter((c) => c !== column));
       },
     });
-  };
+  });
 
   /** A hidden-column grip's menu: one column back, or all of them ("*"). */
-  const showColumn = (column: string) => {
+  const showColumn = useStableCallback((column: string) => {
     if (!activeTab || activeTab.kind !== "table") return;
     setHidden(activeTab, column === "*" ? [] : (activeTab.hidden ?? []).filter((c) => c !== column));
-  };
+  });
 
   /** Where hidden columns were, for the grips in the grid header. */
   const activeGrips = useMemo(
@@ -3074,17 +3275,59 @@ export function Workspace({
   );
 
   /** Cell menu on a query result that reads one table: that table, in a table tab with no filter. */
-  const openResultAsTable = () => {
+  const openResultAsTable = useStableCallback(() => {
     if (!resultTableKey) return;
     const table = findTable(schemaTree, resultTableKey);
     if (table) openTable(table, { keep: true, state: { filter: "", sort: [] } });
-  };
+  });
+  const filterColumn = useStableCallback((column: string) => openChipEditor({ column }));
+  const showStructure = useStableCallback(() => setActiveView("structure"));
 
   const loadMore = () => {
     if (activeTab?.kind !== "table") return;
     if (activeTab.preview) patchTab(activeTab.id, { preview: false });
     void runTable({ ...activeTab, preview: false }, true);
   };
+  /** The grid's note for no rows: memoised, so typing in the editor never re-renders the grid. */
+  const filtered = isTableTab && !!activeTab?.filter?.trim();
+  const clearFilters = useStableCallback(() => {
+    if (activeTab?.kind === "table") setChips(activeTab, [], false);
+  });
+  const addRow = useStableCallback(() => runCommand("insert-row"));
+  const emptyNote = useMemo(
+    () =>
+      filtered ? (
+        <>
+          No rows match.{" "}
+          <button
+            type="button"
+            className="rg-empty-link"
+            data-clear-filters
+            onClick={clearFilters}
+          >
+            Clear filters
+          </button>
+          {/* No paging here, so a new row has its place under the note. */}
+          {rowEdits.rowsEditable && (
+            <button
+              type="button"
+              className="rg-add-row"
+              data-add-row
+              title={commandTip("insert-row", "Add a row")}
+              onClick={addRow}
+            >
+              <PlusIcon size={11} />
+              Add row
+            </button>
+          )}
+        </>
+      ) : busy ? undefined : (
+        // A finished run with no rows says so, so it doesn't read as still loading.
+        <span data-empty-rows>No records</span>
+      ),
+    [filtered, rowEdits.rowsEditable, busy, clearFilters, addRow],
+  );
+
   /** The grid scrolled to its last rows: the next page, when there is one. */
   const loadMoreRef = useRef(loadMore);
   loadMoreRef.current = loadMore;
@@ -3124,18 +3367,15 @@ export function Workspace({
       flash(String(e));
     }
   };
-  // ⌘K MCP activity's Open in tab: the agent's SQL in a new tab here, not run.
+  // ⌘K MCP activity's Open in tab and Open in Rowkery from the chat: the
+  // agent's SQL in a new tab here, not run (a logged query is only text).
   const openSqlInTabRef = useRef(openSqlInTab);
   openSqlInTabRef.current = openSqlInTab;
   useEffect(() => {
     const onOpenSql = (e: Event) => {
-      const d = (e as CustomEvent<{ windowId: string; sql: string; title?: string; run?: boolean }>).detail;
+      const d = (e as CustomEvent<{ windowId: string; sql: string; title?: string }>).detail;
       if (d?.windowId !== windowId) return;
-      const tabId = openSqlInTabRef.current(d.sql, d.title, tabsRef.current[tabsRef.current.length - 1]?.id);
-      if (d.run) {
-        runWhenConnected.current = { tabId, sql: d.sql };
-        setRunWhenTick((n) => n + 1);
-      }
+      openSqlInTabRef.current(d.sql, d.title, tabsRef.current[tabsRef.current.length - 1]?.id);
       requestAnimationFrame(() => requestAnimationFrame(() => sqlEditorRef.current?.focus()));
     };
     window.addEventListener("rowkery:open-sql", onOpenSql);
@@ -4321,8 +4561,14 @@ export function Workspace({
                     }
                   }}
                 />
-                <span className="find-count" data-find-count={find.query ? findCount : ""}>
-                  {find.query ? (findCount ? `${findAt + 1} of ${findCount.toLocaleString()}` : "No matches") : `↵ next · ${isMacPlatform() ? "⇧↵" : "Shift+↵"} previous`}
+                <span className="find-count" data-find-count={find.query && findCount !== null ? findCount : ""} data-find-searching={find.query && findCount === null ? "" : undefined}>
+                  {find.query
+                    ? findCount === null
+                      ? "Searching…"
+                      : findCount
+                        ? `${findAt + 1} of ${findCount.toLocaleString()}`
+                        : "No matches"
+                    : `↵ next · ${isMacPlatform() ? "⇧↵" : "Shift+↵"} previous`}
                 </span>
               </span>
             )}
@@ -4427,7 +4673,13 @@ export function Workspace({
               />
             )}
             <div className="results-main">
-              {resultsView === "structure" && activeTable ? (
+              {activeHeld && activeTab ? (
+                <AwayEdits
+                  tab={activeTab}
+                  where={session.database ?? activeConnection?.name ?? "this connection"}
+                  nameOf={(id) => connections.find((c) => c.id === id)?.name ?? "a removed connection"}
+                />
+              ) : resultsView === "structure" && activeTable ? (
                 <TableStructure
                   key={activeTable.key}
                   table={activeTable}
@@ -4496,7 +4748,7 @@ export function Workspace({
                     onColumnWidthsChange={setColumnWidths}
                     keyColumns={keyColumns}
                     columnComments={commentsByColumn}
-                    sort={isTableTab ? (activeTab?.sort ?? []) : (activeClientSort ?? [])}
+                    sort={(isTableTab ? activeTab?.sort : activeClientSort) ?? NO_SORT}
                     sortMode={isTableTab ? "server" : "client"}
                     onSort={sortBy}
                     onSortColumn={sortColumn}
@@ -4510,8 +4762,8 @@ export function Workspace({
                     find={!isTableTab && find?.tabId === activeTabId ? find : null}
                     onFindCount={setFindCount}
                     commandState={commandState}
-                    onFilterColumn={isTableTab ? (column) => openChipEditor({ column }) : undefined}
-                    onStructure={isTableTab && activeTable ? () => setActiveView("structure") : undefined}
+                    onFilterColumn={isTableTab ? filterColumn : undefined}
+                    onStructure={isTableTab && activeTable ? showStructure : undefined}
                     markedColumns={markedSet}
                     hiddenColumns={hiddenSet}
                     onMarkColumn={markTable ? markColumn : undefined}
@@ -4522,37 +4774,7 @@ export function Workspace({
                     onCellSelect={onCellSelect}
                     onNearEnd={activeRun.hasMore ? onNearEnd : undefined}
                     scrollKey={`${activeTabId}:${activeRun.runNo ?? 0}`}
-                    emptyNote={
-                      isTableTab && activeTab?.filter?.trim() ? (
-                        <>
-                          No rows match.{" "}
-                          <button
-                            type="button"
-                            className="rg-empty-link"
-                            data-clear-filters
-                            onClick={() => activeTab.kind === "table" && setChips(activeTab, [], false)}
-                          >
-                            Clear filters
-                          </button>
-                          {/* No paging here, so a new row has its place under the note. */}
-                          {rowEdits.rowsEditable && (
-                            <button
-                              type="button"
-                              className="rg-add-row"
-                              data-add-row
-                              title={commandTip("insert-row", "Add a row")}
-                              onClick={() => runCommand("insert-row")}
-                            >
-                              <PlusIcon size={11} />
-                              Add row
-                            </button>
-                          )}
-                        </>
-                      ) : busy ? undefined : (
-                        // A finished run with no rows says so, so it doesn't read as still loading.
-                        <span data-empty-rows>No records</span>
-                      )
-                    }
+                    emptyNote={emptyNote}
                   />
                 </RenderErrorBoundary>
               )}

@@ -90,9 +90,9 @@ fn run(mut current: AppConfig, rx: mpsc::Receiver<Msg>) {
                 match rx.recv_timeout(left) {
                     Ok(m) => m,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if let Err(e) = current.save() {
-                            eprintln!("config: {e}");
-                        }
+                        // A failure is logged once and told again by the
+                        // app (`SaveGate::take_failure`).
+                        let _ = current.save();
                         dirty_since = None;
                         continue;
                     }
