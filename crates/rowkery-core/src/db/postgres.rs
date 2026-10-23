@@ -211,8 +211,15 @@ pub async fn open_session_with_secrets(
     open_session_via(connection_id, config, secrets, None).await
 }
 
-/// How long connecting to Postgres may take (TCP, TLS, auth).
+/// How long the TCP connect to one of the host's addresses may take; the
+/// next address gets its own.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long opening a session may take in all: every address, then TLS,
+/// startup, login (a slow one over a tunnel or LDAP) and the read-only `SET`.
+/// Without it a port that takes the connection and says nothing (a dead
+/// `kubectl port-forward`) would hang the open for good.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Opens a session, through `route` when it is the one the connection uses
 /// and still alive (else a new one, which `session.route()` returns for the
@@ -300,12 +307,14 @@ pub async fn open_session_via(
         DriverError::Message(humanize_postgres_error(&e, &config.username))
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
+    let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
     // The outer error is the Cloud SQL connector's (no Postgres error to
     // retry on); the inner one is Postgres's.
     let connect = |pg_config: tokio_postgres::Config| {
         let tls = tls.clone();
         let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
+        let late = no_answer(&config.host, config.port);
         async move {
             if let Some(dialer) = dialer {
                 let mut retried = false;
@@ -340,15 +349,21 @@ pub async fn open_session_via(
                     }
                 }
             }
-            Ok::<_, DriverError>(if let Some(tls) = tls {
-                pg_config.connect(tls).await.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings))
-                })
-            } else {
-                pg_config.connect(NoTls).await.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings))
-                })
+            // `connect_timeout` bounds each address's TCP connect; the
+            // deadline bounds the rest (see `OPEN_TIMEOUT`).
+            let started = tokio::time::timeout_at(deadline, async {
+                match tls {
+                    Some(tls) => pg_config.connect(tls).await.map(|(client, connection)| {
+                        (client, drive_connection(connection, txn_warnings))
+                    }),
+                    None => pg_config.connect(NoTls).await.map(|(client, connection)| {
+                        (client, drive_connection(connection, txn_warnings))
+                    }),
+                }
             })
+            .await
+            .map_err(|_| late)?;
+            Ok::<_, DriverError>(started)
         }
     };
     let (client, connection_task) = match connect(pg_config.clone()).await? {
@@ -383,10 +398,18 @@ pub async fn open_session_via(
     // Read-only connections are read-only at the server too, so a write that
     // safe mode's text check misses (a function call in a SELECT) still fails.
     if config.safe_mode == SafeMode::ReadOnly {
-        client
-            .batch_execute(READ_ONLY_DEFAULT)
-            .await
-            .map_err(humanize)?;
+        let set = tokio::time::timeout_at(deadline, client.batch_execute(READ_ONLY_DEFAULT)).await;
+        let failed = match set {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(humanize(e)),
+            Err(_) => Some(no_answer(&config.host, config.port)),
+        };
+        if let Some(err) = failed {
+            // No session holds the connection yet: stop it here, or it
+            // waits on a silent server for good.
+            connection_task.abort();
+            return Err(err);
+        }
     }
 
     let cancel_token = client.cancel_token();
@@ -411,6 +434,16 @@ pub async fn open_session_via(
         tag,
         guard: None,
     })
+}
+
+/// A session open that gave up after [`OPEN_TIMEOUT`]: no address took the
+/// connection in time, or one did and TLS, startup or login never finished.
+/// `explain_connect_error` reads "did not finish connecting" as a timeout.
+fn no_answer(host: &str, port: u16) -> DriverError {
+    DriverError::Message(format!(
+        "Connection timed out: {host}:{port} did not finish connecting in {} s",
+        OPEN_TIMEOUT.as_secs()
+    ))
 }
 
 /// Runs the connection, counting `BEGIN`'s "already a transaction in
@@ -528,6 +561,10 @@ pub struct StreamOptions {
     /// slow query shows its first rows (and a live count) without waiting
     /// for a full batch. Checked as rows arrive.
     pub max_wait: std::time::Duration,
+    /// Rows decoded and passed on at most; the rest are read off the wire
+    /// and counted, never decoded (the statement still runs to its end).
+    /// `None` keeps every row.
+    pub keep: Option<u64>,
 }
 
 impl Default for StreamOptions {
@@ -535,6 +572,7 @@ impl Default for StreamOptions {
         Self {
             batch_rows: BATCH_SIZE,
             max_wait: std::time::Duration::from_millis(10),
+            keep: None,
         }
     }
 }
@@ -814,6 +852,7 @@ where
     let mut first_row = None;
     // When the oldest row of the batch being built arrived.
     let mut batch_since = started;
+    let full = |n: u64| opts.keep.is_some_and(|keep| n >= keep);
 
     while let Some(row) = stream
         .try_next()
@@ -823,6 +862,10 @@ where
         let row: Row = row;
         if first_row.is_none() {
             first_row = Some(started.elapsed());
+        }
+        if full(total_rows) {
+            total_rows += 1;
+            continue;
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
@@ -834,7 +877,10 @@ where
         batch_rows.push(values);
         total_rows += 1;
 
-        if batch_rows.len() >= opts.batch_rows || batch_since.elapsed() >= opts.max_wait {
+        if batch_rows.len() >= opts.batch_rows
+            || batch_since.elapsed() >= opts.max_wait
+            || full(total_rows)
+        {
             let batch = RowBatch {
                 columns: columns.clone(),
                 rows: batch_rows,

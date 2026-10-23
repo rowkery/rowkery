@@ -451,3 +451,84 @@ async fn postgres_locking_ctes_read_and_change_nothing() {
         .await
         .expect("drop");
 }
+
+/// Past `keep` rows are counted but neither decoded nor passed on, and the
+/// statement still runs to its end (a write's RETURNING finishes).
+#[tokio::test]
+async fn keep_stops_decoding_but_not_the_statement() {
+    let s = session("keep").await;
+    let table = format!("it_keep_{}", std::process::id());
+    session_execute(&s, &format!("CREATE TABLE {table} (n int)"))
+        .await
+        .unwrap();
+    let opts = StreamOptions {
+        keep: Some(3),
+        batch_rows: 2,
+        ..StreamOptions::default()
+    };
+    let mut got = Got::default();
+    let stats = session_query_stream_with(
+        &s,
+        &format!("WITH w AS (INSERT INTO {table} SELECT generate_series(1, 10) RETURNING n) SELECT n FROM w ORDER BY n"),
+        opts,
+        got.take(),
+    )
+    .await
+    .expect("run");
+    assert_eq!(stats.rows, 10);
+    assert_eq!(
+        got.rows,
+        vec![
+            vec![Value::Int(1)],
+            vec![Value::Int(2)],
+            vec![Value::Int(3)]
+        ]
+    );
+    let all = plain(&s, &format!("SELECT count(*)::int8 FROM {table}"))
+        .await
+        .unwrap();
+    assert_eq!(all.rows, vec![vec![Value::Int(10)]]);
+    session_execute(&s, &format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+}
+
+/// A key value read from the table can't break out of the keyset page's
+/// literal on a server with `standard_conforming_strings` off, where `\'`
+/// inside a plain string is a quote that doesn't end it.
+#[tokio::test]
+async fn keyset_literal_holds_with_standard_conforming_strings_off() {
+    use rowkery_core::db::{table_browse_query, BrowseOptions, EngineKind};
+    let s = session("scs").await;
+    let table = format!("it_scs_{}", std::process::id());
+    let breakout = r"\' OR TRUE --";
+    session_execute(
+        &s,
+        &format!(
+            r#"CREATE TABLE {table} (k text COLLATE "C" PRIMARY KEY);
+              INSERT INTO {table} VALUES ('!'), ('\'' OR TRUE --'), ('zz')"#
+        ),
+    )
+    .await
+    .unwrap();
+    session_execute(&s, "SET standard_conforming_strings = off")
+        .await
+        .unwrap();
+    let opts = BrowseOptions {
+        key: vec!["k".into()],
+        after: Some([("k".to_string(), Value::Text(breakout.into()))].into()),
+        ..BrowseOptions::first_page(100)
+    };
+    let sql = table_browse_query(EngineKind::Postgres, "public", &table, &opts);
+    let got = plain(&s, &sql).await.expect(&sql);
+    assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
+    // The same literal reads the same with it on (the default).
+    session_execute(&s, "SET standard_conforming_strings = on")
+        .await
+        .unwrap();
+    let got = plain(&s, &sql).await.expect(&sql);
+    assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
+    session_execute(&s, &format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+}

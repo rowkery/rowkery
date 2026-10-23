@@ -82,6 +82,14 @@ impl<W: Write> ExportWriter<W> {
                 writeln!(self.out, "{}", line.join("\t"))
             }
             ExportFormat::Json => write!(self.out, "["),
+            // Text and bytea are plain `'…'` strings, where a backslash is
+            // a backslash only with standard_conforming_strings on (as
+            // `apply_changes` sets it): the file says so for whatever server
+            // it is loaded into.
+            ExportFormat::SqlInsert {
+                engine: EngineKind::Postgres,
+                ..
+            } => writeln!(self.out, "SET standard_conforming_strings = on;"),
             ExportFormat::SqlInsert { .. } => Ok(()),
         }
     }
@@ -293,6 +301,12 @@ mod tests {
             pg.lines().last().unwrap(),
             "INSERT INTO public.\"my \"\"t\"\"\" (id, note, ok, data) VALUES (2, 'it''s', NULL, NULL);"
         );
+        // Backslashes in text and in bytea's \x read as written on a server
+        // with standard_conforming_strings off.
+        assert!(
+            pg.starts_with("SET standard_conforming_strings = on;\nINSERT INTO "),
+            "{pg}"
+        );
         // A line break inside a value stays in its literal.
         assert!(
             pg.contains("'a, \"b\"\nc\td', TRUE, '\\xdead'::bytea);\n"),
@@ -303,6 +317,7 @@ mod tests {
             schema: "main".into(),
             table: "t".into(),
         });
+        // SQLite strings have no escapes: no SET.
         assert!(lite.starts_with("INSERT INTO t ("), "{lite}");
         assert!(lite.contains("X'DEAD');\n"), "{lite}");
     }
