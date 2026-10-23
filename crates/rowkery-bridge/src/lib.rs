@@ -18,7 +18,7 @@ use rowkery_core::db::postgres::{
     session_introspect, session_list_databases, session_note_statement, session_plan_facts,
     session_probe_txn, session_query_cursor, session_query_stream_with, session_server_version,
     session_table_indexes, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
-    StreamStats, TxnState,
+    StreamStats, TxnState, CONNECT_TIMEOUT,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount};
 use rowkery_core::db::{
@@ -737,8 +737,19 @@ pub fn probe_connection_blocking(
                         runtime.block_on(async {
                             let mut session =
                                 open_session_with_secrets(probe_id, pg, Some(&secrets)).await?;
-                            session_test(&mut session).await?;
-                            Ok(session_server_version(&session).await.ok())
+                            // The open is bounded; so is what runs after it,
+                            // so a probe always ends.
+                            let checked = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                                session_test(&mut session).await?;
+                                Ok(session_server_version(&session).await.ok())
+                            })
+                            .await;
+                            checked.unwrap_or_else(|_| {
+                                Err(DriverError::Message(format!(
+                                    "Connection timed out: the server did not answer SELECT 1 in {} s",
+                                    CONNECT_TIMEOUT.as_secs()
+                                )))
+                            })
                         })
                     });
                     match test_result {

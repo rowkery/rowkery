@@ -306,6 +306,7 @@ pub async fn open_session_via(
         let tls = tls.clone();
         let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
+        let late = no_answer(&config.host, config.port);
         async move {
             if let Some(dialer) = dialer {
                 let mut retried = false;
@@ -340,15 +341,23 @@ pub async fn open_session_via(
                     }
                 }
             }
-            Ok::<_, DriverError>(if let Some(tls) = tls {
-                pg_config.connect(tls).await.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings))
-                })
-            } else {
-                pg_config.connect(NoTls).await.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings))
-                })
+            // `connect_timeout` bounds only the TCP connect: a port that takes
+            // the connection and then says nothing (a dead `kubectl
+            // port-forward`, a tunnel whose far end is gone) would hang the
+            // TLS handshake, startup and auth for good.
+            let started = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                match tls {
+                    Some(tls) => pg_config.connect(tls).await.map(|(client, connection)| {
+                        (client, drive_connection(connection, txn_warnings))
+                    }),
+                    None => pg_config.connect(NoTls).await.map(|(client, connection)| {
+                        (client, drive_connection(connection, txn_warnings))
+                    }),
+                }
             })
+            .await
+            .map_err(|_| late)?;
+            Ok::<_, DriverError>(started)
         }
     };
     let (client, connection_task) = match connect(pg_config.clone()).await? {
@@ -383,10 +392,13 @@ pub async fn open_session_via(
     // Read-only connections are read-only at the server too, so a write that
     // safe mode's text check misses (a function call in a SELECT) still fails.
     if config.safe_mode == SafeMode::ReadOnly {
-        client
-            .batch_execute("SET default_transaction_read_only = on")
-            .await
-            .map_err(humanize)?;
+        tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            client.batch_execute("SET default_transaction_read_only = on"),
+        )
+        .await
+        .map_err(|_| no_answer(&config.host, config.port))?
+        .map_err(humanize)?;
     }
 
     let cancel_token = client.cancel_token();
@@ -411,6 +423,16 @@ pub async fn open_session_via(
         tag,
         guard: None,
     })
+}
+
+/// A session open that gave up after [`CONNECT_TIMEOUT`]: the port took the
+/// connection but Postgres never finished the handshake. It says "timed
+/// out", which `explain_connect_error` reads as the host not answering.
+fn no_answer(host: &str, port: u16) -> DriverError {
+    DriverError::Message(format!(
+        "Connection timed out: {host}:{port} took the connection but Postgres did not answer in {} s",
+        CONNECT_TIMEOUT.as_secs()
+    ))
 }
 
 /// Runs the connection, counting `BEGIN`'s "already a transaction in
