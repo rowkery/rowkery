@@ -37,7 +37,7 @@ const kiosks: TableNode = {
 
 describe("staging", () => {
   test("a cell back to its original value is no longer edited", () => {
-    let b = stageCell(emptyBuffer("db.public.kiosks"), key(3), "city", { Text: "PJ" }, { Text: "KL" });
+    let b = stageCell(emptyBuffer("db.public.kiosks", "c1"), key(3), "city", { Text: "PJ" }, { Text: "KL" });
     expect(changeCount(b)).toBe(1);
     b = stageCell(b, key(3), "city", { Text: "Puchong" }, { Text: "ignored: the first original stands" });
     expect(b.updates[rowKey(key(3))].was.city).toEqual({ Text: "KL" });
@@ -46,14 +46,14 @@ describe("staging", () => {
   });
 
   test("Esc reverts one cell and keeps the others", () => {
-    let b = stageCell(emptyBuffer("t"), key(1), "a", { Int: 2 }, { Int: 1 });
+    let b = stageCell(emptyBuffer("t", "c1"), key(1), "a", { Int: 2 }, { Int: 1 });
     b = stageCell(b, key(1), "b", null, { Text: "x" });
     b = revertCell(b, key(1), "a");
     expect(b.updates[rowKey(key(1))].set).toEqual({ b: null });
   });
 
   test("⌫ marks rows and unmarks them when all were marked", () => {
-    let b = toggleDeletes(emptyBuffer("t"), [key(1), key(2)]);
+    let b = toggleDeletes(emptyBuffer("t", "c1"), [key(1), key(2)]);
     expect(Object.keys(b.deletes)).toHaveLength(2);
     b = toggleDeletes(b, [key(1)]);
     expect(Object.keys(b.deletes)).toHaveLength(1);
@@ -69,7 +69,7 @@ describe("staging", () => {
 
 describe("what core gets", () => {
   test("inserts in the order made, then updates, then deletes; a deleted row drops its edits", () => {
-    let b = addInserts(emptyBuffer("t"), [{ id: 1, values: { name: { Text: "first" } } }]);
+    let b = addInserts(emptyBuffer("t", "c1"), [{ id: 1, values: { name: { Text: "first" } } }]);
     b = addInserts(b, [{ id: 2, values: {} }]);
     b = setInsertCell(b, 2, "name", { Text: "second" });
     b = stageCell(b, key(3), "name", { Text: "x" }, { Text: "y" });
@@ -86,7 +86,7 @@ describe("what core gets", () => {
   });
 
   test("a saved buffer comes back, and a broken one doesn't", () => {
-    const b = toggleDeletes(stageCell(emptyBuffer("t"), key(1), "a", { Int: 2 }, { Int: 1 }), [key(5)]);
+    const b = toggleDeletes(stageCell(emptyBuffer("t", "c1"), key(1), "a", { Int: 2 }, { Int: 1 }), [key(5)]);
     expect(savedBuffer(JSON.parse(JSON.stringify(b)))).toEqual(b);
     expect(savedBuffer({ tableKey: "t", inserts: [], updates: {}, deletes: {} })).toBeUndefined();
     expect(savedBuffer({ tableKey: "t", inserts: "x" })).toBeUndefined();
@@ -142,6 +142,44 @@ describe("typed input", () => {
     expect(parsePaste("a\tb\r\nc\td\n")).toEqual([["a", "b"], ["c", "d"]]);
     expect(parsePaste("one\ntwo")).toEqual([["one"], ["two"]]);
   });
+
+  test("quoted TSV keeps line breaks, tabs and quotes in one cell", () => {
+    expect(parsePaste('"Kuala\nLumpur"\tx\n"a\tb"\t"say ""hi"""\n')).toEqual([
+      ["Kuala\nLumpur", "x"],
+      ["a\tb", 'say "hi"'],
+    ]);
+    expect(parsePaste("a\t\nb\tc")).toEqual([["a", ""], ["b", "c"]]);
+    // A stray quote isn't a quoted field: split on tabs as is.
+    expect(parsePaste('5" pipe\tx')).toEqual([['5" pipe', "x"]]);
+  });
+
+  test("a bad quote is taken literally and leaves the rest of the block alone", () => {
+    // Excel's unquoted `"Best" seller` beside a quoted multi-line cell.
+    expect(parsePaste('"Best" seller\t"a\nb"\nx\ty')).toEqual([['"Best" seller', "a\nb"], ["x", "y"]]);
+    // An unquoted field starting with a quote doesn't swallow the cells after it.
+    expect(parsePaste('"open\tb\tc\nd\te\tf')).toEqual([['"open', "b", "c"], ["d", "e", "f"]]);
+    // A lone quoted word keeps its quotes, so a JSON string pastes as it is.
+    expect(parsePaste('"hello"')).toEqual([['"hello"']]);
+    expect(parsePaste('"hello"\t{"a": 1}')).toEqual([['"hello"', '{"a": 1}']]);
+  });
+
+  test("a line with commas is one value", () => {
+    for (const v of ["12 Jalan Ampang, Kuala Lumpur", "3,14", "[1, 2, 3]", '{"a": 1, "b": 2}', '"x","y"']) {
+      expect(parsePaste(v)).toEqual([[v]]);
+    }
+    expect(parsePaste("Hopper, Grace\nTuring, Alan")).toEqual([["Hopper, Grace"], ["Turing, Alan"]]);
+  });
+
+  test("CSV only with several lines, a quoted field and the same fields on each", () => {
+    expect(parsePaste('a,b\n"c,d","e\nf"')).toEqual([["a", "b"], ["c,d", "e\nf"]]);
+    expect(parsePaste('a,b,c\n"c,d"')).toEqual([["a,b,c"], ['"c,d"']]);
+    expect(parsePaste("a,b\nc,d")).toEqual([["a,b"], ["c,d"]]);
+  });
+
+  test("one column: a value per line, a quoted one keeps its line break", () => {
+    expect(parsePaste('"two\nlines"\nNULL\n')).toEqual([["two\nlines"], ["NULL"]]);
+    expect(parsePaste("")).toEqual([[""]]);
+  });
 });
 
 describe("a value closed as it opened stages nothing", () => {
@@ -174,9 +212,9 @@ describe("a value closed as it opened stages nothing", () => {
     expect(sameValue({ Bool: false }, { Int: 0 }, "bool")).toBe(true);
     expect(sameValue({ Bool: false }, { Int: 1 }, "bool")).toBe(false);
     // Staging the value it holds leaves the row unedited.
-    const b = stageCell(emptyBuffer("main.flags"), key(1), "on", { Bool: true }, { Int: 1 }, "bool");
+    const b = stageCell(emptyBuffer("main.flags", "c1"), key(1), "on", { Bool: true }, { Int: 1 }, "bool");
     expect(changeCount(b)).toBe(0);
-    const off = stageCell(emptyBuffer("main.flags"), key(1), "on", { Bool: false }, { Int: 1 }, "bool");
+    const off = stageCell(emptyBuffer("main.flags", "c1"), key(1), "on", { Bool: false }, { Int: 1 }, "bool");
     expect(changeCount(off)).toBe(1);
   });
 
@@ -187,14 +225,14 @@ describe("a value closed as it opened stages nothing", () => {
     expect(sameValue({ Int: 3 }, { Text: "3.0" }, "int")).toBe(true);
     // A text column keeps its spelling: "1.0" isn't "1".
     expect(sameValue({ Text: "1.0" }, { Text: "1" }, "text")).toBe(false);
-    const b = stageCell(emptyBuffer("db.public.t"), key(1), "price", { Text: "2.5" }, { Float: 2.5 }, "number");
+    const b = stageCell(emptyBuffer("db.public.t", "c1"), key(1), "price", { Text: "2.5" }, { Float: 2.5 }, "number");
     expect(changeCount(b)).toBe(0);
   });
 });
 
 describe("a commit takes only what it sent", () => {
   test("edits staged while it ran stay, measured from what it wrote", () => {
-    let sent = stageCell(emptyBuffer("db.public.kiosks"), key(1), "name", { Text: "A" }, { Text: "a" });
+    let sent = stageCell(emptyBuffer("db.public.kiosks", "c1"), key(1), "name", { Text: "A" }, { Text: "a" });
     sent = addInserts(sent, [{ id: 7, values: { name: { Text: "new" } } }]);
     sent = toggleDeletes(sent, [key(2)]);
     // Meanwhile: row 1 edited again, row 3 edited, one more new row.

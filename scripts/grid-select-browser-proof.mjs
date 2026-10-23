@@ -2,9 +2,9 @@
 // Results grid selection proof without a Tauri webview (stubbed `invoke`):
 // drag selects a block of cells (and scrolls past the sheet's edge), ⇧-click
 // and ⇧-arrows extend it, the row number selects whole rows, ⌘A selects the
-// whole table and never the page's text, ⌘C copies the block as CSV and ⇧⌘C
+// whole table and never the page's text, ⌘C copies the block as TSV and ⇧⌘C
 // adds the column names; column rules show where each value ends. Right-click
-// opens the cell menu (Quick Look, Copy ⌘C, Copy as CSV with headers ⇧⌘C, keys
+// opens the cell menu (Quick Look, Copy ⌘C, Copy with headers ⇧⌘C, keys
 // from commands.ts): inside the block it keeps the block, elsewhere it selects
 // that cell first.
 //
@@ -234,22 +234,22 @@ check((await page.locator(visible + " [data-header][data-selected]").count()) ==
 await page.screenshot({ path: `${OUT}/2-drag-block.png`, clip });
 console.log(`${OUT}/2-drag-block.png`);
 
-// 3. ⌘C copies the block as CSV (a comma in a value gets quoted).
+// 3. ⌘C copies the block as TSV (a comma needs no quotes).
 await page.keyboard.press("Control+c");
 await page.waitForTimeout(150);
 const csv = await clipboard();
 check(
-  csv === '"Hopper, Grace",grace@kioskuno.com,185.75\nAlan Turing,alan@kioskuno.com,359.00\nEdsger Dijkstra,edsger@kioskuno.com,532.25\nBarbara Liskov,barbara@kioskuno.com,705.50',
-  "⌘C copies the cells as CSV without the header",
+  csv === 'Hopper, Grace\tgrace@kioskuno.com\t185.75\nAlan Turing\talan@kioskuno.com\t359.00\nEdsger Dijkstra\tedsger@kioskuno.com\t532.25\nBarbara Liskov\tbarbara@kioskuno.com\t705.50',
+  "⌘C copies the cells as TSV without the header",
 );
-check((await toastText()) === "Copied 12 cells · CSV", `toast: Copied 12 cells · CSV (${await toastText()})`);
+check((await toastText()) === "Copied 12 cells · TSV", `toast: Copied 12 cells · TSV (${await toastText()})`);
 
 // 4. ⇧⌘C adds the column names on top.
 await page.keyboard.press("Control+Shift+c");
 await page.waitForTimeout(150);
 const csvH = await clipboard();
-check(csvH.split("\n")[0] === "owner,email,balance" && csvH.split("\n").length === 5, "⇧⌘C puts the header row on top");
-check((await toastText()) === "Copied 12 cells · CSV with header", "toast: CSV with header");
+check(csvH.split("\n")[0] === "owner\temail\tbalance" && csvH.split("\n").length === 5, "⇧⌘C puts the header row on top");
+check((await toastText()) === "Copied 12 cells · TSV with header", "toast: TSV with header");
 await page.screenshot({ path: `${OUT}/3-copied-with-header.png`, clip });
 console.log(`${OUT}/3-copied-with-header.png`);
 
@@ -266,7 +266,7 @@ await page.waitForTimeout(150);
 check((await clipboard()) === "Hopper, Grace", "one cell copies as is");
 await page.keyboard.press("Control+Shift+c");
 await page.waitForTimeout(150);
-check((await clipboard()) === 'owner\n"Hopper, Grace"', "⇧⌘C on one cell adds its column name");
+check((await clipboard()) === 'owner\nHopper, Grace', "⇧⌘C on one cell adds its column name");
 
 // 7. ⇧-click extends from the active cell.
 await cell(3, 4).click({ modifiers: ["Shift"] });
@@ -282,7 +282,7 @@ await page.mouse.up();
 check((await selCount()) === 18, `gutter drag selects rows 3–5 whole (${await selCount()})`);
 await page.keyboard.press("Control+c");
 await page.waitForTimeout(150);
-check((await toastText()) === "Copied 3 rows · CSV", "whole rows are counted as rows");
+check((await toastText()) === "Copied 3 rows · TSV", "whole rows are counted as rows");
 await page.screenshot({ path: `${OUT}/4-whole-rows.png`, clip });
 console.log(`${OUT}/4-whole-rows.png`);
 
@@ -293,9 +293,9 @@ check((await page.locator(visible + " [data-header][data-selected]").count()) ==
 await page.keyboard.press("Control+Shift+c");
 await page.waitForTimeout(150);
 const all = await clipboard();
-check(all.split("\n").length === 121 && all.startsWith("id,owner,email,balance,active,note\n1001,"), "⌘A then ⇧⌘C copies all 120 rows with the header");
-check((await toastText()) === "Copied 120 rows · CSV with header", "toast: Copied 120 rows");
-check(all.split("\n")[4].endsWith(","), "NULL copies as an empty field");
+check(all.split("\n").length === 121 && all.startsWith("id\towner\temail\tbalance\tactive\tnote\n1001\t"), "⌘A then ⇧⌘C copies all 120 rows with the header");
+check((await toastText()) === "Copied 120 rows · TSV with header", "toast: Copied 120 rows");
+check(all.split("\n")[4].endsWith("\t"), "NULL copies as an empty field");
 await page.screenshot({ path: `${OUT}/5-select-all.png`, clip });
 console.log(`${OUT}/5-select-all.png`);
 
@@ -332,15 +332,15 @@ await cell(2, 2).click({ button: "right" });
 await page.waitForSelector(MENU);
 check((await selCount()) === 6, "right-click inside the block keeps it");
 const labels = await page.$$eval(`${MENU} [data-item]`, (els) => els.map((e) => `${e.dataset.item}=${e.querySelector('[data-testid="grid-menu-label"]').textContent}:${e.dataset.keys ?? ""}`));
-check(labels.join("|") === "quick-look=Quick Look:Space|csv=Copy:Ctrl+C|csv-header=Copy as CSV with headers:Ctrl+Shift+C", `menu items: ${labels.join(", ")}`);
+check(labels.join("|") === "quick-look=Quick Look:Space|csv=Copy:Ctrl+C|csv-header=Copy with headers:Ctrl+Shift+C", `menu items: ${labels.join(", ")}`);
 await page.locator(`${MENU} [data-item="csv-header"]`).hover();
 await page.screenshot({ path: `${OUT}/7-context-menu.png`, clip });
 console.log(`${OUT}/7-context-menu.png`);
 await page.locator(`${MENU} [data-item="csv-header"]`).click();
 await page.waitForTimeout(200);
-check((await clipboard()) === 'owner,email\n"Hopper, Grace",grace@kioskuno.com\nAlan Turing,alan@kioskuno.com\nEdsger Dijkstra,edsger@kioskuno.com', "Copy as CSV with headers copies the block with its header");
+check((await clipboard()) === 'owner\temail\nHopper, Grace\tgrace@kioskuno.com\nAlan Turing\talan@kioskuno.com\nEdsger Dijkstra\tedsger@kioskuno.com', "Copy with headers copies the block with its header");
 check((await page.locator(MENU).count()) === 0, "the menu closes after a pick");
-check((await toastText()) === "Copied 6 cells · CSV with header", "toast after a menu copy");
+check((await toastText()) === "Copied 6 cells · TSV with header", "toast after a menu copy");
 
 // 12. Right-click outside the block selects that cell; Copy copies it.
 await cell(6, 2).click({ button: "right" });

@@ -195,12 +195,203 @@ pub fn pg_relations(explain_json: &Json) -> Vec<(Option<String>, String)> {
     out
 }
 
-/// Postgres statistics hold sample values of every column (`pg_stats`'
-/// most common values), so with tables hidden they're off limits too.
+/// Statistics hold sample values of every column (Postgres's `pg_stats`
+/// and `pg_stats_ext` most common values and histograms, read from these
+/// two catalogs; SQLite's `sqlite_stat3` / `sqlite_stat4` index samples),
+/// so with tables hidden or columns masked they're off limits too. SQLite
+/// reserves the `sqlite_` prefix, so the name alone says it's the catalog.
 pub fn is_statistics(schema: Option<&str>, table: &str) -> bool {
-    schema.is_none_or(|s| s == "pg_catalog")
-        && matches!(table, "pg_statistic" | "pg_statistic_ext_data")
+    let pg = schema.is_none_or(|s| s == "pg_catalog")
+        && matches!(table, "pg_statistic" | "pg_statistic_ext_data");
+    let sqlite = schema != Some("pg_catalog")
+        && table
+            .get(..11)
+            .is_some_and(|p| p.eq_ignore_ascii_case("sqlite_stat"));
+    pg || sqlite
 }
+
+/// Postgres catalogs that hold credentials, and the column of each that
+/// holds them: role password hashes (`pg_authid.rolpassword`, under
+/// `pg_shadow`), foreign servers' user mappings with their passwords
+/// (`pg_user_mapping.umoptions`, under `pg_user_mappings` and
+/// `information_schema.user_mapping_options`) and subscriptions' connection
+/// strings (`pg_subscription.subconninfo`).
+const SECRETS: &[(&str, &str)] = &[
+    ("pg_authid", "rolpassword"),
+    ("pg_user_mapping", "umoptions"),
+    ("pg_subscription", "subconninfo"),
+];
+
+pub fn is_credentials(schema: Option<&str>, table: &str) -> bool {
+    schema.is_none_or(|s| s == "pg_catalog") && SECRETS.iter().any(|(t, _)| *t == table)
+}
+
+/// The columns of the credentials catalogs in order, as (catalog, column)
+/// rows, for [`credentials_use`].
+pub const CREDENTIAL_COLUMNS_SQL: &str = "SELECT c.relname::text, a.attname::text \
+    FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+    WHERE c.relnamespace = 'pg_catalog'::regnamespace \
+    AND c.relname IN ('pg_authid', 'pg_user_mapping', 'pg_subscription') \
+    AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname, a.attnum";
+
+/// Why a plan that reads a credentials catalog is refused: it uses the
+/// secret column. Read for an agent, whatever is shared, never; the rest of
+/// the catalog (role names under `pg_roles`, `information_schema.schemata`
+/// and the privilege views) stays open.
+///
+/// Every use of the column shows in the plan by its name, views expanded:
+/// anywhere in an expression, or as a whole row (`a.*`). One place lists it
+/// without using it: a scan straight under a join (through Hash, Sort or
+/// Material) may emit the catalog's whole row, every column in order, and
+/// the join takes only what it names. Names the check can't follow are
+/// refused: a column alias list on the catalog (`pg_authid AS a(…, pw)`,
+/// seen in `written_calls`, the `name(` calls of the SQL as sent) or a
+/// column of the scan the catalog doesn't have.
+pub fn credentials_use(
+    plan: &Json,
+    columns: &[(String, String)],
+    written_calls: &[String],
+) -> Option<&'static str> {
+    use crate::mask::{tokens, Tok};
+    // The credentials scans as (alias, catalog).
+    fn scans(node: &Json, out: &mut Vec<(String, String)>) {
+        let rel = node.get("Relation Name").and_then(Json::as_str);
+        let schema = node.get("Schema").and_then(Json::as_str);
+        if let Some(rel) = rel.filter(|r| is_credentials(schema, r)) {
+            let alias = node.get("Alias").and_then(Json::as_str).unwrap_or(rel);
+            out.push((alias.to_string(), rel.to_string()));
+        }
+        for child in node
+            .get("Plans")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+        {
+            scans(child, out);
+        }
+    }
+    let root = plan.get(0).and_then(|p| p.get("Plan")).unwrap_or(plan);
+    let mut found = Vec::new();
+    scans(root, &mut found);
+    if found.is_empty() {
+        return None;
+    }
+    let columns_of = |rel: &str| -> Vec<&str> {
+        columns
+            .iter()
+            .filter(|(t, _)| t == rel)
+            .map(|(_, c)| c.as_str())
+            .collect()
+    };
+    // Postgres tells a repeated alias apart with `_1`, `_2`.
+    let base = |alias: &str| -> String {
+        match alias.rsplit_once('_') {
+            Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => b.into(),
+            _ => alias.into(),
+        }
+    };
+    if found
+        .iter()
+        .any(|(alias, _)| written_calls.contains(alias) || written_calls.contains(&base(alias)))
+    {
+        return Some(CREDENTIALS_RENAMED);
+    }
+    let secret = |name: &str| SECRETS.iter().any(|(_, c)| *c == name);
+    // An Output that is a catalog's whole row, in order.
+    let whole_row = |list: &[&str]| {
+        found.iter().any(|(alias, rel)| {
+            let cols = columns_of(rel);
+            list.len() == cols.len()
+                && list.iter().zip(&cols).all(|(entry, col)| {
+                    matches!(tokens(entry).as_slice(),
+                        [Tok::Name(chain)] if chain.last().map(String::as_str) == Some(*col)
+                            && (chain.len() == 1 || (chain.len() == 2 && chain[0] == *alias)))
+                })
+        })
+    };
+    const PASS: &[&str] = &["Hash", "Sort", "Incremental Sort", "Material", "Memoize"];
+    const JOINS: &[&str] = &["Hash Join", "Merge Join", "Nested Loop"];
+    fn walk(
+        node: &Json,
+        under_join: bool,
+        check: &dyn Fn(&Json, bool) -> Option<&'static str>,
+    ) -> Option<&'static str> {
+        let kind = node.get("Node Type").and_then(Json::as_str).unwrap_or("");
+        if let Some(why) = check(node, under_join) {
+            return Some(why);
+        }
+        let next = JOINS.contains(&kind) || (PASS.contains(&kind) && under_join);
+        node.get("Plans")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .find_map(|child| walk(child, next, check))
+    }
+    let check = |node: &Json, under_join: bool| -> Option<&'static str> {
+        let kind = node.get("Node Type").and_then(Json::as_str).unwrap_or("");
+        let rel = node.get("Relation Name").and_then(Json::as_str);
+        let schema = node.get("Schema").and_then(Json::as_str);
+        let own = rel.filter(|r| is_credentials(schema, r));
+        let map = node.as_object()?;
+        for (key, value) in map {
+            if key == "Plans" || crate::functions::NAME_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            let list: Vec<&str> = match value {
+                Json::String(s) => vec![s.as_str()],
+                Json::Array(items) => items.iter().filter_map(Json::as_str).collect(),
+                _ => continue,
+            };
+            let passing = key == "Output"
+                && under_join
+                && (own.is_some() || PASS.contains(&kind))
+                && whole_row(&list);
+            if passing {
+                continue;
+            }
+            for entry in &list {
+                let toks = tokens(entry);
+                for tok in &toks {
+                    let Tok::Name(chain) = tok else { continue };
+                    if chain.last().is_some_and(|n| secret(n)) {
+                        return Some(CREDENTIALS_REFUSAL);
+                    }
+                    if let [head, col] = chain.as_slice() {
+                        if let Some((_, rel)) = found.iter().find(|(a, _)| a == head) {
+                            if col == "*" {
+                                return Some(CREDENTIALS_REFUSAL);
+                            }
+                            if !columns_of(rel).contains(&col.as_str()) {
+                                return Some(CREDENTIALS_RENAMED);
+                            }
+                        }
+                    }
+                }
+                // A scan of the catalog that emits a bare name: one of its own.
+                if let (Some(rel), "Output", [Tok::Name(chain)]) =
+                    (own, key.as_str(), toks.as_slice())
+                {
+                    let name = chain[0].as_str();
+                    let constant = matches!(name, "null" | "true" | "false");
+                    if chain.len() == 1 && !constant && !columns_of(rel).contains(&name) {
+                        return Some(CREDENTIALS_RENAMED);
+                    }
+                }
+            }
+        }
+        None
+    };
+    walk(root, false, &check)
+}
+
+pub const STATISTICS_REFUSAL: &str =
+    "Refused: column statistics (pg_stats, pg_statistic, sqlite_stat4) hold sample values of every column, including ones the user masked or hasn't shared. Leave them out of the query.";
+
+pub const CREDENTIALS_REFUSAL: &str =
+    "Refused: this reads a password or connection string (pg_authid.rolpassword under pg_shadow, pg_user_mapping.umoptions under pg_user_mappings, or pg_subscription.subconninfo). Agents never read these. Leave that column out; role names (pg_roles.rolname) are fine.";
+
+pub const CREDENTIALS_RENAMED: &str =
+    "Refused: this renames the columns of a catalog that holds passwords or connection strings (pg_authid, pg_user_mapping or pg_subscription), so Rowkery can't tell which one it reads. Use the columns' own names.";
 
 pub const HIDDEN_REFUSAL: &str =
     "Refused: this reads a table the user hasn't shared with agents in Rowkery. A view or join needs every table it reads shared. Leave it out of the query, or ask the user to share it.";
@@ -456,6 +647,61 @@ mod tests {
         assert!(rule.allows("public", "api_keys"));
         assert!(is_statistics(Some("pg_catalog"), "pg_statistic"));
         assert!(!is_statistics(Some("public"), "pg_statistic"));
+        assert!(is_statistics(Some("main"), "sqlite_stat4"));
+        assert!(is_statistics(Some("other"), "SQLITE_STAT1"));
+        assert!(!is_statistics(Some("main"), "sqlite_master"));
+        assert!(is_credentials(Some("pg_catalog"), "pg_authid"));
+        assert!(is_credentials(Some("pg_catalog"), "pg_user_mapping"));
+        assert!(!is_credentials(Some("public"), "pg_authid"));
+    }
+
+    #[test]
+    fn credentials_refuse_only_the_secret_column() {
+        let cols: Vec<(String, String)> = ["oid", "rolname", "rolpassword"]
+            .iter()
+            .map(|c| ("pg_authid".to_string(), c.to_string()))
+            .collect();
+        let scan = |out: &[&str]| {
+            json!({ "Node Type": "Seq Scan", "Relation Name": "pg_authid",
+                "Schema": "pg_catalog", "Alias": "u", "Output": out })
+        };
+        let joined = |top: &[&str], scan: Json| {
+            json!([{ "Plan": { "Node Type": "Hash Join", "Output": top,
+                "Hash Cond": "(u.oid = n.nspowner)", "Plans": [scan,
+                { "Node Type": "Hash", "Plans": [{ "Node Type": "Seq Scan",
+                  "Relation Name": "pg_namespace", "Schema": "pg_catalog", "Alias": "n" }] }] } }])
+        };
+        let full = ["u.oid", "u.rolname", "u.rolpassword"];
+        // information_schema.schemata: the whole row under a join, unused.
+        let plan = joined(&["n.nspname", "(u.rolname)::name"], scan(&full));
+        assert_eq!(credentials_use(&plan, &cols, &[]), None);
+        // The same row anywhere else, or the column used, is refused.
+        let plan = json!([{ "Plan": scan(&full) }]);
+        assert_eq!(
+            credentials_use(&plan, &cols, &[]),
+            Some(CREDENTIALS_REFUSAL)
+        );
+        let plan = joined(&["u.rolpassword"], scan(&full));
+        assert_eq!(
+            credentials_use(&plan, &cols, &[]),
+            Some(CREDENTIALS_REFUSAL)
+        );
+        let plan = joined(&["u.*"], scan(&["u.oid"]));
+        assert_eq!(
+            credentials_use(&plan, &cols, &[]),
+            Some(CREDENTIALS_REFUSAL)
+        );
+        // Names it can't follow: an alias list, or a column it doesn't have.
+        let plan = joined(&["u.rolname"], scan(&["u.oid", "u.rolname"]));
+        assert_eq!(
+            credentials_use(&plan, &cols, &["u".into()]),
+            Some(CREDENTIALS_RENAMED)
+        );
+        let plan = joined(&["u.pw"], scan(&["u.oid", "u.pw"]));
+        assert_eq!(
+            credentials_use(&plan, &cols, &[]),
+            Some(CREDENTIALS_RENAMED)
+        );
     }
 
     #[test]

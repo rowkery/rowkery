@@ -2,7 +2,7 @@
 
 A Cloudflare Worker that files reports from Rowkery's **Help > Report an Issue…** sheet as issues in the private repo `rowkery/reports` (`GITHUB_REPO` in `wrangler.toml`), labelled `user-report`. The GitHub token stays in the Worker as a secret, so the app never holds one, and users need no GitHub account. The Worker stores nothing.
 
-`POST /report` takes JSON `{ description, app, database?, error?, query? }` (at most 20 KB) and answers `{ ok: true, number }` or `{ ok: false, error }`. Each IP may send 3 reports a minute (`[[ratelimits]]` in `wrangler.toml`).
+`POST /report` takes JSON `{ description, app, database?, error?, query? }` (at most 20 KB) and answers `{ ok: true, number }` or `{ ok: false, error }`. Each IP may send 3 reports a minute (`[[ratelimits]]` in `wrangler.toml`); without that binding the Worker answers 503. Browsers may call it only from the app's own webview origins (`APP_ORIGINS` in `src/index.ts`); any other website gets a 403 and no CORS headers, so it can't file reports through its visitors.
 
 Reports go to a private repo because they can carry a user's error text and query. Public issues on `rowkery/rowkery` stay open for anyone with a GitHub account (2026-10-16).
 

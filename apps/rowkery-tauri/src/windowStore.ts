@@ -20,6 +20,8 @@ export interface SavedTab {
   preview?: boolean;
   /** Table tabs: staged row edits (checked with `savedBuffer` on restore). */
   edits?: unknown;
+  /** Table tabs: edits parked on other connections (`savedParked`). */
+  parked?: unknown;
 }
 
 /** Open windows, restored on launch without connecting until one is shown. */

@@ -81,7 +81,7 @@ export function cellMenu(o: {
   }
   rows.push(
     { id: "csv", label: "Copy", command: "copy-cells", separated: true },
-    { id: "csv-header", label: "Copy as CSV with headers", command: "copy-cells-with-headers" },
+    { id: "csv-header", label: "Copy with headers", command: "copy-cells-with-headers" },
   );
   if (o.openAsTable) rows.push({ id: "open-table", label: "Open as table tab", separated: true });
   return rows;

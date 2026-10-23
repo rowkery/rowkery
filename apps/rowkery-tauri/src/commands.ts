@@ -278,7 +278,7 @@ const zoneCommands = (): Command[] => [
   },
   {
     id: "copy-cells-with-headers",
-    title: "Copy as CSV with headers",
+    title: "Copy with headers",
     section: "Grid",
     chord: { mac: "Mod+Shift+C" },
     palette: false,
@@ -1091,7 +1091,7 @@ export interface Gesture {
 
 export const GESTURES: Gesture[] = [
   { id: "tab-expand-star", title: "Expand * into the column list", section: "Editor", keys: { mac: "⇥ after *", other: "Tab after *" } },
-  { id: "copy-cells", title: "Copy the cell, or the block as CSV", section: "Grid", chord: { mac: "Mod+C" } },
+  { id: "copy-cells", title: "Copy the cell, or the block as TSV", section: "Grid", chord: { mac: "Mod+C" } },
   { id: "copy-cells-with-headers", title: "Copy the block with column names", section: "Grid", chord: { mac: "Mod+Shift+C" } },
   { id: "grid-select-all", title: "Select the whole result", section: "Grid", chord: { mac: "Mod+A" } },
   { id: "grid-extend", title: "Extend the selection", section: "Grid", keys: { mac: "⇧-click · ⇧↑↓←→", other: "Shift+click/arrows" } },
