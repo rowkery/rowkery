@@ -92,7 +92,7 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
-import { showOfferToast, showToast, showUndoToast } from "./notify";
+import { showErrorToastIfFree, showOfferToast, showToast, showUndoToast } from "./notify";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -4728,7 +4728,7 @@ export function Workspace({
           fallback={() => null}
           onError={(err) => {
             closePalette();
-            showToast("Couldn't show the command palette", err.message || String(err), "error");
+            showErrorToastIfFree("Couldn't show the command palette", err.message || String(err));
           }}
         >
           <CommandPalette

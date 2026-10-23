@@ -37,7 +37,7 @@ import { ReportSheet } from "./ReportSheet";
 import type { ReportContext } from "./report";
 import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
-import { hasPendingUndo, liveOffer, showOfferToast, showToast, showUndoToast } from "./notify";
+import { hasPendingUndo, liveOffer, showErrorToastIfFree, showOfferToast, showToast, showUndoToast } from "./notify";
 import { RenderErrorBoundary } from "./ErrorBoundary";
 import { readKey, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
@@ -1517,7 +1517,7 @@ function App() {
           fallback={() => null}
           onError={(err) => {
             setNewConnOpen(false);
-            showToast("Couldn't show the connection sheet", err.message || String(err), "error");
+            showErrorToastIfFree("Couldn't show the connection sheet", err.message || String(err));
           }}
         >
         <NewConnectionSheet
