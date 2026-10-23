@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 type Handler = (frame: unknown) => void;
 const plays: { frames: unknown[]; reject?: string }[] = [];
+const cancels: unknown[] = [];
 
 vi.mock("@tauri-apps/api/core", () => {
   class Channel {
@@ -10,7 +11,8 @@ vi.mock("@tauri-apps/api/core", () => {
   }
   return {
     Channel,
-    invoke: vi.fn(async (_cmd: string, args: { onFrame: { onmessage: Handler } }) => {
+    invoke: vi.fn(async (cmd: string, args: { onFrame: { onmessage: Handler } }) => {
+      if (cmd === "cancel_query") return void cancels.push(args);
       const play = plays.shift()!;
       if (play.reject) throw new Error(play.reject);
       // Frames land after the invoke resolves, in order.
@@ -41,6 +43,7 @@ const done = (extra = {}) => ({
 
 beforeEach(() => {
   plays.length = 0;
+  cancels.length = 0;
   let id = 0;
   const timers = new Map<number, ReturnType<typeof setTimeout>>();
   vi.stubGlobal("requestAnimationFrame", (fn: () => void) => {
@@ -124,6 +127,8 @@ describe("runQuery", () => {
     plays.push({ frames: [...columns, new ArrayBuffer(64), done()] });
     await expect(runQuery("w1", 1, "select")).rejects.toThrow("Couldn't read the results: not an INL1 frame");
     expect(abandonRun("w1", 1)).toBeUndefined();
+    // Core still runs it and holds the tab's session: it's told to stop, once.
+    expect(cancels).toEqual([{ windowId: "w1", tabId: 1 }]);
   });
 
   test("Force stop gives up on a run whose done frame never comes", async () => {

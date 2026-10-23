@@ -432,6 +432,16 @@ export function abandonRun(windowId: string, tabId: number): ((why: string) => v
   return fail && ((why) => fail(new Error(why)));
 }
 
+/**
+ * A run the webview gave up on by itself (a frame it couldn't read): core
+ * still runs it and holds the tab's session, so ask core to stop it, or the
+ * tab's next run would wait behind it.
+ */
+function stopOrphan(args: Record<string, unknown>) {
+  if (typeof args.windowId !== "string" || typeof args.tabId !== "number") return;
+  invoke("cancel_query", { windowId: args.windowId, tabId: args.tabId }).catch(() => {});
+}
+
 /** Runs a streaming command; resolves on its done frame with what `invoke` returned. */
 function stream<Started>(
   command: string,
@@ -482,6 +492,8 @@ function stream<Started>(
       try {
         onFrame(frame);
       } catch (e) {
+        if (!run.isOpen()) return;
+        stopOrphan(args);
         run.fail(new Error(`Couldn't read the results: ${e instanceof Error ? e.message : String(e)}`));
       }
     };
@@ -578,6 +590,7 @@ function exportStream(
           settle();
         }
       } catch (e) {
+        stopOrphan(args);
         run.fail(e);
       }
     };

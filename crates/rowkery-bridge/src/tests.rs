@@ -5049,3 +5049,68 @@ fn explain_wait_ends_when_the_plan_worker_dies() {
     }
     drop(sink);
 }
+
+/// A tab's run that finds the tab's session still out with an earlier run
+/// (one the webview gave up on) says it is waiting, so it never reads as a
+/// hang, and runs once the session is back.
+#[test]
+fn postgres_a_run_behind_the_tabs_busy_session_says_it_waits() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "postgres-busy-tab";
+    if save_test_pg(&bridge, id).is_none() {
+        eprintln!(
+            "skip postgres_a_run_behind_the_tabs_busy_session_says_it_waits (set ROWKERY_PG_HOST)"
+        );
+        return;
+    }
+    bridge.open_window("w", id, None).expect("open");
+    let first = bridge
+        .run_window_query("w", 1, "SELECT pg_sleep(1)".into(), None, false)
+        .expect("run");
+    // Let the first run take the tab's session.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !first
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::QueryStarted { .. }))
+    {
+        assert!(Instant::now() < deadline, "the first run started");
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(100));
+    let second = bridge
+        .run_window_query("w", 1, "SELECT 2::int8".into(), None, false)
+        .expect("run");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let events = loop {
+        let events = second.lock().unwrap().clone();
+        if events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::QueryFinished { .. }))
+        {
+            break events;
+        }
+        assert!(Instant::now() < deadline, "the second run ended");
+        thread::sleep(Duration::from_millis(5));
+    };
+    let waits: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match e {
+            CoreEvent::QueryWaiting { waiting, .. } => Some(*waiting),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        waits,
+        vec![true, false],
+        "said it waited, then that it has one"
+    );
+    let error = events.iter().find_map(|e| match e {
+        CoreEvent::QueryFinished { error, .. } => Some(error.clone()),
+        _ => None,
+    });
+    assert_eq!(error, Some(None));
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
