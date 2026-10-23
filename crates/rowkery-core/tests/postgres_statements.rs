@@ -469,10 +469,13 @@ async fn keyset_literal_holds_with_standard_conforming_strings_off() {
     let sql = table_browse_query(EngineKind::Postgres, "public", &table, &opts);
     let got = plain(&s, &sql).await.expect(&sql);
     assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
-    session_execute(
-        &s,
-        &format!("SET standard_conforming_strings = on; DROP TABLE {table}"),
-    )
-    .await
-    .unwrap();
+    // The same literal reads the same with it on (the default).
+    session_execute(&s, "SET standard_conforming_strings = on")
+        .await
+        .unwrap();
+    let got = plain(&s, &sql).await.expect(&sql);
+    assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
+    session_execute(&s, &format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
 }
