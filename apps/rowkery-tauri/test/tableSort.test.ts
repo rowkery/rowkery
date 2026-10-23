@@ -211,6 +211,20 @@ describe("numeric text sorts by value", () => {
     expect(col(sortResult(result, [{ column: "code", desc: false }]), 1)[0]).toBe("-3");
   });
 
+  test("parsed once, a numeric column still orders mixed cells, descending, NULLs last", () => {
+    const cells: Value[] = [T("10.00"), { Null: null }, N(7), T("-3"), T("not a number"), B("100"), T("9.5")];
+    const order = (desc: boolean) =>
+      sortedOrder((r) => cells[r]!, cells.length, [{ col: 0, desc, numeric: true }]).map((r) => cells[r]);
+    const asc = order(false);
+    const desc = order(true);
+    // Every number in value order, the same either way round; NULL last both ways.
+    const nums = (xs: (Value | undefined)[]) => xs.filter((v) => v && !("Null" in v) && !("Text" in v && v.Text === "not a number"));
+    expect(nums(asc)).toEqual([T("-3"), N(7), T("9.5"), T("10.00"), B("100")]);
+    expect(nums(desc)).toEqual([B("100"), T("10.00"), T("9.5"), N(7), T("-3")]);
+    expect(asc[asc.length - 1]).toEqual({ Null: null });
+    expect(desc[desc.length - 1]).toEqual({ Null: null });
+  });
+
   test("digits compare exactly, past what a double holds", () => {
     const t = (s: string) => ({ Text: s });
     expect(compareValues(t("123456789012345678901.5"), t("123456789012345678901.25"), true)).toBe(1);
