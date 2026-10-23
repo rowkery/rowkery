@@ -111,7 +111,7 @@ function stubTauri() {
           await new Promise((r) => setTimeout(r, 400));
           return { status: "ready", version: "0.1.2", notes: "Faster grid scrolling.\nSettings page." };
         case "busy_work":
-          return { transaction: false, writes: 0, commits: 0, imports: 0, sql_files: 0 };
+          return { unknown: false, transactions: 0, writes: 0, commits: 0, imports: 0, sql_files: 0 };
         default:
           return null;
       }

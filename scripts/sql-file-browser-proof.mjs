@@ -89,6 +89,8 @@ function stubTauri() {
           return scans[name];
         }
         case "run_sql_file":
+          // Refused before anything ran.
+          if (window.__REFUSE__) return Promise.reject(window.__REFUSE__);
           return new Promise((resolve, reject) => {
             let done = 0;
             const started = Date.now();
@@ -96,7 +98,7 @@ function stubTauri() {
               done++;
               args.onFrame.onmessage({ t: "progress", done, line: done * 40, current: done === 12 ? "COPY public.orders (id, customer_id, total, placed_at) FROM stdin" : `ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id)`, bytes: done * 11000000, rows: done * 60000 });
               // The call fails mid-run: what ran is unknown.
-              if (window.__LOSE_ANSWER__ && done >= 5) return reject("Rowkery's core stopped");
+              if (window.__LOSE_ANSWER__ && done >= 5) return reject("Rowkery's core stopped before it answered");
               if (done >= 38) {
                 stop = null;
                 resolve({ done, rows: 2410332, elapsed_ms: Date.now() - started, failed: null, errors: 0, first_error: null, cancelled: false, rolled_back: false, lost: 0 });
@@ -220,6 +222,21 @@ check(
 check(!lost.includes("Nothing was kept") && !lost.includes("rolled back"), "and claims no rollback");
 await page.screenshot({ path: `${OUT}/5b-outcome-unknown.png` });
 await page.evaluate(() => (window.__LOSE_ANSWER__ = false));
+
+// A refusal: nothing ran, so it says so plainly, never "Outcome unknown".
+await page.click(`${panel} [data-sql-file-close]`);
+await page.waitForFunction((p) => !document.querySelector(p), panel);
+await drop("/Users/me/cleanup.sql");
+await page.waitForSelector(`${panel} [data-sql-file="ready"]`);
+await page.evaluate(() => (window.__REFUSE__ = "A SQL file is already running in this window."));
+await page.click(`${panel} [data-sql-file-run]`);
+await page.waitForSelector(`${panel} [data-sql-file-ended="failed"]`);
+const refused = await text(`${panel} [data-sql-file-ended]`);
+check(!refused.includes("Outcome unknown"), `a refusal isn't unknown: ${refused}`);
+check(refused.includes("A SQL file is already running in this window."), "it names the refusal");
+check((await text(`${panel} [data-sql-file-kept]`)) === "Nothing was kept.", "and nothing was kept");
+await page.screenshot({ path: `${OUT}/5c-refused.png` });
+await page.evaluate(() => (window.__REFUSE__ = null));
 
 // A custom-format archive: refused, with the way forward.
 await page.click(`${panel} [data-sql-file-close]`);

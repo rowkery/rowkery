@@ -10,6 +10,7 @@ import {
   type SqlFileScan,
 } from "./api";
 import { InspectorHead } from "./Inspector";
+import { isLostAnswer } from "./runOutcome";
 import { formatBytes } from "./types";
 import "./SqlFilePanel.css";
 
@@ -110,9 +111,10 @@ export function SqlFilePanel({
         if (report.done > 0 && !report.rolled_back) onRan();
       },
       (e) => {
-        setPhase({ at: "ended", scan, report: lostRun(String(e), Date.now() - started) });
-        // It may have changed the schema before the answer was lost.
-        onRan();
+        const report = failedRun(e, Date.now() - started);
+        setPhase({ at: "ended", scan, report });
+        // Lost, it may have changed the schema; refused, nothing ran.
+        if (report.unknown) onRan();
       },
     );
   };
@@ -314,21 +316,23 @@ function Running({ scan, progress, elapsed }: { scan: SqlFileScan; progress: Sql
 }
 
 /**
- * A run whose answer never came (the call itself failed): Rowkery can't say
- * what ran, what was committed or what rolled back.
+ * The report for a run whose call failed. Refused (already running,
+ * read-only, not connected…), nothing ran. Its answer lost (core stopped),
+ * Rowkery can't say what ran, what was committed or what rolled back.
  */
-export function lostRun(message: string, elapsedMs: number): SqlFileReport {
+export function failedRun(error: unknown, elapsedMs: number): SqlFileReport {
+  const lost = isLostAnswer(error);
   return {
     done: 0,
     rows: 0,
     elapsed_ms: elapsedMs,
-    failed: { line: null, statement: "", message },
+    failed: { line: null, statement: "", message: String(error) },
     errors: 1,
     first_error: null,
     cancelled: false,
-    rolled_back: false,
+    rolled_back: !lost,
     lost: 0,
-    unknown: true,
+    ...(lost && { unknown: true }),
   };
 }
 

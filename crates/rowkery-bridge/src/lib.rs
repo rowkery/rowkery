@@ -51,8 +51,8 @@ mod busy;
 mod pool;
 mod prefetch;
 mod sessions;
-pub use busy::BusyWork;
 use busy::{Busy, HoldUntilFinished, Work};
+pub use busy::{BusyWork, Held};
 use pool::{Lease, SharedPool, Slot};
 pub use prefetch::{
     APPLICATION_NAME as PREFETCH_APPLICATION_NAME, MAX_ENTRIES as PREFETCH_MAX_ENTRIES,
@@ -199,9 +199,9 @@ enum Command {
     },
     /// ⌘K "Stop all queries": every run in every window, at once.
     StopAllQueries,
-    /// Whether any tab's session may hold the user's open transaction.
-    HoldsTransaction {
-        respond_to: oneshot::Sender<bool>,
+    /// How many tabs' sessions may hold the user's open transaction.
+    CountTransactions {
+        respond_to: oneshot::Sender<Option<usize>>,
     },
     ListDatabases {
         window_id: String,
@@ -340,6 +340,11 @@ fn first_row(batches: Vec<RowBatch>) -> Option<FollowRow> {
     let row = batches.into_iter().flat_map(|b| b.rows).next()?;
     Some(FollowRow { columns, row })
 }
+
+/// The error of a call whose answer never came: core stopped (or the work
+/// died) after it may have begun, so its outcome is unknown. Every other
+/// error of a run, import or commit is a refusal: nothing ran.
+pub const LOST_ANSWER: &str = "Rowkery's core stopped before it answered";
 
 /// How a commit of staged edits ended.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -3035,12 +3040,8 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 force_stop(&state.runtime, slot);
             }
         }
-        Command::HoldsTransaction { respond_to } => {
-            let held = state
-                .pool
-                .lock()
-                .map(|p| p.holds_user_transaction())
-                .unwrap_or(true);
+        Command::CountTransactions { respond_to } => {
+            let held = state.pool.lock().ok().map(|p| p.user_transactions());
             let _ = respond_to.send(held);
         }
         Command::Prefetch {
@@ -3761,7 +3762,7 @@ impl CoreBridge {
             confirmed,
             respond_to,
         })
-        .ok_or_else(|| "core thread stopped".to_string())?
+        .ok_or_else(|| LOST_ANSWER.to_string())?
     }
 
     /// Imports a CSV file into a table (see `rowkery_core::import`): one
@@ -3782,7 +3783,7 @@ impl CoreBridge {
             progress,
             respond_to,
         })
-        .ok_or_else(|| "core thread stopped".to_string())?
+        .ok_or_else(|| LOST_ANSWER.to_string())?
     }
 
     /// Cancels the tab's query, if any, and closes its warm session.
@@ -3844,7 +3845,7 @@ impl CoreBridge {
             on_progress,
             respond_to,
         })
-        .unwrap_or_else(|| Err("Rowkery's core stopped".into()))
+        .unwrap_or_else(|| Err(LOST_ANSWER.into()))
     }
 
     pub fn cancel_window_query(&self, window_id: &str, tab_id: u64) {
@@ -3929,17 +3930,20 @@ impl CoreBridge {
         let _ = self.command_tx.send(Command::StopAllQueries);
     }
 
-    /// Whether any tab's Postgres session may hold the user's open
-    /// transaction (a restart would roll it back). True when unknown.
-    pub fn holds_transaction(&self) -> bool {
-        self.send_command(|respond_to| Command::HoldsTransaction { respond_to })
-            .unwrap_or(true)
+    /// What quitting now would cut short: tabs' open transactions, and the
+    /// writes, commits, imports and SQL file runs in flight. `unknown` when
+    /// core doesn't answer.
+    pub fn busy_work(&self) -> BusyWork {
+        let transactions = self
+            .send_command(|respond_to| Command::CountTransactions { respond_to })
+            .flatten();
+        self.busy.now(transactions)
     }
 
-    /// What quitting now would cut short: an open transaction, and the
-    /// writes, commits, imports and SQL file runs in flight.
-    pub fn busy_work(&self) -> BusyWork {
-        self.busy.now(self.holds_transaction())
+    /// Counts a commit made outside core (an agent's proposal) as running
+    /// until the guard drops, so a quit asks first.
+    pub fn hold_commit(&self) -> Held {
+        self.busy.hold(Work::Commit)
     }
 
     /// Databases on the window's server; empty for SQLite.

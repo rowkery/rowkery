@@ -648,13 +648,17 @@ export type ApplyOutcome =
   | { status: "committed"; inserted: number; updated: number; deleted: number; elapsed_ms: number }
   /** Confirm writes (`confirm`) or Read-only (`refuse`): nothing ran. */
   | { status: "held"; hold: SafetyHold; sql: string }
-  /** Nothing was kept; `index` and `statement` name the row at fault. */
+  /**
+   * Nothing was kept; `index` and `statement` name the row at fault. With
+   * `unknown`, the connection dropped during COMMIT and it may have been.
+   */
   | {
       status: "rolled_back";
       index: number | null;
       statement: string | null;
       rows: number | null;
       message: string;
+      unknown?: boolean;
       elapsed_ms: number;
     };
 

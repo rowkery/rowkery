@@ -92,7 +92,7 @@ import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
 import { showOfferToast, showToast, showUndoToast } from "./notify";
-import { commitLost, importLost } from "./runOutcome";
+import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -1116,8 +1116,10 @@ export function Workspace({
     try {
       out = await applyChanges(windowId, tab.id, table, bufferChanges(buffer), confirmed);
     } catch (e) {
+      if (!isLostAnswer(e)) return setTray(tab.id, { kind: "failed", message: String(e) });
       // No answer: the COMMIT may have gone through.
-      return setTray(tab.id, { kind: "failed", message: commitLost(String(e)), unknown: true });
+      const lost = commitLost(String(e));
+      return setTray(tab.id, { kind: "failed", message: lost.message, title: lost.title, unknown: true });
     }
     if (out.status === "held") {
       if (out.hold.action === "refuse") return setTray(tab.id, { kind: "refused", reason: "Read-only connection · Change safe mode…" }, 4000);
@@ -1126,7 +1128,7 @@ export function Workspace({
       setHeldEdits((prev) => ({ ...prev, [tab.id]: { sql: out.sql, hold: out.hold, summary: editSummary(buffer, where) } }));
       return;
     }
-    if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message });
+    if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message, unknown: out.unknown });
     // Only what was sent is done: an edit staged while it ran stays staged.
     setTabEdits(tab.id, (cur) => withoutCommitted(cur, buffer));
     const done = [
@@ -1399,6 +1401,7 @@ export function Workspace({
         onRun(() => ({ run: { rows, startedAt } })),
       );
     } catch (e) {
+      if (!isLostAnswer(e)) return failed(String(e));
       // No answer: it may or may not have committed.
       const lost = importLost(cur.table, String(e));
       return failed(lost.message, lost.toast, lost.detail);

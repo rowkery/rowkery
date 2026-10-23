@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -1145,25 +1146,36 @@ async fn busy_work(app: AppHandle) -> Result<rowkery_bridge::BusyWork, String> {
 #[cfg(target_os = "macos")]
 const QUIT_ITEM: &str = "rowkery-quit";
 
-/// Quitting (or closing the window, which quits) while work would be lost
-/// asks first, in one native dialog naming it; `then` quits.
-fn ask_before_quit(app: &AppHandle, then: impl FnOnce() + Send + 'static) {
+/// A quit dialog is showing: another ⌘Q or close waits for its answer.
+static ASKING_TO_QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Quitting (or closing the window, which quits, or restarting into an
+/// update; `verb` names which) while work would be lost asks first, in one
+/// native dialog naming it; `then` quits. A request made while the dialog
+/// is up is dropped. The Dock's Quit, logging out and an AppleScript quit
+/// don't come through here: tao has no applicationShouldTerminate hook.
+fn ask_before_quit(app: &AppHandle, verb: &'static str, then: impl FnOnce() + Send + 'static) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if ASKING_TO_QUIT.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let app = app.clone();
     // The core thread answers off the main thread, which the dialog needs free.
     thread::spawn(move || {
         let Some(warning) = app.state::<CoreBridge>().busy_work().quit_warning() else {
+            ASKING_TO_QUIT.store(false, Ordering::SeqCst);
             return then();
         };
         app.dialog()
             .message(warning)
-            .title("Quit anyway?")
+            .title(format!("{verb} Rowkery?"))
             .kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom(
-                "Quit Anyway".into(),
+                format!("{verb} Anyway"),
                 "Cancel".into(),
             ))
             .show(move |quit| {
+                ASKING_TO_QUIT.store(false, Ordering::SeqCst);
                 if quit {
                     then();
                 }
@@ -1365,7 +1377,13 @@ async fn apply_changes(
     on_blocking_pool(app, move |bridge| {
         bridge.apply_changes(&window_id, tab_id, table, changes, confirmed)
     })
-    .await?
+    .await
+    .map_err(lost_answer)?
+}
+
+/// A run, import or commit whose blocking task died: its outcome is unknown.
+fn lost_answer(error: String) -> String {
+    format!("{} ({error})", rowkery_bridge::LOST_ANSWER)
 }
 
 /// Import CSV…: the native open dialog for a .csv / .tsv file. `None` when
@@ -1429,7 +1447,8 @@ async fn import_csv(
     let done = on_blocking_pool(app.clone(), move |bridge| {
         bridge.import_csv(&id, spec, cancel, progress)
     })
-    .await;
+    .await
+    .map_err(lost_answer);
     if let Ok(mut running) = app.state::<Imports>().0.lock() {
         running.remove(&window_id);
     }
@@ -1619,9 +1638,12 @@ async fn proposal_dry_run(id: String) -> Result<rowkery_mcp::proposals::DryRun, 
 /// the row counts the user saw (`rows`, per statement).
 #[tauri::command]
 async fn proposal_commit(
+    bridge: State<'_, CoreBridge>,
     id: String,
     rows: Vec<u64>,
 ) -> Result<rowkery_mcp::proposals::CommitOutcome, String> {
+    // A quit while it commits asks first.
+    let _running = bridge.hold_commit();
     rowkery_mcp::proposals::commit(&id, &rows).await
 }
 
@@ -2031,7 +2053,7 @@ pub fn run(mut timings: Timings) {
         let id = event.id().as_ref();
         if id == QUIT_ITEM {
             let quit = app.clone();
-            return ask_before_quit(app, move || quit.exit(0));
+            return ask_before_quit(app, "Quit", move || quit.exit(0));
         }
         if menu_spec_contains(&menu_spec(), id) {
             let _ = app.emit("menu-command", id);
@@ -2053,7 +2075,7 @@ pub fn run(mut timings: Timings) {
                 api.prevent_close();
                 let app = window.app_handle().clone();
                 let window = window.clone();
-                ask_before_quit(&app, move || {
+                ask_before_quit(&app, "Quit", move || {
                     #[cfg(target_os = "macos")]
                     close_after_hiding(&window);
                     #[cfg(not(target_os = "macos"))]

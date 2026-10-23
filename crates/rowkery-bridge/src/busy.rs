@@ -38,10 +38,12 @@ impl Busy {
         self.0[work as usize].load(Ordering::SeqCst)
     }
 
-    /// What is running now; `transaction` from the pool.
-    pub fn now(&self, transaction: bool) -> BusyWork {
+    /// What is running now; `transactions` from the pool, `None` when
+    /// core can't say.
+    pub fn now(&self, transactions: Option<usize>) -> BusyWork {
         BusyWork {
-            transaction,
+            unknown: transactions.is_none(),
+            transactions: transactions.unwrap_or(0),
             writes: self.count(Work::Write),
             commits: self.count(Work::Commit),
             imports: self.count(Work::Import),
@@ -51,7 +53,7 @@ impl Busy {
 }
 
 /// One running piece of work; it stops counting when dropped.
-pub(crate) struct Held {
+pub struct Held {
     busy: Arc<Busy>,
     work: Work,
 }
@@ -62,8 +64,7 @@ impl Drop for Held {
     }
 }
 
-/// A write's events, passed on; it counts as running until it finishes (or
-/// safe mode holds it).
+/// A write's events, passed on; it counts as running until it finishes.
 pub(crate) struct HoldUntilFinished {
     pub inner: SharedSink,
     pub held: Mutex<Option<Held>>,
@@ -71,10 +72,7 @@ pub(crate) struct HoldUntilFinished {
 
 impl EventSink for HoldUntilFinished {
     fn push(&self, event: CoreEvent) {
-        let ended = matches!(
-            event,
-            CoreEvent::QueryFinished { .. } | CoreEvent::QueryHeld { .. }
-        );
+        let ended = matches!(event, CoreEvent::QueryFinished { .. });
         self.inner.push(event);
         if ended {
             if let Ok(mut held) = self.held.lock() {
@@ -87,8 +85,10 @@ impl EventSink for HoldUntilFinished {
 /// What quitting now would cut short.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct BusyWork {
-    /// A query tab may hold the user's open transaction.
-    pub transaction: bool,
+    /// Core didn't answer, so Rowkery can't tell what is running.
+    pub unknown: bool,
+    /// Query tabs that may hold the user's open transaction.
+    pub transactions: usize,
     pub writes: usize,
     pub commits: usize,
     pub imports: usize,
@@ -100,42 +100,54 @@ impl BusyWork {
         *self == Self::default()
     }
 
-    /// The quit dialog's text, naming what would be lost; `None` when
-    /// nothing would be.
+    /// The quit dialog's text, one line per kind of work and what quitting
+    /// does to it; `None` when nothing would be lost.
     pub fn quit_warning(&self) -> Option<String> {
-        let mut lost = Vec::new();
-        if self.transaction {
-            lost.push("a query tab's open transaction (rolled back)".to_string());
+        let mut lines = Vec::new();
+        if self.unknown {
+            lines.push("Rowkery can't tell whether work is running.".to_string());
         }
-        let mut say = |n: usize, one: &str, many: &str, what: &str| match n {
+        let mut say = |n: usize, one: &str, many: &str, then_one: &str, then_many: &str| match n {
             0 => {}
-            1 => lost.push(format!("{one} ({what})")),
-            n => lost.push(format!("{n} {many} ({what})")),
+            1 => lines.push(format!("{one} {then_one}")),
+            n => lines.push(format!("{n} {many} {then_many}")),
         };
         say(
+            self.transactions,
+            "A query tab has an open transaction.",
+            "query tabs have open transactions.",
+            "It is rolled back.",
+            "They are rolled back.",
+        );
+        say(
             self.commits,
-            "a commit of staged edits",
-            "commits of staged edits",
-            "may or may not be saved",
+            "A commit of staged edits is running.",
+            "commits of staged edits are running.",
+            "It may or may not be saved.",
+            "They may or may not be saved.",
         );
         say(
             self.writes,
-            "a running write",
-            "running writes",
-            "may still finish on the server",
+            "A query tab is running a write.",
+            "query tabs are running writes.",
+            "It may still finish on the server.",
+            "They may still finish on the server.",
         );
-        say(self.imports, "a CSV import", "CSV imports", "rolled back");
+        say(
+            self.imports,
+            "A CSV import is running.",
+            "CSV imports are running.",
+            "It is rolled back.",
+            "They are rolled back.",
+        );
         say(
             self.sql_files,
-            "a SQL file run",
-            "SQL file runs",
-            "what isn't committed yet is rolled back",
+            "A SQL file is running.",
+            "SQL files are running.",
+            "What it hasn't committed is rolled back.",
+            "What they haven't committed is rolled back.",
         );
-        match lost.as_slice() {
-            [] => None,
-            [one] => Some(format!("Quitting now ends {one}.")),
-            [rest @ .., last] => Some(format!("Quitting now ends {} and {last}.", rest.join(", "))),
-        }
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 }
 
@@ -152,15 +164,15 @@ mod tests {
     #[test]
     fn the_warning_names_what_would_be_lost() {
         let txn = BusyWork {
-            transaction: true,
+            transactions: 1,
             ..BusyWork::default()
         };
         assert_eq!(
             txn.quit_warning().as_deref(),
-            Some("Quitting now ends a query tab's open transaction (rolled back).")
+            Some("A query tab has an open transaction. It is rolled back.")
         );
         let more = BusyWork {
-            transaction: true,
+            transactions: 3,
             imports: 1,
             sql_files: 2,
             ..BusyWork::default()
@@ -169,10 +181,22 @@ mod tests {
         assert_eq!(
             more.quit_warning().as_deref(),
             Some(
-                "Quitting now ends a query tab's open transaction (rolled back), \
-                 a CSV import (rolled back) and 2 SQL file runs (what isn't \
-                 committed yet is rolled back)."
+                "3 query tabs have open transactions. They are rolled back.\n\
+                 A CSV import is running. It is rolled back.\n\
+                 2 SQL files are running. What they haven't committed is rolled back."
             )
+        );
+    }
+
+    #[test]
+    fn not_knowing_says_so_instead_of_naming_a_transaction() {
+        let busy = Busy::default();
+        let work = busy.now(None);
+        assert!(!work.is_idle());
+        assert_eq!(work.transactions, 0);
+        assert_eq!(
+            work.quit_warning().as_deref(),
+            Some("Rowkery can't tell whether work is running.")
         );
     }
 
@@ -181,9 +205,9 @@ mod tests {
         let busy = Arc::new(Busy::default());
         let held = busy.hold(Work::Commit);
         let other = busy.hold(Work::Commit);
-        assert_eq!(busy.now(false).commits, 2);
+        assert_eq!(busy.now(Some(0)).commits, 2);
         drop(held);
         drop(other);
-        assert!(busy.now(false).is_idle());
+        assert!(busy.now(Some(0)).is_idle());
     }
 }

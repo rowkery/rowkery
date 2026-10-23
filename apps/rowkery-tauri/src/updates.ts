@@ -225,7 +225,10 @@ export function idleEnough(o: { now: number; lastInput: number; focused: boolean
 
 /** What a restart would cut short (core `BusyWork`). */
 export interface BusyWork {
-  transaction: boolean;
+  /** Core didn't answer. */
+  unknown: boolean;
+  /** Query tabs that may hold an open transaction. */
+  transactions: number;
   writes: number;
   commits: number;
   imports: number;
@@ -235,7 +238,13 @@ export interface BusyWork {
 /** Nothing a restart would cut short; not knowing counts as something. */
 export function losesNothing(work: BusyWork | null): boolean {
   return (
-    !!work && !work.transaction && work.writes === 0 && work.commits === 0 && work.imports === 0 && work.sql_files === 0
+    !!work &&
+    !work.unknown &&
+    work.transactions === 0 &&
+    work.writes === 0 &&
+    work.commits === 0 &&
+    work.imports === 0 &&
+    work.sql_files === 0
   );
 }
 
