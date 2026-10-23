@@ -134,3 +134,26 @@ export function toastPreview(text: string, max = 48): string {
   const line = text.replace(/\s+/g, " ").trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
+
+/** At most one "went wrong" toast in this long; every one is still logged. */
+const STRAY_ERROR_QUIET_MS = 10_000;
+let lastStrayToast = -Infinity;
+
+/**
+ * A promise nobody waited on failed: says so in one toast, then stays quiet
+ * for a while, so a failing loop can't flood the screen. Returns whether it
+ * toasted.
+ */
+export function toastStrayError(reason: unknown, now = performance.now()): boolean {
+  console.error("Rowkery: unhandled rejection", reason);
+  if (now - lastStrayToast < STRAY_ERROR_QUIET_MS) return false;
+  lastStrayToast = now;
+  const detail = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : undefined;
+  showToast("Something went wrong", detail ? toastPreview(detail, 120) : undefined, "error");
+  return true;
+}
+
+/** Toasts unhandled promise rejections (`toastStrayError`) instead of dropping them. */
+export function installStrayErrorToast() {
+  window.addEventListener("unhandledrejection", (e) => toastStrayError(e.reason));
+}

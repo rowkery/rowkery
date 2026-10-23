@@ -12,6 +12,7 @@ import {
   browseTableSql,
   cancelCount,
   chooseFile,
+  abandonRun,
   cancelQuery,
   countRows,
   stopAllQueries,
@@ -222,6 +223,8 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 
 /** How long a confirmation such as "Copied 100 rows" stays in the results header. */
 const NOTICE_MS = 2400;
+/** Force stop: how long core's stop has to report back before the tab lets the run go. */
+const FORCE_STOP_GRACE_MS = 2000;
 
 const PALETTE_EMPTY_GROUPS: PaletteGroup[] = [
   "queries",
@@ -1995,16 +1998,19 @@ export function Workspace({
 
   // Cancel asks the server; pressed again (Force stop, or Esc twice) core
   // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel.
+  // a dead connection never answers a cancel. A run whose end never reaches
+  // the tab even then is let go, so the tab is never stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
+    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
     patchRun(tabId, { cancelling: true });
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
       flash(String(e));
     }
+    if (giveUp) setTimeout(() => giveUp("The query stopped answering, so Rowkery let it go"), FORCE_STOP_GRACE_MS);
   };
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
@@ -4274,7 +4280,10 @@ export function Workspace({
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
           ) : isImportTab ? (
-            <RenderErrorBoundary fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}>
+            <RenderErrorBoundary
+              resetKeys={[importResult]}
+              fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
+            >
               <ResultsGrid
                 result={importResult}
                 importRows={importPreview}
@@ -4473,6 +4482,7 @@ export function Workspace({
                 />
               ) : (
                 <RenderErrorBoundary
+                  resetKeys={[activeTabId, shownResult]}
                   fallback={(err) => (
                     <div className="results-error">
                       {err.message || String(err)}
@@ -4594,6 +4604,10 @@ export function Workspace({
           data-review-sql={inspectorKind === "review" ? "" : undefined}
           data-deleted={inspectorKind === "quicklook" && qlView?.edit?.mark === "delete" ? "" : undefined}
         >
+          <RenderErrorBoundary
+            resetKeys={[inspectorKind, activeTabId]}
+            fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
+          >
           {inspectorKind === "sqlfile" && sqlFile ? (
             <SqlFilePanel
               key={sqlFile.path}
@@ -4666,6 +4680,7 @@ export function Workspace({
               onToggleDelete={isTableTab ? qlView.toggleDelete : undefined}
             />
           ) : null}
+          </RenderErrorBoundary>
         </Inspector>
       </Presence>
       {active && (
@@ -4708,14 +4723,23 @@ export function Workspace({
         />
       )}
       {active && (
-        <CommandPalette
-          open={paletteOpen}
-          onClose={closePalette}
-          groups={paletteGroups}
-          emptyGroups={PALETTE_EMPTY_GROUPS}
-          connectionName={connected ? (activeConnection?.name ?? null) : null}
-          onPick={onPalettePick}
-        />
+        <RenderErrorBoundary
+          resetKeys={[paletteOpen]}
+          fallback={() => null}
+          onError={(err) => {
+            closePalette();
+            showToast("Couldn't show the command palette", err.message || String(err), "error");
+          }}
+        >
+          <CommandPalette
+            open={paletteOpen}
+            onClose={closePalette}
+            groups={paletteGroups}
+            emptyGroups={PALETTE_EMPTY_GROUPS}
+            connectionName={connected ? (activeConnection?.name ?? null) : null}
+            onPick={onPalettePick}
+          />
+        </RenderErrorBoundary>
       )}
       <Presence open={timingsOpen && active}>
         {timingsOpen && active && (
