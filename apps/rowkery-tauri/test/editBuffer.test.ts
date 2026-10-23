@@ -142,6 +142,44 @@ describe("typed input", () => {
     expect(parsePaste("a\tb\r\nc\td\n")).toEqual([["a", "b"], ["c", "d"]]);
     expect(parsePaste("one\ntwo")).toEqual([["one"], ["two"]]);
   });
+
+  test("quoted TSV keeps line breaks, tabs and quotes in one cell", () => {
+    expect(parsePaste('"Kuala\nLumpur"\tx\n"a\tb"\t"say ""hi"""\n')).toEqual([
+      ["Kuala\nLumpur", "x"],
+      ["a\tb", 'say "hi"'],
+    ]);
+    expect(parsePaste("a\t\nb\tc")).toEqual([["a", ""], ["b", "c"]]);
+    // A stray quote isn't a quoted field: split on tabs as is.
+    expect(parsePaste('5" pipe\tx')).toEqual([['5" pipe', "x"]]);
+  });
+
+  test("a bad quote is taken literally and leaves the rest of the block alone", () => {
+    // Excel's unquoted `"Best" seller` beside a quoted multi-line cell.
+    expect(parsePaste('"Best" seller\t"a\nb"\nx\ty')).toEqual([['"Best" seller', "a\nb"], ["x", "y"]]);
+    // An unquoted field starting with a quote doesn't swallow the cells after it.
+    expect(parsePaste('"open\tb\tc\nd\te\tf')).toEqual([['"open', "b", "c"], ["d", "e", "f"]]);
+    // A lone quoted word keeps its quotes, so a JSON string pastes as it is.
+    expect(parsePaste('"hello"')).toEqual([['"hello"']]);
+    expect(parsePaste('"hello"\t{"a": 1}')).toEqual([['"hello"', '{"a": 1}']]);
+  });
+
+  test("a line with commas is one value", () => {
+    for (const v of ["12 Jalan Ampang, Kuala Lumpur", "3,14", "[1, 2, 3]", '{"a": 1, "b": 2}', '"x","y"']) {
+      expect(parsePaste(v)).toEqual([[v]]);
+    }
+    expect(parsePaste("Hopper, Grace\nTuring, Alan")).toEqual([["Hopper, Grace"], ["Turing, Alan"]]);
+  });
+
+  test("CSV only with several lines, a quoted field and the same fields on each", () => {
+    expect(parsePaste('a,b\n"c,d","e\nf"')).toEqual([["a", "b"], ["c,d", "e\nf"]]);
+    expect(parsePaste('a,b,c\n"c,d"')).toEqual([["a,b,c"], ['"c,d"']]);
+    expect(parsePaste("a,b\nc,d")).toEqual([["a,b"], ["c,d"]]);
+  });
+
+  test("one column: a value per line, a quoted one keeps its line break", () => {
+    expect(parsePaste('"two\nlines"\nNULL\n')).toEqual([["two\nlines"], ["NULL"]]);
+    expect(parsePaste("")).toEqual([[""]]);
+  });
 });
 
 describe("a value closed as it opened stages nothing", () => {

@@ -394,8 +394,69 @@ export function editorStartText(kind: EditorKind, initial: Value | null): string
   return kind === "json" ? jsonEditorText(raw) : raw;
 }
 
-/** A pasted block: TSV when it has tabs, else one value per line. */
+/**
+ * Rows of fields split on `sep`. A field is quoted only when it opens with a quote, closes at a
+ * field or line boundary and needed the quotes (a `sep`, line break or `""` inside); anything
+ * else, like Excel's `"Best" seller` or a lone `"hello"`, is taken as it is.
+ */
+function splitQuoted(text: string, sep: string): { rows: string[][]; quoted: boolean } {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let quoted = false;
+  let i = 0;
+  const boundary = (at: number) => at >= text.length || text[at] === sep || text[at] === "\n";
+  for (;;) {
+    let field: string | null = null;
+    if (text[i] === '"') {
+      let j = i + 1;
+      let inner = "";
+      let escaped = false;
+      for (;;) {
+        const q = text.indexOf('"', j);
+        if (q < 0) break;
+        inner += text.slice(j, q);
+        if (text[q + 1] === '"') {
+          inner += '"';
+          escaped = true;
+          j = q + 2;
+          continue;
+        }
+        if (boundary(q + 1) && (escaped || inner.includes(sep) || inner.includes("\n"))) {
+          field = inner;
+          i = q + 1;
+          quoted = true;
+        }
+        break;
+      }
+    }
+    if (field === null) {
+      let end = i;
+      while (!boundary(end)) end++;
+      field = text.slice(i, end);
+      i = end;
+    }
+    row.push(field);
+    if (i >= text.length) break;
+    if (text[i] === "\n") {
+      rows.push(row);
+      row = [];
+    }
+    i++;
+  }
+  rows.push(row);
+  return { rows, quoted };
+}
+
+/**
+ * A pasted block: TSV, which with no tabs is one value per line. Only text with no tabs, several
+ * lines, a quoted field and the same two or more fields on every line is read as CSV.
+ */
 export function parsePaste(text: string): string[][] {
-  const lines = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
-  return lines.map((l) => (l.includes("\t") ? l.split("\t") : [l]));
+  const t = text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+  if (!t.includes("\t") && t.includes("\n") && t.includes('"') && t.includes(",")) {
+    const csv = splitQuoted(t, ",");
+    const n = csv.rows[0].length;
+    if (csv.quoted && csv.rows.length > 1 && n > 1 && csv.rows.every((r) => r.length === n)) return csv.rows;
+  }
+  return splitQuoted(t, "\t").rows;
 }
