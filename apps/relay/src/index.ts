@@ -7,7 +7,7 @@ export interface Env {
   GITHUB_TOKEN: string;
   /** "owner/name" that reports are filed in (private), set in wrangler.toml. */
   GITHUB_REPO: string;
-  /** Optional Cloudflare rate limiting binding, keyed by client IP. */
+  /** Cloudflare rate limiting binding, keyed by client IP. Without it the relay refuses reports. */
   REPORT_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
 }
 
@@ -36,17 +36,35 @@ const KINDS: Record<Kind, { label: string; name: string }> = {
 export const MAX_BODY_BYTES = 20_000;
 const LABEL = "user-report";
 
-const CORS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "POST, OPTIONS",
-  "access-control-allow-headers": "content-type",
-  "access-control-max-age": "86400",
-};
+/**
+ * The app's own webview origins (Tauri 2 without useHttpsScheme): macOS, then
+ * Windows/Linux, then `npm run tauri dev` (devUrl in tauri.conf.json, and dev
+ * builds read the report URL from .env too). Any other website gets no CORS
+ * headers and a 403, so it can't make its visitors' browsers file reports.
+ * Requests with no Origin (curl) aren't a browser; the rate limit covers them.
+ */
+export const APP_ORIGINS = new Set([
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+  "http://localhost:1420",
+]);
 
-function json(status: number, body: unknown): Response {
+function cors(origin: string | null): Record<string, string> {
+  if (!origin || !APP_ORIGINS.has(origin)) return {};
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "access-control-max-age": "86400",
+    vary: "origin",
+  };
+}
+
+function reply(status: number, body: unknown, origin: string | null = null): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", ...CORS },
+    headers: { "content-type": "application/json", ...cors(origin) },
   });
 }
 
@@ -124,14 +142,26 @@ async function createIssue(env: Env, issue: { title: string; body: string; label
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    const origin = request.headers.get("origin");
+    const foreign = origin !== null && !APP_ORIGINS.has(origin);
+    if (request.method === "OPTIONS") return new Response(null, { status: foreign ? 403 : 204, headers: cors(origin) });
+    const json = (status: number, body: unknown) => reply(status, body, origin);
     const url = new URL(request.url);
     // The root also takes reports, so a build whose report URL left off /report still works.
     if (url.pathname !== "/report" && url.pathname !== "/") return json(404, { ok: false, error: "Not found" });
     if (request.method !== "POST") return json(405, { ok: false, error: "Use POST" });
 
-    const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-    if (env.REPORT_LIMITER && !(await env.REPORT_LIMITER.limit({ key: ip })).success) {
+    if (foreign) return json(403, { ok: false, error: "Reports come from the Rowkery app" });
+
+    // Fail closed: without a limiter, or a client IP to key it by, anyone could
+    // file reports without limit (or share one bucket with everyone else).
+    if (!env.REPORT_LIMITER) {
+      console.error("REPORT_LIMITER binding is missing");
+      return json(503, { ok: false, error: "Reporting is unavailable right now" });
+    }
+    const ip = request.headers.get("cf-connecting-ip");
+    if (!ip) return json(400, { ok: false, error: "Missing client address" });
+    if (!(await env.REPORT_LIMITER.limit({ key: ip })).success) {
       return json(429, { ok: false, error: "Too many reports, try again in a minute" });
     }
 
