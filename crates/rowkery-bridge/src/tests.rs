@@ -2318,14 +2318,24 @@ fn sqlite_tabs_keep_their_connection_between_runs() {
     assert_eq!(count(1), Some(Value::Int(30)));
     assert!(run(1, "SELECT count(*) FROM scratch").1.is_some());
 
-    // Re-pointing the window does too.
+    // Re-pointing the window, or a new safe mode, would too: both are
+    // refused while it's open, as on Postgres, and it stays as it was.
     run(1, "BEGIN");
     run(1, "DELETE FROM orders");
+    assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 1)]);
+    let refused = bridge
+        .open_window("w1", "cancel-sqlite", None)
+        .expect_err("refused");
+    assert_eq!(refused, super::REPOINT_IN_TXN);
+    let refused = set_safe_mode(&bridge, "cancel-sqlite", SafeMode::Confirm).expect_err("refused");
+    assert!(refused.contains("transaction open"), "{refused}");
+    assert_eq!(count(1), Some(Value::Int(0)));
+    assert!(run(1, "ROLLBACK").1.is_none(), "the transaction was kept");
+    assert!(bridge.open_transactions().is_empty());
     bridge
         .open_window("w1", "cancel-sqlite", None)
         .expect("reopen");
     assert_eq!(count(1), Some(Value::Int(30)));
-    assert!(run(1, "ROLLBACK").1.is_some(), "no transaction is open");
 
     // With none open, edits save on the tab's connection.
     let out = bridge
@@ -2433,36 +2443,21 @@ fn sqlite_says_when_a_run_rolled_back_the_tabs_transaction() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
-/// Switching a SQLite connection to Read-only drops its tabs' connections,
-/// as Postgres resets its sessions: a later COMMIT can't write what the
-/// tab deleted before (`query_only` doesn't refuse COMMIT).
+/// A SQLite connection doesn't switch to Read-only under a tab's open
+/// transaction, as on Postgres: the change is refused, so a later COMMIT
+/// can't write under Read-only what the tab deleted before (`query_only`
+/// doesn't refuse COMMIT). Once it ends, the switch goes through.
 #[test]
-fn sqlite_read_only_ends_an_open_transaction() {
+fn sqlite_read_only_waits_for_an_open_transaction() {
     let (_guard, _file, path, bridge) = sqlite_orders();
     let run = |sql: &str| window_query(&bridge, "w1", 1, sql);
     run("BEGIN");
     assert_eq!(run("DELETE FROM orders").4, Some(30));
-    CoreBridge::upsert_connection(
-        &bridge,
-        ConnectionRecord::Sqlite(SqliteConnection {
-            environment: None,
-            safe_mode: SafeMode::ReadOnly,
-            allow_mcp: false,
-            mcp_hidden_tables: Vec::new(),
-            mcp_until: None,
-            mcp_samples_off: false,
-            mcp_access: None,
-            masked_columns: Default::default(),
-            id: "cancel-sqlite".into(),
-            name: "cancel".into(),
-            path: path.clone(),
-            sample: false,
-        }),
-        ConnectionSecrets::default(),
-    )
-    .expect("save");
-    assert!(run("COMMIT").1.is_some(), "no transaction is open");
+    let refused = set_safe_mode(&bridge, "cancel-sqlite", SafeMode::ReadOnly).expect_err("refused");
+    assert_eq!(refused, super::SAFE_MODE_IN_TXN);
+    assert!(run("ROLLBACK").1.is_none(), "the transaction was kept");
     assert_eq!(orders_on_disk(&path), 30);
+    set_safe_mode(&bridge, "cancel-sqlite", SafeMode::ReadOnly).expect("none open");
     assert_eq!(run("SELECT count(*) FROM orders").0, Some(Value::Int(30)));
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
@@ -5422,8 +5417,9 @@ fn set_safe_mode(bridge: &super::CoreBridge, id: &str, mode: SafeMode) -> Result
         .into_iter()
         .find(|c| c.id() == id)
         .expect("saved");
-    if let ConnectionRecord::Postgres(pg) = &mut record {
-        pg.safe_mode = mode;
+    match &mut record {
+        ConnectionRecord::Postgres(pg) => pg.safe_mode = mode,
+        ConnectionRecord::Sqlite(lite) => lite.safe_mode = mode,
     }
     CoreBridge::upsert_connection(bridge, record, ConnectionSecrets::default())
         .map_err(|e| e.to_string())
