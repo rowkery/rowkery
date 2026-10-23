@@ -102,6 +102,10 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'NaN'::numeric",
         "(-7)::int2",
         "1.5::float4",
+        // Every digit survives: no trip through an f64.
+        r#"'{"id": 9007199254740993, "amount": 0.1000000000000000055}'::jsonb"#,
+        r#"'{"id":9007199254740993,  "amount":0.1000000000000000055}'::json"#,
+        "'<a b=\"1\">x</a>'::xml",
     ];
     for expr in cases {
         let sql = format!("SELECT {expr} AS v, ({expr})::text AS t");
