@@ -334,7 +334,7 @@ pub fn scan_sql(sql: &str) -> Scan {
 }
 
 /// Plan keys whose values are names, not expressions.
-const NAME_KEYS: &[&str] = &[
+pub(crate) const NAME_KEYS: &[&str] = &[
     "Node Type",
     "Relation Name",
     "Schema",
@@ -416,13 +416,7 @@ fn core(schema: &str) -> bool {
 /// name goes in as hex, so nothing in it is read as SQL.
 pub fn facts_sql(names: &[String], operators: &[String]) -> String {
     fn list(items: &[String]) -> String {
-        let hex: Vec<String> = items
-            .iter()
-            .map(|s| {
-                let h: String = s.bytes().map(|b| format!("{b:02x}")).collect();
-                format!("convert_from(decode('{h}', 'hex'), 'UTF8')")
-            })
-            .collect();
+        let hex: Vec<String> = items.iter().map(|s| text_literal(s)).collect();
         format!("ARRAY[{}]::text[]", hex.join(", "))
     }
     format!(
@@ -465,6 +459,12 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
         names = list(names),
         ops = list(operators),
     )
+}
+
+/// `text` as a SQL text value, written in hex so nothing in it is read as SQL.
+pub fn text_literal(text: &str) -> String {
+    let h: String = text.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("convert_from(decode('{h}', 'hex'), 'UTF8')")
 }
 
 /// [`Facts`] from the rows of [`facts_sql`], each five or six text cells.
