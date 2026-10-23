@@ -2462,6 +2462,43 @@ fn sqlite_read_only_waits_for_an_open_transaction() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A tab running a read inside its open transaction still counts as
+/// holding it: a re-point or a safe mode change is refused until it ends,
+/// and the transaction is kept. A read outside one doesn't count.
+#[test]
+fn sqlite_a_running_tab_keeps_its_transaction() {
+    let (_guard, _file, path, bridge) = sqlite_orders();
+    let run = |tab: u64, sql: &str| window_query(&bridge, "w1", tab, sql);
+    let wait_running = || thread::sleep(Duration::from_millis(300));
+
+    let queue = bridge
+        .run_window_query("w1", 2, SLOW_SQLITE.into(), None, false)
+        .expect("run");
+    wait_running();
+    assert!(bridge.open_transactions().is_empty(), "a read outside one");
+    bridge.cancel_window_query("w1", 2);
+    wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
+
+    run(1, "BEGIN");
+    assert_eq!(run(1, "DELETE FROM orders").4, Some(30));
+    let queue = bridge
+        .run_window_query("w1", 1, SLOW_SQLITE.into(), None, false)
+        .expect("run");
+    wait_running();
+    assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 1)]);
+    let refused = bridge
+        .open_window("w1", "cancel-sqlite", None)
+        .expect_err("refused");
+    assert_eq!(refused, super::REPOINT_IN_TXN);
+    let refused = set_safe_mode(&bridge, "cancel-sqlite", SafeMode::ReadOnly).expect_err("refused");
+    assert_eq!(refused, super::SAFE_MODE_IN_TXN);
+    bridge.cancel_window_query("w1", 1);
+    wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
+    assert!(run(1, "ROLLBACK").1.is_none(), "the transaction was kept");
+    assert_eq!(orders_on_disk(&path), 30);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// A write that waits out another tab's transaction says which tab holds
 /// it, and a file replaced under a tab's open transaction refuses the
 /// tab's next run instead of writing to the deleted copy.

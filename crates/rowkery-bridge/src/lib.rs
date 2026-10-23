@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -812,6 +812,9 @@ struct SqliteTabs {
     open: HashMap<(String, u64), SqliteCursor>,
     /// By tab, with the path it was opened for.
     conns: HashMap<(String, u64), (String, TabConn)>,
+    /// Tabs whose latest run started inside a transaction or may open one:
+    /// while it runs, its connection can't be asked.
+    run_at_risk: HashSet<(String, u64)>,
 }
 
 type SharedSqliteTabs = Arc<Mutex<SqliteTabs>>;
@@ -845,18 +848,20 @@ impl SqliteTabs {
         })
     }
 
-    /// The window's tabs whose idle connection holds an open transaction,
-    /// which closing the connection would roll back (one out running
-    /// something isn't asked, as above).
+    /// The window's tabs whose connection may hold an open transaction,
+    /// which closing the connection would roll back: an idle one that holds
+    /// one, or one out on a run that started inside one or may open one.
     fn window_transactions(&self, window_id: &str) -> Vec<u64> {
         let mut tabs: Vec<u64> = self
             .conns
             .iter()
-            .filter(|((w, _), (_, conn))| {
-                w == window_id
-                    && conn
-                        .try_lock()
-                        .is_ok_and(|d| d.as_ref().is_some_and(SqliteDriver::in_transaction))
+            .filter(|(key, (_, conn))| {
+                key.0 == window_id
+                    && match conn.try_lock() {
+                        Ok(d) => d.as_ref().is_some_and(SqliteDriver::in_transaction),
+                        Err(std::sync::TryLockError::WouldBlock) => self.run_at_risk.contains(*key),
+                        Err(std::sync::TryLockError::Poisoned(_)) => false,
+                    }
             })
             .map(|((_, tab), _)| *tab)
             .collect();
@@ -988,6 +993,18 @@ impl SqliteTab {
         }
     }
 
+    /// Notes whether the run that now holds the tab's connection started
+    /// inside a transaction or may open one (`window_transactions`).
+    fn note_run(&self, at_risk: bool) {
+        if let Ok(mut tabs) = self.tabs.lock() {
+            if at_risk {
+                tabs.run_at_risk.insert(self.key.clone());
+            } else {
+                tabs.run_at_risk.remove(&self.key);
+            }
+        }
+    }
+
     /// Replaces a bare `SQLITE_LOCKED` with which tab holds the lock, when
     /// another tab's open transaction is why.
     fn explain_locked(&self, path: &str, message: &mut String) {
@@ -1086,6 +1103,7 @@ fn run_sqlite_query_worker(
         let driver = ready_tab(&mut held, &db_path, read_only).map_err(|e| e.to_string())?;
         // A cancel or an error inside a write can end the tab's transaction.
         let in_transaction = driver.in_transaction();
+        tab.note_run(in_transaction || !reads_only(&sql));
         if let Some(handle) = driver.interrupt_handle() {
             if !arm_cancel(&interrupt_slot, CancelHandle::Sqlite(handle)) {
                 return Ok(QueryOutcome::cancelled(0));
@@ -2769,17 +2787,19 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     .connections
                     .iter()
                     .any(|c| c.id() == id && c.safe_mode() != mode);
-                // One lock for the check and the resets: nothing opens a
-                // transaction in between.
+                // One lock each for the check and the resets: nothing opens
+                // a transaction in between.
                 let mut pool = state.pool.lock().ok();
+                let mut sqlite_tabs = state.sqlite_tabs.lock().ok();
                 let held = state.windows.iter().any(|(w, target)| match target {
                     WindowTarget::Postgres { connection_id, .. } if *connection_id == id => pool
                         .as_ref()
                         .is_some_and(|p| !p.open_transactions(w).is_empty()),
-                    WindowTarget::Sqlite { connection_id, .. } if *connection_id == id => state
-                        .sqlite_tabs
-                        .lock()
-                        .is_ok_and(|t| !t.window_transactions(w).is_empty()),
+                    WindowTarget::Sqlite { connection_id, .. } if *connection_id == id => {
+                        sqlite_tabs
+                            .as_ref()
+                            .is_some_and(|t| !t.window_transactions(w).is_empty())
+                    }
                     _ => false,
                 });
                 if changes_mode && held {
@@ -2795,7 +2815,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             ..
                         } if *connection_id == id && *safe_mode != mode => {
                             *safe_mode = mode;
-                            if let Ok(mut tabs) = state.sqlite_tabs.lock() {
+                            if let Some(tabs) = sqlite_tabs.as_mut() {
                                 closing.extend(tabs.drop_window_conns(window_id));
                             }
                         }
@@ -2813,6 +2833,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 }
                 // The sessions close outside the lock.
                 drop(pool);
+                drop(sqlite_tabs);
                 drop(stale);
                 drop_conns(closing);
                 state.config.upsert_connection(connection);
