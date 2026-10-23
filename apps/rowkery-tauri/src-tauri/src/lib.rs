@@ -756,6 +756,9 @@ enum ExportFrame {
 
 type ExportDone<W> = Box<dyn FnOnce(W) -> Result<(), String> + Send>;
 
+/// Cancels the run that feeds a sink (its tab's query).
+type ExportStop = Box<dyn FnOnce() + Send>;
+
 /// Writes a run's batches straight into an `ExportWriter` (a file, or memory
 /// for the clipboard), reporting progress; nothing reaches the webview but
 /// counts.
@@ -770,6 +773,10 @@ struct ExportState<W: std::io::Write + Send> {
     error: Option<String>,
     last_progress: std::time::Instant,
     done: Option<ExportDone<W>>,
+    /// Called once, on the first write that fails (Copy all past its cap,
+    /// a full disk): nothing more can be written, so the run stops instead
+    /// of reading to its end with the count frozen.
+    stop: Option<ExportStop>,
 }
 
 impl<W: std::io::Write + Send> ExportSink<W> {
@@ -778,6 +785,7 @@ impl<W: std::io::Write + Send> ExportSink<W> {
         writer: rowkery_core::export::ExportWriter<W>,
         path: Option<String>,
         done: ExportDone<W>,
+        stop: ExportStop,
     ) -> Self {
         Self {
             channel,
@@ -787,6 +795,7 @@ impl<W: std::io::Write + Send> ExportSink<W> {
                 error: None,
                 last_progress: std::time::Instant::now(),
                 done: Some(done),
+                stop: Some(stop),
             }),
         }
     }
@@ -826,6 +835,9 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
                 let rows = writer.rows_written();
                 if let Err(e) = written {
                     st.error = Some(self.write_error(e));
+                    if let Some(stop) = st.stop.take() {
+                        stop();
+                    }
                 } else if st.last_progress.elapsed() >= Duration::from_millis(100) {
                     st.last_progress = std::time::Instant::now();
                     self.send(&ExportFrame::Progress { rows });
@@ -835,6 +847,9 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
                 error, cancelled, ..
             } => {
                 let rows = st.writer.as_ref().map_or(0, |w| w.rows_written());
+                // A run this sink stopped ends cancelled, but it failed: say
+                // why, not "cancelled".
+                let cancelled = cancelled && st.error.is_none();
                 let mut error = st.error.take().or(error.filter(|_| !cancelled));
                 if let (Some(writer), Some(done)) = (st.writer.take(), st.done.take()) {
                     if error.is_none() && !cancelled {
@@ -857,6 +872,17 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
             _ => {}
         }
     }
+}
+
+/// An export sink's `stop`: cancels the tab's run (it only queues the
+/// cancel, so a sink may call it while core is pushing to it).
+fn stop_tab_run(app: &AppHandle, window_id: &str, tab_id: u64) -> ExportStop {
+    let app = app.clone();
+    let window_id = window_id.to_string();
+    Box::new(move || {
+        app.state::<CoreBridge>()
+            .cancel_window_query(&window_id, tab_id)
+    })
 }
 
 /// The save dialog's suggested name, without characters a file name can't hold.
@@ -941,6 +967,7 @@ async fn export_results(
         writer,
         Some(path_text),
         Box::new(|_| Ok(())),
+        stop_tab_run(&app, &window_id, tab_id),
     ));
     on_blocking_pool(app, move |bridge| {
         bridge.run_window_export_to(&window_id, tab_id, sql, sink)
@@ -949,9 +976,9 @@ async fn export_results(
     .map(Some)
 }
 
-/// The most Copy all results holds in memory. Past it the copy fails and
-/// says to export instead: the text is held twice at the end (here and in
-/// the clipboard), and a pasteboard that size helps no one.
+/// The most Copy all results holds in memory (100 MiB). Past it the copy
+/// stops its run and says to export instead: the text is held twice at the
+/// end (here and in the clipboard), and a pasteboard that size helps no one.
 const CLIPBOARD_MAX_BYTES: usize = 100 * 1024 * 1024;
 
 /// Copy all results' text as it is written, refusing to grow past
@@ -963,7 +990,7 @@ impl std::io::Write for ClipboardBuf {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if self.0.len() + buf.len() > CLIPBOARD_MAX_BYTES {
             return Err(std::io::Error::other(format!(
-                "The result is over {} MB; use Export… to write it to a file",
+                "The result is over {} MiB; use Export… to write it to a file",
                 CLIPBOARD_MAX_BYTES / (1024 * 1024)
             )));
         }
@@ -996,6 +1023,7 @@ async fn copy_all_results(
     };
     let writer = rowkery_core::export::ExportWriter::new(ClipboardBuf::default(), format);
     let clip = app.clone();
+    let stop = stop_tab_run(&app, &window_id, tab_id);
     let sink = Arc::new(ExportSink::new(
         on_frame,
         writer,
@@ -1010,6 +1038,7 @@ async fn copy_all_results(
                 .write_text(text)
                 .map_err(|e| format!("Couldn't copy: {e}"))
         }),
+        stop,
     ));
     on_blocking_pool(app, move |bridge| {
         bridge.run_window_export_to(&window_id, tab_id, sql, sink)
@@ -2479,6 +2508,76 @@ mod tests {
         buf.write_all(&vec![b'x'; CLIPBOARD_MAX_BYTES]).unwrap();
         let err = buf.write_all(b"y").unwrap_err();
         assert!(err.to_string().contains("use Export"), "{err}");
+        assert!(err.to_string().contains("100 MiB"), "{err}");
         assert_eq!(buf.0.len(), CLIPBOARD_MAX_BYTES);
+    }
+
+    /// The first write that fails stops the run once, and the run's end
+    /// (cancelled, as a stopped run is) reports the failure, not a cancel.
+    #[test]
+    fn a_failed_write_stops_the_run_and_says_why() {
+        use rowkery_core::bridge::QueryDetail;
+        use rowkery_core::db::{Column, RowBatch, Value};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("The result is over 100 MiB"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = frames.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                seen.lock().unwrap().push(json);
+            }
+            Ok(())
+        });
+        let stops = Arc::new(AtomicUsize::new(0));
+        let counted = stops.clone();
+        let sink = ExportSink::new(
+            channel,
+            rowkery_core::export::ExportWriter::new(Full, rowkery_core::export::ExportFormat::Csv),
+            None,
+            Box::new(|_| panic!("a failed copy never reaches the clipboard")),
+            Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let batch = || CoreEvent::QueryBatch {
+            query_id: 1,
+            tab_id: 1,
+            batch: RowBatch {
+                columns: vec![Column {
+                    name: "n".into(),
+                    type_name: "int8".into(),
+                }],
+                rows: vec![vec![Value::Int(1)]],
+            },
+            first: true,
+        };
+        sink.push(batch());
+        sink.push(batch());
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        sink.push(CoreEvent::QueryFinished {
+            query_id: 1,
+            tab_id: 1,
+            row_count: 2,
+            rows_affected: None,
+            elapsed_ms: 1,
+            error: Some("Query cancelled".into()),
+            cancelled: true,
+            detail: QueryDetail::default(),
+        });
+        let last = frames.lock().unwrap().last().cloned().unwrap();
+        let done: serde_json::Value = serde_json::from_str(&last).unwrap();
+        assert_eq!(done["t"], "done");
+        assert_eq!(done["cancelled"], false);
+        assert_eq!(done["error"], "The result is over 100 MiB");
     }
 }
