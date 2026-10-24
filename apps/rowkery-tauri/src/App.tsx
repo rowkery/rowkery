@@ -37,7 +37,8 @@ import { ReportSheet } from "./ReportSheet";
 import type { ReportContext } from "./report";
 import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
-import { hasPendingUndo, liveOffer, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
+import { hasPendingUndo, liveOffer, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
+import { RenderErrorBoundary } from "./ErrorBoundary";
 import { persistNotice, readKey, takeConfigNotice, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
@@ -1540,6 +1541,14 @@ function App() {
       <ToastHost />
       <CmdHints />
       <Presence open={newConnOpen}>
+        {/* A sheet that fails to render closes with a toast, never takes the window. */}
+        <RenderErrorBoundary
+          fallback={() => null}
+          onError={(err) => {
+            setNewConnOpen(false);
+            showErrorToastIfFree("Couldn't show the connection sheet", err.message || String(err));
+          }}
+        >
         <NewConnectionSheet
           editing={connections.find((c) => c.id === editingId) ?? null}
           markField={markField}
@@ -1577,6 +1586,7 @@ function App() {
             );
           }}
         />
+        </RenderErrorBoundary>
       </Presence>
       <Presence open={shortcutsOpen}>
         {shortcutsOpen && <ShortcutsSheet onClose={() => setShortcutsOpen(false)} onNotices={() => actionsRef.current.openNotices()} />}

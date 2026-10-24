@@ -1717,6 +1717,61 @@ impl EventSink for InvalidateOnFinish {
     }
 }
 
+/// A run's events, passed on; if the run's worker goes away without saying
+/// how it ended (a panic, an early return), dropping the last handle sends a
+/// failed finish, so the caller (the webview's channel, ⌘E's wait) never
+/// waits on a run that is gone.
+struct FinishGuard {
+    inner: SharedSink,
+    query_id: u64,
+    tab_id: u64,
+    start: Instant,
+    finished: AtomicBool,
+}
+
+const RUN_LOST_MESSAGE: &str =
+    "The query stopped without reporting how it ended (please report this bug)";
+
+fn finish_guard(inner: SharedSink, query_id: u64, tab_id: u64) -> SharedSink {
+    Arc::new(FinishGuard {
+        inner,
+        query_id,
+        tab_id,
+        start: Instant::now(),
+        finished: AtomicBool::new(false),
+    })
+}
+
+impl EventSink for FinishGuard {
+    fn push(&self, event: CoreEvent) {
+        if matches!(
+            event,
+            CoreEvent::QueryFinished { .. } | CoreEvent::QueryHeld { .. }
+        ) {
+            self.finished.store(true, Ordering::SeqCst);
+        }
+        self.inner.push(event);
+    }
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        self.inner.push(CoreEvent::QueryFinished {
+            query_id: self.query_id,
+            tab_id: self.tab_id,
+            row_count: 0,
+            rows_affected: None,
+            elapsed_ms: self.start.elapsed().as_millis() as u64,
+            error: Some(RUN_LOST_MESSAGE.into()),
+            cancelled: false,
+            detail: QueryDetail::default(),
+        });
+    }
+}
+
 /// Builds the statements, asks safe mode, then runs them as one transaction
 /// on the tab's own connection (SQLite) or session (Postgres), refused while
 /// the user's transaction is open there.
@@ -2992,6 +3047,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 }),
                 _ => sink,
             };
+            let events = finish_guard(events, query_id, tab_id);
             // A new run ends the tab's SQLite page (an export leaves it).
             let tab_key = (window_id.clone(), tab_id);
             if !export {
@@ -3217,6 +3273,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 let tab = SqliteTab::new(&state.sqlite_tabs, &key, &path);
                 let slot: CancelSlot = Arc::default();
                 state.window_interrupts.insert(key.clone(), slot.clone());
+                let sink = finish_guard(sink, query_id, tab_id);
                 push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
                 let Some(cursor) = cursor else {
                     finish_query_worker(
@@ -3267,6 +3324,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             state
                 .window_interrupts
                 .insert((window_id.clone(), tab_id), slot.clone());
+            let sink = finish_guard(sink, query_id, tab_id);
             push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
             run_postgres_query_on_runtime(
                 state.runtime.clone(),
