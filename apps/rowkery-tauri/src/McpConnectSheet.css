@@ -10,7 +10,7 @@
   flex-direction: column;
   max-width: 760px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   animation: pop 0.16s ease;
 }
@@ -39,7 +39,7 @@
   max-height: 220px;
   overflow: auto;
   padding: 12px 14px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--hover);
   color: var(--text);
   font: 12px/1.6 var(--mono);
@@ -75,7 +75,7 @@
   gap: 4px 10px;
   padding: 12px 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: var(--panel);
   color: var(--mute);
   font-size: 12.5px;
@@ -94,7 +94,7 @@
 
 .mc-note code {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--hover);
   color: var(--text);
   font: 11.5px var(--mono);
@@ -136,7 +136,7 @@
   height: 28px;
   padding: 0 12px;
   border: 1px solid var(--ink);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--ink);
   color: var(--inkfg);
   font: 600 12px var(--sans);
