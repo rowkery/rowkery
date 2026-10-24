@@ -6,9 +6,10 @@
 // 900 px instead of scrolling, each reading col / op / value in the SQL
 // colours on the accent wash; the chip editor is the inline pill with Add ↵
 // and ×, its operator picker opens; the grid's header is 46 px and its rows
-// 30 px, NULL is the small chip, a timestamp's date is dimmed; an edited,
-// a deleted and a new row carry their gutter dots (ink / red / green) and
-// washes; the edits bar at the grid's foot counts them (2 changes · ● 1
+// 30 px, NULL is the small chip (--r-xs), chips are pills (--r-pill), a
+// timestamp's date is dimmed; an edited, a deleted and a new row carry their
+// gutter dots (ink / red / green) and washes; the edits bar, a 48 px capsule
+// docked 8 px inside the grid's foot (2026-10-24), counts them (2 changes · ● 1
 // edited ● 1 deleted ● 1 new), shows committing / failed + Retry / refused /
 // done, Confirm writes holds it in the Paper strip and Commit still commits;
 // there is no foot + Add row (⌘I and the results … add one); Structure is the
@@ -223,7 +224,7 @@ const nullStyle = await nullChip.evaluate((e) => {
   const s = getComputedStyle(e);
   return { size: s.fontSize, weight: s.fontWeight, radius: s.borderRadius, bg: s.backgroundColor };
 });
-check(nullStyle.size === "9.5px" && nullStyle.weight === "600" && nullStyle.radius === "3px" && nullStyle.bg !== "rgba(0, 0, 0, 0)", `NULL chip: 600 9.5 px on a fill, radius 3 (${JSON.stringify(nullStyle)})`);
+check(nullStyle.size === "9.5px" && nullStyle.weight === "600" && nullStyle.radius === "4px" && nullStyle.bg !== "rgba(0, 0, 0, 0)", `NULL chip: 600 9.5 px on a fill, radius 4 (${JSON.stringify(nullStyle)})`);
 // Class on purpose: the dimmed date is the style under test.
 check((await page.locator(`${ws} [data-testid="rg-body"] [data-row="0"] [data-col="4"] .rg-ts-date`).count()) === 1, "a timestamp's date is set apart from its time");
 const tsTones = await page.evaluate((ws) => {
@@ -250,7 +251,7 @@ const chipLook = await page.$eval(`${line} [data-chip="0"]`, (e) => {
   const s = getComputedStyle(e);
   return { h: e.getBoundingClientRect().height, radius: s.borderRadius, bg: s.backgroundColor, font: s.fontFamily };
 });
-check(Math.round(chipLook.h) === 26 && chipLook.radius === "13px" && chipLook.bg !== "rgba(0, 0, 0, 0)" && /Mono/.test(chipLook.font), `a chip: 26 px, radius 13, accent wash, mono (${JSON.stringify(chipLook)})`);
+check(Math.round(chipLook.h) === 26 && chipLook.radius === "999px" && chipLook.bg !== "rgba(0, 0, 0, 0)" && /Mono/.test(chipLook.font), `a chip: a 26 px pill, accent wash, mono (${JSON.stringify(chipLook)})`);
 const tones = await page.$eval(`${line} [data-chip="0"]`, (e) => {
   const c = (sel) => {
     const el = e.querySelector(sel);
@@ -395,7 +396,14 @@ check(counts.join(",") === "edited:1,deleted:1,inserted:1", `the bar counts them
 check((await page.textContent(`${bar} .edit-tray-count`)) === "3 changes", "3 changes"); // Class on purpose: the count's element.
 const barBox = await box(bar);
 const cardBox = await box(`${ws} [data-testid="results-card"]`);
-check(barBox && Math.round(barBox.height) === 46 && Math.abs(barBox.y + barBox.height - (cardBox.y + cardBox.height)) <= 1, `a 46 px bar at the grid's foot (${barBox?.height} px, bottom ${barBox && barBox.y + barBox.height} / ${cardBox.y + cardBox.height})`);
+check(
+  barBox && Math.round(barBox.height) === 48 && Math.abs(barBox.y + barBox.height + 8 - (cardBox.y + cardBox.height)) <= 1 && Math.abs(barBox.x - 8 - cardBox.x) <= 1 && Math.abs(barBox.x + barBox.width + 8 - (cardBox.x + cardBox.width)) <= 1,
+  `a 48 px bar docked 8 px inside the grid's foot (${barBox?.height} px, bottom ${barBox && barBox.y + barBox.height} / ${cardBox.y + cardBox.height})`,
+);
+const barLook = await page.$eval(bar, (e) => getComputedStyle(e).borderTopLeftRadius);
+const lastRow = await page.$$eval(`${ws} [data-row]`, (rows) => Math.max(...rows.map((r) => r.getBoundingClientRect().bottom)));
+const scroller = await box(`${ws} [data-testid="results-grid-wrap"]`);
+check(barLook === "12px" && scroller.y + scroller.height <= barBox.y + 1, `a 12 px capsule below the grid, never over a row (${barLook}, grid ends ${scroller.y + scroller.height} / bar ${barBox.y}, last row ${lastRow})`);
 const dot = (sel) => page.$eval(sel, (e) => getComputedStyle(e).backgroundColor).catch(() => null);
 const [dEdit, dDel, dNew] = await Promise.all([
   dot(`${ws} [data-testid="rg-body"] [data-row="0"] .rg-mark-dot`), // Class on purpose: the gutter dot is under test.

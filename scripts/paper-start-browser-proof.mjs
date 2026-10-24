@@ -4,16 +4,18 @@
 // Agents page, the Paper sheets and the query tab's Results row.
 //
 // Proves that a window with no connection hides the schema column (the main
-// column spans the window under the title bar) and shows the penguin beside the
-// "Connect to start" heading, the four bordered cards with their registry
-// keys, Your connections and Found on this Mac (macOS); that each card runs
+// column is one sheet inset 8 px on every side under the title bar,
+// 2026-10-24) and shows the penguin beside the "Connect to start" heading,
+// the four bordered 14 px cards with their registry keys, Your connections
+// and Found on this Mac (macOS), each grouped on one bordered 14 px card of
+// 44 px rows; that each card runs
 // its command (New connection opens the form, ⌘O's file becomes a
 // connection, the paste card fills the form from the clipboard, the sample
 // opens); that a saved row connects the window and the schema column comes
 // back; that a failed connect shows Couldn't connect in the same column with
 // the penguin Tilted (in --del) and Retry · Edit… · Report…; that the Agents
 // page renders in light and dark with its ruled columns; that Timings,
-// Shortcuts and Connect an agent open as Paper sheets (radius 8, --pop
+// Shortcuts and Connect an agent open as Paper sheets (radius 12, --pop
 // shadow, the title, esc) and close with Esc; and that a query tab's
 // Results row has the count and a bordered Export that runs the registry's
 // export command (export_results).
@@ -168,10 +170,13 @@ for (const dark of [false, true]) {
   const theme = await page.evaluate(() => document.documentElement.dataset.theme);
   check(theme === (dark ? "dark" : "light"), `${theme}: the theme follows the system`);
   check(!(await visible(`${ws} [data-testid="sidebar"]`)), `${theme}: no schema column while the window has no connection`);
-  // The main column spans the window under the title bar.
+  // The main column is one sheet under the title bar, inset 8 px on every side.
   check(await visible('[data-testid="titlebar"]'), `${theme}: the title bar stays`);
-  const main = await box(`${ws} [data-testid="main"]`);
-  check(main.left === 0 && main.right === 1280 && main.top === 48, `${theme}: the main column spans the window under the 48 px title bar (${main.left}–${main.right} at ${main.top})`);
+  const main = await page.$eval(`${ws} [data-testid="main"]`, (e) => {
+    const r = e.getBoundingClientRect();
+    return { left: r.left, right: r.right, top: r.top, bottom: window.innerHeight - r.bottom, radius: getComputedStyle(e).borderTopLeftRadius };
+  });
+  check(main.left === 8 && main.right === 1272 && main.top === 48 && main.bottom === 8 && main.radius === "14px", `${theme}: the main column is a 14 px sheet inset 8 px under the 48 px title bar (${main.left}–${main.right} at ${main.top}, ${main.bottom} off the foot)`);
   const col = await page.$eval(`${ws} [data-empty-window] .ew-block`, (e) => ({ w: e.getBoundingClientRect().width, top: e.getBoundingClientRect().top })); // Class on purpose: the 560 px column under test.
   check(col.w === 560 && Math.round(col.top) === 48 + 42 + 88, `${theme}: one 560 px column, 88 px under the tab row (${col.w} at ${col.top})`);
   const title = await page.$eval('[data-testid="ew-title"]', (e) => ({ t: e.textContent, f: getComputedStyle(e).fontFamily, s: getComputedStyle(e).fontSize, w: getComputedStyle(e).fontWeight }));
@@ -187,13 +192,22 @@ for (const dark of [false, true]) {
   );
   const cardText = cards.map((c) => `${c.id}:${c.sub}:${c.key}`).join(" | ");
   check(cardText === "new:Postgres or SQLite:⌘N | file:or drop one anywhere:⌘O | paste:fills the form for you:⌘V | sample:six tables, one view:↵", `${theme}: four cards with sub-lines and registry keys (${cardText})`);
-  check(cards.every((c) => c.border === "1px" && c.radius === "8px" && Math.abs(c.w - 275) < 1), `${theme}: bordered 1 px, radius 8, two by two`);
+  check(cards.every((c) => c.border === "1px" && c.radius === "14px" && Math.abs(c.w - 275) < 1), `${theme}: bordered 1 px, radius 14, two by two`);
+  const lists = await page.$$eval(`${ws} :is([data-saved-section], [data-found-section]) > ul`, (els) =>
+    els.map((e) => {
+      const cs = getComputedStyle(e);
+      const row = getComputedStyle(e.querySelector('[data-testid="ew-row"]'));
+      return `${cs.borderTopWidth}/${cs.borderTopColor}/${cs.borderTopLeftRadius}/${cs.paddingTop}/${row.borderTopLeftRadius}`;
+    }),
+  );
+  const line2 = await colorOf("--line2");
+  check(lists.length === 2 && lists.every((l) => l === `1px/${line2}/14px/4px/10px`), `${theme}: each list is one bordered 14 px card, 4 px in, its rows 10 px (${lists.join(" | ")})`);
   const sections = await page.$$eval('[data-testid="ew-section"]', (els) => els.map((e) => e.textContent));
   check(sections.join() === "Your connections,Found on this Mac", `${theme}: Your connections, then Found on this Mac`);
   check((await page.$$("[data-saved-conn]")).length === 4 && (await page.textContent('[data-saved-conn="prd"]')).includes("Connect ↵"), `${theme}: saved rows print Connect ↵`);
   const savedH = await page.$eval('[data-saved-conn="prd"]', (e) => e.getBoundingClientRect().height);
   const foundH = await page.$eval('[data-found="5432"]', (e) => e.getBoundingClientRect().height);
-  check(Math.round(savedH) === 44 && Math.round(foundH) === 36, `${theme}: 44 px saved rows, a 36 px found row (${savedH}, ${foundH})`);
+  check(Math.round(savedH) === 44 && Math.round(foundH) === 44, `${theme}: 44 px rows, saved and found (${savedH}, ${foundH})`);
   // The empty window has no tab row chrome: no chip, no ‹ ›, no search box (⌘K opens mid-window).
   check(!(await visible('[data-testid="conn-chip"]')) && !(await visible(`${ws} [data-history-back]`)) && !(await visible('[data-testid="search-cap"]')), `${theme}: no chip, ‹ › or search box in the tab row`);
   // Light contrast: the saved rows' sub-lines and Connect ↵ are --mute.
@@ -256,7 +270,7 @@ const sheetLook = (sel) =>
     const head = e.querySelector(".sheet-head"); // Class on purpose: the shared 42 px head.
     return { radius: cs.borderTopLeftRadius, shadow: cs.boxShadow, font: title && getComputedStyle(title).fontFamily, head: head?.offsetHeight, esc: head?.lastElementChild?.textContent.trim() };
   });
-const paperSheet = (l) => l.radius === "8px" && /32px -8px/.test(l.shadow) && /IBM Plex Sans/.test(l.font) && l.head === 42 && l.esc === "esc";
+const paperSheet = (l) => l.radius === "12px" && /32px -8px/.test(l.shadow) && /IBM Plex Sans/.test(l.font) && l.head === 42 && l.esc === "esc";
 
 // 4 · The query tab's Results row: the count, then Export ahead of the ….
 await page.click(`${ws} textarea[data-testid="sql-editor"]`);
@@ -313,7 +327,7 @@ await page.waitForTimeout(100);
 await page.keyboard.press("Enter");
 await page.waitForSelector("[data-timings]");
 let look = await sheetLook("[data-timings]");
-check(paperSheet(look), `Timings: radius 8, --pop, title in a 42 px head with esc (${JSON.stringify(look)})`);
+check(paperSheet(look), `Timings: radius 12, --pop, title in a 42 px head with esc (${JSON.stringify(look)})`);
 check(/Mono/.test(await page.$eval("[data-timing]", (e) => getComputedStyle(e).fontFamily)), "the marks are a mono table");
 const copyBg = await page.$eval("[data-timings-copy]", (e) => getComputedStyle(e).backgroundColor);
 check(copyBg === (await colorOf("--bg")), `Copy is bordered, not ink: it commits nothing (${copyBg})`);
@@ -378,7 +392,7 @@ await page.waitForSelector('[data-testid="ag-connect"] [data-mc-term]');
 check((await page.$$eval('[data-testid="settings-page"] *', (els) => els.filter((e) => e.textContent.trim() === "esc" && e.children.length === 0 && e.offsetParent && !e.closest('[data-testid="page-back"]')).length)) === 1, "one esc besides the back button while Connect an agent is open");
 check(/ · /.test(await page.textContent('[data-testid="mc-facts"]')), "its facts are one line joined by ·");
 const mc = await page.$eval('[data-testid="ag-connect"] [data-mc-term]', (e) => ({ f: getComputedStyle(e).fontFamily, r: getComputedStyle(e).borderTopLeftRadius, bg: getComputedStyle(e).backgroundColor }));
-check(/Mono/.test(mc.f) && mc.r === "6px" && mc.bg === (await colorOf("--hover")), `Connect an agent: the command in mono on --hover, radius 6 (${mc.r})`);
+check(/Mono/.test(mc.f) && mc.r === "8px" && mc.bg === (await colorOf("--hover")), `Connect an agent: the command in mono on --hover, radius 8 (${mc.r})`);
 const run = await page.$eval('[data-mc-primary="run"]', (e) => getComputedStyle(e).backgroundColor);
 check(run === (await colorOf("--ink")), `Run is the ink primary (${run})`);
 await page.mouse.move(5, 790);

@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // The Paper inspector (2026-10-10):
 // Quick Look, New connection and Review SQL open in one column at the main
-// column's right, beside the data. Stubbed `invoke`, Linux keys, 1280 × 800, light and dark.
+// column's right, beside the data: its own paper sheet (2026-10-24).
+// Stubbed `invoke`, Linux keys, 1280 × 800, light and dark.
 // Proves:
-//  1. Quick Look slides in (slideIn) as a 340 px column on the panel's
-//     ground; the grid ends where it begins and its columns keep their
-//     widths; ⌘K steps left with it. The head reads ROW + `kiosks · 3 of n`,
+//  1. Quick Look slides in (slideIn) as a 340 px sheet, paper with a 14 px
+//     radius, 8 px from the window's right and bottom; the grid ends 8 px
+//     (the canvas gap) before it begins and its columns keep their widths;
+//     ⌘K steps left with it. The head reads ROW + `kiosks · 3 of n`,
 //     the title is the row's name with the key icon; the grid's row under it
 //     carries the looked wash.
 //  2. ↓ / ↑ (the head's buttons and the keys) move the row and the grid's
@@ -18,7 +20,8 @@
 //  4. While Confirm writes holds a commit, the edits bar's Commit is
 //     disabled and its count says the write waits for confirmation.
 //  5. A filter matching nothing offers + Add row, which stages a new row.
-//  6. New connection is a 380 px column: Save and connect is dim until the
+//  6. New connection is a 380 px sheet 8 px from the window's right, the
+//     main sheet 8 px before it: Save and connect is dim until the
 //     form can connect, the probe line turns green with the server's
 //     answer; SQLite's tab takes a chosen file and probes it; Esc closes.
 //  7. The tab row folds by need, not because an inspector is open: Quick
@@ -238,11 +241,12 @@ await page.waitForTimeout(350);
 const look = await page.$eval(ql, (e) => {
   const r = e.getBoundingClientRect();
   const g = e.closest('[data-testid="workspace"]').querySelector('[data-testid="results-grid-wrap"]').getBoundingClientRect();
-  return { w: r.width, left: r.left, right: window.innerWidth - r.right, gridRight: g.right, bg: getComputedStyle(e).backgroundColor };
+  const cs = getComputedStyle(e);
+  return { w: r.width, left: r.left, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom, gridRight: g.right, bg: cs.backgroundColor, radius: cs.borderTopLeftRadius };
 });
-check(look.w === 340 && Math.round(look.right) === 0, `a 340 px column at the window's right (${look.w}, ${look.right})`);
-check(look.bg === (await tokenColor("--panel")), `on the panel's ground (${look.bg})`);
-check(Math.abs(look.gridRight - look.left) <= 1, `the grid ends where it begins (${look.gridRight} / ${look.left})`);
+check(look.w === 340 && Math.round(look.right) === 8 && Math.round(look.bottom) === 8, `a 340 px sheet 8 px from the window's right and bottom (${look.w}, ${look.right}, ${look.bottom})`);
+check(look.bg === (await tokenColor("--bg")) && look.radius === "14px", `paper, radius 14 (${look.bg}, ${look.radius})`);
+check(Math.abs(look.gridRight + 8 - look.left) <= 1, `the grid ends at the 8 px canvas gap before it (${look.gridRight} / ${look.left})`);
 check(Math.abs((await box(`${ws} [data-header="name"]`)).width - nameW0) < 1, "the grid's columns keep their widths");
 const pill1 = await box('[data-testid="win-tab"][data-on]');
 // The title bar's pills sit above the column; they stay put.
@@ -296,7 +300,7 @@ check(browsed.table === "owners" && browsed.filter === "id = 4", `→ follows ow
 await page.keyboard.press("Escape");
 check(await gone(`${ws} [data-quicklook]`), "Esc closes the column");
 const mainRight = await page.$eval(`${ws} [data-testid="main"]`, (e) => window.innerWidth - e.getBoundingClientRect().right);
-check(Math.round(mainRight) === 0, `the main column takes the room back (${mainRight})`);
+check(Math.round(mainRight) === 8, `the main column takes the room back, to 8 px from the edge (${mainRight})`);
 await page.keyboard.press("Alt+ArrowLeft");
 await page.waitForFunction(() => document.querySelector('[data-testid="workspace"]:not([hidden]) [data-testid="query-tab"][aria-selected="true"]')?.textContent.includes("kiosks"));
 await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "120", ws);
@@ -374,7 +378,7 @@ await page.keyboard.press("Control+n");
 await page.waitForSelector('[data-testid="nc-sheet"]');
 await page.waitForTimeout(300);
 const nc = await page.$eval('[data-testid="nc-sheet"]', (e) => ({ w: e.getBoundingClientRect().width, right: window.innerWidth - e.getBoundingClientRect().right }));
-check(nc.w === 380 && Math.round(nc.right) === 0, `a 380 px column at the right (${nc.w})`);
+check(nc.w === 380 && Math.round(nc.right) === 8, `a 380 px sheet 8 px from the right (${nc.w}, ${nc.right})`);
 // Since Postgres gained its Connect to row, the MCP row may sit just below the fold
 // at 800 px: the foot stays in view, and the form scrolls the row above it.
 const foot = await box("[data-save]");
@@ -387,7 +391,7 @@ const tabsRow = await box(`${ws} [data-testid="query-tabs"]`);
 const firstTab = await box(`${ws} [data-testid="query-tab"]`);
 check(firstTab.x >= tabsRow.x - 0.5, `the first tab stays in view (tab at ${firstTab.x}, row at ${tabsRow.x})`);
 const mainRightNc = await page.$eval(`${ws} [data-testid="main"]`, (e) => window.innerWidth - e.getBoundingClientRect().right);
-check(Math.round(mainRightNc) === 380, `the window stays in view beside it (${mainRightNc})`);
+check(Math.round(mainRightNc) === 380 + 16, `the window stays in view beside it, across the gap (${mainRightNc})`);
 const saveOpacity = () => page.$eval("[data-save]", (e) => getComputedStyle(e).opacity);
 check((await saveOpacity()) === "0.5", "Save and connect is dim on an empty form");
 const fill = async (field, value) => {
