@@ -47,9 +47,12 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
 use tokio_postgres::CancelToken;
 
+mod busy;
 mod pool;
 mod prefetch;
 mod sessions;
+use busy::{Busy, HoldUntilFinished, Work};
+pub use busy::{BusyWork, Held};
 use pool::{Lease, SharedPool, Slot};
 pub use prefetch::{
     APPLICATION_NAME as PREFETCH_APPLICATION_NAME, MAX_ENTRIES as PREFETCH_MAX_ENTRIES,
@@ -204,9 +207,9 @@ enum Command {
     },
     /// ⌘K "Stop all queries": every run in every window, at once.
     StopAllQueries,
-    /// Whether any tab's session may hold the user's open transaction.
-    HoldsTransaction {
-        respond_to: oneshot::Sender<bool>,
+    /// How many tabs' sessions may hold the user's open transaction.
+    CountTransactions {
+        respond_to: oneshot::Sender<Option<usize>>,
     },
     ListDatabases {
         window_id: String,
@@ -345,6 +348,11 @@ fn first_row(batches: Vec<RowBatch>) -> Option<FollowRow> {
     let row = batches.into_iter().flat_map(|b| b.rows).next()?;
     Some(FollowRow { columns, row })
 }
+
+/// The error of a call whose answer never came: core stopped (or the work
+/// died) after it may have begun, so its outcome is unknown. Every other
+/// error of a run, import or commit is a refusal: nothing ran.
+pub const LOST_ANSWER: &str = "Rowkery's core stopped before it answered";
 
 /// How a commit of staged edits ended.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -624,6 +632,8 @@ struct CoreState {
     /// SQLite query tabs' own connections and paged reads.
     sqlite_tabs: SharedSqliteTabs,
     runtime: Handle,
+    /// Writes, commits, imports and SQL file runs in flight.
+    busy: Arc<Busy>,
 }
 
 /// Cancel state for one running query. `requested` keeps a cancel that lands
@@ -832,13 +842,16 @@ impl SqliteTabs {
         entry.1.clone()
     }
 
-    /// Whether a tab's idle connection holds an open transaction (one out
+    /// The tabs whose idle connection holds an open transaction (one out
     /// running something isn't asked; the page knows those).
-    fn holds_user_transaction(&self) -> bool {
-        self.conns.values().any(|(_, conn)| {
-            conn.try_lock()
-                .is_ok_and(|d| d.as_ref().is_some_and(SqliteDriver::in_transaction))
-        })
+    fn user_transactions(&self) -> usize {
+        self.conns
+            .values()
+            .filter(|(_, conn)| {
+                conn.try_lock()
+                    .is_ok_and(|d| d.as_ref().is_some_and(SqliteDriver::in_transaction))
+            })
+            .count()
     }
 
     /// Forgets the window's pages and connections (a run still on one
@@ -1836,12 +1849,15 @@ fn apply_changes_now(
             },
         }
     };
+    // Counts as running (a quit asks first) until it answers.
+    let held = state.busy.hold(Work::Commit);
     match target {
         WindowTarget::Sqlite {
             path, safe_mode, ..
         } => {
             let tab = SqliteTab::new(&state.sqlite_tabs, &(window_id, tab_id), &path);
             thread::spawn(move || {
+                let _held = held;
                 let result = with_catch(|| {
                     // Waits (boundedly) for a run on the tab to end.
                     let until = Instant::now() + APPLY_STEP_TIMEOUT;
@@ -1867,6 +1883,7 @@ fn apply_changes_now(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 // The tab's own session, waiting (boundedly) for a run on it
                 // to end, or for a free connection.
                 let no_room = std::sync::atomic::AtomicBool::new(false);
@@ -1950,9 +1967,11 @@ fn import_csv_now(
         return;
     }
     invalidate_prefetch(&state.pool, &window_id, &state.runtime);
+    let held = state.busy.hold(Work::Import);
     match target {
         WindowTarget::Sqlite { path, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let result = with_catch(|| {
                     rowkery_core::import::import_sqlite_file(&path, &spec, &cancel, &*progress.0)
                 });
@@ -1967,6 +1986,7 @@ fn import_csv_now(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 let Lease { session, .. } = match pool::lease(
                     &pool,
                     &window_id,
@@ -2457,9 +2477,11 @@ fn run_sql_file(
         confirmed: _,
         on_progress,
     } = run;
+    let held = state.busy.hold(Work::SqlFile);
     match target {
         WindowTarget::Sqlite { path: db, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let report = with_catch(|| {
                     let conn = open_sqlite(&db)?;
                     if !arm_cancel(&slot, CancelHandle::Sqlite(conn.get_interrupt_handle())) {
@@ -2491,6 +2513,7 @@ fn run_sql_file(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 let stop = slot.lock().map(|s| s.stop.clone()).ok();
                 let committing = Arc::new(AtomicBool::new(false));
                 let sent = committing.clone();
@@ -2624,6 +2647,8 @@ pub struct CoreBridge {
     save_gate: SaveGate,
     catalog_listener: ListenerSlot,
     launch_warm: LaunchWarmSlot,
+    /// Shared with the core thread's state, read without a round trip.
+    busy: Arc<Busy>,
 }
 
 /// The config as it is now, numbered, for the caller to write.
@@ -3035,6 +3060,15 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 }),
                 _ => sink,
             };
+            // A write counts as running (a quit asks first) until it ends.
+            let events: SharedSink = if writes {
+                Arc::new(HoldUntilFinished {
+                    inner: events,
+                    held: Mutex::new(Some(state.busy.hold(Work::Write))),
+                })
+            } else {
+                events
+            };
             let events = finish_guard(events, query_id, tab_id);
             // A new run ends the tab's SQLite page (an export leaves it).
             let tab_key = (window_id.clone(), tab_id);
@@ -3388,17 +3422,10 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 force_stop(&state.runtime, slot);
             }
         }
-        Command::HoldsTransaction { respond_to } => {
-            let held = state
-                .pool
-                .lock()
-                .map(|p| p.holds_user_transaction())
-                .unwrap_or(true)
-                || state
-                    .sqlite_tabs
-                    .lock()
-                    .map(|t| t.holds_user_transaction())
-                    .unwrap_or(true);
+        Command::CountTransactions { respond_to } => {
+            let postgres = state.pool.lock().ok().map(|p| p.user_transactions());
+            let sqlite = state.sqlite_tabs.lock().ok().map(|t| t.user_transactions());
+            let held = postgres.zip(sqlite).map(|(p, s)| p + s);
             let _ = respond_to.send(held);
         }
         Command::Prefetch {
@@ -3705,6 +3732,8 @@ impl CoreBridge {
         let thread_launch_warm = launch_warm.clone();
         let writer = ConfigWriter::spawn(initial.clone());
         let ui = Arc::new(Mutex::new(initial.ui.clone()));
+        let busy = Arc::new(Busy::default());
+        let thread_busy = busy.clone();
         thread::Builder::new()
             .name("rowkery-core".into())
             .spawn(move || {
@@ -3736,6 +3765,7 @@ impl CoreBridge {
                     pool: pool.clone(),
                     sqlite_tabs: SharedSqliteTabs::default(),
                     runtime: runtime_handle,
+                    busy: thread_busy,
                 };
                 // Commands may spawn onto the runtime from this thread
                 // (a closing window's prefetcher cancels its query).
@@ -3758,6 +3788,7 @@ impl CoreBridge {
             save_gate,
             catalog_listener,
             launch_warm,
+            busy,
         }
     }
 
@@ -4135,7 +4166,7 @@ impl CoreBridge {
             confirmed,
             respond_to,
         })
-        .ok_or_else(|| "core thread stopped".to_string())?
+        .ok_or_else(|| LOST_ANSWER.to_string())?
     }
 
     /// Imports a CSV file into a table (see `rowkery_core::import`): one
@@ -4156,7 +4187,7 @@ impl CoreBridge {
             progress,
             respond_to,
         })
-        .ok_or_else(|| "core thread stopped".to_string())?
+        .ok_or_else(|| LOST_ANSWER.to_string())?
     }
 
     /// Cancels the tab's query, if any, and closes its warm session.
@@ -4218,7 +4249,7 @@ impl CoreBridge {
             on_progress,
             respond_to,
         })
-        .unwrap_or_else(|| Err("Rowkery's core stopped".into()))
+        .unwrap_or_else(|| Err(LOST_ANSWER.into()))
     }
 
     pub fn cancel_window_query(&self, window_id: &str, tab_id: u64) {
@@ -4303,12 +4334,20 @@ impl CoreBridge {
         let _ = self.command_tx.send(Command::StopAllQueries);
     }
 
-    /// Whether any tab's Postgres session (or SQLite connection) may hold
-    /// the user's open transaction (a restart would roll it back). True
-    /// when unknown.
-    pub fn holds_transaction(&self) -> bool {
-        self.send_command(|respond_to| Command::HoldsTransaction { respond_to })
-            .unwrap_or(true)
+    /// What quitting now would cut short: tabs' open transactions, and the
+    /// writes, commits, imports and SQL file runs in flight. `unknown` when
+    /// core doesn't answer.
+    pub fn busy_work(&self) -> BusyWork {
+        let transactions = self
+            .send_command(|respond_to| Command::CountTransactions { respond_to })
+            .flatten();
+        self.busy.now(transactions)
+    }
+
+    /// Counts a commit made outside core (an agent's proposal) as running
+    /// until the guard drops, so a quit asks first.
+    pub fn hold_commit(&self) -> Held {
+        self.busy.hold(Work::Commit)
     }
 
     /// Databases on the window's server; empty for SQLite.
@@ -4505,6 +4544,7 @@ impl Clone for CoreBridge {
             save_gate: self.save_gate.clone(),
             catalog_listener: self.catalog_listener.clone(),
             launch_warm: self.launch_warm.clone(),
+            busy: self.busy.clone(),
         }
     }
 }

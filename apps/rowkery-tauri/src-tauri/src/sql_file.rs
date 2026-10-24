@@ -120,7 +120,7 @@ pub async fn run_sql_file(
             .run_sql_file(&window_id, path, scan, options, confirmed, progress)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{} ({e})", rowkery_bridge::LOST_ANSWER))?
 }
 
 /// Stops the window's scan or run (a run rolls back).

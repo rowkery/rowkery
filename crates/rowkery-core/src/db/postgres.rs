@@ -1216,6 +1216,7 @@ pub async fn session_apply_changes_within(
                 message: late(&named),
                 statement: Some(named),
                 rows: None,
+                unknown: false,
             });
         };
         match ran {
@@ -1234,9 +1235,7 @@ pub async fn session_apply_changes_within(
     if let Err(err) = session.client.batch_execute("COMMIT").await {
         if session.client.is_closed() {
             // The server may have committed before the socket went.
-            return Err(ApplyFailure::other(
-                "The connection dropped during COMMIT, so the changes may or may not be saved. Reload the table to check.",
-            ));
+            return Err(ApplyFailure::commit_lost());
         }
         rollback(&session.client).await;
         return Err(ApplyFailure::other(message(&err)));

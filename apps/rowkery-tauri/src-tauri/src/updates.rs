@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, State, Url};
+use tauri::{AppHandle, Manager, State, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// The download is a few tens of MB; a slow link gets this long for the
@@ -208,13 +208,23 @@ fn install_ready(updates: &Updates) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Restart into the downloaded update. The page asks only when nothing runs.
+/// Restart into the downloaded update. The page asks only when no query
+/// runs; work it can't see (a commit, an import, a SQL file, an open
+/// transaction) gets the quit dialog first.
 #[tauri::command]
 pub fn restart_to_update(app: AppHandle, updates: State<'_, Updates>) -> Result<(), String> {
-    if !install_ready(&updates)? {
+    if updates.ready.lock().unwrap().is_none() {
         return Err("No update is ready".into());
     }
-    app.restart()
+    let restart = app.clone();
+    crate::ask_before_quit(&app, "Restart", move || {
+        match install_ready(&restart.state::<Updates>()) {
+            Ok(true) => restart.restart(),
+            Ok(false) => {}
+            Err(e) => eprintln!("update: couldn't install: {e}"),
+        }
+    });
+    Ok(())
 }
 
 /// Quitting with an update downloaded installs it, so the next launch runs it.

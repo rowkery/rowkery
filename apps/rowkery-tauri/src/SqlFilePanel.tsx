@@ -10,6 +10,7 @@ import {
   type SqlFileScan,
 } from "./api";
 import { InspectorHead } from "./Inspector";
+import { isLostAnswer } from "./runOutcome";
 import { formatBytes } from "./types";
 import "./SqlFilePanel.css";
 
@@ -109,22 +110,12 @@ export function SqlFilePanel({
         setPhase({ at: "ended", scan, report });
         if (report.done > 0 && !report.rolled_back) onRan();
       },
-      (e) =>
-        setPhase({
-          at: "ended",
-          scan,
-          report: {
-            done: 0,
-            rows: 0,
-            elapsed_ms: Date.now() - started,
-            failed: { line: null, statement: "", message: String(e) },
-            errors: 1,
-            first_error: null,
-            cancelled: false,
-            rolled_back: true,
-            lost: 0,
-          },
-        }),
+      (e) => {
+        const report = failedRun(e, Date.now() - started);
+        setPhase({ at: "ended", scan, report });
+        // Lost, it may have changed the schema; refused, nothing ran.
+        if (report.unknown) onRan();
+      },
     );
   };
 
@@ -324,8 +315,32 @@ function Running({ scan, progress, elapsed }: { scan: SqlFileScan; progress: Sql
   );
 }
 
-function Ended({ report, wholeFile }: { report: SqlFileReport; wholeFile: boolean }) {
-  const ran = `${plural(report.done, "statement")} · ${plural(report.rows, "row")} · ${clock(report.elapsed_ms)}`;
+/**
+ * The report for a run whose call failed. Refused (already running,
+ * read-only, not connected…), nothing ran. Its answer lost (core stopped),
+ * Rowkery can't say what ran, what was committed or what rolled back.
+ */
+export function failedRun(error: unknown, elapsedMs: number): SqlFileReport {
+  const lost = isLostAnswer(error);
+  return {
+    done: 0,
+    rows: 0,
+    elapsed_ms: elapsedMs,
+    failed: { line: null, statement: "", message: String(error) },
+    errors: 1,
+    first_error: null,
+    cancelled: false,
+    rolled_back: !lost,
+    lost: 0,
+    ...(lost && { unknown: true }),
+  };
+}
+
+/** How the panel words a run's end: its title, its kind and what was kept. */
+export function endedText(report: SqlFileReport, wholeFile: boolean): { title: string; kind: string; kept: string } {
+  if (report.unknown) {
+    return { title: "Outcome unknown", kind: "unknown", kept: "Rowkery lost track of this run; check the tables it touches." };
+  }
   const stayed = report.done - report.lost;
   const kept = report.rolled_back
     ? "Nothing was kept."
@@ -344,6 +359,14 @@ function Ended({ report, wholeFile }: { report: SqlFileReport; wholeFile: boolea
       : report.errors
         ? [`Done with ${plural(report.errors, "error")}`, "errors"]
         : ["Done", "done"];
+  return { title, kind, kept };
+}
+
+function Ended({ report, wholeFile }: { report: SqlFileReport; wholeFile: boolean }) {
+  const ran = report.unknown
+    ? clock(report.elapsed_ms)
+    : `${plural(report.done, "statement")} · ${plural(report.rows, "row")} · ${clock(report.elapsed_ms)}`;
+  const { title, kind, kept } = endedText(report, wholeFile);
   const failure = report.failed ?? report.first_error;
   return (
     <section className={`sf-ended ${kind}`} data-sql-file-ended={kind}>
@@ -358,7 +381,11 @@ function Ended({ report, wholeFile }: { report: SqlFileReport; wholeFile: boolea
           {failure.statement && <pre className="sf-current">{failure.statement}</pre>}
         </>
       )}
-      {(report.cancelled || report.failed) && kept && <div className="sf-ended-line">{kept}</div>}
+      {(report.cancelled || report.failed) && kept && (
+        <div className="sf-ended-line" data-sql-file-kept>
+          {kept}
+        </div>
+      )}
     </section>
   );
 }
