@@ -2386,7 +2386,25 @@ fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
         guard.requested = true;
         let stop = guard.stop.clone();
         match guard.handle.take() {
-            Some(CancelHandle::Sqlite(handle)) => handle.interrupt(),
+            Some(CancelHandle::Sqlite(handle)) => {
+                handle.interrupt();
+                // An interrupt that lands before the statement starts is
+                // lost, so ask again until the worker disarms.
+                guard.handle = Some(CancelHandle::Sqlite(handle));
+                let slot = slot.clone();
+                runtime.spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        match slot.lock().as_deref() {
+                            Ok(CancelState {
+                                handle: Some(CancelHandle::Sqlite(handle)),
+                                ..
+                            }) => handle.interrupt(),
+                            _ => break,
+                        }
+                    }
+                });
+            }
             Some(CancelHandle::Postgres { token, tls }) => {
                 runtime.spawn(async move {
                     // The cancel itself can hang on a dead tunnel; it gets
