@@ -182,7 +182,7 @@ components:
   toast:
     backgroundColor: "{colors.ink}"
     textColor: "{colors.ink-fg}"
-    rounded: "{rounded.lg}"
+    rounded: "{rounded.pill}"
     height: "34px"
 ---
 
@@ -291,9 +291,9 @@ Rounded on a scale, from the keycap up to the sheet (2026-10-24). The CSS reads 
 - `--r-xs` **4px**: badges, keycaps, NULL chips.
 - `--r-sm` **6px**: small icon buttons (24 px and under).
 - `--r-md` **8px**: buttons (Run included), inputs, list rows, query tabs. The window pills in the title bar and the Data / Structure switch are a step rounder, 10px.
-- `--r-lg` **12px**: cards, popovers and menus, modal sheets, the edits bar, the toast card.
+- `--r-lg` **12px**: cards, popovers and menus, modal sheets, the edits bar.
 - `--r-xl` **14px**: the inset sheets, the cards and grouped lists on Connect to start. ⌘K is a step rounder, 16px.
-- `--r-pill` **999px**: filter chips, env tags, the key strip.
+- `--r-pill` **999px**: filter chips, env tags, the key strip, the toast.
 
 The window itself keeps its 12 px corner. Borders are 1 px. Rules are structure; borders are controls.
 
@@ -319,7 +319,7 @@ The window itself keeps its 12 px corner. Borders are 1 px. Rules are structure;
 - **Corner Style:** `--r-lg` (12px); on Connect to start, `--r-xl` (14px).
 - **Background:** paper on paper with a 1px control rule; Agents connection cards the same.
 - **Shadow Strategy:** none at rest.
-- **Connect to start** (2026-10-24): the four action cards are `--r-xl` with a 1px `--line` border (the lighter rule, since at that size a control rule boxes the page in) and 16px 18px padding. Each list (Your connections, Found on this Mac) is grouped on one paper card: `--r-xl`, a 1px `--line` border, 4px padding, 44px rows at 10px (the Concentric Rule), sharing one glide hover.
+- **Connect to start** (2026-10-24): the four action cards are `--r-xl` with a 1px `--line2` border and 16px 18px padding. Each list (Your connections, Found on this Mac) is grouped on one paper card: `--r-xl`, a 1px `--line2` border, 4px padding, 44px rows at 10px (the Concentric Rule), sharing one glide hover.
 
 ### Inputs / Fields
 - **Style:** paper ground, 1px control rule, `--r-md` (8px), 28–30px tall.
@@ -345,7 +345,7 @@ Quick Look, Review SQL and New connection: a paper sheet on the right (`--r-xl`,
 A docked capsule at the grid's foot (2026-10-24): 48px tall, inset 8px from the main sheet's sides and bottom, `--r-lg`, panel ground with a 1px --line ring, its buttons `--r-md`. It is part of the layout, below the last row, so it never covers one. Inside: "n changes" with dotted counts, Discard, Review SQL, Commit (ink). While Confirm writes holds a commit, Commit is disabled and the count says it is waiting.
 
 ### Toast
-An ink card (34px, `--r-lg`, `0 8px 24px rgba(0,0,0,.18)`) centred at the bottom of the main column, its action (Undo, View) in orange; in the dark the panel lifted by the popover shadow with a control-rule ring. Reversible actions offer Undo instead of a confirm dialog.
+An ink capsule (34px, `--r-pill`, `0 8px 24px rgba(0,0,0,.18)`) centred at the bottom of the main column, its action (Undo, View) in orange; in the dark the panel lifted by the popover shadow with a control-rule ring. Reversible actions offer Undo instead of a confirm dialog.
 
 ### The Penguin
 The posture penguin (Ready / Tilted, the original hand drawing) appears only at dead ends: Connect to start and Couldn't connect.
@@ -353,7 +353,7 @@ The posture penguin (Ready / Tilted, the original hand drawing) appears only at 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** separate regions inside a sheet with 1px --line rules and give controls a 1px --line2 border (the large cards and grouped lists on Connect to start take --line).
+- **Do** separate regions inside a sheet with 1px --line rules and give controls a 1px --line2 border.
 - **Do** keep orange to Run, the active statement, chips, switches that are on and the focus ring.
 - **Do** set the main and inspector columns as paper sheets on the canvas (`--r-xl`, the sheet ring, 8px insets and gap), and take every radius from the scale, nested ones by the Concentric Rule.
 - **Do** make the committing button ink.
