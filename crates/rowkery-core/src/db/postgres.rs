@@ -13,7 +13,7 @@ use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme
 use crate::edits::{ApplyCounts, ApplyFailure, RowStatement};
 use crate::safety::{locks_rows, SafeMode};
 use tokio_postgres::config::SslMode;
-use tokio_postgres::error::SqlState;
+use tokio_postgres::error::{Severity, SqlState};
 use tokio_postgres::types::Type;
 use tokio_postgres::{AsyncMessage, CancelToken, Client, NoTls, Row, Statement};
 pub use tokio_postgres_rustls::MakeRustlsConnect;
@@ -32,11 +32,16 @@ use super::{Column, DriverError, RowBatch, Value};
 
 mod activity;
 pub use activity::{
-    rowkery_tag, session_activity, session_locks_held, session_stop, HeldLock, ServerSession,
-    StopKind,
+    rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
+    HeldLock, ServerSession, StopKind,
 };
 
 const BATCH_SIZE: usize = 200;
+
+/// A session's warnings, as the connection task receives them.
+type Warnings = Arc<std::sync::Mutex<Vec<String>>>;
+/// Warnings kept per statement; a loop that warns on every row keeps the first.
+const MAX_WARNINGS: usize = 8;
 
 /// Every session's `application_name` starts with this, then a space and
 /// its [`PostgresSession::tag`], so the Sessions tab can tell which tab a
@@ -110,6 +115,9 @@ pub struct PostgresSession {
     /// `BEGIN` warnings (SQLSTATE 25001) seen so far: one after ours means
     /// the user's own transaction was already open.
     txn_warnings: Arc<AtomicU64>,
+    /// The server's warnings since [`session_take_warnings`] last took them
+    /// (`COMMIT` with no transaction open says so only this way).
+    warnings: Warnings,
     /// A query tab's paged result, waiting for its next `FETCH`.
     cursor: Option<OpenCursor>,
     /// Whether the user has a transaction open on this session, as far as
@@ -119,6 +127,10 @@ pub struct PostgresSession {
     statements: std::sync::Mutex<std::collections::VecDeque<(String, Statement)>>,
     /// In its `application_name` after [`APP_NAME`].
     tag: String,
+    /// A cancel meant for a finished statement landed on one of ours inside
+    /// the user's transaction and aborted it (see
+    /// [`session_take_cancel_aborted`]).
+    cancel_aborted: bool,
     /// Whatever the owner ties to the session's life (the bridge keeps its
     /// place under the per-connection cap here): dropped with the session.
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
@@ -307,6 +319,7 @@ pub async fn open_session_via(
         DriverError::Message(humanize_postgres_error(&e, &config.username))
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
+    let warnings = Warnings::default();
     let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
     // The outer error is the Cloud SQL connector's (no Postgres error to
     // retry on); the inner one is Postgres's.
@@ -314,6 +327,7 @@ pub async fn open_session_via(
         let tls = tls.clone();
         let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
+        let warnings = warnings.clone();
         let late = no_answer(&config.host, config.port);
         async move {
             if let Some(dialer) = dialer {
@@ -343,7 +357,7 @@ pub async fn open_session_via(
                         }
                         started => {
                             return Ok(started.map(|(client, connection)| {
-                                (client, drive_connection(connection, txn_warnings))
+                                (client, drive_connection(connection, txn_warnings, warnings))
                             }));
                         }
                     }
@@ -354,10 +368,10 @@ pub async fn open_session_via(
             let started = tokio::time::timeout_at(deadline, async {
                 match tls {
                     Some(tls) => pg_config.connect(tls).await.map(|(client, connection)| {
-                        (client, drive_connection(connection, txn_warnings))
+                        (client, drive_connection(connection, txn_warnings, warnings))
                     }),
                     None => pg_config.connect(NoTls).await.map(|(client, connection)| {
-                        (client, drive_connection(connection, txn_warnings))
+                        (client, drive_connection(connection, txn_warnings, warnings))
                     }),
                 }
             })
@@ -428,10 +442,12 @@ pub async fn open_session_via(
         cancel_token,
         cancel_via,
         txn_warnings,
+        warnings,
         cursor: None,
         txn: TxnState::None,
         statements: Default::default(),
         tag,
+        cancel_aborted: false,
         guard: None,
     })
 }
@@ -447,11 +463,13 @@ fn no_answer(host: &str, port: u16) -> DriverError {
 }
 
 /// Runs the connection, counting `BEGIN`'s "already a transaction in
-/// progress" warnings. A notice is handled before the messages after it,
-/// so the count is current when the batch that caused it returns.
+/// progress" warnings and keeping every warning's text. A notice is handled
+/// before the messages after it, so both are current when the batch that
+/// caused it returns.
 fn drive_connection<S, T>(
     mut connection: tokio_postgres::Connection<S, T>,
     txn_warnings: Arc<AtomicU64>,
+    warnings: Warnings,
 ) -> tokio::task::JoinHandle<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -463,6 +481,13 @@ where
                 Some(Ok(AsyncMessage::Notice(notice))) => {
                     if notice.code() == &SqlState::ACTIVE_SQL_TRANSACTION {
                         txn_warnings.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if notice.parsed_severity() == Some(Severity::Warning) {
+                        if let Ok(mut kept) = warnings.lock() {
+                            if kept.len() < MAX_WARNINGS {
+                                kept.push(notice.message().to_string());
+                            }
+                        }
                     }
                 }
                 Some(Ok(_)) => {}
@@ -954,6 +979,8 @@ where
             }
             Err(err) => return Err(map_query_error(&err, &session.config.username)),
             Ok(()) if session.txn_warnings.load(Ordering::SeqCst) != before => {
+                // Our BEGIN's warning, not the user's.
+                session_take_warnings(session);
                 session.txn = TxnState::Users;
                 users = true;
             }
@@ -1043,6 +1070,16 @@ pub async fn session_declare_cursor(
         .map_err(|e| map_query_error(&e, &session.config.username))
 }
 
+/// The server's warnings since the last call (`there is no transaction in
+/// progress` after a `COMMIT` that had nothing to commit), oldest first.
+pub fn session_take_warnings(session: &PostgresSession) -> Vec<String> {
+    session
+        .warnings
+        .lock()
+        .map(|mut w| std::mem::take(&mut *w))
+        .unwrap_or_default()
+}
+
 /// A statement ran as written on the session: unless it only reads, it may
 /// have opened or ended a transaction (BEGIN, COMMIT, CALL, DO …), so the
 /// next cursor asks first.
@@ -1061,12 +1098,65 @@ pub async fn session_probe_txn(session: &mut PostgresSession, limit: Duration) -
     if session.txn != TxnState::Unknown || session.cursor.is_some() {
         return session.txn;
     }
+    session.txn = probe_txn(session, limit).await.unwrap_or(TxnState::Unknown);
+    session.txn
+}
+
+/// After a cancel, what the cancelled statement left: a transaction it
+/// opened, ended or failed (a failed one is still open: the user must roll
+/// it back). A paged result's cursor goes first: our own cursor
+/// transaction is rolled back whatever the cancel left it in, and one in the
+/// user's transaction is closed. The cancel may have arrived only after the
+/// statement finished and land on one of these statements instead (57014):
+/// each is tried again, and if that aborted the user's transaction, the
+/// tab's next statement says why (`session_take_cancel_aborted`). `Unknown`
+/// when the server doesn't answer within `limit`.
+pub async fn session_probe_after_cancel(
+    session: &mut PostgresSession,
+    limit: Duration,
+) -> TxnState {
+    let mut hit = false;
+    if let Some(cursor) = session.cursor.take() {
+        let sql = if cursor.ours {
+            "ROLLBACK".to_string()
+        } else {
+            format!("CLOSE {CURSOR}")
+        };
+        for _ in 0..2 {
+            match tokio::time::timeout(limit, session.client.batch_execute(&sql)).await {
+                Ok(Err(err)) if err.code() == Some(&SqlState::QUERY_CANCELED) => hit = true,
+                _ => break,
+            }
+        }
+    }
+    session.txn = TxnState::Unknown;
+    for _ in 0..3 {
+        match probe_txn(session, limit).await {
+            Some(state) => {
+                session.txn = state;
+                break;
+            }
+            None => hit = true,
+        }
+    }
+    session.cancel_aborted = hit && session.txn == TxnState::Users;
+    session.txn
+}
+
+/// Whether a cancel aborted the user's transaction after their statement
+/// had finished (see [`session_probe_after_cancel`]); asking clears it.
+pub fn session_take_cancel_aborted(session: &mut PostgresSession) -> bool {
+    std::mem::take(&mut session.cancel_aborted)
+}
+
+/// [`session_probe_txn`]'s question; `None` when a cancel stopped it.
+async fn probe_txn(session: &PostgresSession, limit: Duration) -> Option<TxnState> {
     let probe = tokio::time::timeout(
         limit,
         session.client.batch_execute("SAVEPOINT rowkery_probe"),
     )
     .await;
-    session.txn = match probe {
+    Some(match probe {
         Ok(Ok(())) => {
             let released = tokio::time::timeout(
                 limit,
@@ -1075,17 +1165,17 @@ pub async fn session_probe_txn(session: &mut PostgresSession, limit: Duration) -
                     .batch_execute("RELEASE SAVEPOINT rowkery_probe"),
             )
             .await;
-            if matches!(released, Ok(Ok(()))) {
-                TxnState::Users
-            } else {
-                TxnState::Unknown
+            match released {
+                Ok(Ok(())) => TxnState::Users,
+                Ok(Err(err)) if err.code() == Some(&SqlState::QUERY_CANCELED) => return None,
+                _ => TxnState::Unknown,
             }
         }
+        Ok(Err(err)) if err.code() == Some(&SqlState::QUERY_CANCELED) => return None,
         Ok(Err(err)) if err.code() == Some(&SqlState::NO_ACTIVE_SQL_TRANSACTION) => TxnState::None,
         Ok(Err(err)) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => TxnState::Users,
         _ => TxnState::Unknown,
-    };
-    session.txn
+    })
 }
 
 /// The next `rows` of the tab's open cursor (0: the rest).

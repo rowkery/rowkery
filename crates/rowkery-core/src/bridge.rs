@@ -19,6 +19,11 @@ pub struct QueryDetail {
     pub more: bool,
     /// The run reached the most rows a tab holds and left the rest out.
     pub capped: bool,
+    /// The server's warnings, one per line (`there is no transaction in
+    /// progress` after a `COMMIT` with nothing to commit).
+    pub warning: Option<String>,
+    /// Stopped without the server's answer: it may still finish the statement.
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

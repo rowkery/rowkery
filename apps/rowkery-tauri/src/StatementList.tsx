@@ -20,9 +20,16 @@ export function statementOutcome(s: StatementResult): string {
   if (r.error) return "Error";
   if (r.cancelled) return "Cancelled";
   const count = (n: number, word: string) => `${n.toLocaleString()} ${n === 1 ? word : `${word}s`}`;
-  if (r.columns.length > 0) return count(r.row_count, "row");
   const changed = r.affected_rows ?? 0;
-  return changed > 0 || WRITES_ROWS.test(s.ranSql ?? "") ? `${count(changed, "row")} changed` : "Done";
+  const done =
+    r.columns.length > 0
+      ? count(r.row_count, "row")
+      : changed > 0 || WRITES_ROWS.test(s.ranSql ?? "")
+        ? `${count(changed, "row")} changed`
+        : "Done";
+  // The server warned: say so, beside the count when there is one.
+  if (!r.warning) return done;
+  return done === "Done" ? "Warning" : `${done} · Warning`;
 }
 
 /**

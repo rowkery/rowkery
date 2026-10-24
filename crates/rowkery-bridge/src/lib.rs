@@ -16,8 +16,9 @@ use rowkery_core::db::postgres::{
     cancel_with_token, open_session, open_session_with_secrets, session_apply_changes_within,
     session_catalog_fingerprint, session_close_cursor, session_execute, session_fetch_more,
     session_introspect, session_list_databases, session_note_statement, session_plan_facts,
-    session_probe_txn, session_query_cursor, session_query_stream_with, session_server_version,
-    session_table_indexes, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
+    session_probe_after_cancel, session_probe_txn, session_query_cursor, session_query_stream_with,
+    session_server_version, session_table_indexes, session_take_cancel_aborted,
+    session_take_warnings, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
     StreamStats, TxnState, CONNECT_TIMEOUT,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount, SQLITE_LOCKED};
@@ -210,6 +211,10 @@ enum Command {
     /// How many tabs' sessions may hold the user's open transaction.
     CountTransactions {
         respond_to: oneshot::Sender<Option<usize>>,
+    },
+    /// Each window's query tabs that may hold the user's open transaction.
+    OpenTransactions {
+        respond_to: oneshot::Sender<Vec<(String, u64)>>,
     },
     ListDatabases {
         window_id: String,
@@ -454,7 +459,7 @@ impl std::fmt::Debug for dyn EventSink {
 }
 
 /// How a run ended when it ran.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct QueryOutcome {
     row_count: u64,
     rows_affected: Option<u64>,
@@ -465,6 +470,10 @@ struct QueryOutcome {
     more: bool,
     /// Rows past `MAX_TAB_ROWS` were left out.
     capped: bool,
+    /// The server's warnings, one per line.
+    warning: Option<String>,
+    /// Stopped without the server's answer (`force_stop`).
+    forced: bool,
 }
 
 impl QueryOutcome {
@@ -647,6 +656,12 @@ struct CancelState {
     /// The run is waiting for a free connection: nothing to ask the server,
     /// so a cancel stops it at once.
     waiting: bool,
+    /// Told once the Postgres cancel request has gone out (or given up), so
+    /// the run can ask what it left before parking its session.
+    sent: Arc<tokio::sync::Notify>,
+    /// The tag of the Postgres session the run is on, for a cancel from
+    /// another session after a force stop.
+    tag: Option<String>,
 }
 
 /// The tab id a window's Run SQL file runs under, for cancelling it.
@@ -829,6 +844,9 @@ struct SqliteTabs {
     open: HashMap<(String, u64), SqliteCursor>,
     /// By tab, with the path it was opened for.
     conns: HashMap<(String, u64), (String, TabConn)>,
+    /// Tabs whose latest run started inside a transaction or may open one:
+    /// while it runs, its connection can't be asked.
+    run_at_risk: HashMap<(String, u64), bool>,
 }
 
 type SharedSqliteTabs = Arc<Mutex<SqliteTabs>>;
@@ -853,16 +871,29 @@ impl SqliteTabs {
         entry.1.clone()
     }
 
-    /// The tabs whose idle connection holds an open transaction (one out
-    /// running something isn't asked; the page knows those).
-    fn user_transactions(&self) -> usize {
-        self.conns
-            .values()
-            .filter(|(_, conn)| {
-                conn.try_lock()
-                    .is_ok_and(|d| d.as_ref().is_some_and(SqliteDriver::in_transaction))
+    /// The window's tabs whose connection may hold an open transaction,
+    /// which closing the connection would roll back: an idle one that holds
+    /// one, or one out on a run that started inside one or may open one.
+    /// `held`: a running tab counts only when its run started inside one.
+    fn window_transactions(&self, window_id: &str, held: bool) -> Vec<u64> {
+        let mut tabs: Vec<u64> = self
+            .conns
+            .iter()
+            .filter(|(key, (_, conn))| {
+                key.0 == window_id
+                    && match conn.try_lock() {
+                        Ok(d) => d.as_ref().is_some_and(SqliteDriver::in_transaction),
+                        Err(std::sync::TryLockError::WouldBlock) => self
+                            .run_at_risk
+                            .get(*key)
+                            .is_some_and(|inside| *inside || !held),
+                        Err(std::sync::TryLockError::Poisoned(_)) => false,
+                    }
             })
-            .count()
+            .map(|((_, tab), _)| *tab)
+            .collect();
+        tabs.sort_unstable();
+        tabs
     }
 
     /// Forgets the window's pages and connections (a run still on one
@@ -989,6 +1020,18 @@ impl SqliteTab {
         }
     }
 
+    /// Notes whether the run that now holds the tab's connection started
+    /// inside a transaction, or may open one (`window_transactions`).
+    fn note_run(&self, inside: bool, may_open: bool) {
+        if let Ok(mut tabs) = self.tabs.lock() {
+            if inside || may_open {
+                tabs.run_at_risk.insert(self.key.clone(), inside);
+            } else {
+                tabs.run_at_risk.remove(&self.key);
+            }
+        }
+    }
+
     /// Replaces a bare `SQLITE_LOCKED` with which tab holds the lock, when
     /// another tab's open transaction is why.
     fn explain_locked(&self, path: &str, message: &mut String) {
@@ -1088,6 +1131,7 @@ fn run_sqlite_query_worker(
         let driver = ready_tab(&mut held, &db_path, read_only).map_err(|e| e.to_string())?;
         // A cancel or an error inside a write can end the tab's transaction.
         let in_transaction = driver.in_transaction();
+        tab.note_run(in_transaction, !reads_only(&sql));
         if let Some(handle) = driver.interrupt_handle() {
             if !arm_cancel(&interrupt_slot, CancelHandle::Sqlite(handle)) {
                 return Ok(QueryOutcome::cancelled(0));
@@ -1381,6 +1425,9 @@ async fn stream_on_session(
         PgWork::Within { .. } | PgWork::Explain { .. } => None,
     };
     let mut fwd = Forward::new(events, query_id, tab_id, cap);
+    // Only this run's warnings reach its result.
+    session_take_warnings(session);
+    let cancel_aborted = session_take_cancel_aborted(session);
     let paged = |fwd: &Forward, r: Result<(StreamStats, bool), DriverError>| {
         let more = r.as_ref().is_ok_and(|(_, more)| *more);
         fwd.outcome(r.map(|(stats, _)| stats))
@@ -1499,8 +1546,24 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
     };
+    let warnings = session_take_warnings(session);
+    let result = result
+        .map(|o| QueryOutcome {
+            warning: (!warnings.is_empty()).then(|| warnings.join("\n")),
+            ..o
+        })
+        .map_err(|mut failure| {
+            // 25P02: the transaction is aborted. Say what aborted it.
+            if cancel_aborted && failure.sqlstate.as_deref() == Some("25P02") {
+                failure.message.push_str(CANCEL_ABORTED);
+            }
+            failure
+        });
     (result, fwd.had_result_set)
 }
+
+/// After "current transaction is aborted" when a cancel aborted it.
+const CANCEL_ABORTED: &str = " (The last Cancel reached the server after your statement had finished, and aborted the transaction. ROLLBACK to go on.)";
 
 /// Every statement only reads: it can't open or end a transaction.
 fn reads_only(sql: &str) -> bool {
@@ -1537,6 +1600,7 @@ fn run_postgres_query_on_runtime(
     let stopped_pool = (pooled.pool.clone(), pooled.window_id.clone());
     let (stopped_connection, stopped_config) = (connection_id.clone(), config.clone());
     let stopped_slot = interrupt_slot.clone();
+    let stopped_generation = pooled.generation;
     let run = async move {
         let mut attempt = 0;
         // Every connection the saved connection may hold is busy: the tab
@@ -1566,11 +1630,11 @@ fn run_postgres_query_on_runtime(
                 &on_wait,
             )
             .await;
-            // `_out` holds the tab's slot until the session is given back.
+            // `out` holds the tab's slot until the session is given back.
             let Lease {
                 mut session,
                 reused,
-                out: _out,
+                mut out,
             } = match leased {
                 Ok(lease) => lease,
                 Err(err) => {
@@ -1584,6 +1648,9 @@ fn run_postgres_query_on_runtime(
                 token: session.cancel_token.clone(),
                 tls: session.cancel_via.clone(),
             };
+            if let Ok(mut state) = interrupt_slot.lock() {
+                state.tag = Some(session.tag().to_string());
+            }
             if !arm_cancel(&interrupt_slot, handle) {
                 finish_query_worker(
                     Ok(QueryOutcome::cancelled(0)),
@@ -1600,7 +1667,13 @@ fn run_postgres_query_on_runtime(
                     pooled.generation,
                     session,
                 );
+                drop(out);
                 return;
+            }
+            // A statement that may open a transaction: from now on the tab
+            // counts as holding one, and a force stop marks it lost.
+            if matches!(&work, PgWork::Query { sql, .. } if !reads_only(sql)) {
+                out.may_open_transaction();
             }
             let (result, sent_rows) =
                 stream_on_session(&mut session, &work, query_id, tab_id, &events).await;
@@ -1635,8 +1708,21 @@ fn run_postgres_query_on_runtime(
             let cancelled = disarm_cancel(&interrupt_slot);
             finish_query_worker(result, query_id, tab_id, start, &events);
             // After a cancel the request may still be on its way to this
-            // backend; parking the session could let it hit the next run.
-            if !cancelled {
+            // backend: the tab's next run waits (its slot stays out) until
+            // the cancel has gone and the server said what the statement
+            // left, so a transaction open in the session is kept.
+            if cancelled {
+                let sent = interrupt_slot
+                    .lock()
+                    .map(|s| s.sent.clone())
+                    .unwrap_or_default();
+                let pool = pooled.pool.clone();
+                let (window_id, generation) = (pooled.window_id.clone(), pooled.generation);
+                tokio::spawn(async move {
+                    keep_after_cancel(&pool, &window_id, tab_id, generation, session, &sent).await;
+                    drop(out);
+                });
+            } else {
                 // A statement that may have opened or ended a transaction:
                 // ask which, off the result's path, so the pool knows
                 // whether this session may ever be closed on its own.
@@ -1650,6 +1736,7 @@ fn run_postgres_query_on_runtime(
                     pooled.generation,
                     session,
                 );
+                drop(out);
             }
             return;
         }
@@ -1662,25 +1749,43 @@ fn run_postgres_query_on_runtime(
             _ = stop.notified() => {
                 // The run (and its session, socket and any transaction of
                 // ours, which the server rolls back) is dropped here.
+                // Stopped while waiting for a free connection: nothing hung.
+                let (waited, tag) = stopped_slot
+                    .lock()
+                    .map(|mut s| (std::mem::take(&mut s.waiting), s.tag.take()))
+                    .unwrap_or_default();
                 finish_query_worker(
-                    Ok(QueryOutcome::cancelled(0)),
+                    Ok(QueryOutcome {
+                        forced: !waited,
+                        ..QueryOutcome::cancelled(0)
+                    }),
                     query_id,
                     tab_id,
                     start,
                     &stopped_events,
                 );
-                // Stopped while waiting for a free connection: nothing hung.
-                let waited = stopped_slot
-                    .lock()
-                    .map(|mut s| std::mem::take(&mut s.waiting))
-                    .unwrap_or(false);
                 if waited {
                     return;
+                }
+                let (pool, window_id) = stopped_pool;
+                // The server keeps running what the closed socket sent: ask
+                // it to stop from another session of the window's own.
+                if let Some(tag) = tag {
+                    let target = sessions::Target {
+                        pool: pool.clone(),
+                        window_id: window_id.clone(),
+                        generation: stopped_generation,
+                        connection_id: stopped_connection.clone(),
+                        config: stopped_config.clone(),
+                    };
+                    tokio::spawn(async move {
+                        let cancel = sessions::cancel_stopped(target, tag);
+                        let _ = tokio::time::timeout(STOPPED_CANCEL_WITHIN, cancel).await;
+                    });
                 }
                 // The socket that hung may not be the only dead one: check
                 // the window's parked sessions now, so the next run doesn't
                 // find another (the prefetch session goes rather than waits).
-                let (pool, window_id) = stopped_pool;
                 if let Some(f) = pool.lock().ok().and_then(|p| p.existing_prefetcher(&window_id)) {
                     f.drop_if_idle(Duration::ZERO);
                 }
@@ -1689,6 +1794,44 @@ fn run_postgres_query_on_runtime(
             }
         }
     });
+}
+
+/// How long the cancel sent after a force stop may take, from another
+/// session (which may need a new connection).
+const STOPPED_CANCEL_WITHIN: Duration = Duration::from_secs(15);
+/// How long after the cancel went out the server gets to deliver it, before
+/// the run asks what its statement left.
+const CANCEL_SETTLE: Duration = Duration::from_millis(50);
+
+/// After a cancelled run: once the cancel has gone out, asks the session
+/// what the statement left and parks it, so a transaction open in it (even
+/// one the cancel failed: the user still has to roll it back) stays with
+/// the tab. A session that doesn't answer, or whose socket is gone, is
+/// dropped, and the tab's next statement says its transaction was lost.
+async fn keep_after_cancel(
+    pool: &SharedPool,
+    window_id: &str,
+    tab_id: u64,
+    generation: u64,
+    mut session: PostgresSession,
+    sent: &tokio::sync::Notify,
+) {
+    let _ = tokio::time::timeout(FORCE_STOP_AFTER, sent.notified()).await;
+    tokio::time::sleep(CANCEL_SETTLE).await;
+    if session.is_closed() {
+        pool::drop_lost(pool, window_id, Slot::Tab(tab_id), session);
+        return;
+    }
+    let probed = tokio::time::timeout(
+        pool::PROBE_TIMEOUT * 2,
+        session_probe_after_cancel(&mut session, pool::PROBE_TIMEOUT),
+    )
+    .await;
+    if matches!(probed, Ok(TxnState::None | TxnState::Users)) {
+        pool::give_back(pool, window_id, Slot::Tab(tab_id), generation, session);
+    } else {
+        pool::drop_lost(pool, window_id, Slot::Tab(tab_id), session);
+    }
 }
 
 /// How long saving edits waits for the tab's session, for `BEGIN`, and for
@@ -2050,6 +2193,8 @@ fn finish_query_worker<S: EventSink + ?Sized>(
                 paged: outcome.paged,
                 more: outcome.more,
                 capped: outcome.capped,
+                warning: outcome.warning,
+                forced: outcome.forced,
                 ..QueryDetail::default()
             },
         },
@@ -2232,6 +2377,38 @@ fn open_window_now(
                 None,
             );
         }
+    }
+}
+
+/// Why a window wasn't re-pointed.
+pub const REPOINT_IN_TXN: &str = "A query tab in this window has a transaction open, and switching would roll it back. COMMIT or ROLLBACK it first.";
+
+/// Why safe mode didn't change.
+pub const SAFE_MODE_IN_TXN: &str = "A query tab on this connection has a transaction open, and changing safe mode would roll it back. COMMIT or ROLLBACK it first.";
+
+/// The window's query tabs that may hold the user's open transaction, which
+/// re-pointing the window or a new safe mode would roll back: a Postgres
+/// tab's session, or a SQLite tab's own connection.
+/// `held`: as the pool's `held_transactions` (a quit's count).
+fn window_transactions(state: &CoreState, window_id: &str, held: bool) -> Vec<u64> {
+    match state.windows.get(window_id) {
+        Some(WindowTarget::Postgres { .. }) => state
+            .pool
+            .lock()
+            .map(|p| {
+                if held {
+                    p.held_transactions(window_id)
+                } else {
+                    p.open_transactions(window_id)
+                }
+            })
+            .unwrap_or_default(),
+        Some(WindowTarget::Sqlite { .. }) => state
+            .sqlite_tabs
+            .lock()
+            .map(|t| t.window_transactions(window_id, held))
+            .unwrap_or_default(),
+        None => Vec::new(),
     }
 }
 
@@ -2428,11 +2605,13 @@ fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
                 });
             }
             Some(CancelHandle::Postgres { token, tls }) => {
+                let sent = guard.sent.clone();
                 runtime.spawn(async move {
                     // The cancel itself can hang on a dead tunnel; it gets
                     // the same time as the run.
                     let _ =
                         tokio::time::timeout(FORCE_STOP_AFTER, cancel_with_token(token, tls)).await;
+                    sent.notify_one();
                 });
                 runtime.spawn(async move {
                     tokio::time::sleep(FORCE_STOP_AFTER).await;
@@ -2659,7 +2838,14 @@ fn with_postgres<T, F, Fut>(
 }
 
 fn force_stop(runtime: &Handle, slot: &CancelSlot) {
-    request_cancel(runtime, slot);
+    // A test stands in for a cancel request that never reaches the server.
+    #[cfg(test)]
+    let skip = tests::NO_TOKEN_CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(test))]
+    let skip = false;
+    if !skip {
+        request_cancel(runtime, slot);
+    }
     if let Ok(guard) = slot.lock() {
         guard.stop.notify_one();
     }
@@ -2707,14 +2893,38 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             connection,
             respond_to,
         } => {
-            let event = {
+            let event = 'event: {
                 // Open windows follow a changed safe mode on their next run.
                 // Warm Postgres sessions were opened under the old mode
-                // (read-only or not), so those windows start fresh ones; so
-                // do SQLite tabs, or an open transaction would commit its
+                // (read-only or not), so those windows start fresh ones, and
+                // so do SQLite tabs, or an open transaction would commit its
                 // earlier writes under Read-only (`query_only` doesn't
-                // refuse COMMIT).
+                // refuse COMMIT): never while a tab's transaction is open in
+                // one, which that would roll back.
                 let (id, mode) = (connection.id().to_string(), connection.safe_mode());
+                let changes_mode = state
+                    .config
+                    .connections
+                    .iter()
+                    .any(|c| c.id() == id && c.safe_mode() != mode);
+                // One lock each for the check and the resets: nothing opens
+                // a transaction in between.
+                let mut pool = state.pool.lock().ok();
+                let mut sqlite_tabs = state.sqlite_tabs.lock().ok();
+                let held = state.windows.iter().any(|(w, target)| match target {
+                    WindowTarget::Postgres { connection_id, .. } if *connection_id == id => pool
+                        .as_ref()
+                        .is_some_and(|p| !p.open_transactions(w).is_empty()),
+                    WindowTarget::Sqlite { connection_id, .. } if *connection_id == id => {
+                        sqlite_tabs
+                            .as_ref()
+                            .is_some_and(|t| !t.window_transactions(w, false).is_empty())
+                    }
+                    _ => false,
+                });
+                if changes_mode && held {
+                    break 'event Event::Error(SAFE_MODE_IN_TXN.into());
+                }
                 let mut stale = Vec::new();
                 let mut closing = Vec::new();
                 for (window_id, target) in state.windows.iter_mut() {
@@ -2725,7 +2935,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             ..
                         } if *connection_id == id && *safe_mode != mode => {
                             *safe_mode = mode;
-                            if let Ok(mut tabs) = state.sqlite_tabs.lock() {
+                            if let Some(tabs) = sqlite_tabs.as_mut() {
                                 closing.extend(tabs.drop_window_conns(window_id));
                             }
                         }
@@ -2734,13 +2944,16 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             config,
                         } if *connection_id == id && config.safe_mode != mode => {
                             config.safe_mode = mode;
-                            if let Ok(mut pool) = state.pool.lock() {
+                            if let Some(pool) = pool.as_mut() {
                                 stale.extend(pool.reset_window(window_id).1);
                             }
                         }
                         _ => {}
                     }
                 }
+                // The sessions close outside the lock.
+                drop(pool);
+                drop(sqlite_tabs);
                 drop(stale);
                 drop_conns(closing);
                 state.config.upsert_connection(connection);
@@ -2789,6 +3002,14 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     });
                     return;
                 }
+            }
+            // Re-pointing (another connection or database, Reconnect) starts
+            // the window's sessions afresh: never over a tab's transaction.
+            if state.windows.contains_key(&window_id)
+                && !window_transactions(state, &window_id, false).is_empty()
+            {
+                let _ = respond_to.send(Err(REPOINT_IN_TXN.into()));
+                return;
             }
             open_window_now(state, window_id, connection_id, database, respond_to);
         }
@@ -3452,10 +3673,29 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 force_stop(&state.runtime, slot);
             }
         }
+        Command::OpenTransactions { respond_to } => {
+            let mut open: Vec<(String, u64)> = state
+                .windows
+                .keys()
+                .flat_map(|w| {
+                    let tabs = window_transactions(state, w, false);
+                    tabs.into_iter().map(move |t| (w.clone(), t))
+                })
+                .collect();
+            open.sort();
+            let _ = respond_to.send(open);
+        }
         Command::CountTransactions { respond_to } => {
-            let postgres = state.pool.lock().ok().map(|p| p.user_transactions());
-            let sqlite = state.sqlite_tabs.lock().ok().map(|t| t.user_transactions());
-            let held = postgres.zip(sqlite).map(|(p, s)| p + s);
+            // Tabs holding one, a run inside one included (a write that may
+            // open one counts as a write); unknown when a lock is poisoned.
+            let sound = state.pool.lock().is_ok() && state.sqlite_tabs.lock().is_ok();
+            let held = sound.then(|| {
+                state
+                    .windows
+                    .keys()
+                    .map(|w| window_transactions(state, w, true).len())
+                    .sum()
+            });
             let _ = respond_to.send(held);
         }
         Command::Prefetch {
@@ -4378,6 +4618,13 @@ impl CoreBridge {
     /// until the guard drops, so a quit asks first.
     pub fn hold_commit(&self) -> Held {
         self.busy.hold(Work::Commit)
+    }
+
+    /// Each window's query tabs (window id, tab id) whose session may hold
+    /// the user's open transaction.
+    pub fn open_transactions(&self) -> Vec<(String, u64)> {
+        self.send_command(|respond_to| Command::OpenTransactions { respond_to })
+            .unwrap_or_default()
     }
 
     /// Databases on the window's server; empty for SQLite.

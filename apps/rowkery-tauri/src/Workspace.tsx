@@ -94,6 +94,7 @@ import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
+import { forgetTabTitles, noteTabTitles } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -379,6 +380,17 @@ interface WorkspaceProps {
  * connection and database. The app shell owns connecting, the title bar
  * and the switchers at the top of the panel; this owns the rest.
  */
+/** When the last "may finish it" toast showed: a Stop all of many tabs shows one. */
+let forcedToastAt = 0;
+
+/** Force stop closed a run's connection; the server keeps running what it had. */
+function toastForcedStop() {
+  const now = Date.now();
+  if (now - forcedToastAt < 2000) return;
+  forcedToastAt = now;
+  showToast("Stopped here; the server may finish it");
+}
+
 export function Workspace({
   session,
   active,
@@ -466,6 +478,9 @@ export function Workspace({
   const nextTabId = useRef((restoredTabs?.tabs.length ?? 1) + 1);
   // Tabs and their SQL are saved as they change; persist.ts waits for the
   // typing to pause before writing.
+  // A refused switch names the tab whose transaction is in the way.
+  useEffect(() => noteTabTitles(windowId, tabs), [windowId, tabs]);
+  useEffect(() => () => forgetTabTitles(windowId), [windowId]);
   useEffect(() => {
     if (!onTabsChange) return;
     // The import tab goes with its panel: it isn't restored.
@@ -2293,6 +2308,7 @@ export function Workspace({
       }
       if (res.cancelled) outcome = null;
       else if (res.error) outcome = "error";
+      if (res.forced) toastForcedStop();
       end = res.cancelled ? "cancelled" : res.error ? "error" : "done";
       elapsedMs = res.elapsed_ms;
       const answered = !res.error && !res.cancelled;
@@ -2607,10 +2623,11 @@ export function Workspace({
    * One run at a time per table tab. A filter, sort, page size, hide or
    * history step made while one runs is queued (`queued`, the newest wins)
    * and runs as soon as the one in flight ends, whose answer is then dropped
-   * if it no longer matches the tab. The run isn't cancelled: core doesn't
-   * park a cancelled session, and a cancel that lands late could hit the
-   * next run. A Load more asked for mid-run is dropped (scrolling asks
-   * again), and one whose rows no longer match the tab loads a first page.
+   * if it no longer matches the tab. The run isn't cancelled: after a
+   * cancel core holds the tab's session until the cancel has landed, which
+   * would only delay the next run. A Load more asked for mid-run is dropped
+   * (scrolling asks again), and one whose rows no longer match the tab loads
+   * a first page.
    */
   const runKey = (t: QueryTab) =>
     JSON.stringify([t.tableKey, t.filter ?? "", t.sort ?? [], t.pageSize ?? DEFAULT_PAGE, t.hidden ?? []]);
