@@ -84,7 +84,7 @@
 .tn-text {
   margin: 0;
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--panel);
   font: 11.5px/1.5 var(--mono);
   color: var(--text);

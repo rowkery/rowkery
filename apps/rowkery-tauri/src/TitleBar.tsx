@@ -38,7 +38,7 @@ interface TitleBarProps {
 }
 
 /**
- * The title bar (Paper, 2026-10-13): 48 px of --bar with a rule under it.
+ * The title bar (Paper, 2026-10-13): 48 px straight on the canvas (2026-10-24).
  * Left, the traffic lights and one 28 px pill per window (the engine's logo
  * or the penguin, the connection's name, its environment dot, × on hover and
  * on the shown one), then + for a new window. The shown pill also carries

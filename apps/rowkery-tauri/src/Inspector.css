@@ -1,21 +1,24 @@
 /* ---------- The inspector column (Paper, 2026-10-10) ----------
    Quick Look, New connection and Review SQL open in one column at the main
-   column's right: the panel's
-   ground with a 1 px rule on its left, a 42 px head level with the tab row.
-   The main column gives it its width (App.css, --inspector-right), so it
-   never covers a row. It slides in from the right and fades out, shorter. */
+   column's right: its own paper sheet (2026-10-24), inset from the window's
+   right and bottom with a canvas gap before the main sheet, a 42 px head
+   level with the tab row. The main column gives it its width (App.css,
+   --inspector-right), so it never covers a row. It slides in from the right
+   and fades out, shorter. Unclipped, so its resize edge can reach into the
+   gap; nothing inside paints into its corners. */
 
 .inspector {
   position: absolute;
   z-index: 3;
   top: var(--titlebar-h);
-  right: 0;
-  bottom: 0;
+  right: var(--inset);
+  bottom: var(--inset);
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--panel);
-  box-shadow: inset 1px 0 0 var(--line);
+  border-radius: var(--r-xl);
+  background: var(--bg);
+  box-shadow: var(--sheet-ring);
   color: var(--text);
   animation: slideIn 0.22s var(--ease-out);
   transition: width 0.22s ease, background-color 0.3s ease, box-shadow 0.3s ease;
@@ -38,13 +41,14 @@
 }
 
 /* The left edge drags the width (InspectorResize, 2026-10-13): a 6 px hit
-   area, a --line2 rule on hover, the orange while dragging. */
+   area in the canvas gap before the sheet, a --line2 rule on hover, the
+   orange while dragging. */
 .insp-resize {
   position: absolute;
   z-index: 2;
   top: 0;
   bottom: 0;
-  left: -3px;
+  left: calc(1px - var(--inset));
   width: 6px;
   cursor: col-resize;
   touch-action: none;
@@ -53,8 +57,8 @@
 .insp-resize::after {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: var(--r-xl);
+  bottom: var(--r-xl);
   left: 2px;
   width: 2px;
   transition: background-color 0.12s;
@@ -139,7 +143,7 @@
   height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   cursor: pointer;
@@ -175,7 +179,7 @@
   height: 30px;
   padding: 0 10px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   color: var(--text);
   font: 500 12px var(--sans);
@@ -270,7 +274,7 @@
   align-items: center;
   margin-top: 8px;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--delbg);
   color: var(--del);
   font: 600 11px var(--sans);
@@ -293,7 +297,7 @@
   grid-template-columns: 96px minmax(0, 1fr);
   gap: 12px;
   padding: 9px 8px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   box-shadow: inset 0 -1px 0 var(--rowline);
   transition: background-color 0.18s ease;
 }
@@ -383,7 +387,7 @@
   gap: 4px;
   padding: 1px 7px 1px 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--blue) 14%, transparent);
   color: var(--blue);
   font: 600 10.5px/1.6 var(--sans);
@@ -424,7 +428,7 @@
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: none;
   color: var(--dim);
   opacity: 0;
@@ -462,7 +466,7 @@
   align-items: center;
   height: 30px;
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   font: 12.5px var(--sans);
   color: var(--text);
   cursor: pointer;
@@ -538,7 +542,7 @@
   gap: 6px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   animation: rise 0.25s var(--ease-out) both;
 }
@@ -553,7 +557,7 @@
 .rv-badge {
   flex-shrink: 0;
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   font: 600 10px var(--sans);
   letter-spacing: 0.06em;
 }
@@ -653,7 +657,7 @@
   height: 28px;
   padding: 0 6px 0 7px;
   border: 1px solid var(--line2);
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text);
   font: 500 13px var(--sans);
@@ -688,7 +692,7 @@
 .page-back kbd {
   flex-shrink: 0;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--kbd);
   color: var(--mute);
   font: 10.5px var(--mono);

@@ -61,8 +61,8 @@ Paths below are under `apps/rowkery-tauri/` unless they start with `crates/`.
 
 The visual language is Paper; `DESIGN.md` has the tokens and the reasons.
 
-- **Rules are the structure, borders mean controls.** Regions are separated by 1 px `--line` rules on one opaque paper sheet; a 1 px `--line2` border says "you can press this". No glass, no glow, and no `backdrop-filter` except ⌘K's scrim.
-- **Orange is what you ask for, ink commits.** `--acc` is only on Run, the active statement's bar, the WHERE chips, the active tab, switches that are on and the focus ring. The button that writes (Commit, Save and connect, Send) is ink (`--ink` / `--inkfg`), never orange or red. Run is a flat fill.
+- **Rules are the structure, borders mean controls.** The work sits on opaque paper sheets on a canvas, and inside a sheet regions are separated by 1 px `--line` rules; a 1 px `--line2` border says "you can press this". No glass, no glow, and no `backdrop-filter` except ⌘K's scrim.
+- **Orange is what you ask for, ink commits.** `--acc` is only on Run, the active statement's bar, the WHERE chips, switches that are on and the focus ring. The button that writes (Commit, Save and connect, Send) is ink (`--ink` / `--inkfg`), never orange or red. Run is a flat fill.
 - **Light and dark follow macOS** (Auto, or pinned in Settings › Appearance). Every colour is a token defined in both `:root` and `:root[data-theme="dark"]` in `src/App.css`; no hex outside them. Text on a solid fill uses `--onfill`; small text stays at 4.5:1 in both themes (`scripts/paper-finish-browser-proof.mjs` checks).
 - **The inspector column** on the right holds Quick Look, Review SQL and New connection, one at a time, beside the data, never over it.
 - **The foot edits bar** at the grid's foot counts staged edits and holds Discard / Review SQL / Commit; toasts (an ink card, its action in orange) sit above it.

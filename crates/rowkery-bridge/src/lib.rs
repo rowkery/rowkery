@@ -18,7 +18,7 @@ use rowkery_core::db::postgres::{
     session_introspect, session_list_databases, session_note_statement, session_plan_facts,
     session_probe_txn, session_query_cursor, session_query_stream_with, session_server_version,
     session_table_indexes, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
-    StreamStats, TxnState,
+    StreamStats, TxnState, CONNECT_TIMEOUT,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount, SQLITE_LOCKED};
 use rowkery_core::db::{
@@ -294,7 +294,7 @@ pub struct FollowRow {
 /// `SELECT * … WHERE column = literal LIMIT 1`, or `None` when the value
 /// can't be matched (NULL, bytes).
 fn follow_sql(engine: EngineKind, lookup: &FollowLookup) -> Option<String> {
-    let literal = rowkery_core::query_util::sql_literal(&lookup.value)?;
+    let literal = rowkery_core::query_util::sql_literal(engine, &lookup.value)?;
     let opts = BrowseOptions {
         filter: Some(format!(
             "{} = {literal}",
@@ -325,7 +325,7 @@ const QUICK_LOOK_LIMIT: Duration = Duration::from_secs(5);
 /// how many rows reference a value, bounded so a hot key costs no more than
 /// a cold one.
 fn incoming_sql(engine: EngineKind, lookup: &FollowLookup) -> Option<String> {
-    let literal = rowkery_core::query_util::sql_literal(&lookup.value)?;
+    let literal = rowkery_core::query_util::sql_literal(engine, &lookup.value)?;
     Some(format!(
         "SELECT count(*) AS n FROM (SELECT 1 FROM {} WHERE {} = {literal} LIMIT {}) s",
         qualified_table_sql(engine, &lookup.schema, &lookup.table),
@@ -755,8 +755,19 @@ pub fn probe_connection_blocking(
                         runtime.block_on(async {
                             let mut session =
                                 open_session_with_secrets(probe_id, pg, Some(&secrets)).await?;
-                            session_test(&mut session).await?;
-                            Ok(session_server_version(&session).await.ok())
+                            // The open is bounded; so is what runs after it,
+                            // so a probe always ends.
+                            let checked = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                                session_test(&mut session).await?;
+                                Ok(session_server_version(&session).await.ok())
+                            })
+                            .await;
+                            checked.unwrap_or_else(|_| {
+                                Err(DriverError::Message(format!(
+                                    "Connection timed out: the server did not answer SELECT 1 in {} s",
+                                    CONNECT_TIMEOUT.as_secs()
+                                )))
+                            })
                         })
                     });
                     match test_result {
@@ -1159,9 +1170,9 @@ struct PoolSlot {
     generation: u64,
 }
 
-/// The most rows one run sends a tab. Past it the rest are read and left
-/// out (never cancelled: a write's RETURNING still finishes, and the user's
-/// transaction is untouched), and the run says `capped`. Paged loading stops
+/// The most rows one run sends a tab. Past it the rest are read off the wire
+/// and left out, never decoded (never cancelled: a write's RETURNING still
+/// finishes, and the user's transaction is untouched), and the run says `capped`. Paged loading stops
 /// there too: the webview asks for no more than what is left of it.
 pub const MAX_TAB_ROWS: u64 = 1_000_000;
 
@@ -1188,6 +1199,17 @@ impl<'a> Forward<'a> {
             had_result_set: false,
             cap,
             capped: false,
+        }
+    }
+
+    /// How to stream for this forward: past what is left of the cap (and one
+    /// more, which says `capped`) rows aren't decoded.
+    fn opts(&self) -> StreamOptions {
+        StreamOptions {
+            keep: self
+                .cap
+                .map(|cap| cap.saturating_sub(self.row_count).saturating_add(1)),
+            ..StreamOptions::default()
         }
     }
 
@@ -1348,7 +1370,6 @@ async fn stream_on_session(
         PgWork::Within { .. } | PgWork::Explain { .. } => None,
     };
     let mut fwd = Forward::new(events, query_id, tab_id, cap);
-    let opts = StreamOptions::default;
     let paged = |fwd: &Forward, r: Result<(StreamStats, bool), DriverError>| {
         let more = r.as_ref().is_ok_and(|(_, more)| *more);
         fwd.outcome(r.map(|(stats, _)| stats))
@@ -1363,7 +1384,7 @@ async fn stream_on_session(
             sql,
             page: Some(rows),
         } if pages_by_cursor(sql) => {
-            let first = session_query_cursor(session, sql, *rows, opts(), |b, first| {
+            let first = session_query_cursor(session, sql, *rows, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1375,7 +1396,7 @@ async fn stream_on_session(
                 // transaction, or Postgres won't take it as one): run it as
                 // written; past MAX_TAB_ROWS its rows are left out.
                 Ok(None) => {
-                    let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+                    let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                         fwd.batch(b, first);
                         Ok(())
                     })
@@ -1386,7 +1407,7 @@ async fn stream_on_session(
         }
         PgWork::Query { sql, .. } => {
             session_close_cursor(session).await;
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1395,7 +1416,7 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
         PgWork::Within { sql } => {
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1403,7 +1424,7 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
         PgWork::More { rows } => {
-            let more = session_fetch_more(session, *rows, opts(), |b, first| {
+            let more = session_fetch_more(session, *rows, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1439,7 +1460,7 @@ async fn stream_on_session(
                 }
             }
             let mut text = String::new();
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 if let Some(Value::Text(t)) = b.rows.first().and_then(|r| r.first()) {
                     text.push_str(t);
                 }
@@ -1706,6 +1727,61 @@ impl EventSink for InvalidateOnFinish {
             invalidate_prefetch(&self.pool, &self.window_id, &self.runtime);
         }
         self.inner.push(event);
+    }
+}
+
+/// A run's events, passed on; if the run's worker goes away without saying
+/// how it ended (a panic, an early return), dropping the last handle sends a
+/// failed finish, so the caller (the webview's channel, ⌘E's wait) never
+/// waits on a run that is gone.
+struct FinishGuard {
+    inner: SharedSink,
+    query_id: u64,
+    tab_id: u64,
+    start: Instant,
+    finished: AtomicBool,
+}
+
+const RUN_LOST_MESSAGE: &str =
+    "The query stopped without reporting how it ended (please report this bug)";
+
+fn finish_guard(inner: SharedSink, query_id: u64, tab_id: u64) -> SharedSink {
+    Arc::new(FinishGuard {
+        inner,
+        query_id,
+        tab_id,
+        start: Instant::now(),
+        finished: AtomicBool::new(false),
+    })
+}
+
+impl EventSink for FinishGuard {
+    fn push(&self, event: CoreEvent) {
+        if matches!(
+            event,
+            CoreEvent::QueryFinished { .. } | CoreEvent::QueryHeld { .. }
+        ) {
+            self.finished.store(true, Ordering::SeqCst);
+        }
+        self.inner.push(event);
+    }
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        self.inner.push(CoreEvent::QueryFinished {
+            query_id: self.query_id,
+            tab_id: self.tab_id,
+            row_count: 0,
+            rows_affected: None,
+            elapsed_ms: self.start.elapsed().as_millis() as u64,
+            error: Some(RUN_LOST_MESSAGE.into()),
+            cancelled: false,
+            detail: QueryDetail::default(),
+        });
     }
 }
 
@@ -3005,6 +3081,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             } else {
                 events
             };
+            let events = finish_guard(events, query_id, tab_id);
             // A new run ends the tab's SQLite page (an export leaves it).
             let tab_key = (window_id.clone(), tab_id);
             if !export {
@@ -3230,6 +3307,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 let tab = SqliteTab::new(&state.sqlite_tabs, &key, &path);
                 let slot: CancelSlot = Arc::default();
                 state.window_interrupts.insert(key.clone(), slot.clone());
+                let sink = finish_guard(sink, query_id, tab_id);
                 push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
                 let Some(cursor) = cursor else {
                     finish_query_worker(
@@ -3280,6 +3358,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             state
                 .window_interrupts
                 .insert((window_id.clone(), tab_id), slot.clone());
+            let sink = finish_guard(sink, query_id, tab_id);
             push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
             run_postgres_query_on_runtime(
                 state.runtime.clone(),

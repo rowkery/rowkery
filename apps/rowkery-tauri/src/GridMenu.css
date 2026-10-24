@@ -4,7 +4,7 @@
   z-index: 1000;
   min-width: 220px;
   padding: 6px;
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   box-shadow: var(--pop);
   color: var(--text);
@@ -15,7 +15,7 @@
   animation: grid-menu-in 160ms var(--ease-out);
   -webkit-user-select: none;
   user-select: none;
-  --glide-radius: 5px;
+  --glide-radius: var(--r-sm);
 }
 
 .grid-menu-item {
@@ -27,7 +27,7 @@
   height: 32px;
   padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: none;
   /* Not /1: the label clips its overflow, and at 1 the line box cut off descenders (the g in Agents). */
   font: 400 12.5px/1.4 var(--sans);

@@ -203,20 +203,39 @@ describe("review fixes", () => {
   });
 
   // Contains matches the value literally.
+  // On Postgres the escaped pattern and its ESCAPE are E'' strings, which
+  // read the same with standard_conforming_strings on or off.
   test("contains escapes \\ % _ and says ESCAPE", () => {
-    expect(chipsToWhere([pred("note", "text", "ILIKE", "it's a \\")])).toBe("note ILIKE '%it''s a \\\\%' ESCAPE '\\'");
-    expect(chipsToWhere([pred("name", "text", "ILIKE", "user_name")])).toBe("name ILIKE '%user\\_name%' ESCAPE '\\'");
+    expect(chipsToWhere([pred("note", "text", "ILIKE", "it's a \\")])).toBe("note ILIKE E'%it''s a \\\\\\\\%' ESCAPE E'\\\\'");
+    expect(chipsToWhere([pred("name", "text", "ILIKE", "user_name")])).toBe("name ILIKE E'%user\\\\_name%' ESCAPE E'\\\\'");
     expect(chipsToWhere([pred("name", "text", "ILIKE", "50%")], "sqlite")).toBe("name LIKE '%50\\%%' ESCAPE '\\'");
-    expect(chipsToWhere([{ kind: "any", columns: ["note"], value: "a_b" }])).toBe("note ILIKE '%a\\_b%' ESCAPE '\\'");
+    expect(chipsToWhere([pred("note", "text", "ILIKE", "it's a \\")], "sqlite")).toBe("note LIKE '%it''s a \\\\%' ESCAPE '\\'");
+    expect(chipsToWhere([{ kind: "any", columns: ["note"], value: "a_b" }])).toBe("note ILIKE E'%a\\\\_b%' ESCAPE E'\\\\'");
     // A plain value reads plainly.
     expect(chipsToWhere([pred("name", "text", "ILIKE", "kiosk")])).toBe("name ILIKE '%kiosk%'");
   });
 
   test("contains chips round-trip through the line", () => {
-    for (const v of ["it's a \\", "user_name", "50%", "plain", "a\\_b", "x y"]) {
-      const sql = chipsToWhere([pred("note", "text", "ILIKE", v)]);
-      expect(parseFragment(sql, COLUMNS), sql).toEqual(pred("note", "text", "ILIKE", v));
+    for (const engine of ["postgres", "sqlite"] as const) {
+      for (const v of ["it's a \\", "user_name", "50%", "plain", "a\\_b", "x y"]) {
+        const sql = chipsToWhere([pred("note", "text", "ILIKE", v)], engine).replace(/^note LIKE /, "note ILIKE ");
+        expect(parseFragment(sql, COLUMNS), sql).toEqual(pred("note", "text", "ILIKE", v));
+      }
     }
+  });
+
+  // A key value with a backslash can't end its literal on a Postgres server
+  // with standard_conforming_strings off (following a key builds this chip).
+  test("a value with a backslash is an E'' literal on Postgres", () => {
+    const breakout = "\\' OR TRUE --";
+    expect(chipsToWhere([pred("name", "text", "=", breakout)])).toBe("name = E'\\\\'' OR TRUE --'");
+    expect(chipsToWhere([pred("name", "text", "=", "C:\\tmp")])).toBe("name = E'C:\\\\tmp'");
+    expect(chipsToWhere([pred("name", "text", "IN", "a\\b, c")])).toBe("name IN (E'a\\\\b', 'c')");
+    // Without a backslash, and on SQLite (no escapes in strings), plain quotes.
+    expect(chipsToWhere([pred("name", "text", "=", "it's")])).toBe("name = 'it''s'");
+    expect(chipsToWhere([pred("name", "text", "=", breakout)], "sqlite")).toBe("name = '\\'' OR TRUE --'");
+    // IN's chip text keeps plain quotes: it is read back by splitList, not run.
+    expect(joinList(["a, b\\"])).toBe("'a, b\\'");
   });
 
   // IN lists with apostrophes and quoted commas.

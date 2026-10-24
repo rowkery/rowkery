@@ -602,9 +602,10 @@ pub(crate) async fn lease(
     .await
 }
 
-/// [`lease`], calling `on_wait(true)` when a new session must wait for a
-/// free place under the connection's cap, and `on_wait(false)` once it has
-/// one. Dropping the future while it waits gives nothing up.
+/// [`lease`], calling `on_wait(true)` when it must wait (the slot's session
+/// is still out with an earlier run, or a new session needs a free place
+/// under the connection's cap), and `on_wait(false)` once it has one.
+/// Dropping the future while it waits gives nothing up.
 pub(crate) async fn lease_or_wait(
     pool: &SharedPool,
     window_id: &str,
@@ -615,6 +616,9 @@ pub(crate) async fn lease_or_wait(
     on_wait: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<Lease, DriverError> {
     let key = (window_id.to_string(), slot);
+    // Waiting on the slot's own session (an earlier run still holds it) says
+    // so too, so it never reads as a hang.
+    let mut busy_waited = false;
     let (parked, tunnel, mut out) = loop {
         let returned = pool.lock().map(|p| p.returned.clone()).ok();
         let wake = returned.as_ref().map(|n| n.notified());
@@ -641,10 +645,16 @@ pub(crate) async fn lease_or_wait(
             Err(_) => Found::Ready(None, None, Checkout::none()),
         };
         match found {
-            Found::Busy => match wake.as_mut().as_pin_mut() {
-                Some(w) => w.await,
-                None => tokio::task::yield_now().await,
-            },
+            Found::Busy => {
+                if !busy_waited {
+                    busy_waited = true;
+                    on_wait(true);
+                }
+                match wake.as_mut().as_pin_mut() {
+                    Some(w) => w.await,
+                    None => tokio::task::yield_now().await,
+                }
+            }
             Found::Lost(sure) => {
                 return Err(DriverError::Message(
                     if sure { LOST_TXN } else { LOST_MAYBE_TXN }.into(),
@@ -653,6 +663,9 @@ pub(crate) async fn lease_or_wait(
             Found::Ready(parked, tunnel, out) => break (parked, tunnel, out),
         }
     };
+    if busy_waited {
+        on_wait(false);
+    }
     // Already known dead: replaced before anything is sent, so this is safe
     // for any statement. No ping here; that would cost a round trip per run.
     // But if it may have held the user's transaction, that is gone: say so.
