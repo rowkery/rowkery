@@ -7,8 +7,13 @@ import { Keys } from "./Keys";
 export type TrayState =
   | { kind: "pending" }
   | { kind: "committing" }
-  /** Rolled back: `message` names the row ("UPDATE kiosks WHERE id = 3 changed 2 rows"). */
-  | { kind: "failed"; message: string }
+  /**
+   * Rolled back: `message` names the row ("UPDATE kiosks WHERE id = 3 changed 2 rows").
+   * `unknown`: the commit's answer never came (or the connection dropped
+   * during COMMIT), so it may have been saved. `title`: the hover text, when
+   * it isn't `message`.
+   */
+  | { kind: "failed"; message: string; title?: string; unknown?: boolean }
   /** "Updated 1 · Inserted 1 · Deleted 1 · 24 ms", for 1.6 s after a commit. */
   | { kind: "done"; text: string }
   /** ↵ where nothing can be edited, for 4 s. */
@@ -95,8 +100,8 @@ export function EditTray({
     >
       <b className="edit-tray-count">{n}</b>
       {failed ? (
-        <span className="edit-tray-error" data-tray-error title={state.message}>
-          Nothing changed · {state.message}
+        <span className="edit-tray-error" data-tray-error title={state.title ?? state.message}>
+          {state.unknown ? "Outcome unknown" : "Nothing changed"} · {state.message}
         </span>
       ) : (
         <span className="edit-tray-dots">
