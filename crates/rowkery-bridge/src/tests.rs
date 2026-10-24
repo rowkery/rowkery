@@ -1593,6 +1593,33 @@ fn sqlite_cancel_right_after_run_is_not_lost() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A cancel keeps interrupting until its run ends, but never the next run
+/// on the same tab's connection.
+#[test]
+fn sqlite_cancel_leaves_the_next_run_alone() {
+    let (_guard, _file, path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    connect_sqlite(&bridge, path);
+    let next = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n LIMIT 300000) \
+                SELECT count(*) FROM n";
+    for _ in 0..10 {
+        let queue = bridge
+            .run_window_query("w1", 1, SLOW_SQLITE.into(), None, false)
+            .expect("run");
+        bridge.cancel_window_query("w1", 1);
+        let after = bridge
+            .run_window_query("w1", 1, next.into(), None, false)
+            .expect("run");
+        let (_, cancelled) =
+            wait_query_finished(&queue, std::time::Duration::from_secs(5)).expect("finish");
+        assert!(cancelled);
+        let (error, cancelled) =
+            wait_query_finished(&after, std::time::Duration::from_secs(5)).expect("finish");
+        assert!(!cancelled && error.is_none(), "next run: {error:?}");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 #[test]
 fn postgres_cancel_stops_running_query() {
     if std::env::var("ROWKERY_PG_HOST").is_err() {
