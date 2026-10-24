@@ -1,5 +1,5 @@
 /* ---------- Paper sheets: Timings, Shortcuts, Connect an agent, Report, Notices ----------
-   (2026-10-10) Each is a --pop card on the sheet: radius 8, --bg, the
+   (2026-10-10) Each is a --pop card on the sheet: --r-lg, --bg, the
    prototype's popover shadow and 1 px line ring, `pop` in over .16s and out
    shorter. The layer behind only catches the click away, with the faintest
    shade (--scrim). Heads
@@ -18,7 +18,7 @@
 .mcp-sheet,
 .rp-sheet,
 .tn-sheet {
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   box-shadow: var(--pop);
   color: var(--text);
@@ -72,7 +72,7 @@
   flex-shrink: 0;
   padding: 2px 5px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--kbd);
   color: var(--mute);
   font: 10.5px var(--mono);
@@ -96,7 +96,7 @@
   height: 28px;
   padding: 0 12px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   color: var(--text2);
   font: 500 12px var(--sans);

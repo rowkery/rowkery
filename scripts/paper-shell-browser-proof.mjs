@@ -11,9 +11,13 @@
 // list that moves to the hovered row (its transform changes) and fades when
 // the pointer leaves, in the schema list, ⌘K and the schema column's foot
 // (whose buttons paint no hover fill of their own); that the "Search tables, commands" button
-// opens ⌘K under itself; that toasts are ink capsules; that dark Run is ink
-// on orange (≥ 4.5:1). Captures the connected window and the empty window in light
-// and dark, ⌘K open, the connection picker open and a toast.
+// opens ⌘K under itself; that toasts are 34 px ink capsules (--r-pill); that
+// dark Run is ink on orange (≥ 4.5:1). Inset sheets (2026-10-24): the main
+// column is a 14 px paper sheet 8 px from the window's right and bottom on
+// the canvas, the selected query tab sits on a neutral pill (no orange), and
+// grid body cells draw no vertical rule. Captures the connected window and
+// the empty window in light and dark, ⌘K open, the connection picker open
+// and a toast.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/paper-shell-browser-proof.mjs [outDir]
@@ -151,6 +155,25 @@ await page.waitForSelector(`${ws} [data-row]`);
 await page.mouse.move(700, 790);
 await shot("desktop");
 
+// ---------- Inset sheets (2026-10-24) ----------
+const sheet = await page.$eval(`${ws} [data-testid="main"]`, (e) => {
+  const r = e.getBoundingClientRect();
+  const cs = getComputedStyle(e);
+  return { radius: cs.borderTopLeftRadius, bg: cs.backgroundColor, right: Math.round(window.innerWidth - r.right), bottom: Math.round(window.innerHeight - r.bottom), frame: getComputedStyle(document.querySelector('[data-testid="app-frame"]')).backgroundColor };
+});
+check(sheet.radius === "14px" && sheet.right === 8 && sheet.bottom === 8, `the main column is a 14 px sheet, 8 px from the window's right and bottom (${JSON.stringify(sheet)})`);
+check(sheet.bg === (await token("--bg")) && sheet.frame === (await token("--canvas")), `paper on the canvas (${sheet.bg} on ${sheet.frame})`);
+const acc = await token("--acc");
+const pill = await page.$eval(`${ws} [data-testid="query-tab-thumb"]`, (e) => {
+  const cs = getComputedStyle(e);
+  const b = getComputedStyle(e, "::before");
+  return { shadow: cs.boxShadow, bg: cs.backgroundColor, pillBg: b.backgroundColor, pillShadow: b.boxShadow, h: b.height, r: b.borderTopLeftRadius };
+});
+check(pill.pillBg === (await token("--hover")) && pill.h === "28px" && pill.r === "8px", `the selected tab sits on a 28 px --hover pill, radius 8 (${JSON.stringify(pill)})`);
+check(![pill.shadow, pill.bg, pill.pillBg, pill.pillShadow].some((v) => v.includes(acc)), "the selected tab's pill has no orange");
+const ruled = await page.$$eval(`${ws} [data-row] [data-col]`, (cells) => cells.filter((c) => { const cs = getComputedStyle(c); return cs.boxShadow !== "none" || cs.borderRightWidth !== "0px"; }).length);
+check(ruled === 0, `grid body cells draw no vertical rule (${ruled} do)`);
+
 // ---------- Glide hover in the schema column ----------
 const glide = `${ws} [data-testid="sb-scroll"] > [data-glide]`;
 const glideState = () => page.$eval(glide, (g) => ({ t: g.style.transform, o: getComputedStyle(g).opacity, on: g.hasAttribute("data-glide-on") }));
@@ -240,8 +263,8 @@ const toastBox = await page.$eval("[data-toast]", (e) => {
   const cs = getComputedStyle(e);
   return { bg: cs.backgroundColor, h: Math.round(e.getBoundingClientRect().height), r: cs.borderRadius, anim: cs.animationName };
 });
-// The toast (2026-10-13): an ink card, radius 8.
-check(toastBox.bg === (await token("--ink")) && toastBox.h === 34 && toastBox.r === "8px", `the toast is a 34 px ink card (${JSON.stringify(toastBox)})`);
+// The toast (2026-10-13): an ink capsule (2026-10-24, --r-pill).
+check(toastBox.bg === (await token("--ink")) && toastBox.h === 34 && toastBox.r === "999px", `the toast is a 34 px ink capsule (${JSON.stringify(toastBox)})`);
 check(toastBox.anim === "toast", "it plays Paper's 2.6 s toast keyframes");
 await page.waitForTimeout(400);
 await page.screenshot({ path: `${OUT}/toast.png` });

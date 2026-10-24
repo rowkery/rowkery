@@ -40,7 +40,7 @@
   gap: 3px;
   padding: 7px 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background: transparent;
   text-align: left;
   user-select: none;

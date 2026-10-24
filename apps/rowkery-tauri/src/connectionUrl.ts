@@ -28,6 +28,25 @@ function sslFrom(mode: string | null | undefined): PgForm["ssl"] | undefined {
   return "prefer";
 }
 
+/**
+ * Percent-decodes; where the text isn't all valid (`a%41%zz`), each run of
+ * escapes that is decodes and the rest stays as typed (`aA%zz`). This runs
+ * during render, so it never throws.
+ */
+function decode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    });
+  }
+}
+
 function parseUrl(trimmed: string): Partial<PgForm> | null {
   let url: URL;
   try {
@@ -37,12 +56,12 @@ function parseUrl(trimmed: string): Partial<PgForm> | null {
     return null;
   }
   const out: Partial<PgForm> = {};
-  if (url.hostname) out.host = decodeURIComponent(url.hostname);
+  if (url.hostname) out.host = decode(url.hostname);
   out.port = url.port || "5432";
-  const db = decodeURIComponent(url.pathname.replace(/^\//, ""));
+  const db = decode(url.pathname.replace(/^\//, ""));
   if (db) out.database = db;
-  if (url.username) out.username = decodeURIComponent(url.username);
-  if (url.password) out.password = decodeURIComponent(url.password);
+  if (url.username) out.username = decode(url.username);
+  if (url.password) out.password = decode(url.password);
   const ssl = sslFrom(url.searchParams.get("sslmode"));
   if (ssl) out.ssl = ssl;
   const rootCert = url.searchParams.get("sslrootcert");

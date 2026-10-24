@@ -19,7 +19,10 @@
   }
 }
 
+/* A 16 px card, a step rounder than a popover; its rows run concentric
+   with it (16 px less the list's 6 px padding). */
 .cp-panel {
+  --cp-radius: 16px;
   position: absolute;
   top: 16vh;
   left: 0;
@@ -31,7 +34,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: var(--cp-radius);
   background: var(--bg);
   box-shadow: var(--pop);
   color: var(--text);
@@ -70,7 +73,7 @@
 .cp-scope {
   flex-shrink: 0;
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--accbg);
   color: var(--acc2);
   font-size: 11.5px;
@@ -80,7 +83,7 @@
 .cp-kbd {
   flex-shrink: 0;
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--kbd);
   /* Paper finish (2026-10-13): --dim on --kbd / --hover is under 4.5:1 at this size; --mute clears it in both themes. */
   color: var(--mute);
@@ -98,7 +101,7 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-  --glide-radius: 5px;
+  --glide-radius: calc(var(--cp-radius) - 6px);
 }
 
 .cp-group {
@@ -120,7 +123,7 @@
   height: 32px;
   padding: 0 10px;
   border: none;
-  border-radius: 5px;
+  border-radius: calc(var(--cp-radius) - 6px);
   background: transparent;
   color: var(--text);
   font: inherit;

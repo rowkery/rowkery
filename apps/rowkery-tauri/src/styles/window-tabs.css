@@ -10,8 +10,17 @@
   z-index: 3;
 }
 
-/* The dragged query tab lifts over the ones it passes. */
-.query-tabs.reordering > [data-dragging] {
+/* The dragged query tab lifts over the ones it passes, on a pill of paper
+   shaped like the selected one's (main-column.css). */
+.query-tabs.reordering > [data-dragging]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: calc(50% - 14px);
+  left: 0;
+  right: 0;
+  height: 28px;
+  border-radius: var(--r-md);
   background: var(--bg);
   box-shadow: inset 0 0 0 1px var(--line), var(--shadow);
 }
@@ -82,7 +91,7 @@
   height: 36px;
   padding: 0 10px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -108,7 +117,7 @@
   place-items: center;
   width: 24px;
   height: 24px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--engine) 14%, transparent);
   color: var(--engine);
 }
@@ -137,7 +146,7 @@
   height: 24px;
   transform: translateY(-50%);
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   cursor: default;
@@ -232,7 +241,7 @@
   margin-top: 6px;
   padding: 0 10px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   box-shadow: 0 -7px 0 -6px var(--line);
   background: transparent;
   color: var(--text);
@@ -254,14 +263,14 @@
 .conn-option-key,
 .sb-kbd {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--kbd);
   color: var(--mute);
 }
 
 .sb-kbd {
   padding: 0 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--text) 6%, transparent);
   color: var(--mute);
 }

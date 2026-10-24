@@ -1,7 +1,6 @@
 /* ---------- Title bar (Paper, 2026-10-13) ----------
-   48 px of --bar with a rule under it, across the whole window: the traffic
-   lights, one pill per window and +, then the shown window's Safe mode and
-   MCP and ⌘K. */
+   48 px across the whole window, straight on the canvas with no fill and no
+   rule (2026-10-24): the traffic lights, one pill per window and +. */
 .titlebar {
   position: absolute;
   z-index: 30;
@@ -13,9 +12,6 @@
   gap: 12px;
   height: var(--titlebar-h);
   padding: 0 14px 0 18px;
-  background: var(--bar);
-  box-shadow: inset 0 -1px 0 var(--line);
-  transition: background-color 0.3s ease, box-shadow 0.3s ease;
 }
 
 .titlebar-gap {
@@ -73,7 +69,8 @@
   box-shadow: none;
 }
 
-/* The windows: 28 px pills, the shown one raised on paper. */
+/* The windows: 28 px pills a step rounder than a button (10 px), the shown
+   one raised on paper. */
 .win-tabs {
   position: relative;
   isolation: isolate;
@@ -82,7 +79,7 @@
   gap: 4px;
   min-width: 0;
   margin-left: 8px;
-  --glide-radius: 6px;
+  --glide-radius: 10px;
 }
 
 .win-tab {
@@ -94,7 +91,7 @@
   min-width: 0;
   height: 28px;
   padding: 0 3px 0 10px;
-  border-radius: 6px;
+  border-radius: 10px;
   color: var(--mute);
   font: 500 12.5px var(--sans);
   white-space: nowrap;
@@ -181,7 +178,7 @@
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   opacity: 0;
@@ -216,7 +213,7 @@
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   cursor: default;
@@ -246,7 +243,7 @@
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 10px;
   background: transparent;
   color: var(--dim);
   transition: color 0.18s ease;

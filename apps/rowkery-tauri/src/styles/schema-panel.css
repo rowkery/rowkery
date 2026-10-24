@@ -23,10 +23,8 @@
   width: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--panel);
-  box-shadow: inset -1px 0 0 var(--line);
   pointer-events: auto;
-  transition: left 240ms var(--ease-out), visibility 0s, background-color 0.3s ease, box-shadow 0.3s ease;
+  transition: left 240ms var(--ease-out), visibility 0s;
 }
 
 /* ⌘B (⌃⌘S): the panel moves left exactly as far as the main column does. It
@@ -58,12 +56,13 @@
 }
 
 /* The schema column's edge: a --line2 rule on hover, the orange while it is
-   dragged (2026-10-13). */
+   dragged (2026-10-13), along the main sheet's straight edge, clear of its
+   corners. */
 .panel-resizer::after {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: var(--r-xl);
+  bottom: calc(var(--inset) + var(--r-xl));
   left: 2px;
   width: 2px;
   transition: background-color 0.12s;
@@ -306,7 +305,7 @@
   height: 22px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   cursor: default;
@@ -341,7 +340,7 @@
   overscroll-behavior: contain;
   margin: 0 -4px;
   padding: 0 4px 12px;
-  --glide-radius: 6px;
+  --glide-radius: var(--r-md);
   -webkit-mask-image: linear-gradient(#000 calc(100% - 16px), transparent);
   mask-image: linear-gradient(#000 calc(100% - 16px), transparent);
 }
@@ -430,7 +429,7 @@
   align-items: center;
   height: 30px;
   padding-left: 10px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   color: var(--text2);
   transition: color 0.18s ease;
 }
@@ -489,7 +488,7 @@
   font: 500 10.5px var(--sans);
   color: var(--mute);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--hover);
 }
 
@@ -504,7 +503,7 @@
   margin-right: 4px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   cursor: default;
@@ -567,7 +566,7 @@
   gap: 4px;
   padding: 8px 12px 10px;
   box-shadow: inset 0 1px 0 var(--line);
-  --glide-radius: 6px;
+  --glide-radius: var(--r-md);
 }
 
 .sb-foot-btn {
@@ -578,7 +577,7 @@
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--mute);
   cursor: default;
@@ -629,7 +628,7 @@
   height: 6px;
   border-radius: 50%;
   background: var(--ok);
-  box-shadow: 0 0 0 1.5px var(--panel);
+  box-shadow: 0 0 0 1.5px var(--canvas);
 }
 
 /* Changes agents proposed, waiting: a count where the dot was. */
@@ -640,9 +639,9 @@
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
-  border-radius: 7px;
+  border-radius: var(--r-pill);
   background: var(--acc);
-  box-shadow: 0 0 0 1.5px var(--panel);
+  box-shadow: 0 0 0 1.5px var(--canvas);
   color: var(--onfill);
   font: 600 10px/14px var(--sans);
   text-align: center;

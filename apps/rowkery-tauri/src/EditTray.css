@@ -1,17 +1,21 @@
-/* The edits bar at the grid's foot (Paper, 2026-10-10): 46 px on a --line2
-   rule, the bar fill. Left the count and a dot per kind, right Review SQL,
-   Discard and Commit in ink (Run stays the only orange). It rises in and
-   leaves faster. Also Review SQL's sheet. */
+/* The edits bar at the grid's foot (Paper, 2026-10-10): a docked capsule
+   (2026-10-24), 48 px on the panel fill with a --line ring, 8 px in from the
+   sheet's sides and bottom and part of its layout, so it never covers a
+   row. Left the count and a dot per kind, right Review SQL, Discard and
+   Commit in ink (Run stays the only orange). It rises in and leaves faster.
+   Also Review SQL's sheet. */
 
 .edit-tray {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 16px;
-  height: 46px;
-  padding: 0 10px 0 16px;
-  border-top: 1px solid var(--line2);
-  background: var(--bar);
+  height: 48px;
+  margin: 0 var(--inset) var(--inset);
+  padding: 0 8px 0 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
   color: var(--text);
   font: 12.5px var(--sans);
   white-space: nowrap;
@@ -127,7 +131,7 @@
   height: 30px;
   padding: 0 12px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   font: 500 12.5px var(--sans);
   color: var(--text);
@@ -164,7 +168,7 @@
   height: 30px;
   padding: 0 12px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: transparent;
   font: 500 12.5px var(--sans);
   color: var(--mute);
@@ -211,7 +215,7 @@
   height: 30px;
   padding: 0 14px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--ink);
   color: var(--inkfg);
   font: 600 12.5px var(--sans);
@@ -258,7 +262,7 @@
   width: 640px;
   max-width: 100%;
   max-height: calc(100vh - 100px);
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   outline: none;
   background: var(--bg);
   box-shadow:
@@ -293,7 +297,7 @@
   max-height: 360px;
   margin: 0 12px;
   overflow: auto;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: var(--bg-editor);
 }
 

@@ -12,6 +12,7 @@ import {
   browseTableSql,
   cancelCount,
   chooseFile,
+  abandonRun,
   cancelQuery,
   countRows,
   stopAllQueries,
@@ -91,7 +92,7 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
-import { settlePending, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
+import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -236,6 +237,8 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 
 /** How long a confirmation such as "Copied 100 rows" stays in the results header. */
 const NOTICE_MS = 2400;
+/** Force stop: how long core's stop has to report back before the tab lets the run go. */
+const FORCE_STOP_GRACE_MS = 2000;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -2142,16 +2145,19 @@ export function Workspace({
 
   // Cancel asks the server; pressed again (Force stop, or Esc twice) core
   // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel.
+  // a dead connection never answers a cancel. A run whose end never reaches
+  // the tab even then is let go, so the tab is never stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
+    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
     patchRun(tabId, { cancelling: true });
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
       flash(String(e));
     }
+    if (giveUp) setTimeout(() => giveUp("Stopped waiting for this query; it may still have run"), FORCE_STOP_GRACE_MS);
   };
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
@@ -2345,7 +2351,7 @@ export function Workspace({
     } catch (e) {
       outcome = "error";
       end = "error";
-      patchRun(tabId, { error: String(e) });
+      patchRun(tabId, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       patchRun(tabId, {
         startedAt: null,
@@ -2649,7 +2655,7 @@ export function Workspace({
       ran = current();
       if (ran && !append) shownKey.current[tab.id] = key;
     } catch (e) {
-      patchRun(tab.id, { error: String(e) });
+      patchRun(tab.id, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       loading.current.delete(tab.id);
       const next = queued.current.get(tab.id);
@@ -4514,7 +4520,10 @@ export function Workspace({
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
           ) : isImportTab ? (
-            <RenderErrorBoundary fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}>
+            <RenderErrorBoundary
+              resetKeys={[importResult]}
+              fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
+            >
               <ResultsGrid
                 result={importResult}
                 importRows={importPreview}
@@ -4725,6 +4734,7 @@ export function Workspace({
                 />
               ) : (
                 <RenderErrorBoundary
+                  resetKeys={[activeTabId, shownResult]}
                   fallback={(err) => (
                     <div className="results-error">
                       {err.message || String(err)}
@@ -4816,6 +4826,10 @@ export function Workspace({
           data-review-sql={inspectorKind === "review" ? "" : undefined}
           data-deleted={inspectorKind === "quicklook" && qlView?.edit?.mark === "delete" ? "" : undefined}
         >
+          <RenderErrorBoundary
+            resetKeys={[inspectorKind, activeTabId, qlView]}
+            fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
+          >
           {inspectorKind === "sqlfile" && sqlFile ? (
             <SqlFilePanel
               key={sqlFile.path}
@@ -4888,6 +4902,7 @@ export function Workspace({
               onToggleDelete={isTableTab ? qlView.toggleDelete : undefined}
             />
           ) : null}
+          </RenderErrorBoundary>
         </Inspector>
       </Presence>
       {active && (
@@ -4930,14 +4945,23 @@ export function Workspace({
         />
       )}
       {active && (
-        <CommandPalette
-          open={paletteOpen}
-          onClose={closePalette}
-          groups={paletteGroups}
-          emptyGroups={PALETTE_EMPTY_GROUPS}
-          connectionName={connected ? (activeConnection?.name ?? null) : null}
-          onPick={onPalettePick}
-        />
+        <RenderErrorBoundary
+          resetKeys={[paletteOpen]}
+          fallback={() => null}
+          onError={(err) => {
+            closePalette();
+            showErrorToastIfFree("Couldn't show the command palette", err.message || String(err));
+          }}
+        >
+          <CommandPalette
+            open={paletteOpen}
+            onClose={closePalette}
+            groups={paletteGroups}
+            emptyGroups={PALETTE_EMPTY_GROUPS}
+            connectionName={connected ? (activeConnection?.name ?? null) : null}
+            onPick={onPalettePick}
+          />
+        </RenderErrorBoundary>
       )}
       <Presence open={timingsOpen && active}>
         {timingsOpen && active && (

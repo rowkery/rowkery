@@ -23,7 +23,7 @@
   white-space: nowrap;
   color: var(--text);
   background: var(--bg);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   box-shadow: var(--pop), 0 0 0 1px var(--line2);
 }
 @media (prefers-reduced-motion: reduce) {

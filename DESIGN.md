@@ -1,7 +1,8 @@
 ---
 name: Rowkery
-description: A database tool printed on paper. One opaque sheet in black, grey and white, hairline rules, ink that commits and one orange for what you ask.
+description: A database tool printed on paper. Opaque rounded sheets on a quiet canvas in black, grey and white, hairline rules, ink that commits and one orange for what you ask.
 colors:
+  canvas: "#f1f1f0"
   paper: "#ffffff"
   panel: "#f7f7f7"
   bar: "#f3f3f3"
@@ -31,6 +32,7 @@ colors:
   env-stg: "#e38a2e"
   env-dev: "#2f5bb7"
   env-local: "#2e8b57"
+  dark-canvas: "#121212"
   dark-paper: "#1a1a1a"
   dark-panel: "#212121"
   dark-bar: "#1e1e1e"
@@ -81,24 +83,36 @@ typography:
     fontSize: "13px"
     lineHeight: "21px"
 rounded:
-  badge: "3px"
-  control: "6px"
-  card: "8px"
+  xs: "4px"
+  sm: "6px"
+  md: "8px"
+  lg: "12px"
+  xl: "14px"
+  pill: "999px"
+  window-pill: "10px"
+  switch: "10px"
+  palette: "16px"
   window: "12px"
-  chip: "13px"
 spacing:
   title-bar: "48px"
   schema-column: "264px"
+  sheet-inset: "8px"
+  sheet-gap: "8px"
   tab-row: "42px"
+  tab-pill: "28px"
   grid-row: "30px"
   grid-header: "46px"
-  foot-bar: "46px"
+  foot-bar: "48px"
   inspector: "340px"
 components:
+  sheet:
+    backgroundColor: "{colors.paper}"
+    rounded: "{rounded.xl}"
+    inset: "{spacing.sheet-inset}"
   button-run:
     backgroundColor: "{colors.orange}"
     textColor: "{colors.ink-fg}"
-    rounded: "{rounded.control}"
+    rounded: "{rounded.md}"
     height: "32px"
     padding: "0 14px"
   button-run-hover:
@@ -106,29 +120,70 @@ components:
   button-commit:
     backgroundColor: "{colors.ink}"
     textColor: "{colors.ink-fg}"
-    rounded: "{rounded.control}"
+    rounded: "{rounded.md}"
     height: "28px"
   button-bordered:
     backgroundColor: "{colors.paper}"
     textColor: "{colors.text}"
-    rounded: "{rounded.control}"
+    rounded: "{rounded.md}"
     height: "28px"
     padding: "0 10px"
+  button-icon-small:
+    rounded: "{rounded.sm}"
+    height: "24px"
+  input:
+    backgroundColor: "{colors.paper}"
+    rounded: "{rounded.md}"
+    height: "28px"
   chip-filter:
     textColor: "{colors.text}"
-    rounded: "{rounded.chip}"
+    rounded: "{rounded.pill}"
     height: "26px"
     typography: "{typography.data}"
+  badge:
+    rounded: "{rounded.xs}"
+  query-tab-selected:
+    backgroundColor: "{colors.hover}"
+    rounded: "{rounded.md}"
+    height: "{spacing.tab-pill}"
+  window-pill:
+    rounded: "{rounded.window-pill}"
+    height: "28px"
   card-start:
     backgroundColor: "{colors.paper}"
-    rounded: "{rounded.card}"
-    padding: "14px 16px"
+    rounded: "{rounded.xl}"
+    padding: "16px 18px"
+  list-start:
+    backgroundColor: "{colors.paper}"
+    rounded: "{rounded.xl}"
+    padding: "4px"
+  list-start-row:
+    rounded: "10px"
+  view-switch:
+    rounded: "{rounded.switch}"
+    padding: "3px"
+  view-switch-thumb:
+    rounded: "7px"
+  palette:
+    backgroundColor: "{colors.paper}"
+    rounded: "{rounded.palette}"
+    padding: "6px"
+  palette-row:
+    rounded: "10px"
   inspector-column:
-    backgroundColor: "{colors.panel}"
+    backgroundColor: "{colors.paper}"
+    rounded: "{rounded.xl}"
     width: "340px"
   edits-bar:
     backgroundColor: "{colors.panel}"
-    height: "46px"
+    rounded: "{rounded.lg}"
+    height: "48px"
+    inset: "{spacing.sheet-inset}"
+  toast:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.ink-fg}"
+    rounded: "{rounded.pill}"
+    height: "34px"
 ---
 
 # Design System: Rowkery
@@ -137,12 +192,12 @@ components:
 
 **Creative North Star: "The Printed Sheet"**
 
-Rowkery is a database tool printed on paper: one opaque sheet with hairline rules, where every control is a bordered, familiar component and colour is spent on two things only. Orange marks what you are asking for: the statement under the caret, the filters in the WHERE, the active tab, Run. Ink commits: the near-black button that writes to the database. Everything else is paper, rule and type. This file is the source of truth for that look (chosen 2026-10-10): the tokens above and the rules below.
+Rowkery is a database tool printed on paper: opaque sheets with hairline rules, where every control is a bordered, familiar component and colour is spent on two things only. Orange marks what you are asking for: the statement under the caret, the filters in the WHERE, Run. Ink commits: the near-black button that writes to the database. Everything else is paper, rule and type. This file is the source of truth for that look (chosen 2026-10-10): the tokens above and the rules below.
 
-The window is dense the way a good ledger is dense: 30 px rows, mono data, tight labels, generous rules between groups rather than boxes around them. Panels are slightly darker paper, not cards floating on a void. Light and dark are the same sheet at two times of day, in the website's colours: white and neutral greys in light, #1a1a1a with #212121 panels and the site's cool greys in the dark, a step greyer than the site's #0a0a0a (2026-10-16); the theme follows macOS (Auto); the schema column's Appearance button cycles Auto / Light / Dark and is the only theme control.
+The window is dense the way a good ledger is dense: 30 px rows, mono data, tight labels, generous rules between groups rather than boxes around them. The work rests on sheets laid on a canvas (2026-10-24): the title bar and the schema column sit directly on the canvas, and the main column and the inspector are each a rounded sheet of opaque paper, set in from the window's edges. The sheets are still paper, not glass, and inside a sheet regions are still separated by rules, not boxed. Light and dark are the same sheet at two times of day, in the website's colours: white and neutral greys in light, #1a1a1a sheets with #212121 panels on a #121212 canvas and the site's cool greys in the dark, a step greyer than the site's #0a0a0a (2026-10-16); the theme follows macOS (Auto); the schema column's Appearance button cycles Auto / Light / Dark and is the only theme control.
 
 **Key Characteristics:**
-- An opaque black, grey and white ground; structure is 1 px rules, never glass.
+- Opaque paper sheets with rounded corners on a grey canvas, in black, grey and white; inside a sheet, structure is 1 px rules, never glass.
 - Ink commits, orange is what you ask for; nothing else is coloured except data meaning (ok, delete, key links, environments).
 - Borders mean controls: anything with a 1 px border is something you can press.
 - 600-weight sans names places (connection, Results, Connect to start, a row's title); mono is data and SQL.
@@ -154,15 +209,16 @@ The window is dense the way a good ledger is dense: 30 px rows, mono data, tight
 The website's palette: white or black sheets, neutral grey rules, black or white ink, one orange.
 
 ### Primary
-- **Burnt Orange** (orange; dark-orange in the dark): Run, the active statement's bar in the editor, filter chips and their washes (10% / 18%), the active tab's 2 px underline, switches when on, the focus ring. Hover deepens to orange-deep (dark: #ffa366).
+- **Burnt Orange** (orange; dark-orange in the dark): Run, the active statement's bar in the editor, filter chips and their washes (10% / 18%), switches when on, the focus ring. The selected query tab is a neutral --hover pill, not orange (2026-10-24). Hover deepens to orange-deep (dark: #ffa366).
 
 ### Secondary
 - **Ink** (ink, with ink-fg on it): the button that commits (Commit, Save and connect, Send, Done) and the toast on paper. In the dark the ink is the light text colour with dark paper on it; the dark toast is the panel lifted by the popover shadow instead.
 
 ### Neutral
-- **Paper** (paper): the sheet itself: main column, grid, editor, sheets, cards.
-- **Panel** (panel): the schema column, the inspector column, the edits bar: a half-step darker sheet.
-- **Bar** (bar): head and foot strips.
+- **Canvas** (canvas; dark-canvas #121212): the window's ground, a step below paper. The title bar and the schema column sit on it with no fill of their own, and the empty window's sheet rests on it (2026-10-24).
+- **Paper** (paper): the sheets themselves (the main column and the inspector column) and everything printed on them: grid, editor, modal sheets, cards.
+- **Panel** (panel): a half-step darker paper inside a sheet: the edits bar, the dark toast. The schema column and the inspector no longer use it; one sits on the canvas, the other is a paper sheet (2026-10-24).
+- **Bar** (bar): head and foot strips inside a sheet.
 - **Rule** (line) and **Control Rule** (line-control): 1 px structural rules and control borders. **Row Rule** (row-rule) rules grid rows; **Hover** (hover) is the glide highlight and keycap ground.
 - **Text** (text, text-2), **Mute** (mute), **Dim** (dim), **Faint** (faint): text from strongest to faintest. Faint is for disabled and decoration only, never words a person must read.
 
@@ -174,7 +230,7 @@ The website's palette: white or black sheets, neutral grey rules, black or white
 ### Named Rules
 **The Ink Commits Rule.** The button that writes to the database is ink (white on black in light; black on white in the dark, like the website's white button). Never orange, never red.
 
-**The Orange Is What You Ask Rule.** Orange appears only on Run, the active statement, the WHERE chips, the active tab, switches that are on and the focus ring. If orange marks anything else, it is wrong.
+**The Orange Is What You Ask Rule.** Orange appears only on Run, the active statement, the WHERE chips, switches that are on and the focus ring. If orange marks anything else, it is wrong. The selected query tab left this list on 2026-10-24: where you are is not something you asked for, so it is a neutral pill.
 
 **The Text On Fills Rule.** Words on a solid fill use `--onfill`: white on paper, ink in the dark, where the fills are lighter (white on dark orange is 2.3:1, ink 7.4:1). Words on a wash mix 40% ink into their hue on paper (`--tagmix` 60%) and 34% light text in the dark (66%), so env tags and verdict pills clear 4.5:1.
 
@@ -202,73 +258,94 @@ The website's palette: white or black sheets, neutral grey rules, black or white
 
 ## Layout
 
-A fixed desktop frame on a 12 px-radius window: the 48 px title bar across the top (bar ground, a rule under it: traffic lights, one pill per window, +; the shown pill carries its safe mode shield and agent mark, and nothing sits at the right), the schema column under it at the left (264 px, dragged between 240 and 360), then the main column on the paper. The main column stacks a 42 px tab row, the table head (QUERY row and WHERE row of chips), the grid (46 px header, 30 px rows, 44 px gutter) and, while edits wait, the 46 px edits bar at its foot. Query tabs put the editor above a Results card with its own row (count, Export, the zone menu).
+A fixed desktop frame on a 12 px-radius window whose ground is the canvas. Inset sheets on that canvas (2026-10-24): the 48 px title bar across the top and the schema column under it at the left (264 px, dragged between 240 and 360) sit directly on the canvas, with no fill of their own and no rule between them and the rest. The title bar holds the traffic lights, one pill per window and +; the shown pill carries its safe mode shield and agent mark, and nothing sits at the right. The main column is a sheet: opaque paper with a 14 px radius (`--r-xl`) and the sheet ring, starting directly under the title bar and at the schema column's edge, inset 8 px from the window's right and bottom edges (and from its left edge only when the schema column is hidden).
 
-The inspector column opens on the right of the main column for Quick Look (340 px; 280 under 1100 px; resizable), Review SQL (340 px) and New connection (380 px); the grid ends where it begins and keeps its column widths. With no connection, the schema column folds and the main column spans the window; the title bar keeps only +. ⌘K opens a card centred near the top of the window. There is no status bar and no footer; confirmations are toasts.
+The main sheet stacks a 42 px tab row, the table head (QUERY row and WHERE row of chips), the grid (46 px header, 30 px rows, 44 px gutter; row rules only in the body, see Grid) and, while edits wait, the 48 px edits bar docked at its foot. Inside the sheet, regions are still separated by 1 px rules. Query tabs put the editor above a Results card with its own row (count, Export, the zone menu).
+
+The inspector column opens on the right for Quick Look (340 px; 280 under 1100 px; resizable), Review SQL (340 px) and New connection (380 px). It is its own sheet, made the same way as the main one: inset 8 px from the window's right and bottom edges, with an 8 px gap of canvas between it and the main sheet. The grid ends where the gap begins and keeps its column widths. With no connection, the schema column folds and the empty window (Connect to start) is one sheet inset 8 px on every side below the title bar; the title bar keeps only +. The full-window pages (Agents, Settings, a proposal page) are one inset sheet each in the same way, never full-bleed paper under the canvas title bar (2026-10-24). ⌘K opens a card centred near the top of the window. There is no status bar and no footer; confirmations are toasts.
 
 ### Named Rules
-**The Inspector Column Rule.** A row, a review or a new connection opens in one column on the right, beside the data, never over it. One inspector at a time.
+**The Inspector Column Rule.** A row, a review or a new connection opens in one column on the right, beside the data, never over it: its own sheet beside the main one, across the canvas gap, never layered on top of it. One inspector at a time.
 
-**The Foot Bar Rule.** Staged edits are counted in a bar at the grid's foot (edited / deleted / new, Discard, Review SQL, Commit), not in a floating tray. Toasts lift above it.
+**The Foot Bar Rule.** Staged edits are counted in a bar at the grid's foot (edited / deleted / new, Discard, Review SQL, Commit), not in a floating tray. The bar is a docked capsule: it takes its own space in the main sheet's layout below the last row, so it never floats over or covers a row (2026-10-24). Toasts lift above it.
 
 ## Elevation & Depth
 
-Flat by default. Depth is tonal (paper, panel, bar) and ruled (1 px lines, often drawn as inset shadows so they take no space), not shadowed. Shadows exist only where something floats over the sheet.
+Flat inside a sheet. Depth is tonal (canvas, paper, panel, bar) and ruled (1 px lines, often drawn as inset shadows so they take no space), not shadowed. Beyond the small control shadow, two things carry a shadow: the sheets themselves, with a faint ring and a soft drop that lift them off the canvas (2026-10-24), and anything that floats over a sheet.
+
+"Sheet" names two things in this file: the inset sheets (the main and inspector columns, and the empty window) that rest on the canvas, and the modal sheets (Timings, Shortcuts, Connect an agent, Report, Notices) that float over the window as popover cards.
 
 ### Shadow Vocabulary
 - **Control** (`box-shadow: 0 1px 2px rgba(31, 27, 22, 0.12)`; dark `rgba(0, 0, 0, 0.4)`): bordered buttons and switch knobs.
-- **Popover** (`box-shadow: 0 12px 32px -8px rgba(31, 27, 22, 0.25), 0 0 0 1px var(--line)`; dark `rgba(0,0,0,.45)` with --line2): menus, pickers, ⌘K, sheets.
-- **Scrim** (`--scrim`, rgba(31,27,22,.12) / rgba(0,0,0,.4)): the layer behind a sheet; it only catches the click away.
+- **Sheet** (`--sheet-ring`: `box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04), 0 4px 16px -6px rgba(0,0,0,.06)`; dark `0 0 0 1px rgba(255,255,255,.07), 0 4px 16px -6px rgba(0,0,0,.6)`): the inset sheets on the canvas. The ring is depth, not a border (2026-10-24).
+- **Popover** (`box-shadow: 0 12px 32px -8px rgba(31, 27, 22, 0.25), 0 0 0 1px var(--line)`; dark `rgba(0,0,0,.45)` with --line2): menus, pickers, ⌘K, modal sheets.
+- **Scrim** (`--scrim`, rgba(31,27,22,.12) / rgba(0,0,0,.4)): the layer behind a modal sheet; it only catches the click away.
 
 ### Named Rules
-**The Opaque Sheet Rule.** No backdrop-filter on anything; surfaces are opaque paper. The one exception is ⌘K's scrim, which blurs and dims the window behind it so the search stands alone (2026-10-17).
+**The Opaque Sheet Rule.** No backdrop-filter on anything; surfaces are opaque paper, and so is the canvas beneath them. The one exception is ⌘K's scrim, which blurs and dims the window behind it so the search stands alone (2026-10-17).
 
 ## Shapes
 
-Gently rounded: 3 px badges, 6 px controls, 8 px cards and sheets, 13 px pill chips, the 12 px window. Borders are 1 px. Rules are structure; borders are controls.
+Rounded on a scale, from the keycap up to the sheet (2026-10-24). The CSS reads these tokens instead of hard-coding a radius:
+
+- `--r-xs` **4px**: badges, keycaps, NULL chips.
+- `--r-sm` **6px**: small icon buttons (24 px and under).
+- `--r-md` **8px**: buttons (Run included), inputs, list rows, query tabs. The window pills in the title bar and the Data / Structure switch are a step rounder, 10px.
+- `--r-lg` **12px**: cards, popovers and menus, modal sheets, the edits bar.
+- `--r-xl` **14px**: the inset sheets, the cards and grouped lists on Connect to start. ⌘K is a step rounder, 16px.
+- `--r-pill` **999px**: filter chips, env tags, the key strip, the toast.
+
+The window itself keeps its 12 px corner. Borders are 1 px. Rules are structure; borders are controls.
 
 ### Named Rules
-**The Borders Mean Controls Rule.** A 1 px border around something says it can be pressed (buttons, inputs, cards on Connect to start). Panels and sections are separated by rules, not boxed.
+**The Concentric Rule.** A rounded thing held snugly inside another rounded thing takes the outer radius minus the padding between them, so the two curves run parallel. The Data / Structure switch is 10px outside with 3px padding, so its thumb is 7px; ⌘K is 16px with 6px padding, so its rows are 10px; a grouped list on Connect to start is 14px with 4px padding, so its rows are 10px. The rule is for snug nesting (padding under 8px). Something set a full 8 px inset away takes its own step on the scale and reads as its own shape: a sheet in the window, the edits bar in the main sheet (2026-10-24).
+
+**The Borders Mean Controls Rule.** A 1 px border around something says it can be pressed (buttons, inputs, cards on Connect to start, and the grouped lists there, every row of which connects). Regions inside a sheet are separated by rules, not boxed. A sheet's ring is not a border: it is depth, the sheet resting on the canvas.
 
 ## Components
 
 ### Buttons
-- **Shape:** 6px radius, 28px tall (Run 32px).
+- **Shape:** `--r-md` (8px), 28px tall (Run 32px). Small icon buttons (24px and under) take `--r-sm` (6px).
 - **Run:** burnt orange fill, `--onfill` text, the run keys beside the word. Flat: no gradient, no glow. Hover orange-deep. On paper the prototype's white on orange is 3.6:1 for the 12.5px bold label (under 4.5:1); kept as drawn, the one known exception, and the dark theme's ink on orange is 5.3:1.
 - **Commit (ink):** ink fill, ink-fg text; disabled at 0.5–0.6 opacity.
 - **Bordered:** paper ground, 1px control rule, text colour; hover --hover. Ghost buttons drop the border.
 - **Focus:** a 2px --acc outline at 1px offset, from one zero-specificity rule; components may draw their own.
 
 ### Chips
-- **Filter chips:** 26px pills (13px radius), orange wash, mono text you can read as SQL; × removes. "+ Filter ⌘F" is dashed.
-- **Env tags:** a dot plus the word on its own wash (see the Text On Fills rule). **NULL:** a 9.5px uppercase chip in --mute on --hover.
+- **Filter chips:** 26px pills (`--r-pill`), orange wash, mono text you can read as SQL; × removes. "+ Filter ⌘F" is dashed.
+- **Env tags:** a dot plus the word on its own wash (see the Text On Fills rule), `--r-pill`. **NULL:** a 9.5px uppercase chip in --mute on --hover, `--r-xs`.
 
 ### Cards / Containers
-- **Corner Style:** 8px.
-- **Background:** paper on paper with a 1px control rule (Connect to start cards); Agents connection cards the same.
+- **Corner Style:** `--r-lg` (12px); on Connect to start, `--r-xl` (14px).
+- **Background:** paper on paper with a 1px control rule; Agents connection cards the same.
 - **Shadow Strategy:** none at rest.
+- **Connect to start** (2026-10-24): the four action cards are `--r-xl` with a 1px `--line2` border and 16px 18px padding. Each list (Your connections, Found on this Mac) is grouped on one paper card: `--r-xl`, a 1px `--line2` border, 4px padding, 44px rows at 10px (the Concentric Rule), sharing one glide hover.
 
 ### Inputs / Fields
-- **Style:** paper ground, 1px control rule, 6px radius, 28–30px tall.
+- **Style:** paper ground, 1px control rule, `--r-md` (8px), 28–30px tall.
 - **Focus:** the orange focus ring.
 
 ### Navigation
-- **Title bar:** bar ground, 48px. Windows are 28px pills (engine logo or the penguin, the name, a 7px environment dot, a spinner / ⚠ when it connects, runs out of sight or failed; × on hover and on the shown one); the shown pill is raised on paper with the control shadow (2026-10-13). The shown pill also carries the safe mode shield while connected and an agent mark while its connection is shared; another pill shows the agent mark, with a green dot, only while an agent read it in the last minute (2026-10-17).
-- **Schema column foot:** past a rule, one row of 28px icon buttons 4px apart: Agents (green dot while shared, orange while its page is up), Appearance (sun, moon or half disc for Auto) and Help; names and keys in the tooltips.
-- **Tabs:** 42px row; the active tab is underlined 2px in orange.
-- **Lists:** schema, pickers, ⌘K, menus and saved connections share the glide hover.
+- **Title bar:** 48px, directly on the canvas: no fill and no rule under it (2026-10-24). Windows are 28px pills at 10px radius (engine logo or the penguin, the name, a 7px environment dot, a spinner / ⚠ when it connects, runs out of sight or failed; × on hover and on the shown one); the shown pill is raised on paper with the control shadow (2026-10-13). The shown pill also carries the safe mode shield while connected and an agent mark while its connection is shared; another pill shows the agent mark, with a green dot, only while an agent read it in the last minute (2026-10-17).
+- **Schema column:** directly on the canvas, no fill and no rule against the main sheet (2026-10-24); its rows and filter field are `--r-md`. **Foot:** past a rule, one row of 28px icon buttons 4px apart: Agents (green dot while shared, orange while its page is up), Appearance (sun, moon or half disc for Auto) and Help; names and keys in the tooltips.
+- **Tabs:** 42px row; the selected query tab sits on a neutral --hover pill (`--r-md`, 28px tall, centred in the row) that glides from tab to tab when the selection moves. No orange and no underline (2026-10-24).
+- **Data / Structure switch:** a segmented control, 10px outside with 3px padding and a 7px thumb (the Concentric Rule).
+- **Lists:** schema, pickers, ⌘K, menus and saved connections share the glide hover. ⌘K is a 16px card with 6px padding and 10px rows.
+
+### Grid
+A ledger, not a spreadsheet cage (2026-10-24): the body has row rules only (row-rule, `--rowline`), with no vertical rules between cells. The 46px header keeps short vertical separators between columns, a 1px --line inset 14px from its top and bottom, as the affordance for dragging a column wider.
 
 ### Glide Hover (signature)
 One highlight per list (`useGlideHover`) slides to the row under the pointer instead of each row painting its own :hover. The keyboard cursor keeps its own fill.
 
 ### Inspector Column (signature)
-Quick Look, Review SQL and New connection: a panel-ground column on the right, 42px head with a serif or mono title and ×, a foot of 24px icon buttons; slides in 24px, leaves faster.
+Quick Look, Review SQL and New connection: a paper sheet on the right (`--r-xl`, the sheet ring, 8px from the window's right and bottom edges and 8px from the main sheet), 42px head with a serif or mono title and ×, a foot of 24px icon buttons; slides in 24px, leaves faster.
 
 ### Edits Bar
-46px panel strip at the grid's foot: "n changes" with dotted counts, Discard, Review SQL, Commit (ink). While Confirm writes holds a commit, Commit is disabled and the count says it is waiting.
+A docked capsule at the grid's foot (2026-10-24): 48px tall, inset 8px from the main sheet's sides and bottom, `--r-lg`, panel ground with a 1px --line ring, its buttons `--r-md`. It is part of the layout, below the last row, so it never covers one. Inside: "n changes" with dotted counts, Discard, Review SQL, Commit (ink). While Confirm writes holds a commit, Commit is disabled and the count says it is waiting.
 
 ### Toast
-An ink card (34px, 8px radius, `0 8px 24px rgba(0,0,0,.18)`) centred at the bottom of the main column, its action (Undo, View) in orange; in the dark the panel lifted by the popover shadow with a control-rule ring. Reversible actions offer Undo instead of a confirm dialog.
+An ink capsule (34px, `--r-pill`, `0 8px 24px rgba(0,0,0,.18)`) centred at the bottom of the main column, its action (Undo, View) in orange; in the dark the panel lifted by the popover shadow with a control-rule ring. Reversible actions offer Undo instead of a confirm dialog.
 
 ### The Penguin
 The posture penguin (Ready / Tilted, the original hand drawing) appears only at dead ends: Connect to start and Couldn't connect.
@@ -276,15 +353,18 @@ The posture penguin (Ready / Tilted, the original hand drawing) appears only at 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** separate regions with 1px --line rules and give controls a 1px --line2 border.
-- **Do** keep orange to Run, the active statement, chips, the active tab, switches that are on and the focus ring.
+- **Do** separate regions inside a sheet with 1px --line rules and give controls a 1px --line2 border.
+- **Do** keep orange to Run, the active statement, chips, switches that are on and the focus ring.
+- **Do** set the main and inspector columns as paper sheets on the canvas (`--r-xl`, the sheet ring, 8px insets and gap), and take every radius from the scale, nested ones by the Concentric Rule.
 - **Do** make the committing button ink.
 - **Do** check both themes: every colour is a token defined in light and dark; `scripts/paper-finish-browser-proof.mjs` fails on a light-only colour in dark.
 - **Do** keep small text (≤ 12.5px) at 4.5:1 on whatever it sits on; use --mute, not --dim, on --hover / --kbd / selected rows.
 - **Do** make exits shorter than entries; keyboard-opened overlays appear at once; honour prefers-reduced-motion.
 
 ### Don't:
-- **Don't** use glass, backdrop-filter or glow; the sheet is opaque (⌘K's scrim is the one blur).
+- **Don't** use glass, backdrop-filter or glow; the sheets and the canvas are opaque (⌘K's scrim is the one blur).
+- **Don't** hard-code a radius; take it from the `--r-*` scale, or from the Concentric Rule when one shape is nested snugly in another (the window pills, the Data / Structure switch and ⌘K are the named steps between).
+- **Don't** draw vertical rules between grid body cells.
 - **Don't** colour a commit orange or red.
 - **Don't** add a status bar or a footer.
 - **Don't** float a row or a form over the data; it opens in the inspector column.
