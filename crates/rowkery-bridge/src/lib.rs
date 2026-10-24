@@ -701,6 +701,17 @@ fn disarm_cancel(slot: &CancelSlot) -> bool {
     }
 }
 
+/// Disarms a slot when dropped, panic or not. Declared after the tab's lock,
+/// so the cancel's repeated interrupts stop before the next run can take
+/// the connection.
+struct Disarm<'a>(&'a CancelSlot);
+
+impl Drop for Disarm<'_> {
+    fn drop(&mut self) {
+        disarm_cancel(self.0);
+    }
+}
+
 fn push_event<S: EventSink + ?Sized>(events: &Arc<S>, event: CoreEvent) {
     events.push(event);
 }
@@ -1073,6 +1084,7 @@ fn run_sqlite_query_worker(
         let Some(mut held) = lock_tab(&tab.conn, || cancel_requested(&interrupt_slot)) else {
             return Ok(QueryOutcome::cancelled(0));
         };
+        let _disarm = Disarm(&interrupt_slot);
         let driver = ready_tab(&mut held, &db_path, read_only).map_err(|e| e.to_string())?;
         // A cancel or an error inside a write can end the tab's transaction.
         let in_transaction = driver.in_transaction();
@@ -1160,7 +1172,6 @@ fn run_sqlite_query_worker(
     })();
 
     finish_query_worker(result, query_id, tab_id, start, &events);
-    disarm_cancel(&interrupt_slot);
 }
 
 /// Where a window query's session comes from and goes back to.
@@ -2396,7 +2407,26 @@ fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
         guard.requested = true;
         let stop = guard.stop.clone();
         match guard.handle.take() {
-            Some(CancelHandle::Sqlite(handle)) => handle.interrupt(),
+            Some(CancelHandle::Sqlite(handle)) => {
+                handle.interrupt();
+                // An interrupt that lands before the statement starts is
+                // lost, so ask again until the worker disarms (or is gone).
+                guard.handle = Some(CancelHandle::Sqlite(handle));
+                let slot = Arc::downgrade(slot);
+                runtime.spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let Some(slot) = slot.upgrade() else { break };
+                        match slot.lock().as_deref() {
+                            Ok(CancelState {
+                                handle: Some(CancelHandle::Sqlite(handle)),
+                                ..
+                            }) => handle.interrupt(),
+                            _ => break,
+                        };
+                    }
+                });
+            }
             Some(CancelHandle::Postgres { token, tls }) => {
                 runtime.spawn(async move {
                     // The cancel itself can hang on a dead tunnel; it gets
@@ -2490,6 +2520,7 @@ fn run_sql_file(
                             ..RunReport::default()
                         });
                     }
+                    let _disarm = Disarm(&slot);
                     let report = run_sqlite(
                         &conn,
                         &path,
@@ -2498,7 +2529,6 @@ fn run_sql_file(
                         || cancel_requested(&slot),
                         |p| (on_progress.0)(p),
                     );
-                    disarm_cancel(&slot);
                     Ok(report)
                 })
                 .and_then(|r| r);
