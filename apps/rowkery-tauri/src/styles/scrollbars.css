@@ -14,7 +14,7 @@
 
 ::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--r-pill);
   background-clip: content-box;
   background-color: var(--line2);
 }
@@ -28,7 +28,7 @@
   position: absolute;
   z-index: 6;
   padding: 2px 8px;
-  border-radius: 5px;
+  border-radius: var(--r-md);
   background: var(--bg);
   box-shadow: 0 0 0 1px var(--line), var(--shadow);
   font: 500 12px/1.4 var(--sans);
@@ -93,7 +93,7 @@
   z-index: -1;
   top: 0;
   left: 0;
-  border-radius: var(--glide-radius, 6px);
+  border-radius: var(--glide-radius, var(--r-md));
   background: var(--hover);
   opacity: 0;
   pointer-events: none;

@@ -18,7 +18,9 @@
 //     is one of the light theme's surface / text values (#f7f7f7, #e6e6e6,
 //     #5c5c5c …), and the reverse in light (no dark ground).
 //  2. A representative element reads its token: computed colours compared
-//     with the token resolved in that theme (`tokenColor("--panel")`).
+//     with the token resolved in that theme (`tokenColor("--panel")`); the
+//     title bar sits on --canvas and the main, Quick Look and New connection
+//     sheets are --bg paper (inset sheets, 2026-10-24).
 //  3. Readable: the representative text clears 4.5:1 (3:1 for 14 px bold
 //     and up) on the ground it sits on, in both themes; the 10.5 px
 //     uppercase section labels clear 4.5:1 on --bg and --panel.
@@ -376,8 +378,10 @@ await page.keyboard.press("Escape");
 await page.waitForFunction((l) => !document.querySelector(`${l} [data-chip-editor]`), line);
 await page.waitForTimeout(200);
 await surface("shell", "body", [
-  // The title bar (2026-10-13).
-  { sel: '[data-testid="titlebar"]', what: "the title bar", token: "--bar", prop: "backgroundColor" },
+  // The title bar (2026-10-13), straight on the canvas (2026-10-24); the main
+  // column is a paper sheet on it.
+  { sel: '[data-testid="app-frame"]', what: "the canvas under the title bar", token: "--canvas", prop: "backgroundColor" },
+  { sel: `${ws} [data-testid="main"]`, what: "the main sheet", token: "--bg", prop: "backgroundColor" },
   { sel: '[data-testid="win-tab"][data-on]', what: "the shown window's pill", token: "--bg", prop: "backgroundColor" },
   { sel: '[data-testid="win-tab"][data-on] [data-testid="win-name"]', what: "the window's name", readable: true },
 
@@ -410,7 +414,7 @@ const bar6 = await page.evaluate(() => {
     sidebarTop: document.querySelector('[data-testid="workspace"]:not([hidden]) [data-testid="sidebar"]').getBoundingClientRect().top,
   };
 });
-check(bar6.h === 48 && bar6.top === 0 && bar6.w === 1280 && /inset/.test(bar6.rule), `a 48 px title bar across the window with a rule under it (${bar6.h}, ${bar6.rule})`);
+check(bar6.h === 48 && bar6.top === 0 && bar6.w === 1280 && bar6.rule === "none", `a 48 px title bar across the window, no rule under it (${bar6.h}, ${bar6.rule})`);
 check(!bar6.rail, "no window rail");
 check(bar6.tabs === 1 && bar6.tabH === 28 && bar6.add, `one 28 px window pill and + (${bar6.tabs}, ${bar6.tabH})`);
 check(bar6.shield && !bar6.cap && !bar6.theme, "the shown pill carries the safe mode shield; no search box or theme toggle in the title bar (2026-10-17)");
@@ -487,7 +491,7 @@ await page.click(cell(2, 2));
 await page.keyboard.press("Space");
 await page.waitForSelector(`${ws} [data-quicklook]`);
 await page.waitForTimeout(400);
-await surface("quicklook", `${ws} [data-quicklook]`, [{ sel: `${ws} [data-quicklook]`, what: "the column", token: "--panel", prop: "backgroundColor" }, { sel: `${ws} [data-testid="ql-title"]`, what: "the title", readable: true }]);
+await surface("quicklook", `${ws} [data-quicklook]`, [{ sel: `${ws} [data-quicklook]`, what: "the paper sheet", token: "--bg", prop: "backgroundColor" }, { sel: `${ws} [data-testid="ql-title"]`, what: "the title", readable: true }]);
 await page.keyboard.press("Escape");
 await page.keyboard.press("Control+Shift+P");
 await page.waitForSelector('[data-inspector="review"]');
@@ -552,7 +556,7 @@ await palette("New connection");
 await page.keyboard.press("Enter");
 await page.waitForSelector('[data-testid="nc-sheet"]');
 await page.waitForTimeout(400);
-await surface("new-connection", '[data-testid="nc-sheet"]', [{ sel: '[data-testid="nc-sheet"]', what: "the column", token: "--panel", prop: "backgroundColor" }]);
+await surface("new-connection", '[data-testid="nc-sheet"]', [{ sel: '[data-testid="nc-sheet"]', what: "the paper sheet", token: "--bg", prop: "backgroundColor" }]);
 await page.keyboard.press("Escape");
 
 // A query tab: the editor, its statement bar and Run.
@@ -574,7 +578,7 @@ await page.evaluate(() => navigator.clipboard?.writeText?.("").catch(() => {}));
 await page.click(cell(0, 0)).catch(() => {});
 await page.keyboard.press("Control+c");
 await page.waitForSelector("[data-toast]").catch(() => {});
-// The toast (2026-10-13): an ink card on paper, the lifted panel in the dark.
+// The toast (2026-10-13): an ink capsule on paper, the lifted panel in the dark.
 if (await page.$("[data-toast]")) await surface("toast", "[data-toast]", [{ sel: ".toast", what: "the toast", token: "--toast-bg", prop: "backgroundColor" }, { sel: '[data-testid="toast-message"]', what: "its message", readable: true }]); // Class on purpose: the card under test.
 else check(false, "a copy shows a toast");
 // Closing a window offers Undo: the toast's action reads --acc on the card.
@@ -586,7 +590,7 @@ await page.waitForSelector(".toast-undo"); // Class on purpose: the toast's acti
   for (const scheme of ["light", "dark"]) {
     await setTheme(scheme);
     const act = await page.$eval(".toast-undo", (e) => ({ c: getComputedStyle(e).color, r: getComputedStyle(e.closest(".toast")).borderRadius, ...window.__contrast(e) }));
-    check(act.c === (await tokenColor("--acc")) && act.r === "8px" && act.ratio >= 4.5, `toast (${scheme}): radius 8, its action in --acc, ${act.ratio}:1`);
+    check(act.c === (await tokenColor("--acc")) && act.r === "999px" && act.ratio >= 4.5, `toast (${scheme}): a capsule, its action in --acc, ${act.ratio}:1`);
   }
   await setTheme("light");
 }
@@ -595,7 +599,7 @@ await surface("toast-undo", "[data-toast]", []);
 // ── Dead ends and the Agents page ──
 await fresh();
 await page.waitForSelector("[data-empty-action]");
-await surface("connect-to-start", "body", [{ sel: '[data-testid="ew-card-sub"]', what: "a card's line", readable: true }, { sel: '[data-testid="titlebar"]', what: "the title bar", token: "--bar", prop: "backgroundColor" }]);
+await surface("connect-to-start", "body", [{ sel: '[data-testid="ew-card-sub"]', what: "a card's line", readable: true }, { sel: '[data-testid="app-frame"]', what: "the canvas under the title bar", token: "--canvas", prop: "backgroundColor" }]);
 const empty6 = await page.evaluate(() => {
   const tb = document.querySelector('[data-testid="titlebar"]');
   const shown = (sel) => [...tb.querySelectorAll(sel)].filter((e) => e.getBoundingClientRect().width > 0).length;

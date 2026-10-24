@@ -6,14 +6,18 @@
   position: absolute;
   z-index: 2;
   top: var(--titlebar-h);
-  bottom: 0;
-  /* Over the schema column too: it's hidden while the page is open. */
-  left: 0;
-  right: 0;
+  bottom: var(--inset);
+  /* Over the schema column too: it's hidden while the page is open. One
+     sheet, inset on every side (2026-10-24). */
+  left: var(--inset);
+  right: var(--inset);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: clip;
+  border-radius: var(--r-xl);
   background: var(--bg);
+  box-shadow: var(--sheet-ring);
   outline: none;
   animation: rise 0.28s var(--ease-out);
 }
@@ -55,7 +59,7 @@
   gap: 2px;
   padding: 12px;
   box-shadow: inset -1px 0 0 var(--line);
-  --glide-radius: 7px;
+  --glide-radius: var(--r-md);
 }
 
 .st-nav-row {
@@ -65,7 +69,7 @@
   height: 32px;
   padding: 0 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text2);
   font: 500 13px var(--sans);
@@ -155,7 +159,7 @@
   gap: 10px;
   min-height: 48px;
   padding: 8px 10px 8px 14px;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: var(--hover);
   color: var(--text);
   font: 13px var(--sans);
@@ -182,7 +186,7 @@
   margin: 8px 0 0;
   padding: 10px 14px;
   overflow: auto;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   box-shadow: inset 0 0 0 1px var(--line);
   color: var(--text2);
   font: 12px/1.5 var(--sans);
@@ -208,7 +212,7 @@
   align-items: start;
   padding: 10px 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--hover);
   color: var(--text);
   font: 13px/1.4 var(--sans);

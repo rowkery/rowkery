@@ -3,7 +3,8 @@
 // drag selects a block of cells (and scrolls past the sheet's edge), ⇧-click
 // and ⇧-arrows extend it, the row number selects whole rows, ⌘A selects the
 // whole table and never the page's text, ⌘C copies the block as TSV and ⇧⌘C
-// adds the column names; column rules show where each value ends. Right-click
+// adds the column names; the body has row rules only (2026-10-24), the
+// header a short separator between columns where they drag wider. Right-click
 // opens the cell menu (Quick Look, Copy ⌘C, Copy with headers ⇧⌘C, keys
 // from commands.ts): inside the block it keeps the block, elsewhere it selects
 // that cell first.
@@ -212,11 +213,15 @@ const center = async (loc) => {
 const selCount = () => page.locator(visible + " [data-col][data-selected]").count();
 const pageSelection = () => page.evaluate(() => String(window.getSelection()));
 
-// 1. Column rules: every cell and header has a hairline on its right edge.
+// 1. A ledger: no rule between body cells; the header keeps a short 1 px
+//    separator, 14 px clear of its top and bottom.
 const rule = await cell(0, 1).evaluate((e) => getComputedStyle(e).boxShadow);
-check(/inset/.test(rule) && /-1px/.test(rule), `cells draw a column rule (${rule})`);
-const headRule = await page.locator(visible + " [data-header]").first().evaluate((e) => getComputedStyle(e).boxShadow);
-check(/-1px/.test(headRule), "header cells draw the same rule");
+check(rule === "none", `cells draw no column rule (${rule})`);
+const headRule = await page.locator(visible + " [data-header]").first().evaluate((e) => {
+  const a = getComputedStyle(e, "::after");
+  return { w: a.width, top: a.top, bottom: a.bottom, right: a.right };
+});
+check(headRule.w === "1px" && headRule.top === "14px" && headRule.bottom === "14px" && headRule.right === "0px", `header cells keep a short separator (${JSON.stringify(headRule)})`);
 await page.screenshot({ path: `${OUT}/1-column-rules.png`, clip });
 console.log(`${OUT}/1-column-rules.png`);
 

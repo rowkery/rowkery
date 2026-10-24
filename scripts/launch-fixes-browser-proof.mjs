@@ -19,7 +19,8 @@
 //  6. Every panel resizes by drag, with a 6 px col- / row-resize edge that
 //     turns --acc while dragged, saves to config.json (persist.ts) and resets
 //     on double-click: the schema column (240–360), the inspector column
-//     (320 px to 60% of the window) and a query tab's editor / results
+//     (320 px to 60% of the window; the grid gives the room and stops at
+//     the sheets' 8 px gaps, 2026-10-24) and a query tab's editor / results
 //     split (the editor keeps 80 px).
 //  7. Esc on a selected cell only leaves the selection; Esc again with
 //     pending edits, no cell open and nothing running, discards
@@ -557,7 +558,7 @@ const iedge = await page.$eval(`${ws} [data-testid="insp-resize"]`, (e) => ({ w:
 const inspMid = await drag6(`${ws} [data-testid="insp-resize"]`, -100, 0, () => getComputedStyle(document.querySelector('[data-testid="workspace"]:not([hidden]) [data-testid="insp-resize"]'), "::after").backgroundColor);
 const qlW = () => page.$eval(`${ws} [data-quicklook]`, (e) => Math.round(e.getBoundingClientRect().width));
 const gridEnd = await page.evaluate((ws) => Math.round(document.querySelector(`${ws} [data-testid="results-grid-wrap"]`).getBoundingClientRect().right), ws);
-check(iedge.w === 6 && iedge.c === "col-resize" && inspMid === accLine && (await qlW()) === 440 && gridEnd === 1280 - 440 && (await saved("rowkery.inspectorWidth.quicklook")) === 440, `the inspector drags to ${await qlW()} px and the grid gives the room (ends at ${gridEnd}), saved`);
+check(iedge.w === 6 && iedge.c === "col-resize" && inspMid === accLine && (await qlW()) === 440 && gridEnd === 1280 - 440 - 16 && (await saved("rowkery.inspectorWidth.quicklook")) === 440, `the inspector drags to ${await qlW()} px and the grid gives the room (ends at ${gridEnd}), saved`);
 await drag6(`${ws} [data-testid="insp-resize"]`, 400, 0);
 check((await qlW()) === 320, `it stops at 320 px (${await qlW()})`);
 await drag6(`${ws} [data-testid="insp-resize"]`, -900, 0);
