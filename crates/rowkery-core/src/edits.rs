@@ -769,6 +769,7 @@ mod tests {
             crate::safety::SafeMode::Confirm,
             &transaction_sql(&out),
             false,
+            crate::safety::Dialect::Postgres,
         )
         .unwrap();
         assert_eq!(held.statements.len(), 4);

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use rowkery_core::safety::{check_sql, StatementKind};
+use rowkery_core::safety::{check_sql, Dialect, StatementKind};
 use rowkery_core::Value;
 use serde_json::Value as Json;
 
@@ -21,12 +21,19 @@ pub const CELL_CHARS: usize = 200;
 pub const PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// `sql` as exactly one read statement (SELECT, WITH, VALUES, TABLE) with
-/// its trailing `;` removed, or why it is refused.
-pub fn single_read(sql: &str) -> Result<String, String> {
-    let checks = check_sql(sql);
+/// its trailing `;` removed, or why it is refused. `dialect`: the
+/// connection's engine.
+pub fn single_read(sql: &str, dialect: Dialect) -> Result<String, String> {
+    let checks = check_sql(sql, dialect);
     match checks.as_slice() {
         [] => Err("Empty query.".into()),
         [check] => {
+            if check.unlocks_writes {
+                return Err(
+                    "Refused: this changes a read-only setting. This server only runs SELECT queries."
+                        .into(),
+                );
+            }
             if check.kind != StatementKind::Read {
                 return Err(format!(
                     "Refused: {} is not a read. This server only runs SELECT queries.",
@@ -457,13 +464,16 @@ mod tests {
 
     #[test]
     fn reads_pass_and_lose_their_semicolon() {
-        assert_eq!(single_read("select 1;  ").unwrap(), "select 1");
         assert_eq!(
-            single_read("WITH x AS (SELECT 1) SELECT * FROM x").unwrap(),
+            single_read("select 1;  ", Dialect::Either).unwrap(),
+            "select 1"
+        );
+        assert_eq!(
+            single_read("WITH x AS (SELECT 1) SELECT * FROM x", Dialect::Either).unwrap(),
             "WITH x AS (SELECT 1) SELECT * FROM x"
         );
-        assert!(single_read("VALUES (1)").is_ok());
-        assert!(single_read("-- why\nSELECT 1").is_ok());
+        assert!(single_read("VALUES (1)", Dialect::Either).is_ok());
+        assert!(single_read("-- why\nSELECT 1", Dialect::Either).is_ok());
     }
 
     #[test]
@@ -483,8 +493,53 @@ mod tests {
             "BEGIN",
             "",
         ] {
-            assert!(single_read(sql).is_err(), "{sql} should be refused");
+            assert!(
+                single_read(sql, Dialect::Either).is_err(),
+                "{sql} should be refused"
+            );
         }
+    }
+
+    /// reports#12: the classifier read each of these as a read.
+    #[test]
+    fn classifier_bypasses_are_refused() {
+        let deep_explain = "EXPLAIN ".repeat(50_000) + "SELECT 1";
+        for sql in [
+            "SELECT set_config('default_transaction_read_only','off',false)",
+            "SELECT \"set_config\"('transaction_read_only', 'off', true)",
+            "WITH a AS (SELECT 1 AS [it's]) DELETE FROM t --']",
+            "WITH x AS (SELECT 1) SELECT * INTO stolen FROM x",
+            "WITH a AS (SELECT 1) REPLACE INTO t SELECT * FROM a",
+            "SELECT \"pg_terminate_backend\"(42)",
+            "SELECT CAST(1 AS E'\\'')",
+            "COPY (SELECT 1) TO PROGRAM 'true'",
+            "EXPLAIN (",
+            deep_explain.as_str(),
+        ] {
+            let err = single_read(sql, Dialect::Either).expect_err(sql);
+            assert!(err.starts_with("Refused"), "{sql}: {err}");
+        }
+        // The ones only one engine reads that way: refused there too.
+        for (sql, dialect) in [
+            (
+                "WITH a AS (SELECT 1 AS [it's]) DELETE FROM t --']",
+                Dialect::Sqlite,
+            ),
+            (
+                "WITH a AS (SELECT CAST(1 AS E'\\')) DELETE FROM t --')",
+                Dialect::Sqlite,
+            ),
+        ] {
+            assert!(single_read(sql, dialect).is_err(), "{sql}");
+        }
+        assert!(single_read(
+            "SELECT set_config('search_path', 'app', false)",
+            Dialect::Either
+        )
+        .is_ok());
+        assert!(single_read("SELECT m['key'], [x] FROM t", Dialect::Either).is_ok());
+        assert!(single_read("SELECT [it's] FROM t", Dialect::Sqlite).is_ok());
+        assert!(single_read("SELECT d['a]b'] FROM t", Dialect::Postgres).is_ok());
     }
 
     #[test]
