@@ -1,19 +1,23 @@
 /* The Agents page, in Paper (2026-10-10): in place of the schema column,
-   editor and grid, straight on the sheet. A 42 px head ruled like the tab row, then two
+   editor and grid, on one sheet. A 42 px head ruled like the tab row, then two
    columns with a 1 px rule between them that scroll on their own: access on
    the left, the activity log on the right. */
 .agents-page {
   position: absolute;
   z-index: 2;
   top: var(--titlebar-h);
-  bottom: 0;
-  /* Over the schema column too: it's hidden while the page is open. */
-  left: 0;
-  right: 0;
+  bottom: var(--inset);
+  /* Over the schema column too: it's hidden while the page is open. One
+     sheet, inset on every side (2026-10-24). */
+  left: var(--inset);
+  right: var(--inset);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: clip;
+  border-radius: var(--r-xl);
   background: var(--bg);
+  box-shadow: var(--sheet-ring);
   outline: none;
   animation: rise 0.28s var(--ease-out);
 }
@@ -157,7 +161,7 @@
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background: var(--hover);
 }
 
@@ -165,7 +169,7 @@
   height: 22px;
   padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   font: 500 12px var(--sans);
@@ -212,7 +216,7 @@
   height: 20px;
   padding: 0 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--kbd);
   color: var(--mute);
   font: 10.5px var(--mono);
@@ -238,7 +242,7 @@
   height: 24px;
   padding: 0 10px;
   border: 1px solid var(--line2);
-  border-radius: 12px;
+  border-radius: var(--r-pill);
   background: var(--bg);
   color: var(--mute);
   font: 500 12px var(--sans);
@@ -298,7 +302,7 @@
   height: 28px;
   padding: 0 10px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   color: var(--text2);
   font: 500 12px var(--sans);
@@ -433,7 +437,7 @@
   align-items: start;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   cursor: default;
   transition:
@@ -518,7 +522,7 @@
    each on its own wash. */
 .mcp-verdict {
   padding: 1px 7px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   font: 600 10.5px var(--sans);
   letter-spacing: 0.04em;
 }
@@ -572,7 +576,7 @@
   min-width: 0;
   padding: 8px 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   user-select: text;
 }
@@ -657,7 +661,7 @@
   gap: 3px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   transition: border-color 0.18s ease;
 }
@@ -742,7 +746,7 @@
   justify-self: start;
   gap: 2px;
   padding: 2px;
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background: var(--hover);
 }
 
@@ -750,7 +754,7 @@
   height: 20px;
   padding: 0 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   font: 500 11.5px var(--sans);
@@ -771,7 +775,7 @@
 /* The env word tag, as the schema column's head prints it (.env-tag). */
 .mcp-tag {
   padding: 0 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   font: 600 10.5px var(--sans);
   letter-spacing: 0.04em;
   line-height: 18px;
@@ -808,7 +812,7 @@
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   cursor: default;
@@ -829,7 +833,7 @@
   height: 5px;
   border-radius: 50%;
   background: var(--ok);
-  box-shadow: 0 0 0 1.5px var(--bar);
+  box-shadow: 0 0 0 1.5px var(--canvas);
 }
 
 /* The Agents page is up: the shown pill's mark reads as pressed (a click goes back). */
@@ -947,7 +951,7 @@
   height: 28px;
   padding: 0 10px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   color: var(--text);
   font: 12.5px var(--sans);
@@ -979,7 +983,7 @@
 
 .ag-filter kbd {
   padding: 0 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--kbd);
   color: var(--dim);
   font: 11px var(--mono);
@@ -1008,7 +1012,7 @@
   height: 28px;
   padding: 0 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text);
   font: 12.5px var(--sans);
@@ -1072,7 +1076,7 @@
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   height: 30px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
 }
 
 .ag-db:hover,
@@ -1087,7 +1091,7 @@
   height: 30px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: transparent;
   cursor: pointer;
 }
@@ -1122,7 +1126,7 @@
   width: 14px;
   height: 14px;
   border: 1px solid var(--line2);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   background: var(--bg);
 }
 
@@ -1176,7 +1180,7 @@
   width: 860px;
   max-width: 100%;
   padding: 14px 22px 16px;
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   background: var(--bg);
   box-shadow: var(--pop);
 }
@@ -1260,7 +1264,7 @@
   gap: 8px;
   padding: 12px 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
 }
 
 .ag-panel.ag-never {
@@ -1386,7 +1390,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  border-radius: 6px;
+  border-radius: var(--r-md);
 }
 
 .ag-trow:hover,
@@ -1407,7 +1411,7 @@
   margin-right: 2px;
   padding: 0 6px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--faint);
   font: 11px var(--mono);
@@ -1438,7 +1442,7 @@
   height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   cursor: pointer;
@@ -1463,7 +1467,7 @@
   place-items: center;
   width: 26px;
   height: 22px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   color: var(--faint);
 }
 
@@ -1474,7 +1478,7 @@
 
 .ag-personal {
   padding: 1px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   color: color-mix(in srgb, var(--warning) var(--tagmix), var(--text));
   font: 11px var(--sans);
@@ -1511,7 +1515,7 @@
   min-height: 0;
   overflow: auto;
   padding-bottom: 8px;
-  --glide-radius: 8px;
+  --glide-radius: var(--r-md);
 }
 
 .ag-inbox .pp-cards {
@@ -1540,7 +1544,7 @@
   height: 20px;
   padding: 0 7px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   font: 500 11.5px var(--sans);
@@ -1584,7 +1588,7 @@
   height: 26px;
   padding: 0 26px 0 9px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--line);
   color: var(--text);
   font: 500 12px var(--sans);
@@ -1621,7 +1625,7 @@
   width: 100%;
   padding: 7px 10px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -1759,7 +1763,7 @@
   gap: 10px;
   margin: 14px 16px 0;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   color: var(--text);
   font: 13px/1.5 var(--sans);

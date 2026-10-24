@@ -223,8 +223,15 @@ pub async fn open_session_with_secrets(
     open_session_via(connection_id, config, secrets, None).await
 }
 
-/// How long connecting to Postgres may take (TCP, TLS, auth).
+/// How long the TCP connect to one of the host's addresses may take; the
+/// next address gets its own.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long opening a session may take in all: every address, then TLS,
+/// startup, login (a slow one over a tunnel or LDAP) and the read-only `SET`.
+/// Without it a port that takes the connection and says nothing (a dead
+/// `kubectl port-forward`) would hang the open for good.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Opens a session, through `route` when it is the one the connection uses
 /// and still alive (else a new one, which `session.route()` returns for the
@@ -313,6 +320,7 @@ pub async fn open_session_via(
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
     let warnings = Warnings::default();
+    let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
     // The outer error is the Cloud SQL connector's (no Postgres error to
     // retry on); the inner one is Postgres's.
     let connect = |pg_config: tokio_postgres::Config| {
@@ -320,6 +328,7 @@ pub async fn open_session_via(
         let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
         let warnings = warnings.clone();
+        let late = no_answer(&config.host, config.port);
         async move {
             if let Some(dialer) = dialer {
                 let mut retried = false;
@@ -354,15 +363,21 @@ pub async fn open_session_via(
                     }
                 }
             }
-            Ok::<_, DriverError>(if let Some(tls) = tls {
-                pg_config.connect(tls).await.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings, warnings))
-                })
-            } else {
-                pg_config.connect(NoTls).await.map(|(client, connection)| {
-                    (client, drive_connection(connection, txn_warnings, warnings))
-                })
+            // `connect_timeout` bounds each address's TCP connect; the
+            // deadline bounds the rest (see `OPEN_TIMEOUT`).
+            let started = tokio::time::timeout_at(deadline, async {
+                match tls {
+                    Some(tls) => pg_config.connect(tls).await.map(|(client, connection)| {
+                        (client, drive_connection(connection, txn_warnings, warnings))
+                    }),
+                    None => pg_config.connect(NoTls).await.map(|(client, connection)| {
+                        (client, drive_connection(connection, txn_warnings, warnings))
+                    }),
+                }
             })
+            .await
+            .map_err(|_| late)?;
+            Ok::<_, DriverError>(started)
         }
     };
     let (client, connection_task) = match connect(pg_config.clone()).await? {
@@ -397,10 +412,18 @@ pub async fn open_session_via(
     // Read-only connections are read-only at the server too, so a write that
     // safe mode's text check misses (a function call in a SELECT) still fails.
     if config.safe_mode == SafeMode::ReadOnly {
-        client
-            .batch_execute("SET default_transaction_read_only = on")
-            .await
-            .map_err(humanize)?;
+        let set = tokio::time::timeout_at(deadline, client.batch_execute(READ_ONLY_DEFAULT)).await;
+        let failed = match set {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(humanize(e)),
+            Err(_) => Some(no_answer(&config.host, config.port)),
+        };
+        if let Some(err) = failed {
+            // No session holds the connection yet: stop it here, or it
+            // waits on a silent server for good.
+            connection_task.abort();
+            return Err(err);
+        }
     }
 
     let cancel_token = client.cancel_token();
@@ -427,6 +450,16 @@ pub async fn open_session_via(
         cancel_aborted: false,
         guard: None,
     })
+}
+
+/// A session open that gave up after [`OPEN_TIMEOUT`]: no address took the
+/// connection in time, or one did and TLS, startup or login never finished.
+/// `explain_connect_error` reads "did not finish connecting" as a timeout.
+fn no_answer(host: &str, port: u16) -> DriverError {
+    DriverError::Message(format!(
+        "Connection timed out: {host}:{port} did not finish connecting in {} s",
+        OPEN_TIMEOUT.as_secs()
+    ))
 }
 
 /// Runs the connection, counting `BEGIN`'s "already a transaction in
@@ -553,6 +586,10 @@ pub struct StreamOptions {
     /// slow query shows its first rows (and a live count) without waiting
     /// for a full batch. Checked as rows arrive.
     pub max_wait: std::time::Duration,
+    /// Rows decoded and passed on at most; the rest are read off the wire
+    /// and counted, never decoded (the statement still runs to its end).
+    /// `None` keeps every row.
+    pub keep: Option<u64>,
 }
 
 impl Default for StreamOptions {
@@ -560,6 +597,7 @@ impl Default for StreamOptions {
         Self {
             batch_rows: BATCH_SIZE,
             max_wait: std::time::Duration::from_millis(10),
+            keep: None,
         }
     }
 }
@@ -632,6 +670,19 @@ fn cacheable_sql(sql: &str) -> bool {
 async fn start_query(
     session: &PostgresSession,
     sql: &str,
+    ahead: bool,
+) -> Result<(Statement, tokio_postgres::RowStream), tokio_postgres::Error> {
+    let (set, started) = tokio::join!(
+        keep_read_only(&session.client, ahead),
+        start_query_now(session, sql)
+    );
+    set?;
+    started
+}
+
+async fn start_query_now(
+    session: &PostgresSession,
+    sql: &str,
 ) -> Result<(Statement, tokio_postgres::RowStream), tokio_postgres::Error> {
     let none = std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>;
     let outside_txn = session.txn == TxnState::None && session.cursor.is_none();
@@ -662,6 +713,38 @@ pub async fn session_execute(session: &PostgresSession, sql: &str) -> Result<(),
         .batch_execute(sql)
         .await
         .map_err(|e| map_query_error(&e, &session.config.username))
+}
+
+/// What makes a read-only connection's sessions read-only at the server.
+const READ_ONLY_DEFAULT: &str = "SET default_transaction_read_only = on";
+
+/// Whether a run on `session` sends [`READ_ONLY_DEFAULT`] ahead of itself:
+/// on a read-only connection's session, unless the tab's cursor is open.
+/// A function the text check can't see into (`SELECT f()`) may turn the
+/// default off, and the next transaction would start read-write. Every
+/// run on a read-only connection is one statement (SQL files and imports
+/// are refused there), and only one with no transaction open starts one:
+/// so the SET goes ahead of every run but a `FETCH` (or an export) inside
+/// the cursor's transaction, which started read-only. Inside the user's
+/// own transaction it is harmless, and their `BEGIN` got one too.
+fn read_only_ahead(session: &PostgresSession) -> bool {
+    session.config.safe_mode == SafeMode::ReadOnly && session.cursor.is_none()
+}
+
+/// [`READ_ONLY_DEFAULT`] when `ahead`. Pipelined: the request goes out the
+/// first time this is polled, so `join!`ed ahead of a statement it costs
+/// no round trip. In the user's failed transaction the server refuses it
+/// (25P02); that counts as done, since the rollback the transaction needs
+/// undoes whatever turned the default off, and the statement after it
+/// fails the same way.
+async fn keep_read_only(client: &Client, ahead: bool) -> Result<(), tokio_postgres::Error> {
+    if !ahead {
+        return Ok(());
+    }
+    match client.batch_execute(READ_ONLY_DEFAULT).await {
+        Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Ok(()),
+        done => done,
+    }
 }
 
 /// Runs one statement of a SQL file in the simple protocol, as psql does,
@@ -728,7 +811,22 @@ pub async fn session_query_stream_with<F>(
     session: &PostgresSession,
     sql: &str,
     opts: StreamOptions,
+    on_batch: F,
+) -> Result<StreamStats, DriverError>
+where
+    F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
+{
+    stream_with(session, sql, opts, on_batch, read_only_ahead(session)).await
+}
+
+/// `session_query_stream_with`, sending [`READ_ONLY_DEFAULT`] ahead when
+/// `ahead`.
+async fn stream_with<F>(
+    session: &PostgresSession,
+    sql: &str,
+    opts: StreamOptions,
     mut on_batch: F,
+    ahead: bool,
 ) -> Result<StreamStats, DriverError>
 where
     F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
@@ -743,7 +841,7 @@ where
     .iter()
     .any(|kw| lower.starts_with(kw));
     if !returns_rows {
-        let (_st, stream) = start_query(session, trimmed)
+        let (_st, stream) = start_query(session, trimmed, ahead)
             .await
             .map_err(|e| map_query_error(&e, &username))?;
         futures::pin_mut!(stream);
@@ -759,7 +857,7 @@ where
         });
     }
 
-    let (st, stream) = start_query(session, trimmed)
+    let (st, stream) = start_query(session, trimmed, ahead)
         .await
         .map_err(|e| map_query_error(&e, &username))?;
     futures::pin_mut!(stream);
@@ -779,6 +877,7 @@ where
     let mut first_row = None;
     // When the oldest row of the batch being built arrived.
     let mut batch_since = started;
+    let full = |n: u64| opts.keep.is_some_and(|keep| n >= keep);
 
     while let Some(row) = stream
         .try_next()
@@ -788,6 +887,10 @@ where
         let row: Row = row;
         if first_row.is_none() {
             first_row = Some(started.elapsed());
+        }
+        if full(total_rows) {
+            total_rows += 1;
+            continue;
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
@@ -799,7 +902,10 @@ where
         batch_rows.push(values);
         total_rows += 1;
 
-        if batch_rows.len() >= opts.batch_rows || batch_since.elapsed() >= opts.max_wait {
+        if batch_rows.len() >= opts.batch_rows
+            || batch_since.elapsed() >= opts.max_wait
+            || full(total_rows)
+        {
             let batch = RowBatch {
                 columns: columns.clone(),
                 rows: batch_rows,
@@ -827,6 +933,7 @@ where
 /// The first page of `sql` through `CURSOR`. `Ok(None)` when the statement
 /// can't be a cursor, and the caller runs it plainly.
 ///
+/// On a read-only connection the SET of `read_only_ahead` goes first.
 /// When the session is known to have no transaction open, one pipelined
 /// round sends `BEGIN; SAVEPOINT`, the `DECLARE … NO SCROLL CURSOR` on its
 /// own (`declare_sql`), `RELEASE` and the first `FETCH FORWARD rows`
@@ -850,11 +957,22 @@ where
     F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
 {
     session_close_cursor(session).await;
+    // Ahead of our BEGIN, as a request of its own: in one batch with it,
+    // the transaction would start before the SET ran.
+    let mut ahead = read_only_ahead(session);
     let mut users = session.txn == TxnState::Users;
     let mut begin = "BEGIN; ";
     if session.txn == TxnState::Unknown {
         let before = session.txn_warnings.load(Ordering::SeqCst);
-        match session.client.batch_execute("BEGIN").await {
+        let (set, begun) = tokio::join!(
+            keep_read_only(&session.client, ahead),
+            session.client.batch_execute("BEGIN")
+        );
+        ahead = false;
+        if let Err(err) = set {
+            return Err(map_query_error(&err, &session.config.username));
+        }
+        match begun {
             Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => {
                 session.txn = TxnState::Users;
                 return Ok(None);
@@ -884,14 +1002,15 @@ where
     // first time `join!` polls it. The DECLARE travels alone through the
     // extended protocol, so a second statement hidden in `sql` is refused by
     // the server instead of run.
-    let (opened, declared, released, fetched) = tokio::join!(
+    let (set, opened, declared, released, fetched) = tokio::join!(
+        keep_read_only(&session.client, ahead),
         session.client.batch_execute(&opening),
         session.client.query_typed(&declare, &[]),
         session.client.batch_execute("RELEASE SAVEPOINT rowkery_sp"),
-        session_query_stream_with(session, &fetch, opts, on_batch),
+        stream_with(session, &fetch, opts, on_batch, false),
     );
     // The first failure is the one that counts; the later ones are 25P02.
-    let declared = opened.and(declared.map(drop)).and(released);
+    let declared = set.and(opened).and(declared.map(drop)).and(released);
     // Known to have none open, so `BEGIN` can't warn; if it did anyway, the
     // savepoint keeps their transaction as it was and ours never commits it.
     let warned = session.txn_warnings.load(Ordering::SeqCst) != before;
@@ -1187,6 +1306,7 @@ pub async fn session_apply_changes_within(
                 message: late(&named),
                 statement: Some(named),
                 rows: None,
+                unknown: false,
             });
         };
         match ran {
@@ -1205,9 +1325,7 @@ pub async fn session_apply_changes_within(
     if let Err(err) = session.client.batch_execute("COMMIT").await {
         if session.client.is_closed() {
             // The server may have committed before the socket went.
-            return Err(ApplyFailure::other(
-                "The connection dropped during COMMIT, so the changes may or may not be saved. Reload the table to check.",
-            ));
+            return Err(ApplyFailure::commit_lost());
         }
         rollback(&session.client).await;
         return Err(ApplyFailure::other(message(&err)));

@@ -16,7 +16,7 @@
   gap: 12px;
   margin: 12px 14px 6px;
   padding: 11px 14px;
-  border-radius: 9px;
+  border-radius: var(--r-lg);
   background: color-mix(in srgb, var(--warning) 13%, transparent);
   color: var(--text);
   font-size: 13px;
@@ -121,7 +121,7 @@
 .plan-bar {
   position: relative;
   height: 6px;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--rowline);
   overflow: hidden;
 }
@@ -129,7 +129,7 @@
 .plan-bar i {
   position: absolute;
   inset: 0 auto 0 0;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--faint);
 }
 
@@ -150,7 +150,7 @@
 .plan-miss {
   margin-left: 6px;
   padding: 0 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--del) 10%, transparent);
   color: var(--del);
   font: 500 11px var(--sans);

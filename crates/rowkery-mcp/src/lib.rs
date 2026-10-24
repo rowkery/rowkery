@@ -70,8 +70,10 @@ depends on, such as the row it updates or an id it references, and select only t
 /// `pg_catalog` / `information_schema`. The log is a plain file, so its
 /// verdict alone proves nothing. A bare call to a function defined in the
 /// database still passes: telling it from a built-in needs the catalog.
+/// The engine isn't known here, so text the engines read differently fails
+/// closed.
 pub fn recheck_logged_read(sql: &str) -> Result<(), String> {
-    let sql = guard::single_read(sql)?;
+    let sql = guard::single_read(sql, rowkery_core::safety::Dialect::Either)?;
     let scan = functions::scan_sql(&sql);
     if scan.unicode_names {
         return Err(
@@ -795,11 +797,11 @@ async fn run_read(
     plan_only: bool,
     entry: &mut audit::Entry,
 ) -> Outcome {
-    let sql = guard::single_read(sql)?;
+    let engine = engine(&target.record);
+    let sql = guard::single_read(sql, engine.into())?;
     let cap = guard::row_cap(max_rows);
     let alias = guard::wrapper_alias();
     let capped = guard::wrap_limit(&sql, cap + 1, &alias);
-    let engine = engine(&target.record);
     let rule = rule(target);
     let marks = mask::parse(target.record.masked_columns(&target.database));
 

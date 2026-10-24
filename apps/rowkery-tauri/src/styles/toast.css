@@ -1,24 +1,25 @@
 /* ---------- Toast ---------- */
 
-/* Spans the main column, so the capsule centres over the cards and follows
-   the sidebar sliding away. Clicks pass through to the grid under it. */
+/* Spans the main sheet, so the capsule centres over it and follows the
+   sidebar sliding away. Clicks pass through to the grid under it. */
 .toast-layer {
   position: absolute;
   z-index: 40;
-  left: var(--main-left);
-  right: var(--inspector-right);
-  bottom: 18px;
+  left: var(--sheet-left);
+  right: var(--sheet-right);
+  bottom: calc(var(--inset) + 18px);
   display: flex;
   justify-content: center;
   pointer-events: none;
   transition: left 240ms var(--ease-out), bottom 240ms var(--ease-out);
 }
 
-/* Above the foot edits bar (46 px) while it shows, never over Commit. The
-   shown window says so on itself (`data-tray-up`): a `:has()` that searched
-   each window's whole subtree for the bar cost every window switch. */
+/* Above the foot edits bar (48 px, 8 px into the sheet) while it shows,
+   never over Commit. The shown window says so on itself (`data-tray-up`): a
+   `:has()` that searched each window's whole subtree for the bar cost every
+   window switch. */
 .app-frame:has(> .workspace:not([hidden])[data-tray-up]) .toast-layer {
-  bottom: 64px;
+  bottom: calc(var(--inset) * 2 + 48px + 12px);
 }
 
 .toast {
@@ -28,7 +29,7 @@
   max-width: min(560px, 100%);
   height: 34px;
   padding: 0 14px 0 12px;
-  border-radius: 8px;
+  border-radius: var(--r-pill);
   background: var(--toast-bg);
   box-shadow: var(--toast-shadow), inset 0 0 0 1px var(--toast-ring);
   color: var(--toast-fg);
@@ -51,7 +52,7 @@
   margin: 0 -8px 0 4px;
   padding: 4px 9px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-pill);
   background: transparent;
   color: var(--acc);
   font: inherit;

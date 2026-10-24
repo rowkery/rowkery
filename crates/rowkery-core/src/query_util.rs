@@ -57,12 +57,23 @@ mod tests {
 /// A cell as a SQL literal to match a key on: integers and floats bare, text
 /// single-quoted with quotes doubled, booleans as TRUE / FALSE. `None` for
 /// NULL, bytes and non-finite floats, which can't be looked up this way.
-pub fn sql_literal(value: &crate::db::Value) -> Option<String> {
-    use crate::db::Value;
+///
+/// Postgres text holding a backslash is an `E'…'` string with backslashes
+/// doubled too: a plain `'…'` reads `\'` as a quote that doesn't end it on a
+/// server with `standard_conforming_strings` off, so a key value read from
+/// the table could break out of the literal. `E''` reads the same on every
+/// server.
+pub fn sql_literal(engine: crate::db::EngineKind, value: &crate::db::Value) -> Option<String> {
+    use crate::db::{EngineKind, Value};
     match value {
         Value::Int(n) => Some(n.to_string()),
         Value::Float(f) if f.is_finite() => Some(f.to_string()),
-        Value::Text(t) if !t.contains('\0') => Some(format!("'{}'", t.replace('\'', "''"))),
+        Value::Text(t) if t.contains('\0') => None,
+        Value::Text(t) if engine == EngineKind::Postgres && t.contains('\\') => Some(format!(
+            "E'{}'",
+            t.replace('\\', "\\\\").replace('\'', "''")
+        )),
+        Value::Text(t) => Some(format!("'{}'", t.replace('\'', "''"))),
         Value::Bool(b) => Some(if *b { "TRUE" } else { "FALSE" }.into()),
         _ => None,
     }
@@ -71,27 +82,45 @@ pub fn sql_literal(value: &crate::db::Value) -> Option<String> {
 #[cfg(test)]
 mod literal_tests {
     use super::sql_literal;
-    use crate::db::Value;
+    use crate::db::{EngineKind, Value};
+
+    fn pg(value: &Value) -> Option<String> {
+        sql_literal(EngineKind::Postgres, value)
+    }
 
     #[test]
     fn literals_are_exact_and_escaped() {
         assert_eq!(
-            sql_literal(&Value::Int(i64::MAX)).as_deref(),
+            pg(&Value::Int(i64::MAX)).as_deref(),
             Some("9223372036854775807")
         );
+        assert_eq!(pg(&Value::Text("it's".into())).as_deref(), Some("'it''s'"));
         assert_eq!(
-            sql_literal(&Value::Text("it's".into())).as_deref(),
-            Some("'it''s'")
-        );
-        assert_eq!(
-            sql_literal(&Value::Text("x'; DROP TABLE t; --".into())).as_deref(),
+            pg(&Value::Text("x'; DROP TABLE t; --".into())).as_deref(),
             Some("'x''; DROP TABLE t; --'")
         );
-        assert_eq!(sql_literal(&Value::Bool(false)).as_deref(), Some("FALSE"));
-        assert_eq!(sql_literal(&Value::Float(1.5)).as_deref(), Some("1.5"));
-        assert_eq!(sql_literal(&Value::Float(f64::NAN)), None);
-        assert_eq!(sql_literal(&Value::Null), None);
-        assert_eq!(sql_literal(&Value::Bytes(vec![1])), None);
-        assert_eq!(sql_literal(&Value::Text("a\0b".into())), None);
+        assert_eq!(pg(&Value::Bool(false)).as_deref(), Some("FALSE"));
+        assert_eq!(pg(&Value::Float(1.5)).as_deref(), Some("1.5"));
+        assert_eq!(pg(&Value::Float(f64::NAN)), None);
+        assert_eq!(pg(&Value::Null), None);
+        assert_eq!(pg(&Value::Bytes(vec![1])), None);
+        assert_eq!(pg(&Value::Text("a\0b".into())), None);
+    }
+
+    /// With `standard_conforming_strings` off, `'\''` reads as a string still
+    /// open: a backslash makes it an `E''` string, read the same anywhere.
+    #[test]
+    fn backslashes_cant_end_a_postgres_literal() {
+        let breakout = Value::Text(r"\' OR 1=1 --".into());
+        assert_eq!(pg(&breakout).as_deref(), Some(r"E'\\'' OR 1=1 --'"));
+        assert_eq!(
+            pg(&Value::Text(r"C:\tmp".into())).as_deref(),
+            Some(r"E'C:\\tmp'")
+        );
+        // SQLite has no escapes in strings: a backslash is a backslash.
+        assert_eq!(
+            sql_literal(EngineKind::Sqlite, &breakout).as_deref(),
+            Some(r"'\'' OR 1=1 --'")
+        );
     }
 }

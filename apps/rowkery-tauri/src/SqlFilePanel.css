@@ -53,7 +53,7 @@
   align-items: baseline;
   gap: 10px;
   padding: 5px 8px;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   font: 12px var(--mono);
   color: var(--text);
 }
@@ -110,7 +110,7 @@
   gap: 2px;
   min-width: 0;
   padding: 2px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--hover);
 }
 
@@ -120,7 +120,7 @@
   height: 24px;
   padding: 0 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   font: 400 12px var(--sans);
@@ -180,7 +180,7 @@
 
 .sf-bar {
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--r-pill);
   background: var(--hover);
   overflow: hidden;
 }
@@ -198,7 +198,7 @@
   max-height: 90px;
   overflow: hidden;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   font: 11.5px/17px var(--mono);
   color: var(--mute);
@@ -225,6 +225,7 @@
 
 .sf-ended.failed .sf-ended-title,
 .sf-ended.errors .sf-ended-title,
+.sf-ended.unknown .sf-ended-title,
 .sf-ended-error {
   color: var(--del);
 }

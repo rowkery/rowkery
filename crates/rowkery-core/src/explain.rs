@@ -39,6 +39,9 @@ pub const CERT_NOT_VERIFIED: &str =
 /// Seconds Postgres connects get before giving up (`CONNECT_TIMEOUT`).
 const CONNECT_TIMEOUT_S: u64 = 10;
 
+/// Seconds a whole session open gets (`OPEN_TIMEOUT`).
+const OPEN_TIMEOUT_S: u64 = 30;
+
 fn quoted(text: &str, after: &str) -> Option<String> {
     let rest = text.split_once(after)?.1.trim_start();
     let rest = rest.strip_prefix('"')?;
@@ -145,6 +148,16 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
         return e(
             "dns",
             Some(format!("The name {} could not be resolved.", t.host)),
+            Some("host"),
+        );
+    }
+    if says("did not finish connecting") {
+        return e(
+            "timeout",
+            Some(format!(
+                "{}:{} did not finish connecting in {OPEN_TIMEOUT_S} s.",
+                t.host, t.port
+            )),
             Some("host"),
         );
     }
@@ -318,6 +331,17 @@ mod tests {
             (
                 "timeout",
                 Some("db.internal:5432 did not answer in 10 s.".into()),
+                Some("host")
+            )
+        );
+        assert_eq!(
+            class(
+                "Connection timed out: db.internal:5432 did not finish connecting in 30 s",
+                &T
+            ),
+            (
+                "timeout",
+                Some("db.internal:5432 did not finish connecting in 30 s.".into()),
                 Some("host")
             )
         );

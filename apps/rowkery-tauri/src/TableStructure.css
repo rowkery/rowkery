@@ -104,7 +104,7 @@
   min-height: 34px;
   padding: 0 10px;
   border-bottom: 1px solid var(--rowline);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   font-size: 12px;
   transition: background-color 0.18s ease;
 }
@@ -192,7 +192,7 @@
   flex-shrink: 0;
   padding: 2px 7px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--hover);
   font: 600 10px var(--sans);
   letter-spacing: 0.04em;
@@ -250,7 +250,7 @@ button.ts-badge.fk:hover {
   min-height: 34px;
   padding: 0 10px;
   border-bottom: 1px solid var(--rowline);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   font-size: 12px;
   transition: background-color 0.18s ease;
 }
@@ -279,7 +279,7 @@ button.ts-badge.fk:hover {
 .ts-chip {
   flex-shrink: 0;
   padding: 1px 7px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--hover);
   font: 11.5px var(--mono);
   color: var(--text);
@@ -326,7 +326,7 @@ button.ts-badge.fk:hover {
 .ts-link:focus-visible {
   outline: 1.5px solid var(--acc);
   outline-offset: 2px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
 }
 
 .ts-link-missing {
@@ -342,15 +342,16 @@ button.ts-badge.fk:hover {
 /* Data | Structure (Paper, 2026-10-10): a segmented control, a --hover
    track with a raised paper thumb that slides to the view. On a table tab it
    sits at the tab row's right; on a query tab reading one table, in the
-   results head. */
+   results head. 10 px outside with 3 px padding, so the thumb is 7 px
+   (2026-10-24). */
 .view-switch {
   position: relative;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 2px;
-  border-radius: 7px;
+  padding: 3px;
+  border-radius: 10px;
   background: var(--hover);
 }
 
@@ -360,7 +361,7 @@ button.ts-badge.fk:hover {
   left: 0;
   z-index: 0;
   pointer-events: none;
-  border-radius: 5px;
+  border-radius: 7px;
   background: var(--bg);
   box-shadow: var(--shadow);
   transition:
@@ -377,7 +378,7 @@ button.ts-badge.fk:hover {
   height: 24px;
   padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 7px;
   background: transparent;
   color: var(--mute);
   font: 500 12px var(--sans);
@@ -391,11 +392,11 @@ button.ts-badge.fk:hover {
   color: var(--text);
 }
 
-/* In the tab row: bottom-aligned with the tabs, 7 px off the rule; its
-   right edge lines up with Edit SQL and the map's controls below. */
+/* In the tab row: centred, like the tabs' pills; its right edge lines up
+   with Edit SQL and the map's controls below. */
 .editor-header > .view-switch {
-  align-self: flex-end;
-  margin: 0 0 7px auto;
+  align-self: center;
+  margin-left: auto;
 }
 
 .view-switch svg {

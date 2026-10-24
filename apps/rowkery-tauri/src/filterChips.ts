@@ -137,18 +137,25 @@ const ARRAY_TYPE = /(\[\]|^_)/;
 export const isTextType = (type: string) => TEXT_TYPE.test(type.trim()) && !ARRAY_TYPE.test(type.trim());
 export const isNumberType = (type: string) => NUMBER_TYPE.test(type.trim());
 
-/** `'it''s'`: a string literal with its quotes doubled. */
-export function quoteText(v: string): string {
+/**
+ * `'it''s'`: a string literal with its quotes doubled. On Postgres, text
+ * holding a backslash is an `E'…'` string with backslashes doubled too: with
+ * `standard_conforming_strings` off a plain `'…'` reads `\'` as a quote that
+ * doesn't end it, so a cell's value could break out. `E''` reads the same on
+ * every server (core's `sql_literal` does the same). SQLite has no escapes.
+ */
+export function quoteText(v: string, engine: ChipEngine = "postgres"): string {
+  if (engine === "postgres" && v.includes("\\")) return `E'${v.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
   return `'${v.replace(/'/g, "''")}'`;
 }
 
 /** A value as a literal for a column of `type`: numbers and booleans bare, the rest quoted. */
-export function chipLiteral(value: string, type: string): string {
+export function chipLiteral(value: string, type: string, engine: ChipEngine = "postgres"): string {
   const v = value.trim();
   if (/^null$/i.test(v)) return "NULL";
   if (isNumberType(type) && NUMBER_TEXT.test(v)) return v;
   if (BOOL_TYPE.test(type) && /^(true|false)$/i.test(v)) return v.toUpperCase();
-  return quoteText(value);
+  return quoteText(value, engine);
 }
 
 /** The operator a column gets by default: text contains, everything else equals. */
@@ -162,12 +169,15 @@ const like = (engine: ChipEngine) => (engine === "sqlite" ? "LIKE" : "ILIKE");
 /**
  * "contains": `'%x%'`, with `\`, `%` and `_` in the value escaped so they
  * match themselves (Postgres reads `\` as LIKE's escape, and `user_name`
- * must not match `user-name`), and then `ESCAPE '\'`, which both engines
- * take (SQLite has no escape without it). A plain value reads plainly.
+ * must not match `user-name`), and then an ESCAPE of `\` (SQLite has no
+ * escape without it). On Postgres the escaped pattern and the ESCAPE are
+ * `E''` strings (see `quoteText`): `ESCAPE '\'` is an unclosed string with
+ * `standard_conforming_strings` off. A plain value reads plainly.
  */
-const containsPattern = (v: string) => {
+const containsPattern = (v: string, engine: ChipEngine) => {
   const escaped = v.replace(/[\\%_]/g, "\\$&");
-  return `${quoteText(`%${escaped}%`)}${escaped === v ? "" : " ESCAPE '\\'"}`;
+  if (escaped === v) return quoteText(`%${v}%`, engine);
+  return `${quoteText(`%${escaped}%`, engine)} ESCAPE ${engine === "postgres" ? "E'\\\\'" : "'\\'"}`;
 };
 
 /** A contains pattern's value back (`%a\_b%` → `a_b`); null for a pattern with wildcards of its own. */
@@ -224,7 +234,8 @@ export function splitList(v: string): string[] {
 
 /** IN's values as a chip keeps them: bare, or quoted when an item holds a comma or starts with a quote. */
 export function joinList(items: string[]): string {
-  return items.map((s) => (/,|^'|^\s|\s$/.test(s) ? quoteText(s) : s)).join(", ");
+  // The chip's own text (read back by splitList), not SQL: plain quotes.
+  return items.map((s) => (/,|^'|^\s|\s$/.test(s) ? `'${s.replace(/'/g, "''")}'` : s)).join(", ");
 }
 
 /** `'it''s'` → `it's`; anything else as is. */
@@ -237,18 +248,18 @@ function unquote(v: string): string {
 export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): string {
   if (chip.kind === "expr") return chip.sql.trim();
   if (chip.kind === "any") {
-    const parts = chip.columns.map((c) => `${chipIdent(c)} ${like(engine)} ${containsPattern(chip.value)}`);
+    const parts = chip.columns.map((c) => `${chipIdent(c)} ${like(engine)} ${containsPattern(chip.value, engine)}`);
     // Bracketed by chipFragments when another chip joins it (core's WHERE (…) brackets it alone).
     return parts.join(" OR ");
   }
   const col = chipIdent(chip.column);
-  const lit = (v: string) => chipLiteral(v, chip.type);
+  const lit = (v: string) => chipLiteral(v, chip.type, engine);
   switch (chip.op) {
     case "IS NULL":
     case "IS NOT NULL":
       return `${col} ${chip.op}`;
     case "ILIKE":
-      return `${col} ${like(engine)} ${containsPattern(chip.value)}`;
+      return `${col} ${like(engine)} ${containsPattern(chip.value, engine)}`;
     case "IN":
       return `${col} IN (${splitList(chip.value).map(lit).join(", ")})`;
     case "BETWEEN":
@@ -328,7 +339,7 @@ export function parseFragment(text: string, columns: ChipColumn[]): FilterChip |
   if (m && col) {
     const op = (m[2] ?? m[3]).replace(/\s+/g, " ").toUpperCase().replace("!=", "<>").replace(/^IS NOT$/, "IS DISTINCT FROM") as FilterOp | "LIKE";
     let rest = m[4].trim();
-    if (op === "ILIKE") rest = rest.replace(/\s+escape\s+'\\'$/i, "");
+    if (op === "ILIKE") rest = rest.replace(/\s+escape\s+(?:'\\'|e'\\\\')$/i, "");
     if (op === "IS NULL" || op === "IS NOT NULL") {
       if (rest === "") return { kind: "pred", column: col.name, type: col.type_name, op, value: "" };
     } else if (op === "IN") {
@@ -341,9 +352,17 @@ export function parseFragment(text: string, columns: ChipColumn[]): FilterChip |
       if (b && SIMPLE_VALUE.test(b[1].trim()) && SIMPLE_VALUE.test(b[2].trim()))
         return { kind: "pred", column: col.name, type: col.type_name, op, value: unquote(b[1].trim()), value2: unquote(b[2].trim()) };
     } else if (op === "ILIKE") {
-      // ILIKE '%x%' reads back as "contains x"; a pattern of the user's own stays SQL.
-      const quoted = /^'((?:[^']|'')*)'$/s.exec(rest);
-      const value = quoted ? containsValue(quoted[1].replace(/''/g, "'")) : null;
+      // ILIKE '%x%' (or E'%x%', its backslashes doubled) reads back as
+      // "contains x"; a pattern of the user's own stays SQL.
+      const quoted = /^(e?)'((?:[^']|'')*)'$/is.exec(rest);
+      const body = !quoted
+        ? null
+        : !quoted[1]
+          ? quoted[2]
+          : /^(?:[^\\]|\\\\)*$/.test(quoted[2])
+            ? quoted[2].replace(/\\\\/g, "\\")
+            : null;
+      const value = body !== null ? containsValue(body.replace(/''/g, "'")) : null;
       if (value) return { kind: "pred", column: col.name, type: col.type_name, op, value };
     } else if (op !== "LIKE" && SIMPLE_VALUE.test(rest)) {
       return { kind: "pred", column: col.name, type: col.type_name, op, value: unquote(rest) };

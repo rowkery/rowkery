@@ -50,4 +50,19 @@ describe("parsePostgresUrl", () => {
     expect(parsePostgresUrl("https://example.com")).toBeNull();
     expect(parsePostgresUrl("")).toBeNull();
   });
+
+  test("a stray % never throws: the field keeps the text as typed", () => {
+    // The valid escapes around a stray % still decode; a broken UTF-8 one stays as typed.
+    expect(parsePostgresUrl("postgres://u:a%41%zz@db/app")?.password).toBe("aA%zz");
+    expect(parsePostgresUrl("postgres://u:%C3%A9%zz%C3@db/app")?.password).toBe("é%zz%C3");
+    expect(parsePostgresUrl("postgres://u:p%zz@db/app")).toEqual({
+      host: "db",
+      port: "5432",
+      database: "app",
+      username: "u",
+      password: "p%zz",
+    });
+    expect(parsePostgresUrl("postgres://u%:p@db/a%e9b")).toMatchObject({ username: "u%", database: "a%e9b" });
+    expect(parsePostgresUrl("DATABASE_URL=postgres://u:100%@db/app")).toMatchObject({ password: "100%" });
+  });
 });

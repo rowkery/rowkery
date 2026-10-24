@@ -122,6 +122,9 @@ pub struct ApplyFailure {
     pub rows: Option<u64>,
     /// `UPDATE public.kiosks WHERE id = 3 changed 2 rows`, or the server's error.
     pub message: String,
+    /// The connection dropped during COMMIT: the server may have saved it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unknown: bool,
 }
 
 impl ApplyFailure {
@@ -134,6 +137,7 @@ impl ApplyFailure {
             message: format!("{named} changed {rows} {noun}"),
             statement: Some(named),
             rows: Some(rows),
+            unknown: false,
         }
     }
 
@@ -145,6 +149,7 @@ impl ApplyFailure {
             message: format!("{named}: {error}"),
             statement: Some(named),
             rows: None,
+            unknown: false,
         }
     }
 
@@ -155,6 +160,17 @@ impl ApplyFailure {
             statement: None,
             rows: None,
             message: message.into(),
+            unknown: false,
+        }
+    }
+
+    /// The connection dropped during COMMIT: saved or not, nobody knows.
+    pub fn commit_lost() -> Self {
+        Self {
+            unknown: true,
+            ..Self::other(
+                "The connection dropped during COMMIT, so the changes may or may not be saved. Reload the table to check.",
+            )
         }
     }
 }
@@ -753,6 +769,7 @@ mod tests {
             crate::safety::SafeMode::Confirm,
             &transaction_sql(&out),
             false,
+            crate::safety::Dialect::Postgres,
         )
         .unwrap();
         assert_eq!(held.statements.len(), 4);

@@ -118,7 +118,7 @@
   height: 32px;
   padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   box-shadow: inset 0 0 0 1px var(--line2);
   color: var(--text);
@@ -166,7 +166,7 @@
   display: flex;
   gap: 2px;
   padding: 2px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--hover);
 }
 
@@ -180,7 +180,7 @@
   height: 24px;
   padding: 0 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--mute);
   font: 400 12px var(--sans);
@@ -319,7 +319,7 @@ p.nc-hint[data-invalid] {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   background: var(--bg);
 }
 
@@ -389,7 +389,7 @@ p.nc-hint[data-invalid] {
   width: 30px;
   height: 18px;
   margin: 0;
-  border-radius: 9px;
+  border-radius: var(--r-pill);
   background: var(--faint);
   cursor: pointer;
   transition: background-color 0.2s ease;
@@ -402,7 +402,7 @@ p.nc-hint[data-invalid] {
   left: 2px;
   width: 14px;
   height: 14px;
-  border-radius: 7px;
+  border-radius: 50%;
   background: var(--knob);
   box-shadow: var(--shadow);
   transition: transform 0.2s var(--ease-out);
@@ -466,7 +466,7 @@ p.nc-hint[data-invalid] {
   justify-content: center;
   height: 64px;
   border: 1px dashed var(--line2);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   font-size: 12px;
   color: var(--dim);
   transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
@@ -484,7 +484,7 @@ p.nc-hint[data-invalid] {
   height: 32px;
   padding: 0 10px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   color: var(--text);
   font: 500 12px var(--sans);
@@ -571,7 +571,7 @@ p.nc-hint[data-invalid] {
   flex: 1;
   min-width: 0;
   padding: 7px 10px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--hover);
   color: var(--text);
   font: 12px var(--mono);

@@ -12,6 +12,7 @@ import {
   browseTableSql,
   cancelCount,
   chooseFile,
+  abandonRun,
   cancelQuery,
   countRows,
   stopAllQueries,
@@ -91,7 +92,8 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
-import { settlePending, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
+import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
+import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { forgetTabTitles, noteTabTitles } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
@@ -237,6 +239,8 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 
 /** How long a confirmation such as "Copied 100 rows" stays in the results header. */
 const NOTICE_MS = 2400;
+/** Force stop: how long core's stop has to report back before the tab lets the run go. */
+const FORCE_STOP_GRACE_MS = 2000;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -1248,7 +1252,10 @@ export function Workspace({
     try {
       out = await applyChanges(windowId, buffer.connectionId, tab.id, table, bufferChanges(buffer), confirmed);
     } catch (e) {
-      return setTray(tab.id, { kind: "failed", message: String(e) });
+      if (!isLostAnswer(e)) return setTray(tab.id, { kind: "failed", message: String(e) });
+      // No answer: the COMMIT may have gone through.
+      const lost = commitLost(String(e));
+      return setTray(tab.id, { kind: "failed", message: lost.message, title: lost.title, unknown: true });
     }
     if (out.status === "held") {
       if (out.hold.action === "refuse") return setTray(tab.id, { kind: "refused", reason: "Read-only connection · Change safe mode…" }, 4000);
@@ -1257,7 +1264,7 @@ export function Workspace({
       setHeldEdits((prev) => ({ ...prev, [tab.id]: { sql: out.sql, hold: out.hold, summary: editSummary(buffer, where) } }));
       return;
     }
-    if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message });
+    if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message, unknown: out.unknown });
     // Only what was sent is done: an edit staged while it ran stays staged,
     // and neither the tab's buffer nor a parked copy of it sends it twice.
     setTabEdits(tab.id, (cur) => withoutCommittedTab({ edits: cur }, buffer).edits);
@@ -1546,10 +1553,10 @@ export function Workspace({
       setCsvImport((c) => (c && c.tableKey === cur.tableKey ? { ...c, ...patch(c) } : c));
     const onImportTab = () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.kind === "import";
     /** A failure keeps the panel with the message; off its tab, a toast says so too. */
-    const failed = (message: string) => {
+    const failed = (message: string, toast = "Import failed · nothing was written", detail = message) => {
       if (closeWhenDoneRef.current) setCsvImport(null);
       else onRun(() => ({ run: null, error: message }));
-      if (!onImportTab() || closeWhenDoneRef.current) showToast("Import failed · nothing was written", message, "error");
+      if (!onImportTab() || closeWhenDoneRef.current) showToast(toast, detail, "error");
     };
     let out;
     try {
@@ -1557,7 +1564,10 @@ export function Workspace({
         onRun(() => ({ run: { rows, startedAt } })),
       );
     } catch (e) {
-      return failed(String(e));
+      if (!isLostAnswer(e)) return failed(String(e));
+      // No answer: it may or may not have committed.
+      const lost = importLost(cur.table, String(e));
+      return failed(lost.message, lost.toast, lost.detail);
     }
     if (out.status === "failed") return failed(out.message);
     if (out.status === "cancelled") {
@@ -2157,16 +2167,19 @@ export function Workspace({
 
   // Cancel asks the server; pressed again (Force stop, or Esc twice) core
   // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel.
+  // a dead connection never answers a cancel. A run whose end never reaches
+  // the tab even then is let go, so the tab is never stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
+    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
     patchRun(tabId, { cancelling: true });
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
       flash(String(e));
     }
+    if (giveUp) setTimeout(() => giveUp("Stopped waiting for this query; it may still have run"), FORCE_STOP_GRACE_MS);
   };
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
@@ -2361,7 +2374,7 @@ export function Workspace({
     } catch (e) {
       outcome = "error";
       end = "error";
-      patchRun(tabId, { error: String(e) });
+      patchRun(tabId, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       patchRun(tabId, {
         startedAt: null,
@@ -2666,7 +2679,7 @@ export function Workspace({
       ran = current();
       if (ran && !append) shownKey.current[tab.id] = key;
     } catch (e) {
-      patchRun(tab.id, { error: String(e) });
+      patchRun(tab.id, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       loading.current.delete(tab.id);
       const next = queued.current.get(tab.id);
@@ -4531,7 +4544,10 @@ export function Workspace({
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
           ) : isImportTab ? (
-            <RenderErrorBoundary fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}>
+            <RenderErrorBoundary
+              resetKeys={[importResult]}
+              fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
+            >
               <ResultsGrid
                 result={importResult}
                 importRows={importPreview}
@@ -4742,6 +4758,7 @@ export function Workspace({
                 />
               ) : (
                 <RenderErrorBoundary
+                  resetKeys={[activeTabId, shownResult]}
                   fallback={(err) => (
                     <div className="results-error">
                       {err.message || String(err)}
@@ -4833,6 +4850,10 @@ export function Workspace({
           data-review-sql={inspectorKind === "review" ? "" : undefined}
           data-deleted={inspectorKind === "quicklook" && qlView?.edit?.mark === "delete" ? "" : undefined}
         >
+          <RenderErrorBoundary
+            resetKeys={[inspectorKind, activeTabId, qlView]}
+            fallback={(err) => <div className="results-error">{err.message || String(err)}</div>}
+          >
           {inspectorKind === "sqlfile" && sqlFile ? (
             <SqlFilePanel
               key={sqlFile.path}
@@ -4905,6 +4926,7 @@ export function Workspace({
               onToggleDelete={isTableTab ? qlView.toggleDelete : undefined}
             />
           ) : null}
+          </RenderErrorBoundary>
         </Inspector>
       </Presence>
       {active && (
@@ -4947,14 +4969,23 @@ export function Workspace({
         />
       )}
       {active && (
-        <CommandPalette
-          open={paletteOpen}
-          onClose={closePalette}
-          groups={paletteGroups}
-          emptyGroups={PALETTE_EMPTY_GROUPS}
-          connectionName={connected ? (activeConnection?.name ?? null) : null}
-          onPick={onPalettePick}
-        />
+        <RenderErrorBoundary
+          resetKeys={[paletteOpen]}
+          fallback={() => null}
+          onError={(err) => {
+            closePalette();
+            showErrorToastIfFree("Couldn't show the command palette", err.message || String(err));
+          }}
+        >
+          <CommandPalette
+            open={paletteOpen}
+            onClose={closePalette}
+            groups={paletteGroups}
+            emptyGroups={PALETTE_EMPTY_GROUPS}
+            connectionName={connected ? (activeConnection?.name ?? null) : null}
+            onPick={onPalettePick}
+          />
+        </RenderErrorBoundary>
       )}
       <Presence open={timingsOpen && active}>
         {timingsOpen && active && (

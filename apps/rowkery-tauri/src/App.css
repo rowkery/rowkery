@@ -16,7 +16,8 @@
   font-size: 13px;
   line-height: 1.4;
 
-  /* Surfaces: the sheet, the panels on it, the bars. */
+  /* Surfaces: the canvas, the sheets on it, the panels and bars on them. */
+  --canvas: #f1f1f0;
   --bg: #ffffff;
   --panel: #f7f7f7;
   --bar: #f3f3f3;
@@ -56,6 +57,9 @@
   --num: #c2611a;
   --cm: #8c8c8c;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  /* A sheet resting on the canvas: a faint ring and a soft drop, depth and
+     not a border. */
+  --sheet-ring: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px -6px rgba(0, 0, 0, 0.06);
   --pop: 0 12px 32px -8px rgba(0, 0, 0, 0.2), 0 0 0 1px var(--line);
   /* Shadows elsewhere mix this at their own strength (lighter on paper). */
   --shade: rgba(0, 0, 0, 0.45);
@@ -114,7 +118,16 @@
      dragged by its right edge; App sets --panel-width). */
   --titlebar-h: 48px;
   --panel-width: 264px;
-  --radius: 8px;
+  /* The sheets sit this far from the window's edges and from each other. */
+  --inset: 8px;
+  /* Radii, from the keycap up to the sheet (DESIGN.md, Shapes). Something
+     nested snugly in a rounded thing takes its radius minus the padding. */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 14px;
+  --r-pill: 999px;
   --editor-line-height: 21px;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
@@ -122,6 +135,7 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --canvas: #121212;
   --bg: #1a1a1a;
   --panel: #212121;
   --bar: #1e1e1e;
@@ -155,6 +169,7 @@
   --num: #f2a06a;
   --cm: #7c8188;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --sheet-ring: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 16px -6px rgba(0, 0, 0, 0.6);
   --pop: 0 12px 32px -8px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line2);
   --shade: rgba(0, 0, 0, 1);
   --scrim: rgba(0, 0, 0, 0.4);
@@ -233,21 +248,26 @@ body,
      something past its edge (a page rising in from 8 px below lifted the
      title bar with it). */
   overflow: clip;
-  background: var(--bg);
-  border-radius: 12px;
+  background: var(--canvas);
+  border-radius: var(--r-lg);
   transition: background-color 0.3s ease;
 }
 
 /* ---------- Flow layout: title bar, schema panel, main column ---------- */
 
-/* Under the title bar, two columns on one sheet: the schema column, a panel
-   with a 1 px rule on its right, then the editor and results on the paper
-   itself. */
+/* The title bar and the schema column sit on the canvas; the editor and
+   results are a rounded sheet beside them (2026-10-24), inset from the
+   window's right and bottom, and from its left once the column is hidden.
+   An open inspector is a second sheet, a canvas gap away. */
 /* Defined here, not on :root: a custom property resolves where it is
    declared, and App sets --panel-width on the frame. */
 .app-frame {
   --sidebar-width: var(--panel-width);
   --main-left: var(--sidebar-width);
+  /* The main sheet's edges. The gap before the inspector only counts while
+     one is open (--inspector-right is 0 otherwise). */
+  --sheet-left: max(var(--main-left), var(--inset));
+  --sheet-right: calc(var(--inspector-right) + var(--inset) + min(var(--inspector-right), var(--inset)));
 }
 
 .app-frame.sidebar-hidden {

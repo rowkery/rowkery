@@ -7,8 +7,9 @@
 //    (checked before the first paint after the key, with no new call).
 // 2. Quick Look is the inspector column at the window's right
 //    (2026-10-10, replacing the floating card):
-//    340 px, the panel's opaque ground, no backdrop blur, and the grid ends
-//    where it begins (nothing covered).
+//    340 px, an opaque paper sheet 8 px from the window's edge (2026-10-24),
+//    no backdrop blur, and the grid ends at the 8 px canvas gap before it
+//    (nothing covered).
 // 3. Incoming lists the tables referencing the row with bounded counts
 //    (dash first, then `2`, `0` dim with no arrow, `100+`), counted on demand
 //    (one count_incoming call when the card opens, none on selection).
@@ -169,22 +170,22 @@ check(atOpen.calls === 0, "and asks follow_keys nothing more");
 check(atOpen.counts.length === 3 && atOpen.counts.every((c) => c === ""), "Incoming counts start as a dash");
 check((await page.getAttribute(`${card} [data-focused]`, "data-key-line")) === "kiosk_id", "focus starts on the selected cell's key");
 
-// 2 · The inspector column (2026-10-10): docked right, opaque, the grid beside it.
+// 2 · The inspector column (2026-10-10): a paper sheet at the right, opaque, the grid beside it.
 await page.waitForTimeout(300);
 const look = await page.$eval(card, (e) => {
   const s = getComputedStyle(e);
   const r = e.getBoundingClientRect();
   const g = e.closest('[data-testid="workspace"]').querySelector('[data-testid="results-grid-wrap"]').getBoundingClientRect();
   const probe = document.createElement("i");
-  probe.style.color = "var(--panel)";
+  probe.style.color = "var(--bg)";
   document.body.append(probe);
   const panel = getComputedStyle(probe).color;
   probe.remove();
   return { width: r.width, right: window.innerWidth - r.right, bg: s.backgroundColor, panel, blur: s.backdropFilter, gridRight: g.right, left: r.left };
 });
-check(look.width === 340 && Math.round(look.right) === 0, `docked at the right, 340 px (${look.width}, ${look.right})`);
-check(look.bg === look.panel && (look.blur === "none" || look.blur === ""), `the panel's opaque ground, no glass (${look.bg}, ${look.blur})`);
-check(Math.abs(look.gridRight - look.left) <= 1, `the grid ends where it begins (${look.gridRight} / ${look.left})`);
+check(look.width === 340 && Math.round(look.right) === 8, `a 340 px sheet 8 px from the right (${look.width}, ${look.right})`);
+check(look.bg === look.panel && (look.blur === "none" || look.blur === ""), `opaque paper, no glass (${look.bg}, ${look.blur})`);
+check(Math.abs(look.gridRight + 8 - look.left) <= 1, `the grid ends at the 8 px gap before it (${look.gridRight} / ${look.left})`);
 
 // 3 · Incoming: a dash, then bounded counts.
 await page.waitForSelector(`${card} [data-incoming-row="refunds"][data-count="0"]`);

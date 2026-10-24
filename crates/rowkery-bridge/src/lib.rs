@@ -19,7 +19,7 @@ use rowkery_core::db::postgres::{
     session_probe_after_cancel, session_probe_txn, session_query_cursor, session_query_stream_with,
     session_server_version, session_table_indexes, session_take_cancel_aborted,
     session_take_warnings, session_test, CancelVia, DatabaseInfo, PostgresSession, StreamOptions,
-    StreamStats, TxnState,
+    StreamStats, TxnState, CONNECT_TIMEOUT,
 };
 use rowkery_core::db::sqlite::{sqlite_version, SqliteDriver, TableCount, SQLITE_LOCKED};
 use rowkery_core::db::{
@@ -34,7 +34,7 @@ use rowkery_core::import::{ImportCounts, ImportError, ImportSpec};
 use rowkery_core::plan::{self, Plan, PlanFacts};
 use rowkery_core::query_util::apply_browse_limit;
 use rowkery_core::safety::{
-    check_sql, hold_for, pages_by_cursor, SafeMode, SafetyHold, StatementKind,
+    check_sql, hold_for, pages_by_cursor, plain_read, Dialect, SafeMode, SafetyHold, StatementKind,
 };
 use rowkery_core::sample;
 use rowkery_core::secrets::{
@@ -48,9 +48,12 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
 use tokio_postgres::CancelToken;
 
+mod busy;
 mod pool;
 mod prefetch;
 mod sessions;
+use busy::{Busy, HoldUntilFinished, Work};
+pub use busy::{BusyWork, Held};
 use pool::{Lease, SharedPool, Slot};
 pub use prefetch::{
     APPLICATION_NAME as PREFETCH_APPLICATION_NAME, MAX_ENTRIES as PREFETCH_MAX_ENTRIES,
@@ -205,9 +208,9 @@ enum Command {
     },
     /// ⌘K "Stop all queries": every run in every window, at once.
     StopAllQueries,
-    /// Whether any tab's session may hold the user's open transaction.
-    HoldsTransaction {
-        respond_to: oneshot::Sender<bool>,
+    /// How many tabs' sessions may hold the user's open transaction.
+    CountTransactions {
+        respond_to: oneshot::Sender<Option<usize>>,
     },
     /// Each window's query tabs that may hold the user's open transaction.
     OpenTransactions {
@@ -296,7 +299,7 @@ pub struct FollowRow {
 /// `SELECT * … WHERE column = literal LIMIT 1`, or `None` when the value
 /// can't be matched (NULL, bytes).
 fn follow_sql(engine: EngineKind, lookup: &FollowLookup) -> Option<String> {
-    let literal = rowkery_core::query_util::sql_literal(&lookup.value)?;
+    let literal = rowkery_core::query_util::sql_literal(engine, &lookup.value)?;
     let opts = BrowseOptions {
         filter: Some(format!(
             "{} = {literal}",
@@ -327,7 +330,7 @@ const QUICK_LOOK_LIMIT: Duration = Duration::from_secs(5);
 /// how many rows reference a value, bounded so a hot key costs no more than
 /// a cold one.
 fn incoming_sql(engine: EngineKind, lookup: &FollowLookup) -> Option<String> {
-    let literal = rowkery_core::query_util::sql_literal(&lookup.value)?;
+    let literal = rowkery_core::query_util::sql_literal(engine, &lookup.value)?;
     Some(format!(
         "SELECT count(*) AS n FROM (SELECT 1 FROM {} WHERE {} = {literal} LIMIT {}) s",
         qualified_table_sql(engine, &lookup.schema, &lookup.table),
@@ -350,6 +353,11 @@ fn first_row(batches: Vec<RowBatch>) -> Option<FollowRow> {
     let row = batches.into_iter().flat_map(|b| b.rows).next()?;
     Some(FollowRow { columns, row })
 }
+
+/// The error of a call whose answer never came: core stopped (or the work
+/// died) after it may have begun, so its outcome is unknown. Every other
+/// error of a run, import or commit is a refusal: nothing ran.
+pub const LOST_ANSWER: &str = "Rowkery's core stopped before it answered";
 
 /// How a commit of staged edits ended.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -633,6 +641,8 @@ struct CoreState {
     /// SQLite query tabs' own connections and paged reads.
     sqlite_tabs: SharedSqliteTabs,
     runtime: Handle,
+    /// Writes, commits, imports and SQL file runs in flight.
+    busy: Arc<Busy>,
 }
 
 /// Cancel state for one running query. `requested` keeps a cancel that lands
@@ -706,6 +716,17 @@ fn disarm_cancel(slot: &CancelSlot) -> bool {
     }
 }
 
+/// Disarms a slot when dropped, panic or not. Declared after the tab's lock,
+/// so the cancel's repeated interrupts stop before the next run can take
+/// the connection.
+struct Disarm<'a>(&'a CancelSlot);
+
+impl Drop for Disarm<'_> {
+    fn drop(&mut self) {
+        disarm_cancel(self.0);
+    }
+}
+
 fn push_event<S: EventSink + ?Sized>(events: &Arc<S>, event: CoreEvent) {
     events.push(event);
 }
@@ -760,8 +781,19 @@ pub fn probe_connection_blocking(
                         runtime.block_on(async {
                             let mut session =
                                 open_session_with_secrets(probe_id, pg, Some(&secrets)).await?;
-                            session_test(&mut session).await?;
-                            Ok(session_server_version(&session).await.ok())
+                            // The open is bounded; so is what runs after it,
+                            // so a probe always ends.
+                            let checked = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                                session_test(&mut session).await?;
+                                Ok(session_server_version(&session).await.ok())
+                            })
+                            .await;
+                            checked.unwrap_or_else(|_| {
+                                Err(DriverError::Message(format!(
+                                    "Connection timed out: the server did not answer SELECT 1 in {} s",
+                                    CONNECT_TIMEOUT.as_secs()
+                                )))
+                            })
                         })
                     });
                     match test_result {
@@ -837,15 +869,6 @@ impl SqliteTabs {
             *entry = (path.to_string(), TabConn::default());
         }
         entry.1.clone()
-    }
-
-    /// Whether a tab's idle connection holds an open transaction (one out
-    /// running something isn't asked; the page knows those).
-    fn holds_user_transaction(&self) -> bool {
-        self.conns.values().any(|(_, conn)| {
-            conn.try_lock()
-                .is_ok_and(|d| d.as_ref().is_some_and(SqliteDriver::in_transaction))
-        })
     }
 
     /// The window's tabs whose connection may hold an open transaction,
@@ -1100,6 +1123,7 @@ fn run_sqlite_query_worker(
         let Some(mut held) = lock_tab(&tab.conn, || cancel_requested(&interrupt_slot)) else {
             return Ok(QueryOutcome::cancelled(0));
         };
+        let _disarm = Disarm(&interrupt_slot);
         let driver = ready_tab(&mut held, &db_path, read_only).map_err(|e| e.to_string())?;
         // A cancel or an error inside a write can end the tab's transaction.
         let in_transaction = driver.in_transaction();
@@ -1188,7 +1212,6 @@ fn run_sqlite_query_worker(
     })();
 
     finish_query_worker(result, query_id, tab_id, start, &events);
-    disarm_cancel(&interrupt_slot);
 }
 
 /// Where a window query's session comes from and goes back to.
@@ -1198,9 +1221,9 @@ struct PoolSlot {
     generation: u64,
 }
 
-/// The most rows one run sends a tab. Past it the rest are read and left
-/// out (never cancelled: a write's RETURNING still finishes, and the user's
-/// transaction is untouched), and the run says `capped`. Paged loading stops
+/// The most rows one run sends a tab. Past it the rest are read off the wire
+/// and left out, never decoded (never cancelled: a write's RETURNING still
+/// finishes, and the user's transaction is untouched), and the run says `capped`. Paged loading stops
 /// there too: the webview asks for no more than what is left of it.
 pub const MAX_TAB_ROWS: u64 = 1_000_000;
 
@@ -1227,6 +1250,17 @@ impl<'a> Forward<'a> {
             had_result_set: false,
             cap,
             capped: false,
+        }
+    }
+
+    /// How to stream for this forward: past what is left of the cap (and one
+    /// more, which says `capped`) rows aren't decoded.
+    fn opts(&self) -> StreamOptions {
+        StreamOptions {
+            keep: self
+                .cap
+                .map(|cap| cap.saturating_sub(self.row_count).saturating_add(1)),
+            ..StreamOptions::default()
         }
     }
 
@@ -1362,8 +1396,8 @@ enum PgWork {
     /// A read run whole on the session as it is: an open page cursor and its
     /// transaction stay (an export of the tab's result).
     Within { sql: String },
-    /// `EXPLAIN …` of a statement. A timed plan of a write runs inside a
-    /// transaction (or a savepoint in the user's) that is always rolled back;
+    /// `EXPLAIN …` of a statement. A timed plan runs inside a transaction
+    /// (or a savepoint in the user's) that is always rolled back;
     /// then the facts the hints need are read into `side`.
     Explain {
         sql: String,
@@ -1387,7 +1421,6 @@ async fn stream_on_session(
         PgWork::Within { .. } | PgWork::Explain { .. } => None,
     };
     let mut fwd = Forward::new(events, query_id, tab_id, cap);
-    let opts = StreamOptions::default;
     // Only this run's warnings reach its result.
     session_take_warnings(session);
     let cancel_aborted = session_take_cancel_aborted(session);
@@ -1404,8 +1437,8 @@ async fn stream_on_session(
         PgWork::Query {
             sql,
             page: Some(rows),
-        } if pages_by_cursor(sql) => {
-            let first = session_query_cursor(session, sql, *rows, opts(), |b, first| {
+        } if pages_by_cursor(sql, Dialect::Postgres) => {
+            let first = session_query_cursor(session, sql, *rows, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1417,7 +1450,7 @@ async fn stream_on_session(
                 // transaction, or Postgres won't take it as one): run it as
                 // written; past MAX_TAB_ROWS its rows are left out.
                 Ok(None) => {
-                    let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+                    let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                         fwd.batch(b, first);
                         Ok(())
                     })
@@ -1428,7 +1461,7 @@ async fn stream_on_session(
         }
         PgWork::Query { sql, .. } => {
             session_close_cursor(session).await;
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1437,7 +1470,7 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
         PgWork::Within { sql } => {
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1445,7 +1478,7 @@ async fn stream_on_session(
             fwd.outcome(stats)
         }
         PgWork::More { rows } => {
-            let more = session_fetch_more(session, *rows, opts(), |b, first| {
+            let more = session_fetch_more(session, *rows, fwd.opts(), |b, first| {
                 fwd.batch(b, first);
                 Ok(())
             })
@@ -1481,7 +1514,7 @@ async fn stream_on_session(
                 }
             }
             let mut text = String::new();
-            let stats = session_query_stream_with(session, sql, opts(), |b, first| {
+            let stats = session_query_stream_with(session, sql, fwd.opts(), |b, first| {
                 if let Some(Value::Text(t)) = b.rows.first().and_then(|r| r.first()) {
                     text.push_str(t);
                 }
@@ -1530,18 +1563,8 @@ const CANCEL_ABORTED: &str = " (The last Cancel reached the server after your st
 
 /// Every statement only reads: it can't open or end a transaction.
 fn reads_only(sql: &str) -> bool {
-    let checks = check_sql(sql);
+    let checks = check_sql(sql, Dialect::Postgres);
     !checks.is_empty() && checks.iter().all(|c| c.kind == StatementKind::Read)
-}
-
-/// Safe to send again after the connection dropped under it: it can't have
-/// changed anything.
-fn is_read_only(sql: &str) -> bool {
-    let lower = sql.trim_start().to_ascii_lowercase();
-    ["select", "show", "explain", "table", "values"]
-        .iter()
-        .any(|kw| lower.starts_with(kw))
-        && !lower.contains("explain analyze")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1662,7 +1685,7 @@ fn run_postgres_query_on_runtime(
                 && !sent_rows
                 && session.is_closed()
                 && session.txn_state() == TxnState::None
-                && matches!(&work, PgWork::Query { sql, .. } if is_read_only(sql))
+                && matches!(&work, PgWork::Query { sql, .. } if plain_read(sql, Dialect::Postgres))
             {
                 disarm_cancel(&interrupt_slot);
                 if cancel_requested(&interrupt_slot) {
@@ -1847,6 +1870,61 @@ impl EventSink for InvalidateOnFinish {
     }
 }
 
+/// A run's events, passed on; if the run's worker goes away without saying
+/// how it ended (a panic, an early return), dropping the last handle sends a
+/// failed finish, so the caller (the webview's channel, ⌘E's wait) never
+/// waits on a run that is gone.
+struct FinishGuard {
+    inner: SharedSink,
+    query_id: u64,
+    tab_id: u64,
+    start: Instant,
+    finished: AtomicBool,
+}
+
+const RUN_LOST_MESSAGE: &str =
+    "The query stopped without reporting how it ended (please report this bug)";
+
+fn finish_guard(inner: SharedSink, query_id: u64, tab_id: u64) -> SharedSink {
+    Arc::new(FinishGuard {
+        inner,
+        query_id,
+        tab_id,
+        start: Instant::now(),
+        finished: AtomicBool::new(false),
+    })
+}
+
+impl EventSink for FinishGuard {
+    fn push(&self, event: CoreEvent) {
+        if matches!(
+            event,
+            CoreEvent::QueryFinished { .. } | CoreEvent::QueryHeld { .. }
+        ) {
+            self.finished.store(true, Ordering::SeqCst);
+        }
+        self.inner.push(event);
+    }
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        self.inner.push(CoreEvent::QueryFinished {
+            query_id: self.query_id,
+            tab_id: self.tab_id,
+            row_count: 0,
+            rows_affected: None,
+            elapsed_ms: self.start.elapsed().as_millis() as u64,
+            error: Some(RUN_LOST_MESSAGE.into()),
+            cancelled: false,
+            detail: QueryDetail::default(),
+        });
+    }
+}
+
 /// Builds the statements, asks safe mode, then runs them as one transaction
 /// on the tab's own connection (SQLite) or session (Postgres), refused while
 /// the user's transaction is open there.
@@ -1904,7 +1982,7 @@ fn apply_changes_now(
         ));
         return;
     }
-    if let Some(hold) = hold_for(safe_mode, &sql, confirmed.is_some()) {
+    if let Some(hold) = hold_for(safe_mode, &sql, confirmed.is_some(), engine.into()) {
         let _ = respond_to.send(Ok(ApplyOutcome::Held { hold, sql }));
         return;
     }
@@ -1921,12 +1999,15 @@ fn apply_changes_now(
             },
         }
     };
+    // Counts as running (a quit asks first) until it answers.
+    let held = state.busy.hold(Work::Commit);
     match target {
         WindowTarget::Sqlite {
             path, safe_mode, ..
         } => {
             let tab = SqliteTab::new(&state.sqlite_tabs, &(window_id, tab_id), &path);
             thread::spawn(move || {
+                let _held = held;
                 let result = with_catch(|| {
                     // Waits (boundedly) for a run on the tab to end.
                     let until = Instant::now() + APPLY_STEP_TIMEOUT;
@@ -1952,6 +2033,7 @@ fn apply_changes_now(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 // The tab's own session, waiting (boundedly) for a run on it
                 // to end, or for a free connection.
                 let no_room = std::sync::atomic::AtomicBool::new(false);
@@ -2035,9 +2117,11 @@ fn import_csv_now(
         return;
     }
     invalidate_prefetch(&state.pool, &window_id, &state.runtime);
+    let held = state.busy.hold(Work::Import);
     match target {
         WindowTarget::Sqlite { path, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let result = with_catch(|| {
                     rowkery_core::import::import_sqlite_file(&path, &spec, &cancel, &*progress.0)
                 });
@@ -2052,6 +2136,7 @@ fn import_csv_now(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 let Lease { session, .. } = match pool::lease(
                     &pool,
                     &window_id,
@@ -2488,7 +2573,26 @@ fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
         guard.requested = true;
         let stop = guard.stop.clone();
         match guard.handle.take() {
-            Some(CancelHandle::Sqlite(handle)) => handle.interrupt(),
+            Some(CancelHandle::Sqlite(handle)) => {
+                handle.interrupt();
+                // An interrupt that lands before the statement starts is
+                // lost, so ask again until the worker disarms (or is gone).
+                guard.handle = Some(CancelHandle::Sqlite(handle));
+                let slot = Arc::downgrade(slot);
+                runtime.spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let Some(slot) = slot.upgrade() else { break };
+                        match slot.lock().as_deref() {
+                            Ok(CancelState {
+                                handle: Some(CancelHandle::Sqlite(handle)),
+                                ..
+                            }) => handle.interrupt(),
+                            _ => break,
+                        };
+                    }
+                });
+            }
             Some(CancelHandle::Postgres { token, tls }) => {
                 let sent = guard.sent.clone();
                 runtime.spawn(async move {
@@ -2571,9 +2675,11 @@ fn run_sql_file(
         confirmed: _,
         on_progress,
     } = run;
+    let held = state.busy.hold(Work::SqlFile);
     match target {
         WindowTarget::Sqlite { path: db, .. } => {
             thread::spawn(move || {
+                let _held = held;
                 let report = with_catch(|| {
                     let conn = open_sqlite(&db)?;
                     if !arm_cancel(&slot, CancelHandle::Sqlite(conn.get_interrupt_handle())) {
@@ -2582,6 +2688,7 @@ fn run_sql_file(
                             ..RunReport::default()
                         });
                     }
+                    let _disarm = Disarm(&slot);
                     let report = run_sqlite(
                         &conn,
                         &path,
@@ -2590,7 +2697,6 @@ fn run_sql_file(
                         || cancel_requested(&slot),
                         |p| (on_progress.0)(p),
                     );
-                    disarm_cancel(&slot);
                     Ok(report)
                 })
                 .and_then(|r| r);
@@ -2605,6 +2711,7 @@ fn run_sql_file(
             let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
             let runtime = state.runtime.clone();
             state.runtime.spawn(async move {
+                let _held = held;
                 let stop = slot.lock().map(|s| s.stop.clone()).ok();
                 let committing = Arc::new(AtomicBool::new(false));
                 let sent = committing.clone();
@@ -2745,6 +2852,8 @@ pub struct CoreBridge {
     save_gate: SaveGate,
     catalog_listener: ListenerSlot,
     launch_warm: LaunchWarmSlot,
+    /// Shared with the core thread's state, read without a round trip.
+    busy: Arc<Busy>,
 }
 
 /// The config as it is now, numbered, for the caller to write.
@@ -3104,14 +3213,14 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 WindowTarget::Postgres { .. } => EngineKind::Postgres,
             };
             // ⌘E: the statement's plan instead. Only a timed plan runs it, so
-            // only a timed plan of a write goes through safe mode, and it is
-            // rolled back.
+            // only a timed plan goes through safe mode, and it is always
+            // rolled back: a read can call a function that writes.
             let mut plan_rollback = false;
             let mut user_sql = sql.clone();
             let sql = match &explain {
                 None => sql,
                 Some(run) => {
-                    let checks = check_sql(&sql);
+                    let checks = check_sql(&sql, engine.into());
                     if checks.len() != 1 {
                         let _ = respond_to
                             .send(Err("Explain works on one statement at a time.".into()));
@@ -3120,9 +3229,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     if let Ok(mut side) = run.side.lock() {
                         side.engine = Some(engine);
                     }
-                    plan_rollback = run.timed
-                        && engine == EngineKind::Postgres
-                        && checks[0].kind != StatementKind::Read;
+                    plan_rollback = run.timed && engine == EngineKind::Postgres;
                     match plan::explain_sql(engine, &sql, run.timed) {
                         Ok(explain_sql) => explain_sql,
                         Err(e) => {
@@ -3141,7 +3248,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 user_sql = sql.clone();
             }
             let reads_only = || {
-                let checks = check_sql(&sql);
+                let checks = check_sql(&sql, engine.into());
                 !checks.is_empty() && checks.iter().all(|c| c.kind == StatementKind::Read)
             };
             if export && !reads_only() && explain.is_none() {
@@ -3154,7 +3261,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             };
             // Safe mode: nothing reaches the database until the user confirms
             // (or ever, on a read-only connection).
-            if let Some(hold) = hold_for(safe_mode, &user_sql, confirmed) {
+            if let Some(hold) = hold_for(safe_mode, &user_sql, confirmed, engine.into()) {
                 push_event(
                     &sink,
                     CoreEvent::QueryHeld {
@@ -3193,6 +3300,16 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 }),
                 _ => sink,
             };
+            // A write counts as running (a quit asks first) until it ends.
+            let events: SharedSink = if writes {
+                Arc::new(HoldUntilFinished {
+                    inner: events,
+                    held: Mutex::new(Some(state.busy.hold(Work::Write))),
+                })
+            } else {
+                events
+            };
+            let events = finish_guard(events, query_id, tab_id);
             // A new run ends the tab's SQLite page (an export leaves it).
             let tab_key = (window_id.clone(), tab_id);
             if !export {
@@ -3213,7 +3330,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     if !export
                         && explain.is_none()
                         && apply_limit.is_none()
-                        && pages_by_cursor(&sql)
+                        && pages_by_cursor(&sql, Dialect::Sqlite)
                         && reads_only() =>
                 {
                     Some(SqlitePageRun {
@@ -3418,6 +3535,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 let tab = SqliteTab::new(&state.sqlite_tabs, &key, &path);
                 let slot: CancelSlot = Arc::default();
                 state.window_interrupts.insert(key.clone(), slot.clone());
+                let sink = finish_guard(sink, query_id, tab_id);
                 push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
                 let Some(cursor) = cursor else {
                     finish_query_worker(
@@ -3468,6 +3586,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             state
                 .window_interrupts
                 .insert((window_id.clone(), tab_id), slot.clone());
+            let sink = finish_guard(sink, query_id, tab_id);
             push_event(&sink, CoreEvent::QueryStarted { query_id, tab_id });
             run_postgres_query_on_runtime(
                 state.runtime.clone(),
@@ -3555,17 +3674,17 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             open.sort();
             let _ = respond_to.send(open);
         }
-        Command::HoldsTransaction { respond_to } => {
-            let held = state
-                .pool
-                .lock()
-                .map(|p| p.holds_user_transaction())
-                .unwrap_or(true)
-                || state
-                    .sqlite_tabs
-                    .lock()
-                    .map(|t| t.holds_user_transaction())
-                    .unwrap_or(true);
+        Command::CountTransactions { respond_to } => {
+            // The tabs re-pointing would roll back, a run inside one
+            // included; unknown when a lock is poisoned.
+            let sound = state.pool.lock().is_ok() && state.sqlite_tabs.lock().is_ok();
+            let held = sound.then(|| {
+                state
+                    .windows
+                    .keys()
+                    .map(|w| window_transactions(state, w).len())
+                    .sum()
+            });
             let _ = respond_to.send(held);
         }
         Command::Prefetch {
@@ -3584,10 +3703,10 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             // A browse only reads, but safe mode has the last word; and only
             // one statement that reads is ever kept open as a cursor.
             let one_read = {
-                let checks = check_sql(&sql);
+                let checks = check_sql(&sql, Dialect::Postgres);
                 checks.len() == 1 && checks[0].kind == StatementKind::Read
             };
-            if hold_for(config.safe_mode, &sql, false).is_some() || !one_read {
+            if hold_for(config.safe_mode, &sql, false, Dialect::Postgres).is_some() || !one_read {
                 let _ = respond_to.send(Ok(false));
                 return;
             }
@@ -3872,6 +3991,8 @@ impl CoreBridge {
         let thread_launch_warm = launch_warm.clone();
         let writer = ConfigWriter::spawn(initial.clone());
         let ui = Arc::new(Mutex::new(initial.ui.clone()));
+        let busy = Arc::new(Busy::default());
+        let thread_busy = busy.clone();
         thread::Builder::new()
             .name("rowkery-core".into())
             .spawn(move || {
@@ -3903,6 +4024,7 @@ impl CoreBridge {
                     pool: pool.clone(),
                     sqlite_tabs: SharedSqliteTabs::default(),
                     runtime: runtime_handle,
+                    busy: thread_busy,
                 };
                 // Commands may spawn onto the runtime from this thread
                 // (a closing window's prefetcher cancels its query).
@@ -3925,6 +4047,7 @@ impl CoreBridge {
             save_gate,
             catalog_listener,
             launch_warm,
+            busy,
         }
     }
 
@@ -4302,7 +4425,7 @@ impl CoreBridge {
             confirmed,
             respond_to,
         })
-        .ok_or_else(|| "core thread stopped".to_string())?
+        .ok_or_else(|| LOST_ANSWER.to_string())?
     }
 
     /// Imports a CSV file into a table (see `rowkery_core::import`): one
@@ -4323,7 +4446,7 @@ impl CoreBridge {
             progress,
             respond_to,
         })
-        .ok_or_else(|| "core thread stopped".to_string())?
+        .ok_or_else(|| LOST_ANSWER.to_string())?
     }
 
     /// Cancels the tab's query, if any, and closes its warm session.
@@ -4385,7 +4508,7 @@ impl CoreBridge {
             on_progress,
             respond_to,
         })
-        .unwrap_or_else(|| Err("Rowkery's core stopped".into()))
+        .unwrap_or_else(|| Err(LOST_ANSWER.into()))
     }
 
     pub fn cancel_window_query(&self, window_id: &str, tab_id: u64) {
@@ -4428,7 +4551,7 @@ impl CoreBridge {
             }
         }
         // One statement that only reads; anything else is never counted.
-        let checks = check_sql(&sql);
+        let checks = check_sql(&sql, Dialect::Either);
         if checks.len() != 1 || checks[0].kind != StatementKind::Read {
             return Err("Only a single read can be counted".into());
         }
@@ -4470,12 +4593,20 @@ impl CoreBridge {
         let _ = self.command_tx.send(Command::StopAllQueries);
     }
 
-    /// Whether any tab's Postgres session (or SQLite connection) may hold
-    /// the user's open transaction (a restart would roll it back). True
-    /// when unknown.
-    pub fn holds_transaction(&self) -> bool {
-        self.send_command(|respond_to| Command::HoldsTransaction { respond_to })
-            .unwrap_or(true)
+    /// What quitting now would cut short: tabs' open transactions, and the
+    /// writes, commits, imports and SQL file runs in flight. `unknown` when
+    /// core doesn't answer.
+    pub fn busy_work(&self) -> BusyWork {
+        let transactions = self
+            .send_command(|respond_to| Command::CountTransactions { respond_to })
+            .flatten();
+        self.busy.now(transactions)
+    }
+
+    /// Counts a commit made outside core (an agent's proposal) as running
+    /// until the guard drops, so a quit asks first.
+    pub fn hold_commit(&self) -> Held {
+        self.busy.hold(Work::Commit)
     }
 
     /// Each window's query tabs (window id, tab id) whose session may hold
@@ -4679,6 +4810,7 @@ impl Clone for CoreBridge {
             save_gate: self.save_gate.clone(),
             catalog_listener: self.catalog_listener.clone(),
             launch_warm: self.launch_warm.clone(),
+            busy: self.busy.clone(),
         }
     }
 }

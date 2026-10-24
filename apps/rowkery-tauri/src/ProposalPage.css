@@ -9,12 +9,15 @@
   position: absolute;
   z-index: 3;
   top: var(--titlebar-h);
-  bottom: 0;
-  left: 0;
-  right: 0;
+  bottom: var(--inset);
+  left: var(--inset);
+  right: var(--inset);
   display: flex;
   min-height: 0;
+  overflow: clip;
+  border-radius: var(--r-xl);
   background: var(--bg);
+  box-shadow: var(--sheet-ring);
   outline: none;
   animation: rise 0.28s var(--ease-out);
 }
@@ -317,7 +320,7 @@
 
 .pp-cols code {
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--accbg);
   color: var(--acc2);
   font: 12px/18px var(--mono);
@@ -350,7 +353,7 @@
   height: 28px;
   padding: 0 8px;
   border: 1px solid var(--line2);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   background: var(--bg);
   color: var(--text);
   font: 13px var(--sans);
@@ -383,7 +386,7 @@
   flex-direction: column;
   gap: 2px;
   padding: 8px;
-  --glide-radius: 8px;
+  --glide-radius: var(--r-md);
 }
 
 .pp-card {
@@ -392,7 +395,7 @@
   width: 100%;
   padding: 10px 10px 9px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text);
   font: inherit;

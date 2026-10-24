@@ -14,6 +14,7 @@ import { installKeyTracker, noteMenuCommand } from "./keyTracker";
 import { installCloseScope } from "./closeScope";
 import { initWindowChrome } from "./windowChrome";
 import { initTheme } from "./theme";
+import { installStrayErrorToast } from "./notify";
 // IBM Plex Sans and Mono, the website's faces, self-hosted (no font requests leave the app).
 import "@fontsource/ibm-plex-sans/400.css";
 import "@fontsource/ibm-plex-sans/500.css";
@@ -42,6 +43,8 @@ document.addEventListener("contextmenu", (e) => {
 installKeyTracker();
 // Which area ⌘W closes from: the query tab or the window (closeScope.ts).
 installCloseScope();
+// A promise nobody waited on that fails says so in a toast, once in a while.
+installStrayErrorToast();
 
 // macOS menu bar items come from commands.ts (`src-tauri/menu.json`); a pick
 // arrives as `menu-command` with the command id, and the shown workspace runs

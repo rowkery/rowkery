@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -764,6 +765,9 @@ enum ExportFrame {
 
 type ExportDone<W> = Box<dyn FnOnce(W) -> Result<(), String> + Send>;
 
+/// Cancels the run that feeds a sink (its tab's query).
+type ExportStop = Box<dyn FnOnce() + Send>;
+
 /// Writes a run's batches straight into an `ExportWriter` (a file, or memory
 /// for the clipboard), reporting progress; nothing reaches the webview but
 /// counts.
@@ -778,6 +782,10 @@ struct ExportState<W: std::io::Write + Send> {
     error: Option<String>,
     last_progress: std::time::Instant,
     done: Option<ExportDone<W>>,
+    /// Called once, on the first write that fails (Copy all past its cap,
+    /// a full disk): nothing more can be written, so the run stops instead
+    /// of reading to its end with the count frozen.
+    stop: Option<ExportStop>,
 }
 
 impl<W: std::io::Write + Send> ExportSink<W> {
@@ -786,6 +794,7 @@ impl<W: std::io::Write + Send> ExportSink<W> {
         writer: rowkery_core::export::ExportWriter<W>,
         path: Option<String>,
         done: ExportDone<W>,
+        stop: ExportStop,
     ) -> Self {
         Self {
             channel,
@@ -795,7 +804,17 @@ impl<W: std::io::Write + Send> ExportSink<W> {
                 error: None,
                 last_progress: std::time::Instant::now(),
                 done: Some(done),
+                stop: Some(stop),
             }),
+        }
+    }
+
+    /// A write's failure: a file's names the file; the clipboard's (Copy all
+    /// results, shown under "Couldn't copy") is the cause alone.
+    fn write_error(&self, e: std::io::Error) -> String {
+        match self.path {
+            Some(_) => format!("Couldn't write the file: {e}"),
+            None => e.to_string(),
         }
     }
 
@@ -824,7 +843,10 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
                     .and_then(|_| batch.rows.iter().try_for_each(|r| writer.row(r)));
                 let rows = writer.rows_written();
                 if let Err(e) = written {
-                    st.error = Some(format!("Couldn't write the file: {e}"));
+                    st.error = Some(self.write_error(e));
+                    if let Some(stop) = st.stop.take() {
+                        stop();
+                    }
                 } else if st.last_progress.elapsed() >= Duration::from_millis(100) {
                     st.last_progress = std::time::Instant::now();
                     self.send(&ExportFrame::Progress { rows });
@@ -834,12 +856,15 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
                 error, cancelled, ..
             } => {
                 let rows = st.writer.as_ref().map_or(0, |w| w.rows_written());
+                // A run this sink stopped ends cancelled, but it failed: say
+                // why, not "cancelled".
+                let cancelled = cancelled && st.error.is_none();
                 let mut error = st.error.take().or(error.filter(|_| !cancelled));
                 if let (Some(writer), Some(done)) = (st.writer.take(), st.done.take()) {
                     if error.is_none() && !cancelled {
                         if let Err(e) = writer
                             .finish()
-                            .map_err(|e| format!("Couldn't write the file: {e}"))
+                            .map_err(|e| self.write_error(e))
                             .and_then(done)
                         {
                             error = Some(e);
@@ -856,6 +881,17 @@ impl<W: std::io::Write + Send> EventSink for ExportSink<W> {
             _ => {}
         }
     }
+}
+
+/// An export sink's `stop`: cancels the tab's run (it only queues the
+/// cancel, so a sink may call it while core is pushing to it).
+fn stop_tab_run(app: &AppHandle, window_id: &str, tab_id: u64) -> ExportStop {
+    let app = app.clone();
+    let window_id = window_id.to_string();
+    Box::new(move || {
+        app.state::<CoreBridge>()
+            .cancel_window_query(&window_id, tab_id)
+    })
 }
 
 /// The save dialog's suggested name, without characters a file name can't hold.
@@ -940,12 +976,40 @@ async fn export_results(
         writer,
         Some(path_text),
         Box::new(|_| Ok(())),
+        stop_tab_run(&app, &window_id, tab_id),
     ));
     on_blocking_pool(app, move |bridge| {
         bridge.run_window_export_to(&window_id, tab_id, sql, sink)
     })
     .await?
     .map(Some)
+}
+
+/// The most Copy all results holds in memory (100 MiB). Past it the copy
+/// stops its run and says to export instead: the text is held twice at the
+/// end (here and in the clipboard), and a pasteboard that size helps no one.
+const CLIPBOARD_MAX_BYTES: usize = 100 * 1024 * 1024;
+
+/// Copy all results' text as it is written, refusing to grow past
+/// [`CLIPBOARD_MAX_BYTES`].
+#[derive(Default)]
+struct ClipboardBuf(Vec<u8>);
+
+impl std::io::Write for ClipboardBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buf.len() > CLIPBOARD_MAX_BYTES {
+            return Err(std::io::Error::other(format!(
+                "The result is over {} MiB; use Export… to write it to a file",
+                CLIPBOARD_MAX_BYTES / (1024 * 1024)
+            )));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Copy all results: runs `sql` whole in the tab into memory as CSV (or TSV
@@ -966,18 +1030,24 @@ async fn copy_all_results(
     } else {
         rowkery_core::export::ExportFormat::Csv
     };
-    let writer = rowkery_core::export::ExportWriter::new(Vec::new(), format);
+    let writer = rowkery_core::export::ExportWriter::new(ClipboardBuf::default(), format);
     let clip = app.clone();
+    let stop = stop_tab_run(&app, &window_id, tab_id);
     let sink = Arc::new(ExportSink::new(
         on_frame,
         writer,
         None,
-        Box::new(move |bytes: Vec<u8>| {
-            let text = String::from_utf8_lossy(&bytes);
+        Box::new(move |buf: ClipboardBuf| {
+            // Valid UTF-8 (the writer only writes `str`s) becomes the
+            // clipboard's text in place, without a second copy.
+            let mut text = String::from_utf8(buf.0)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            text.truncate(text.trim_end_matches('\n').len());
             clip.clipboard()
-                .write_text(text.trim_end_matches('\n'))
+                .write_text(text)
                 .map_err(|e| format!("Couldn't copy: {e}"))
         }),
+        stop,
     ));
     on_blocking_pool(app, move |bridge| {
         bridge.run_window_export_to(&window_id, tab_id, sql, sink)
@@ -1140,11 +1210,54 @@ fn stop_all_queries(bridge: State<'_, CoreBridge>) {
     bridge.stop_all_queries();
 }
 
-/// Whether a tab may hold the user's open transaction: an Automatic update
-/// waits rather than restart it away (updates.ts).
+/// What a quit or a restart would cut short (an open transaction, a write,
+/// a commit, an import, a SQL file run): an Automatic update waits for none
+/// (updates.ts).
 #[tauri::command]
-async fn holds_open_transaction(app: AppHandle) -> Result<bool, String> {
-    on_blocking_pool(app, |bridge| bridge.holds_transaction()).await
+async fn busy_work(app: AppHandle) -> Result<rowkery_bridge::BusyWork, String> {
+    on_blocking_pool(app, |bridge| bridge.busy_work()).await
+}
+
+/// The app menu's Quit, in place of the native one (which ends the app
+/// before anything can ask): it goes through [`ask_before_quit`].
+#[cfg(target_os = "macos")]
+const QUIT_ITEM: &str = "rowkery-quit";
+
+/// A quit dialog is showing: another ⌘Q or close waits for its answer.
+static ASKING_TO_QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Quitting (or closing the window, which quits, or restarting into an
+/// update; `verb` names which) while work would be lost asks first, in one
+/// native dialog naming it; `then` quits. A request made while the dialog
+/// is up is dropped. The Dock's Quit, logging out and an AppleScript quit
+/// don't come through here: tao has no applicationShouldTerminate hook.
+fn ask_before_quit(app: &AppHandle, verb: &'static str, then: impl FnOnce() + Send + 'static) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if ASKING_TO_QUIT.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    // The core thread answers off the main thread, which the dialog needs free.
+    thread::spawn(move || {
+        let Some(warning) = app.state::<CoreBridge>().busy_work().quit_warning() else {
+            ASKING_TO_QUIT.store(false, Ordering::SeqCst);
+            return then();
+        };
+        app.dialog()
+            .message(warning)
+            .title(format!("{verb} Rowkery?"))
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                format!("{verb} Anyway"),
+                "Cancel".into(),
+            ))
+            .show(move |quit| {
+                ASKING_TO_QUIT.store(false, Ordering::SeqCst);
+                if quit {
+                    then();
+                }
+            });
+    });
 }
 
 #[derive(Debug, Serialize)]
@@ -1379,7 +1492,13 @@ async fn apply_changes(
             confirmed,
         )
     })
-    .await?
+    .await
+    .map_err(lost_answer)?
+}
+
+/// A run, import or commit whose blocking task died: its outcome is unknown.
+fn lost_answer(error: String) -> String {
+    format!("{} ({error})", rowkery_bridge::LOST_ANSWER)
 }
 
 /// Import CSV…: the native open dialog for a .csv / .tsv file. `None` when
@@ -1443,7 +1562,8 @@ async fn import_csv(
     let done = on_blocking_pool(app.clone(), move |bridge| {
         bridge.import_csv(&id, spec, cancel, progress)
     })
-    .await;
+    .await
+    .map_err(lost_answer);
     if let Ok(mut running) = app.state::<Imports>().0.lock() {
         running.remove(&window_id);
     }
@@ -1633,9 +1753,12 @@ async fn proposal_dry_run(id: String) -> Result<rowkery_mcp::proposals::DryRun, 
 /// the row counts the user saw (`rows`, per statement).
 #[tauri::command]
 async fn proposal_commit(
+    bridge: State<'_, CoreBridge>,
     id: String,
     rows: Vec<u64>,
 ) -> Result<rowkery_mcp::proposals::CommitOutcome, String> {
+    // A quit while it commits asks first.
+    let _running = bridge.hold_commit();
     rowkery_mcp::proposals::commit(&id, &rows).await
 }
 
@@ -1819,7 +1942,8 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     }
     let spec = menu_spec();
     // The app menu: About, then menu.json's "Rowkery" items (Check for
-    // Updates…, Settings…), then the native Services, Hide and Quit.
+    // Updates…, Settings…), then the native Services and Hide, and Quit
+    // (ours: it asks first when quitting would lose work).
     let mut app_items = vec![Entry::Native(PredefinedMenuItem::about(
         app,
         None,
@@ -1836,7 +1960,13 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         Entry::Native(PredefinedMenuItem::hide(app, None)?),
         Entry::Native(PredefinedMenuItem::hide_others(app, None)?),
         sep()?,
-        Entry::Native(PredefinedMenuItem::quit(app, None)?),
+        Entry::Item(MenuItem::with_id(
+            app,
+            QUIT_ITEM,
+            format!("Quit {}", info.name),
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?),
     ]);
     let mut submenus = vec![Submenu::with_items(
         app,
@@ -2036,6 +2166,10 @@ pub fn run(mut timings: Timings) {
     let builder = builder.menu(app_menu).on_menu_event(|app, event| {
         use tauri::Emitter;
         let id = event.id().as_ref();
+        if id == QUIT_ITEM {
+            let quit = app.clone();
+            return ask_before_quit(app, "Quit", move || quit.exit(0));
+        }
         if menu_spec_contains(&menu_spec(), id) {
             let _ = app.emit("menu-command", id);
         }
@@ -2050,13 +2184,24 @@ pub fn run(mut timings: Timings) {
         .manage(rowkery_mcp::picker::Picker::default())
         .manage(open_link::PendingLink::default())
         .on_window_event(|window, event| {
-            #[cfg(target_os = "macos")]
+            // The one window closing quits the app: ask first when that
+            // would lose work.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                close_after_hiding(window);
+                let app = window.app_handle().clone();
+                let window = window.clone();
+                ask_before_quit(&app, "Quit", move || {
+                    #[cfg(target_os = "macos")]
+                    close_after_hiding(&window);
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let target = window.clone();
+                        let _ = window.run_on_main_thread(move || {
+                            let _ = target.destroy();
+                        });
+                    }
+                });
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (window, event);
         })
         .setup(move |app| {
             app.state::<Timings>().mark("setup");
@@ -2111,8 +2256,8 @@ pub fn run(mut timings: Timings) {
             forget_connection_secrets,
             open_sample,
             stop_all_queries,
-            holds_open_transaction,
             open_transactions,
+            busy_work,
             count_rows,
             cancel_count,
             probe_local_servers,
@@ -2478,5 +2623,85 @@ mod tests {
                 "Help"
             ]
         );
+    }
+
+    #[test]
+    fn copy_all_stops_at_its_byte_cap() {
+        use std::io::Write;
+        let mut buf = ClipboardBuf::default();
+        buf.write_all(&vec![b'x'; CLIPBOARD_MAX_BYTES]).unwrap();
+        let err = buf.write_all(b"y").unwrap_err();
+        assert!(err.to_string().contains("use Export"), "{err}");
+        assert!(err.to_string().contains("100 MiB"), "{err}");
+        assert_eq!(buf.0.len(), CLIPBOARD_MAX_BYTES);
+    }
+
+    /// The first write that fails stops the run once, and the run's end
+    /// (cancelled, as a stopped run is) reports the failure, not a cancel.
+    #[test]
+    fn a_failed_write_stops_the_run_and_says_why() {
+        use rowkery_core::bridge::QueryDetail;
+        use rowkery_core::db::{Column, RowBatch, Value};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("The result is over 100 MiB"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = frames.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                seen.lock().unwrap().push(json);
+            }
+            Ok(())
+        });
+        let stops = Arc::new(AtomicUsize::new(0));
+        let counted = stops.clone();
+        let sink = ExportSink::new(
+            channel,
+            rowkery_core::export::ExportWriter::new(Full, rowkery_core::export::ExportFormat::Csv),
+            None,
+            Box::new(|_| panic!("a failed copy never reaches the clipboard")),
+            Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let batch = || CoreEvent::QueryBatch {
+            query_id: 1,
+            tab_id: 1,
+            batch: RowBatch {
+                columns: vec![Column {
+                    name: "n".into(),
+                    type_name: "int8".into(),
+                }],
+                rows: vec![vec![Value::Int(1)]],
+            },
+            first: true,
+        };
+        sink.push(batch());
+        sink.push(batch());
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        sink.push(CoreEvent::QueryFinished {
+            query_id: 1,
+            tab_id: 1,
+            row_count: 2,
+            rows_affected: None,
+            elapsed_ms: 1,
+            error: Some("Query cancelled".into()),
+            cancelled: true,
+            detail: QueryDetail::default(),
+        });
+        let last = frames.lock().unwrap().last().cloned().unwrap();
+        let done: serde_json::Value = serde_json::from_str(&last).unwrap();
+        assert_eq!(done["t"], "done");
+        assert_eq!(done["cancelled"], false);
+        assert_eq!(done["error"], "The result is over 100 MiB");
     }
 }

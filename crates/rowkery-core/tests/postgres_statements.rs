@@ -398,3 +398,137 @@ async fn postgres_a_cursor_never_runs_a_hidden_statement() {
         .await
         .unwrap();
 }
+
+/// A locking clause in a CTE (`FOR UPDATE`, `FOR NO KEY UPDATE`,
+/// `FOR UPDATE OF t`) is not the UPDATE verb: the classifier reads these as
+/// reads, and Postgres runs them without changing a row. A real UPDATE
+/// after one is still a write that does change rows.
+#[tokio::test]
+async fn postgres_locking_ctes_read_and_change_nothing() {
+    use rowkery_core::safety::{check_sql, Dialect, StatementKind};
+    let s = session("locking-cte").await;
+    session_execute(
+        &s,
+        "DROP TABLE IF EXISTS rowkery_lock_cte; \
+         CREATE TABLE rowkery_lock_cte (id int PRIMARY KEY, n int); \
+         INSERT INTO rowkery_lock_cte SELECT g, g FROM generate_series(1, 3) g",
+    )
+    .await
+    .expect("table");
+    let snapshot = || async {
+        plain(
+            &s,
+            "SELECT string_agg(id || ':' || n, ',' ORDER BY id) FROM rowkery_lock_cte",
+        )
+        .await
+        .expect("snapshot")
+        .rows
+    };
+    let before = snapshot().await;
+    let kinds = |sql: &str| -> Vec<StatementKind> {
+        check_sql(sql, Dialect::Postgres)
+            .iter()
+            .map(|c| c.kind)
+            .collect()
+    };
+    for sql in [
+        "WITH x AS (SELECT * FROM rowkery_lock_cte FOR UPDATE) SELECT * FROM x",
+        "WITH x AS (SELECT * FROM rowkery_lock_cte FOR NO KEY UPDATE) SELECT * FROM x",
+        "WITH x AS (SELECT * FROM rowkery_lock_cte t FOR UPDATE OF t) SELECT * FROM x",
+        "WITH x AS (SELECT * FROM rowkery_lock_cte t FOR NO KEY UPDATE OF t SKIP LOCKED) SELECT count(*) FROM x",
+    ] {
+        assert_eq!(kinds(sql), [StatementKind::Read], "{sql}");
+        let got = plain(&s, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert!(!got.rows.is_empty(), "{sql}");
+        assert_eq!(snapshot().await, before, "{sql} changed rows");
+    }
+    let write = "WITH x AS (SELECT * FROM rowkery_lock_cte FOR UPDATE) \
+                 UPDATE rowkery_lock_cte SET n = n + 1 WHERE id IN (SELECT id FROM x)";
+    assert_eq!(kinds(write), [StatementKind::Write]);
+    plain(&s, write).await.expect("update");
+    assert_ne!(snapshot().await, before);
+    session_execute(&s, "DROP TABLE rowkery_lock_cte")
+        .await
+        .expect("drop");
+}
+
+/// Past `keep` rows are counted but neither decoded nor passed on, and the
+/// statement still runs to its end (a write's RETURNING finishes).
+#[tokio::test]
+async fn keep_stops_decoding_but_not_the_statement() {
+    let s = session("keep").await;
+    let table = format!("it_keep_{}", std::process::id());
+    session_execute(&s, &format!("CREATE TABLE {table} (n int)"))
+        .await
+        .unwrap();
+    let opts = StreamOptions {
+        keep: Some(3),
+        batch_rows: 2,
+        ..StreamOptions::default()
+    };
+    let mut got = Got::default();
+    let stats = session_query_stream_with(
+        &s,
+        &format!("WITH w AS (INSERT INTO {table} SELECT generate_series(1, 10) RETURNING n) SELECT n FROM w ORDER BY n"),
+        opts,
+        got.take(),
+    )
+    .await
+    .expect("run");
+    assert_eq!(stats.rows, 10);
+    assert_eq!(
+        got.rows,
+        vec![
+            vec![Value::Int(1)],
+            vec![Value::Int(2)],
+            vec![Value::Int(3)]
+        ]
+    );
+    let all = plain(&s, &format!("SELECT count(*)::int8 FROM {table}"))
+        .await
+        .unwrap();
+    assert_eq!(all.rows, vec![vec![Value::Int(10)]]);
+    session_execute(&s, &format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+}
+
+/// A key value read from the table can't break out of the keyset page's
+/// literal on a server with `standard_conforming_strings` off, where `\'`
+/// inside a plain string is a quote that doesn't end it.
+#[tokio::test]
+async fn keyset_literal_holds_with_standard_conforming_strings_off() {
+    use rowkery_core::db::{table_browse_query, BrowseOptions, EngineKind};
+    let s = session("scs").await;
+    let table = format!("it_scs_{}", std::process::id());
+    let breakout = r"\' OR TRUE --";
+    session_execute(
+        &s,
+        &format!(
+            r#"CREATE TABLE {table} (k text COLLATE "C" PRIMARY KEY);
+              INSERT INTO {table} VALUES ('!'), ('\'' OR TRUE --'), ('zz')"#
+        ),
+    )
+    .await
+    .unwrap();
+    session_execute(&s, "SET standard_conforming_strings = off")
+        .await
+        .unwrap();
+    let opts = BrowseOptions {
+        key: vec!["k".into()],
+        after: Some([("k".to_string(), Value::Text(breakout.into()))].into()),
+        ..BrowseOptions::first_page(100)
+    };
+    let sql = table_browse_query(EngineKind::Postgres, "public", &table, &opts);
+    let got = plain(&s, &sql).await.expect(&sql);
+    assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
+    // The same literal reads the same with it on (the default).
+    session_execute(&s, "SET standard_conforming_strings = on")
+        .await
+        .unwrap();
+    let got = plain(&s, &sql).await.expect(&sql);
+    assert_eq!(got.rows, vec![vec![Value::Text("zz".into())]], "{sql}");
+    session_execute(&s, &format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+}
