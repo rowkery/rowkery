@@ -146,8 +146,9 @@ pub(crate) struct SessionPool {
     /// `true` when it surely did.
     lost: HashMap<Key, bool>,
     /// Checkouts (by id) whose session may hold the user's transaction:
-    /// one counts while `out` still holds the same id.
-    out_risk: HashMap<Key, u64>,
+    /// one counts while `out` still holds the same id. `true` when it went
+    /// out holding one (not just on a statement that may open one).
+    out_risk: HashMap<Key, (u64, bool)>,
     /// Tabs closed while their session was out: it is dropped when it comes
     /// back, not parked (its transaction goes with it, and nobody is told).
     closed: HashSet<Key>,
@@ -196,7 +197,8 @@ impl Checkout {
         };
         if let (Some(_), Some(pool)) = (self.risk, &self.pool) {
             if let Ok(mut p) = pool.lock() {
-                p.out_risk.insert(self.key.clone(), self.id);
+                p.out_risk
+                    .insert(self.key.clone(), (self.id, self.risk == Some(true)));
             }
         }
     }
@@ -254,22 +256,37 @@ impl SessionPool {
     /// or out (running, settling, or kept after a cancel) since a lease that
     /// found one or a statement that may open one.
     pub fn open_transactions(&self, window_id: &str) -> Vec<u64> {
+        self.transactions(window_id, false)
+    }
+
+    /// As [`Self::open_transactions`], but a tab out on a run counts only
+    /// when the run started inside the user's transaction: a quit warns of
+    /// a running write on its own.
+    pub fn held_transactions(&self, window_id: &str) -> Vec<u64> {
+        self.transactions(window_id, true)
+    }
+
+    fn transactions(&self, window_id: &str, held: bool) -> Vec<u64> {
         let parked = self.parked.iter().filter_map(|((w, slot), p)| match slot {
             Slot::Tab(tab) if w == window_id && !p.session.is_closed() => {
                 at_risk(&p.session).then_some(*tab)
             }
             _ => None,
         });
-        let out = self.out_risk.iter().filter_map(|(key, id)| match key {
-            (w, Slot::Tab(tab))
-                if w == window_id
-                    && self.out.get(key) == Some(id)
-                    && !self.closed.contains(key) =>
-            {
-                Some(*tab)
-            }
-            _ => None,
-        });
+        let out = self
+            .out_risk
+            .iter()
+            .filter_map(|(key, (id, sure))| match key {
+                (w, Slot::Tab(tab))
+                    if w == window_id
+                        && self.out.get(key) == Some(id)
+                        && (*sure || !held)
+                        && !self.closed.contains(key) =>
+                {
+                    Some(*tab)
+                }
+                _ => None,
+            });
         let mut tabs: Vec<u64> = parked.chain(out).collect();
         tabs.sort_unstable();
         tabs.dedup();

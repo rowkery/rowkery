@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -846,7 +846,7 @@ struct SqliteTabs {
     conns: HashMap<(String, u64), (String, TabConn)>,
     /// Tabs whose latest run started inside a transaction or may open one:
     /// while it runs, its connection can't be asked.
-    run_at_risk: HashSet<(String, u64)>,
+    run_at_risk: HashMap<(String, u64), bool>,
 }
 
 type SharedSqliteTabs = Arc<Mutex<SqliteTabs>>;
@@ -874,7 +874,8 @@ impl SqliteTabs {
     /// The window's tabs whose connection may hold an open transaction,
     /// which closing the connection would roll back: an idle one that holds
     /// one, or one out on a run that started inside one or may open one.
-    fn window_transactions(&self, window_id: &str) -> Vec<u64> {
+    /// `held`: a running tab counts only when its run started inside one.
+    fn window_transactions(&self, window_id: &str, held: bool) -> Vec<u64> {
         let mut tabs: Vec<u64> = self
             .conns
             .iter()
@@ -882,7 +883,10 @@ impl SqliteTabs {
                 key.0 == window_id
                     && match conn.try_lock() {
                         Ok(d) => d.as_ref().is_some_and(SqliteDriver::in_transaction),
-                        Err(std::sync::TryLockError::WouldBlock) => self.run_at_risk.contains(*key),
+                        Err(std::sync::TryLockError::WouldBlock) => self
+                            .run_at_risk
+                            .get(*key)
+                            .is_some_and(|inside| *inside || !held),
                         Err(std::sync::TryLockError::Poisoned(_)) => false,
                     }
             })
@@ -1017,11 +1021,11 @@ impl SqliteTab {
     }
 
     /// Notes whether the run that now holds the tab's connection started
-    /// inside a transaction or may open one (`window_transactions`).
-    fn note_run(&self, at_risk: bool) {
+    /// inside a transaction, or may open one (`window_transactions`).
+    fn note_run(&self, inside: bool, may_open: bool) {
         if let Ok(mut tabs) = self.tabs.lock() {
-            if at_risk {
-                tabs.run_at_risk.insert(self.key.clone());
+            if inside || may_open {
+                tabs.run_at_risk.insert(self.key.clone(), inside);
             } else {
                 tabs.run_at_risk.remove(&self.key);
             }
@@ -1127,7 +1131,7 @@ fn run_sqlite_query_worker(
         let driver = ready_tab(&mut held, &db_path, read_only).map_err(|e| e.to_string())?;
         // A cancel or an error inside a write can end the tab's transaction.
         let in_transaction = driver.in_transaction();
-        tab.note_run(in_transaction || !reads_only(&sql));
+        tab.note_run(in_transaction, !reads_only(&sql));
         if let Some(handle) = driver.interrupt_handle() {
             if !arm_cancel(&interrupt_slot, CancelHandle::Sqlite(handle)) {
                 return Ok(QueryOutcome::cancelled(0));
@@ -2385,17 +2389,24 @@ pub const SAFE_MODE_IN_TXN: &str = "A query tab on this connection has a transac
 /// The window's query tabs that may hold the user's open transaction, which
 /// re-pointing the window or a new safe mode would roll back: a Postgres
 /// tab's session, or a SQLite tab's own connection.
-fn window_transactions(state: &CoreState, window_id: &str) -> Vec<u64> {
+/// `held`: as the pool's `held_transactions` (a quit's count).
+fn window_transactions(state: &CoreState, window_id: &str, held: bool) -> Vec<u64> {
     match state.windows.get(window_id) {
         Some(WindowTarget::Postgres { .. }) => state
             .pool
             .lock()
-            .map(|p| p.open_transactions(window_id))
+            .map(|p| {
+                if held {
+                    p.held_transactions(window_id)
+                } else {
+                    p.open_transactions(window_id)
+                }
+            })
             .unwrap_or_default(),
         Some(WindowTarget::Sqlite { .. }) => state
             .sqlite_tabs
             .lock()
-            .map(|t| t.window_transactions(window_id))
+            .map(|t| t.window_transactions(window_id, held))
             .unwrap_or_default(),
         None => Vec::new(),
     }
@@ -2907,7 +2918,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     WindowTarget::Sqlite { connection_id, .. } if *connection_id == id => {
                         sqlite_tabs
                             .as_ref()
-                            .is_some_and(|t| !t.window_transactions(w).is_empty())
+                            .is_some_and(|t| !t.window_transactions(w, false).is_empty())
                     }
                     _ => false,
                 });
@@ -2995,7 +3006,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             // Re-pointing (another connection or database, Reconnect) starts
             // the window's sessions afresh: never over a tab's transaction.
             if state.windows.contains_key(&window_id)
-                && !window_transactions(state, &window_id).is_empty()
+                && !window_transactions(state, &window_id, false).is_empty()
             {
                 let _ = respond_to.send(Err(REPOINT_IN_TXN.into()));
                 return;
@@ -3667,7 +3678,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 .windows
                 .keys()
                 .flat_map(|w| {
-                    let tabs = window_transactions(state, w);
+                    let tabs = window_transactions(state, w, false);
                     tabs.into_iter().map(move |t| (w.clone(), t))
                 })
                 .collect();
@@ -3675,14 +3686,14 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             let _ = respond_to.send(open);
         }
         Command::CountTransactions { respond_to } => {
-            // The tabs re-pointing would roll back, a run inside one
-            // included; unknown when a lock is poisoned.
+            // Tabs holding one, a run inside one included (a write that may
+            // open one counts as a write); unknown when a lock is poisoned.
             let sound = state.pool.lock().is_ok() && state.sqlite_tabs.lock().is_ok();
             let held = sound.then(|| {
                 state
                     .windows
                     .keys()
-                    .map(|w| window_transactions(state, w).len())
+                    .map(|w| window_transactions(state, w, true).len())
                     .sum()
             });
             let _ = respond_to.send(held);

@@ -6164,7 +6164,12 @@ fn postgres_busy_work_counts_writes_and_open_transactions() {
         )
         .expect("run");
     thread::sleep(Duration::from_millis(300));
-    assert_eq!(bridge.busy_work().writes, 1, "the write is running");
+    let busy = bridge.busy_work();
+    assert_eq!(
+        (busy.writes, busy.transactions),
+        (1, 0),
+        "the write is running, and opened no transaction"
+    );
     let (error, _) = wait_query_finished(&queue, Duration::from_secs(10)).expect("done");
     assert_eq!(error, None);
     assert_eq!(bridge.busy_work().writes, 0);
