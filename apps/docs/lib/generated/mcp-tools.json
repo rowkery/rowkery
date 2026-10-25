@@ -31,7 +31,7 @@
       "read_only": true
     },
     {
-      "description": "Tables and views with approximate row counts and column counts. Cached for the session; refresh reloads the schema.",
+      "description": "Tables and views with approximate row counts and column counts, the first 500 (search_schema finds the rest). Cached for the session; refresh reloads the schema.",
       "inputs": [
         {
           "description": "Connection id or name from list_connections",

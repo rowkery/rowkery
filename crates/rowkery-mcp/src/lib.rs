@@ -189,7 +189,7 @@ fn tools() -> Vec<Tool> {
         ),
         tool(
             "list_tables",
-            "Tables and views with approximate row counts and column counts. Cached for the session; refresh reloads the schema.",
+            "Tables and views with approximate row counts and column counts, the first 500 (search_schema finds the rest). Cached for the session; refresh reloads the schema.",
             json!({ "connection": connection, "database": database,
                     "refresh": { "type": "boolean", "description": "Reload the schema from the database" } }),
             &["connection"],
@@ -545,17 +545,29 @@ async fn list_databases(store: &mut Store, target: &Target) -> Outcome {
     Ok(json!({ "databases": names }))
 }
 
+/// Tables `list_tables` names. A schema of thousands would fill the agent's
+/// context; past this, it says how many more and points to search_schema.
+const MAX_TABLES: usize = 500;
+
 async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outcome {
     let rule = rule(target);
     let cached = store.catalog(target, refresh).await?;
     let catalog = &cached.catalog;
-    let tables: Vec<Json> = all_tables(catalog)
+    // Counted in one pass: one per table is slow with thousands of them.
+    let mut partitions = std::collections::HashMap::<(&str, &str), usize>::new();
+    for (schema, t) in all_tables(catalog) {
+        if let Some(parent) = t.partition_of.as_deref() {
+            *partitions.entry((schema, parent)).or_default() += 1;
+        }
+    }
+    let shared: Vec<(&str, &TableNode)> = all_tables(catalog)
         .filter(|(_, t)| t.partition_of.is_none())
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
-        .map(|(schema, t)| {
-            let partitions = all_tables(catalog)
-                .filter(|(s, p)| *s == schema && p.partition_of.as_deref() == Some(&t.name))
-                .count();
+        .collect();
+    let tables: Vec<Json> = shared
+        .iter()
+        .take(MAX_TABLES)
+        .map(|&(schema, t)| {
             let mut line = format!("{schema}.{}", t.name);
             if t.kind != TableKind::Table {
                 line.push_str(&format!(" ({})", kind_label(t.kind)));
@@ -564,15 +576,19 @@ async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outco
                 line.push_str(&format!(" ~{rows} rows"));
             }
             line.push_str(&format!(", {} cols", t.columns.len()));
-            if partitions > 0 {
-                line.push_str(&format!(", {partitions} partitions"));
+            if let Some(n) = partitions.get(&(schema, t.name.as_str())) {
+                line.push_str(&format!(", {n} partitions"));
             }
             json!(line)
         })
         .collect();
-    Ok(
-        json!({ "database": target.database, "schema_loaded": age(cached.loaded), "tables": tables }),
-    )
+    let mut out = json!({ "database": target.database, "schema_loaded": age(cached.loaded), "tables": tables });
+    if let Some(more) = shared.len().checked_sub(MAX_TABLES).filter(|n| *n > 0) {
+        out["more"] = json!(format!(
+            "{more} more not listed. search_schema finds tables and columns by name."
+        ));
+    }
+    Ok(out)
 }
 
 async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcome {
@@ -1527,6 +1543,61 @@ mod tests {
             .await
             .expect("statistics with nothing kept back");
 
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The env lock spans the whole test, awaits included: each test has its own runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn list_tables_stops_at_its_cap_and_says_how_many_more() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let db = dir.join("t.db");
+        let sql: String = (0..MAX_TABLES + 3)
+            .map(|i| format!("create table t{i:04}(id integer primary key);"))
+            .collect();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(&sql)
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.upsert_connection(ConnectionRecord::Sqlite(SqliteConnection {
+            id: "s".into(),
+            name: "s".into(),
+            path: db.to_string_lossy().to_string(),
+            environment: None,
+            safe_mode: Default::default(),
+            sample: false,
+            allow_mcp: true,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+        }));
+        config.save().unwrap();
+        let mcp = RowkeryMcp::default();
+        let listed = call(&mcp, "list_tables", json!({ "connection": "s" }))
+            .await
+            .unwrap();
+        assert_eq!(listed["tables"].as_array().unwrap().len(), MAX_TABLES);
+        assert_eq!(listed["tables"][0], "main.t0000, 1 cols");
+        assert_eq!(
+            listed["more"],
+            "3 more not listed. search_schema finds tables and columns by name."
+        );
+        let found = call(
+            &mcp,
+            "search_schema",
+            json!({ "connection": "s", "text": "t0502" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found["tables"], json!(["main.t0502"]));
         std::env::remove_var("ROWKERY_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }
