@@ -31,6 +31,7 @@ use super::introspect::{
 use super::{Column, DriverError, RowBatch, Value};
 
 mod activity;
+mod text_types;
 pub use activity::{
     rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
     HeldLock, ServerSession, StopKind,
@@ -2231,6 +2232,13 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
             std::str::from_utf8(b).ok().map(|s| Value::Text(s.into()))
         }
         Type::BYTEA => Some(Value::Bytes(b.to_vec())),
+        Type::INTERVAL => text_types::interval(b).map(Value::Text),
+        Type::INET | Type::CIDR => text_types::inet(b).map(Value::Text),
+        Type::MACADDR | Type::MACADDR8 => text_types::macaddr(b).map(Value::Text),
+        Type::MONEY => text_types::money(b).map(Value::Text),
+        Type::BIT | Type::VARBIT => text_types::bits(b).map(Value::Text),
+        Type::TIMETZ => text_types::timetz(b).map(Value::Text),
+        Type::CHAR => text_types::char(b).map(Value::Text),
         // As stored, never through serde_json's f64: big integers and long
         // decimals keep every digit, so an edit writes back what was read.
         // xml's binary value is its text; jsonb's is a version byte (1) and
@@ -2271,6 +2279,15 @@ fn array_element_shown(element: &Type) -> bool {
                 | Type::JSON
                 | Type::JSONB
                 | Type::XML
+                | Type::INTERVAL
+                | Type::INET
+                | Type::CIDR
+                | Type::MACADDR
+                | Type::MACADDR8
+                | Type::MONEY
+                | Type::BIT
+                | Type::VARBIT
+                | Type::TIMETZ
         )
 }
 
