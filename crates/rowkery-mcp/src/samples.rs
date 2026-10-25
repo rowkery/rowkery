@@ -75,15 +75,20 @@ fn read_all(now: u64) -> (Vec<Sample>, bool) {
     (list, expired)
 }
 
-/// Replaces the file whole, through a temp file of this process's own, so
-/// a reader never sees half of it.
+fn tmp_path() -> PathBuf {
+    path().with_extension("jsonl.tmp")
+}
+
+/// Replaces the file whole, through a temp file, so a reader never sees
+/// half of it. Rewrites hold [`locked`], so one temp name is enough, and a
+/// crash leaves at most that one behind for the next rewrite to replace.
 fn rewrite(list: &[Sample]) {
     let text: String = list
         .iter()
         .filter_map(|s| serde_json::to_string(s).ok())
         .map(|l| l + "\n")
         .collect();
-    let tmp = path().with_extension(format!("jsonl.{}.tmp", std::process::id()));
+    let tmp = tmp_path();
     if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, path()).is_err() {
         let _ = std::fs::remove_file(tmp);
     }
@@ -95,16 +100,22 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Runs `change` holding `mcp-files.lock` beside the config, which the app
 /// and every agent's MCP server take around a change to the samples or the
 /// log's files, so one's rewrite never drops another's append. `None` when
-/// it can't be had within [`LOCK_WAIT`]: these files are best effort, and
-/// a call never waits longer for them.
+/// another holds it past [`LOCK_WAIT`]: these files are best effort, and a
+/// call never waits longer for them. Where no lock can be had at all (a
+/// read-only lock file, a network volume without locks) `change` runs
+/// unlocked, as it did before there was a lock.
 pub(crate) fn locked<T>(change: impl FnOnce() -> T) -> Option<T> {
     std::fs::create_dir_all(config_dir()).ok()?;
-    let file = OpenOptions::new()
+    let Ok(file) = OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .open(config_dir().join("mcp-files.lock"))
-        .ok()?;
+        .or_else(|_| std::fs::File::open(config_dir().join("mcp-files.lock")))
+    else {
+        return Some(change());
+    };
     let started = std::time::Instant::now();
     loop {
         match file.try_lock() {
@@ -112,7 +123,8 @@ pub(crate) fn locked<T>(change: impl FnOnce() -> T) -> Option<T> {
             Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(_) => return None,
+            Err(std::fs::TryLockError::WouldBlock) => return None,
+            Err(std::fs::TryLockError::Error(_)) => return Some(change()),
         }
     }
     let done = change();
@@ -121,12 +133,17 @@ pub(crate) fn locked<T>(change: impl FnOnce() -> T) -> Option<T> {
 }
 
 /// The time of the file's first sample, the oldest: read without the rest.
+/// A first line that doesn't parse (a write cut off by a crash) counts as
+/// the oldest of all, so the next save rewrites the file without it.
 fn oldest() -> Option<u64> {
     use std::io::BufRead;
     let file = std::fs::File::open(path()).ok()?;
     let mut first = String::new();
     std::io::BufReader::new(file).read_line(&mut first).ok()?;
-    serde_json::from_str::<Sample>(&first).ok().map(|s| s.ts)
+    if first.trim().is_empty() {
+        return None;
+    }
+    Some(serde_json::from_str::<Sample>(&first).map_or(0, |s| s.ts))
 }
 
 /// Best effort, like the audit log: a sample that can't be written never
@@ -170,14 +187,11 @@ pub fn find(session: u64, ts: u64, now: u64) -> Option<Sample> {
         .find(|s| s.session == session && s.ts == ts)
 }
 
-/// Deletes every sample (Clear log).
-pub fn clear() -> std::io::Result<()> {
-    let removed = locked(|| std::fs::remove_file(path())).unwrap_or_else(|| {
-        Err(std::io::Error::other(
-            "an agent is writing to the log; try again",
-        ))
-    });
-    match removed {
+/// Deletes every sample, and a temp file a crash left. The caller holds
+/// [`locked`] (`audit::clear`, which empties the log with them).
+pub(crate) fn remove_all() -> std::io::Result<()> {
+    let _ = std::fs::remove_file(tmp_path());
+    match std::fs::remove_file(path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -217,9 +231,9 @@ mod tests {
         assert_eq!(text.lines().count(), 1);
         assert!(find(1, 2_000, 1_000 + day).is_some());
 
-        clear().unwrap();
+        crate::audit::clear().unwrap();
         assert!(find(1, 2_000, 2_000).is_none());
-        clear().unwrap();
+        crate::audit::clear().unwrap();
 
         // Writers at once, one of them dropping an expired sample: none
         // loses another's.
@@ -235,6 +249,17 @@ mod tests {
             assert!(find(i, now + i, now + 8).is_some(), "sample {i}");
         }
         assert!(find(9, 1, now + 8).is_none());
+
+        // A first line a crash cut off: the next save drops it, and the
+        // temp file a crash left goes with Clear log.
+        std::fs::write(dir.join(SAMPLES_FILE), "{\"session\":1,\"t\n").unwrap();
+        save(&shape(3, now, "[3]"), now);
+        let text = std::fs::read_to_string(dir.join(SAMPLES_FILE)).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(find(3, now, now).is_some());
+        std::fs::write(tmp_path(), "[]").unwrap();
+        crate::audit::clear().unwrap();
+        assert!(!tmp_path().exists());
         let _ = std::fs::remove_dir_all(dir);
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
