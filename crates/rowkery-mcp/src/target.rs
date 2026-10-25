@@ -239,15 +239,20 @@ impl Store {
         Ok(self.sessions.get(&key).expect("session"))
     }
 
-    /// [`guards`] then `then`, after rolling back a transaction a call that
-    /// stopped early left open, when this statement isn't inside a call's own.
-    fn guards_for(&self, key: &(String, String), then: &str) -> String {
+    /// [`guards`], with pruning turned off when `unpruned`, after rolling
+    /// back a transaction a call that stopped early left open, when this
+    /// statement isn't inside a call's own.
+    fn guards_for(&self, key: &(String, String), unpruned: bool) -> String {
         let guards = if self.open.as_ref() != Some(key) && self.left_open.contains(key) {
             format!("ROLLBACK; {}", guards())
         } else {
             guards()
         };
-        format!("{guards}{then}")
+        if unpruned {
+            format!("{guards}; SET enable_partition_pruning = off")
+        } else {
+            guards
+        }
     }
 
     /// Opens one read-only transaction on Postgres for every statement up to
@@ -324,33 +329,40 @@ impl Store {
         late: &str,
         call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
     ) -> Result<T, String> {
-        self.guarded_then(target, late, "", call).await
+        self.guarded_as(target, late, false, call).await
     }
 
-    /// [`Self::guarded`], with `then` run after the guards.
-    async fn guarded_then<T>(
+    /// [`Self::guarded`], with partition pruning off for `call` when
+    /// `unpruned`.
+    async fn guarded_as<T>(
         &mut self,
         target: &Target,
         late: &str,
-        then: &str,
+        unpruned: bool,
         call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
     ) -> Result<T, String> {
         let key = target.key();
         self.session(target).await?;
-        // An adopted session's owner set it up for its own transaction.
+        // An adopted session's owner set it up for its own transaction, and
+        // goes on to run its change there planned as usual.
         let adopted = self.adopted.as_ref() == Some(&key);
-        debug_assert!(
-            !adopted || then.is_empty(),
-            "an adopted session's owner runs its own statements"
-        );
-        let guards = (!adopted).then(|| self.guards_for(&key, then));
+        let guards = if adopted {
+            unpruned.then(|| "SET LOCAL enable_partition_pruning = off".to_string())
+        } else {
+            Some(self.guards_for(&key, unpruned))
+        };
         let session = self.sessions.get(&key).expect("session");
         let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
         let run = async {
-            match &guards {
+            let (set, out) = match &guards {
                 Some(guards) => tokio::join!(session_execute(session, guards), call(session)),
                 None => (Ok(()), call(session).await),
+            };
+            if adopted && unpruned && set.is_ok() && out.is_ok() {
+                let reset = session_execute(session, "RESET enable_partition_pruning").await;
+                return (reset, out);
             }
+            (set, out)
         };
         let (set, out) = match tokio::time::timeout(CALL_TIMEOUT, run).await {
             Ok(done) => done,
@@ -512,38 +524,33 @@ impl Store {
         S: Send + 'static,
         F: FnMut(&mut S, Vec<Value>) -> bool + Send + 'static,
     {
-        self.read_after(target, "", sql, limit, state, each).await
+        self.read_as(target, false, sql, limit, state, each).await
     }
 
     /// [`Self::read`] on Postgres with partition pruning off, for an
     /// `EXPLAIN` that lists every partition the run could read. The next
-    /// statement's guards put pruning back.
+    /// statement's guards put pruning back (on an adopted session, it's put
+    /// back straight after).
     pub async fn read_unpruned(
         &mut self,
         target: &Target,
         sql: &str,
     ) -> Result<ReadResult, String> {
         let read = self
-            .read_after(
-                target,
-                "; SET enable_partition_pruning = off",
-                sql,
-                usize::MAX,
-                Vec::new(),
-                |rows, row| {
-                    rows.push(row);
-                    true
-                },
-            )
+            .read_as(target, true, sql, usize::MAX, Vec::new(), |rows, row| {
+                rows.push(row);
+                true
+            })
             .await?;
         Ok(ReadResult { rows: read.state })
     }
 
-    /// [`Self::read_each`], with `then` run after the guards (Postgres).
-    async fn read_after<S, F>(
+    /// [`Self::read_each`], with partition pruning off when `unpruned`
+    /// (Postgres).
+    async fn read_as<S, F>(
         &mut self,
         target: &Target,
-        then: &str,
+        unpruned: bool,
         sql: &str,
         limit: usize,
         mut state: S,
@@ -565,10 +572,10 @@ impl Store {
                 let started = Instant::now();
                 let mut columns = Vec::new();
                 let (mut seen, mut stopped) = (0usize, false);
-                self.guarded_then(
+                self.guarded_as(
                     target,
                     "Timed out waiting for the server.",
-                    then,
+                    unpruned,
                     async |s| {
                         let read = session_query_stream(s, sql, |batch, first| {
                             if first {

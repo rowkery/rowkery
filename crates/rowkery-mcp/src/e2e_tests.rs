@@ -1502,7 +1502,12 @@ async fn guards_go_ahead_of_every_call() {
     );
     // So does every other call.
     for call in ["databases", "catalog", "activity"] {
-        store.loosen(&target, "SET statement_timeout = 0").await;
+        store
+            .loosen(
+                &target,
+                "SET statement_timeout = 0; SET enable_partition_pruning = off",
+            )
+            .await;
         match call {
             "databases" => drop(store.list_databases(&target).await.expect(call)),
             "catalog" => drop(store.catalog(&target, true).await.expect(call)),
@@ -1513,6 +1518,48 @@ async fn guards_go_ahead_of_every_call() {
             "10s",
             "{call}"
         );
+        assert_eq!(
+            store.setting(&target, "enable_partition_pruning").await,
+            "on",
+            "{call}"
+        );
     }
+
+    // An unpruned read turns pruning off for itself only, even when it fails.
+    let pruning = "SELECT current_setting('enable_partition_pruning')";
+    let off = vec![vec![rowkery_core::Value::Text("off".into())]];
+    let on = vec![vec![rowkery_core::Value::Text("on".into())]];
+    assert_eq!(
+        store
+            .read_unpruned(&target, pruning)
+            .await
+            .expect("unpruned")
+            .rows,
+        off
+    );
+    assert!(store.read_unpruned(&target, "SELECT nope").await.is_err());
+    assert_eq!(store.read(&target, pruning).await.expect("read").rows, on);
+
+    // On a commit's adopted session, inside its owner's transaction, it's
+    // put back straight after: the change then plans as usual.
+    let session = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(&session, "BEGIN").await.expect("begin");
+    let mut adopted = crate::target::Store::on_session(&target, session);
+    assert_eq!(
+        adopted
+            .read_unpruned(&target, pruning)
+            .await
+            .expect("adopted")
+            .rows,
+        off
+    );
+    assert_eq!(
+        adopted.setting(&target, "enable_partition_pruning").await,
+        "on"
+    );
+    let session = adopted.into_session(&target).expect("session");
+    session_execute(&session, "ROLLBACK")
+        .await
+        .expect("rollback");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
