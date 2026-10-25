@@ -214,11 +214,12 @@ async fn guards_hold_against_a_real_postgres() {
                 ran += 1;
             }
             Err(err) => {
-                assert!(err.contains("hasn't shared"), "{err}");
+                assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
                 refused += 1;
             }
         }
-        if ran > 0 && refused > 0 {
+        // Each clean run is a chance to catch a run planned apart.
+        if ran >= 20 && refused > 0 {
             break;
         }
     }
@@ -1430,14 +1431,16 @@ async fn proposed_changes_hold_against_a_real_postgres() {
          WHERE {NOW_COIN}) WHERE id = 1"
     );
     let (mut committed, mut refused) = (0, 0);
-    for _ in 0..200 {
-        if committed > 0 && refused > 0 {
+    // A commit lands only when its three checks (propose, commit, and in
+    // the commit's transaction) all come up clean, about one try in eight.
+    for _ in 0..300 {
+        if committed >= 5 && refused > 0 {
             break;
         }
         let id = match propose(&flip).await {
             Ok(sent) => sent["id"].as_str().unwrap().to_string(),
             Err(err) => {
-                assert!(err.contains("hasn't shared"), "{err}");
+                assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
                 refused += 1;
                 continue;
             }
@@ -1445,7 +1448,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         match proposals::commit(&id, &[1]).await {
             Ok(CommitOutcome::Committed { .. }) => committed += 1,
             Ok(CommitOutcome::Failed { error }) | Err(error) => {
-                assert!(error.contains("hasn't shared"), "{error}");
+                assert_eq!(error, crate::guard::HIDDEN_REFUSAL);
                 refused += 1;
             }
             Ok(other) => panic!("{other:?}"),
