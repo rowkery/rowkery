@@ -40,12 +40,8 @@ pub async fn check(
                 // The statement as sent, before the planner evaluates any of
                 // it; then the plan, views and SQL functions expanded.
                 functions::check_pg(store, target, &functions::scan_sql(&change.sql), true).await?;
-                let explain = store
-                    .read(
-                        target,
-                        &format!("EXPLAIN (FORMAT JSON, VERBOSE) {}", change.sql),
-                    )
-                    .await?;
+                let explain_sql = format!("EXPLAIN (FORMAT JSON, VERBOSE) {}", change.sql);
+                let explain = store.read(target, &explain_sql).await?;
                 let text = match explain.rows.first().and_then(|r| r.first()) {
                     Some(rowkery_core::Value::Text(t)) => t.clone(),
                     _ => return Err("EXPLAIN returned no plan.".into()),
@@ -74,11 +70,13 @@ pub async fn check(
                 };
                 let own = without_fills(&plan, &fills);
                 functions::check_pg(store, target, &functions::scan_plan(&own), false).await?;
-                let touched = guard::pg_relations(&plan);
+                let touched =
+                    crate::lineage::pg_read_relations(store, target, &explain_sql, &plan).await?;
                 let written = functions::scan_sql(&change.sql);
                 crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
-                refuse_unshared(store, target, &touched).await?;
-                masked_mention(store, target, &marks, &touched, change, &text).await?;
+                let above = crate::lineage::above(store, target, &touched).await?;
+                refuse_unshared(target, &above, &touched)?;
+                masked_mention(store, target, &marks, &above, &touched, change, &text).await?;
             }
         }
         ConnectionRecord::Sqlite(c) => {
@@ -89,7 +87,8 @@ pub async fn check(
                     .iter()
                     .map(|(s, t)| (Some(s.clone()), t.clone()))
                     .collect();
-                refuse_unshared(store, target, &touched).await?;
+                let above = crate::lineage::Above::default();
+                refuse_unshared(target, &above, &touched)?;
                 for m in marks
                     .iter()
                     .filter(|m| m.schema.eq_ignore_ascii_case("main"))
@@ -99,7 +98,7 @@ pub async fn check(
                         return Err(masked_refusal(m));
                     }
                 }
-                masked_mention(store, target, &marks, &touched, change, "").await?;
+                masked_mention(store, target, &marks, &above, &touched, change, "").await?;
             }
         }
     }
@@ -229,9 +228,9 @@ fn masked_refusal(m: &mask::Marked) -> String {
 }
 
 /// Every relation a statement touches must be shared (statistics never are).
-async fn refuse_unshared(
-    store: &mut Store,
+fn refuse_unshared(
     target: &Target,
+    above: &crate::lineage::Above,
     touched: &[(Option<String>, String)],
 ) -> Result<(), String> {
     let rule =
@@ -242,23 +241,11 @@ async fn refuse_unshared(
     if statistics {
         return Err(guard::STATISTICS_REFUSAL.into());
     }
-    if !rule.restricts() {
-        return Ok(());
-    }
     let default = match target.record {
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
     };
-    let cached = store.catalog_for(target, touched, default).await?;
-    let catalog = &cached.catalog;
-    let blocked = touched.iter().any(|(schema, table)| {
-        let schema = schema.as_deref().unwrap_or(default);
-        match access::find_exact(catalog, schema, table) {
-            Some(t) => !rule.allows_node(catalog, schema, t),
-            None => !rule.allows(schema, table),
-        }
-    });
-    if blocked {
+    if rule.restricts() && crate::lineage::keeps_back(&rule, above, touched, default) {
         return Err(guard::HIDDEN_REFUSAL.into());
     }
     Ok(())
@@ -271,6 +258,7 @@ async fn masked_mention(
     store: &mut Store,
     target: &Target,
     marks: &[mask::Marked],
+    above: &crate::lineage::Above,
     touched: &[(Option<String>, String)],
     change: &RowChange,
     plan_text: &str,
@@ -286,14 +274,13 @@ async fn masked_mention(
     };
     // A partition or child table counts as the tables it's part of, in
     // any schema.
-    let marked_above = |schema: &str, rel: &str| -> Option<&mask::Marked> {
-        let above = access::above(catalog, schema, rel);
-        marks.iter().find(|m| {
-            above
-                .iter()
-                .any(|(s, t)| s.eq_ignore_ascii_case(&m.schema) && t.eq_ignore_ascii_case(&m.table))
-        })
+    let part_of = |m: &mask::Marked, schema: &str, rel: &str| {
+        let is = |s: &str, t: &str| {
+            s.eq_ignore_ascii_case(&m.schema) && t.eq_ignore_ascii_case(&m.table)
+        };
+        is(schema, rel) || above.of(schema, rel).iter().any(|l| is(&l.schema, &l.name))
     };
+    let marked_above = |schema: &str, rel: &str| marks.iter().find(|m| part_of(m, schema, rel));
     // Postgres: a column alias list on a table with masked columns hides
     // their names from the plan (`mask::pg_renamed`).
     if let Ok(plan) = serde_json::from_str::<Json>(plan_text) {
@@ -317,11 +304,9 @@ async fn masked_mention(
     let named = safety::identifiers(&change.sql);
     let plan_words = words(plan_text);
     for m in marks {
-        let touches = touched.iter().any(|(s, t)| {
-            access::above(catalog, s.as_deref().unwrap_or(default), t)
-                .iter()
-                .any(|(s, t)| s.eq_ignore_ascii_case(&m.schema) && t.eq_ignore_ascii_case(&m.table))
-        });
+        let touches = touched
+            .iter()
+            .any(|(s, t)| part_of(m, s.as_deref().unwrap_or(default), t));
         let column = m.column.to_lowercase();
         // `c::text`, `row_to_json(c)`: a whole row carries every column
         // (the plan writes it `c.*`).

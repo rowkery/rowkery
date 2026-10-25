@@ -17,6 +17,7 @@ mod change;
 mod e2e_tests;
 mod functions;
 mod guard;
+mod lineage;
 pub mod mask;
 pub mod picker;
 pub mod proposals;
@@ -545,16 +546,31 @@ async fn list_databases(store: &mut Store, target: &Target) -> Outcome {
     Ok(json!({ "databases": names }))
 }
 
+/// A partition, in its parent's schema or another: listed with its parent.
+fn is_partition(t: &TableNode) -> bool {
+    t.is_partition || t.partition_of.is_some()
+}
+
+/// The schema a relation named without one is in.
+fn default_schema(record: &ConnectionRecord) -> &'static str {
+    match record {
+        ConnectionRecord::Postgres(_) => "public",
+        ConnectionRecord::Sqlite(_) => "main",
+    }
+}
+
 async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outcome {
     let rule = rule(target);
     let cached = store.catalog(target, refresh).await?;
     let catalog = &cached.catalog;
     let tables: Vec<Json> = all_tables(catalog)
-        .filter(|(_, t)| t.partition_of.is_none())
+        .filter(|(_, t)| !is_partition(t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
         .map(|(schema, t)| {
-            let partitions = all_tables(catalog)
-                .filter(|(s, p)| *s == schema && p.partition_of.as_deref() == Some(&t.name))
+            let partitions = catalog
+                .inherited_by(schema, &t.name)
+                .iter()
+                .filter(|(s, p)| catalog.table(s, p).is_some_and(is_partition))
                 .count();
             let mut line = format!("{schema}.{}", t.name);
             if t.kind != TableKind::Table {
@@ -585,7 +601,7 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
     let mut tables = Vec::new();
     let mut columns = Vec::new();
     for (schema, t) in all_tables(catalog)
-        .filter(|(_, t)| t.partition_of.is_none())
+        .filter(|(_, t)| !is_partition(t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
     {
         if t.name.to_lowercase().contains(&needle) && tables.len() < MAX_HITS {
@@ -815,9 +831,8 @@ async fn run_read(
                 return Err(sessions::ACTIVITY_REFUSAL.into());
             }
             functions::check_pg(store, target, &written, true).await?;
-            let explain = store
-                .read(target, &format!("EXPLAIN (FORMAT JSON, VERBOSE) {capped}"))
-                .await?;
+            let explain_sql = format!("EXPLAIN (FORMAT JSON, VERBOSE) {capped}");
+            let explain = store.read(target, &explain_sql).await?;
             let text = match explain.rows.first().and_then(|r| r.first()) {
                 Some(rowkery_core::Value::Text(t)) => t.clone(),
                 _ => return Err("EXPLAIN returned no plan.".into()),
@@ -831,7 +846,11 @@ async fn run_read(
             let (lines, scans) = guard::pg_plan(&plan);
             let scans: Vec<(Option<String>, String)> =
                 scans.into_iter().map(|s| (s.schema, s.table)).collect();
-            let touched = guard::pg_relations(&plan);
+            let touched = if rule.restricts() || !marks.is_empty() {
+                lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
+            } else {
+                guard::pg_relations(&plan)
+            };
             refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }
@@ -885,18 +904,11 @@ async fn run_read(
         return Err(guard::STATISTICS_REFUSAL.into());
     }
     if rule.restricts() {
-        let cached = store.catalog_for(target, &touched, "main").await?;
-        let catalog = &cached.catalog;
         // Every relation the plan reads (views and CTEs resolved to the
-        // tables underneath) must be shared, matched by its exact name.
-        let blocked = touched.iter().any(|(schema, table)| {
-            let schema = schema.as_deref().unwrap_or("main");
-            match access::find_exact(catalog, schema, table) {
-                Some(t) => !rule.allows_node(catalog, schema, t),
-                None => !rule.allows(schema, table),
-            }
-        });
-        if blocked {
+        // tables underneath) must be shared, matched by its exact name, with
+        // what it's a partition or child table of.
+        let above = lineage::above(store, target, &touched).await?;
+        if lineage::keeps_back(&rule, &above, &touched, default_schema(&target.record)) {
             return Err(guard::HIDDEN_REFUSAL.into());
         }
     }

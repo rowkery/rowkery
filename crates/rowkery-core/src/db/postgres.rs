@@ -1490,7 +1490,8 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                      WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_schemas,
                ARRAY(SELECT p.relname::text FROM pg_catalog.pg_inherits i
                        JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
-                     WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_names
+                     WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_names,
+               c.relispartition
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         LEFT JOIN pg_catalog.pg_inherits inh
@@ -1671,6 +1672,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                 row_estimate,
                 partition_of,
                 inherits_from,
+                is_partition: row.get(9),
                 foreign_keys: Vec::new(),
                 table_bytes,
                 index_bytes: None,

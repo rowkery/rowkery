@@ -85,21 +85,25 @@ impl Tables<'_> {
         }
     }
 
-    /// Whether a catalog table is reachable. A partition or child table goes
-    /// with the tables it's part of, in any schema: shared when one of them
-    /// is ticked, hidden when one is hidden. And with a hide list, a table
-    /// with a hidden partition or child table below it is hidden too, since
-    /// reading it reads their rows.
+    /// Whether a catalog table is reachable, the same way
+    /// `lineage::keeps_back` judges a statement. A whitelist shares a
+    /// partition of a ticked table, in any schema; a child table made with
+    /// `INHERITS` needs its own tick. A hide list hides a partition or child
+    /// table of a hidden table, and a table with one below it, since reading
+    /// it reads their rows.
     pub fn allows_node(&self, catalog: &SchemaCatalog, schema: &str, t: &TableNode) -> bool {
-        let Some(above) = lineage(catalog, schema, t, Direction::Up) else {
-            return false;
-        };
         match self {
-            Tables::Only(_) => above.iter().any(|(s, n)| self.allows(s, n)),
+            Tables::Only(_) => partition_of(catalog, schema, t)
+                .iter()
+                .any(|(s, n)| self.allows(s, n)),
             Tables::AllBut(_) => {
-                above.iter().all(|(s, n)| self.allows(s, n))
-                    && lineage(catalog, schema, t, Direction::Down)
-                        .is_some_and(|below| below.iter().all(|(s, n)| self.allows(s, n)))
+                lineage(catalog, schema, t, Direction::Down).is_some_and(|below| {
+                    below.iter().all(|&(s, n)| match catalog.table(s, n) {
+                        Some(node) => lineage(catalog, s, node, Direction::Up)
+                            .is_some_and(|up| up.iter().all(|(s, n)| self.allows(s, n))),
+                        None => self.allows(s, n),
+                    })
+                })
             }
         }
     }
@@ -183,18 +187,37 @@ fn lineage<'a>(
     Some(seen)
 }
 
-/// `schema.name` and every table it's a partition or child table of, in any
-/// schema (just itself when the catalog doesn't have it).
-pub fn above(catalog: &SchemaCatalog, schema: &str, name: &str) -> Vec<(String, String)> {
-    find_exact(catalog, schema, name)
-        .and_then(|t| lineage(catalog, schema, t, Direction::Up))
-        .map(|all| {
-            all.into_iter()
-                .map(|(s, n)| (s.to_string(), n.to_string()))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![(schema.to_string(), name.to_string())])
+/// `schema.t` and the tables it's a partition of, up through partitions
+/// only, in any schema.
+fn partition_of<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+) -> Vec<(&'a str, &'a str)> {
+    let mut chain = vec![(schema, t.name.as_str())];
+    let mut node = Some(t);
+    while let Some(n) = node.filter(|n| n.is_partition || n.partition_of.is_some()) {
+        let &(s, _) = chain.last().expect("chain");
+        let Some(parent) = n
+            .inherits_from
+            .first()
+            .map(|(s, n)| (s.as_str(), n.as_str()))
+            // A catalog cached before `inherits_from` has only this.
+            .or_else(|| n.partition_of.as_deref().map(|p| (s, p)))
+        else {
+            break;
+        };
+        if chain.contains(&parent) || chain.len() > LINEAGE_DEPTH {
+            break;
+        }
+        chain.push(parent);
+        node = catalog.table(parent.0, parent.1);
+    }
+    chain
 }
+
+/// Deepest chain of partitions followed up.
+const LINEAGE_DEPTH: usize = 64;
 
 /// The table `schema.name` with that exact spelling.
 pub fn find_exact<'a>(
@@ -202,13 +225,7 @@ pub fn find_exact<'a>(
     schema: &str,
     name: &str,
 ) -> Option<&'a TableNode> {
-    catalog
-        .databases
-        .iter()
-        .flat_map(|db| db.schemas.iter())
-        .filter(|s| s.name == schema)
-        .flat_map(|s| s.tables.iter())
-        .find(|t| t.name == name)
+    catalog.table(schema, name)
 }
 
 #[cfg(test)]

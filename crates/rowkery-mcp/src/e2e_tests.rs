@@ -402,11 +402,15 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
         "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1",
         // A parent reads its hidden child table's rows.
         "SELECT name FROM mcp_e2e_people",
-        "SELECT name FROM ONLY mcp_e2e_people",
     ] {
         let err = query(&mcp, sql).await.expect_err(sql);
         assert!(err.starts_with("Refused"), "{sql}: {err}");
     }
+    // Its own rows alone are fine.
+    let own = query(&mcp, "SELECT name FROM ONLY mcp_e2e_people")
+        .await
+        .expect("ONLY the parent");
+    assert_eq!(own["rows"], json!([["ada"]]));
     let tables = call(&mcp, "list_tables", json!({ "connection": ID }))
         .await
         .unwrap()
@@ -428,6 +432,28 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
         .await
         .expect_err("new partition");
     assert!(err.starts_with("Refused"), "{err}");
+    // So is a table attached as one later.
+    session_execute(
+        &setup,
+        "CREATE TABLE mcp_e2e_other.mcp_e2e_ledger_3 (id int, amount int);
+         INSERT INTO mcp_e2e_other.mcp_e2e_ledger_3 VALUES (250, 1);",
+    )
+    .await
+    .expect("loose table");
+    query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_3")
+        .await
+        .expect("not a partition yet");
+    session_execute(
+        &setup,
+        "ALTER TABLE mcp_e2e_ledger ATTACH PARTITION mcp_e2e_other.mcp_e2e_ledger_3
+           FOR VALUES FROM (200) TO (300);",
+    )
+    .await
+    .expect("attach");
+    let err = query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_3")
+        .await
+        .expect_err("attached");
+    assert!(err.starts_with("Refused"), "{err}");
 
     // Ticking the parent shares its partitions wherever they live.
     pg.mcp_hidden_tables = Vec::new();
@@ -436,7 +462,49 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
             pg.database.clone(),
             McpDbAccess {
                 mode: McpTableMode::Picked,
-                tables: vec!["public.mcp_e2e_ledger".into()],
+                tables: vec![
+                    "public.mcp_e2e_ledger".into(),
+                    "public.mcp_e2e_people".into(),
+                ],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    save(pg.clone());
+    let mcp = RowkeryMcp::default();
+    let ok = query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
+        .await
+        .expect("a ticked parent's partition");
+    assert_eq!(ok["rows"], json!([[42]]));
+    // A child table made with INHERITS is a table of its own: ticking its
+    // parent doesn't share it, nor the parent's rows that include it.
+    for sql in [
+        "SELECT name FROM mcp_e2e_other.mcp_e2e_vip",
+        "SELECT name FROM mcp_e2e_people",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused"), "{sql}: {err}");
+    }
+    let tables = call(&mcp, "list_tables", json!({ "connection": ID }))
+        .await
+        .unwrap()
+        .to_string();
+    assert!(
+        tables.contains("public.mcp_e2e_ledger") && !tables.contains("mcp_e2e_vip"),
+        "{tables}"
+    );
+    assert!(!tables.contains("mcp_e2e_ledger_1"), "{tables}");
+
+    // Partitions Postgres leaves out as the run starts (`now()` is only
+    // known then) still count: with one partition ticked, a query that the
+    // plan says reads only it is refused, since the run decides again.
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::Picked,
+                tables: vec!["mcp_e2e_other.mcp_e2e_ledger_1".into()],
             },
         )]
         .into_iter()
@@ -444,14 +512,16 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
     );
     save(pg);
     let mcp = RowkeryMcp::default();
-    let ok = query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
+    query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
         .await
-        .expect("a ticked parent's partition");
-    assert_eq!(ok["rows"], json!([[42]]));
-    let err = query(&mcp, "SELECT name FROM mcp_e2e_other.mcp_e2e_vip")
-        .await
-        .expect_err("unticked");
+        .expect("the ticked partition");
+    let pruned =
+        "SELECT amount FROM mcp_e2e_ledger WHERE id < date_part('year', now())::int - 1950";
+    let err = query(&mcp, pruned).await.expect_err("pruned at the start");
     assert!(err.starts_with("Refused"), "{err}");
+    query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
+        .await
+        .expect("pruning is back on for the next");
 
     let _ = session_execute(&setup, cleanup).await;
     std::env::remove_var("ROWKERY_CONFIG_DIR");

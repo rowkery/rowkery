@@ -195,6 +195,26 @@ pub fn pg_relations(explain_json: &Json) -> Vec<(Option<String>, String)> {
     out
 }
 
+/// Whether Postgres left partitions out of the plan as the executor
+/// started (`Subplans Removed`): pruning on values only known then, such as
+/// `now()`, which the run works out again and may land elsewhere.
+pub fn pg_pruned(explain_json: &Json) -> bool {
+    fn walk(node: &Json) -> bool {
+        node.get("Subplans Removed")
+            .and_then(Json::as_u64)
+            .is_some_and(|n| n > 0)
+            || node
+                .get("Plans")
+                .and_then(Json::as_array)
+                .is_some_and(|children| children.iter().any(walk))
+    }
+    let root = explain_json
+        .get(0)
+        .and_then(|p| p.get("Plan"))
+        .unwrap_or(explain_json);
+    walk(root)
+}
+
 /// Statistics hold sample values of every column (Postgres's `pg_stats`
 /// and `pg_stats_ext` most common values and histograms, read from these
 /// two catalogs; SQLite's `sqlite_stat3` / `sqlite_stat4` index samples),

@@ -17,14 +17,6 @@ use rowkery_core::safety::SafeMode;
 
 use crate::guard::STATEMENT_TIMEOUT;
 
-/// How old a catalog must be before a table it doesn't have reads it again
-/// ([`Store::catalog_for`]): a name that never resolves (a temporary table)
-/// doesn't reload it on every call.
-#[cfg(not(test))]
-const RELOAD_AFTER: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const RELOAD_AFTER: Duration = Duration::ZERO;
-
 /// Longest any one call waits on the database, connecting included.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -194,7 +186,8 @@ impl Store {
         session_execute(
             session,
             &format!(
-                "SET default_transaction_read_only = on; SET statement_timeout = '{}s'",
+                "SET default_transaction_read_only = on; SET statement_timeout = '{}s'; \
+                 RESET enable_partition_pruning",
                 STATEMENT_TIMEOUT.as_secs()
             ),
         )
@@ -266,31 +259,6 @@ impl Store {
         Ok(self.catalogs.get(&key).expect("catalog"))
     }
 
-    /// The catalog for judging the tables a statement touches, read again
-    /// first if it doesn't have one of them and is more than a few seconds
-    /// old: a table made since (a new partition of a hidden table) is
-    /// judged by what it's part of, not by its name alone.
-    pub async fn catalog_for(
-        &mut self,
-        target: &Target,
-        touched: &[(Option<String>, String)],
-        default_schema: &str,
-    ) -> Result<&CachedCatalog, String> {
-        let stale = {
-            let cached = self.catalog(target, false).await?;
-            cached.loaded.elapsed() > RELOAD_AFTER
-                && touched.iter().any(|(schema, table)| {
-                    crate::access::find_exact(
-                        &cached.catalog,
-                        schema.as_deref().unwrap_or(default_schema),
-                        table,
-                    )
-                    .is_none()
-                })
-        };
-        self.catalog(target, stale).await
-    }
-
     /// The other client sessions on the target's database.
     pub async fn activity(&mut self, target: &Target) -> Result<Vec<ServerSession>, String> {
         if !matches!(target.record, ConnectionRecord::Postgres(_)) {
@@ -348,6 +316,26 @@ impl Store {
 
     /// Runs one read (already checked and capped) with the session guards on.
     pub async fn read(&mut self, target: &Target, sql: &str) -> Result<ReadResult, String> {
+        self.read_with(target, sql, false).await
+    }
+
+    /// [`Self::read`] on Postgres with partition pruning off, for an
+    /// `EXPLAIN` that lists every partition the run could read. The next
+    /// statement's guards put pruning back.
+    pub async fn read_unpruned(
+        &mut self,
+        target: &Target,
+        sql: &str,
+    ) -> Result<ReadResult, String> {
+        self.read_with(target, sql, true).await
+    }
+
+    async fn read_with(
+        &mut self,
+        target: &Target,
+        sql: &str,
+        unpruned: bool,
+    ) -> Result<ReadResult, String> {
         match &target.record {
             ConnectionRecord::Sqlite(sqlite) => {
                 let path = sqlite.path.clone();
@@ -359,6 +347,11 @@ impl Store {
             ConnectionRecord::Postgres(_) => {
                 let key = target.key();
                 let session = self.session(target).await?;
+                if unpruned {
+                    session_execute(session, "SET enable_partition_pruning = off")
+                        .await
+                        .map_err(message)?;
+                }
                 let started = Instant::now();
                 let mut columns = Vec::new();
                 let mut rows = Vec::new();

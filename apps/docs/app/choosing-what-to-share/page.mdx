@@ -113,8 +113,9 @@ A table you haven't ticked is left out everywhere the agent looks:
 - `describe_table` answers "No table called …", and leaves out foreign keys that point to it or from it.
 - `sessions` blanks the text of any query that names it.
 - A query whose plan reads it, directly or through a view, join or subquery, is refused: "this reads a table the user hasn't shared with agents in Rowkery."
-- A partition or child table (`INHERITS`) goes with its parent table, in whatever schema it lives: shared when the parent is, hidden when it is hidden.
-- A table with a hidden partition or child table is hidden too, since reading it reads their rows.
+- A partition goes with its parent table, in whatever schema it lives, including one made or attached later: shared when the parent is ticked, hidden when the parent is hidden.
+- A child table made with `INHERITS` is hidden when its parent is, but needs its own tick to be shared. A parent with a hidden child table is left out of the lists, and a query that reads the child's rows through it is refused; `SELECT … FROM ONLY parent` reads the parent's own rows.
+- When Postgres would pick partitions only as the query starts (a filter on `now()`, say), every partition the query could read must be shared.
 - On Postgres, the statistics tables (`pg_statistic`) are refused, since they hold sample values from every column. Postgres's system catalogs aren't on your list either, so reading them directly is refused; the agent uses `list_tables` and `describe_table` instead.
 
 ## What agents can never do
