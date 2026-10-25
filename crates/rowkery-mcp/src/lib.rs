@@ -1452,19 +1452,23 @@ impl ServerHandler for RowkeryMcp {
             Err(message) => message.clone(),
         };
         entry.bytes = Some(text.len() as u64);
-        if keep_sample && outcome.is_ok() {
-            samples::save(
-                &samples::shape(entry.session.unwrap_or(0), entry.ts, &text),
-                entry.ts,
-            );
-        }
+        let sample = (keep_sample && outcome.is_ok())
+            .then(|| samples::shape(entry.session.unwrap_or(0), entry.ts, &text));
         if entry.verdict.is_none() {
             entry.verdict = Some(match &outcome {
                 Ok(_) => "ok".into(),
                 Err(e) => e.clone(),
             });
         }
-        audit::append(&entry);
+        // File writes, which can wait up to a second for another process's
+        // lock: off the async workers.
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(sample) = sample {
+                samples::save(&sample, entry.ts);
+            }
+            audit::append(&entry);
+        })
+        .await;
         let mut result = text_result(&outcome);
         if views && request.name == "query" && outcome.is_ok() {
             result.content.push(ContentBlock::text(views::SHOWN_NOTE));
