@@ -384,18 +384,9 @@ impl Store {
         out.map_err(message)
     }
 
-    /// Drops whatever this process holds for connections no longer shared.
-    pub fn forget_unshared(&mut self, config: &AppConfig) {
-        let shared: Vec<&str> = config
-            .connections
-            .iter()
-            .filter(|c| c.allow_mcp())
-            .map(|c| c.id())
-            .collect();
-        self.sessions
-            .retain(|(id, _), _| shared.contains(&id.as_str()));
-        self.catalogs
-            .retain(|(id, _), _| shared.contains(&id.as_str()));
+    /// Holds nothing worth keeping: no session, no cached schema.
+    pub fn is_idle(&self) -> bool {
+        self.sessions.is_empty() && self.catalogs.is_empty()
     }
 
     pub async fn list_databases(

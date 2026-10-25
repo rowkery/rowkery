@@ -1521,7 +1521,36 @@ async fn a_slow_call_holds_up_only_its_own_connection() {
     session_execute(&setup, "ROLLBACK").await.expect("unlock");
     let read = held.await.expect("join").expect("read");
     assert_eq!(read["rows"], json!([[0]]));
+
+    // A database that isn't there leaves nothing behind.
+    let database = pg_config().database;
+    let missing = call(
+        &mcp,
+        "query",
+        json!({ "connection": ID, "database": "mcp_no_such_db", "sql": "SELECT 1" }),
+    )
+    .await;
+    assert!(missing.is_err());
+    assert!(!mcp
+        .stores()
+        .contains_key(&(ID.to_string(), "mcp_no_such_db".to_string())));
+
+    // Unsharing a connection drops its session on the next call, whichever.
+    let other = ("mcp-e2e-pg-other".to_string(), database.clone());
+    assert!(mcp.stores().contains_key(&other));
+    config.connections.retain(|c| c.id() == ID);
+    config.save().expect("save config");
+    call(&mcp, "list_connections", json!({}))
+        .await
+        .expect("list");
+    assert!(!mcp.stores().contains_key(&other));
+    assert!(mcp.stores().contains_key(&(ID.to_string(), database)));
+
+    session_execute(&setup, "DROP TABLE mcp_slow_locked")
+        .await
+        .expect("cleanup");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // The env lock spans the whole test, awaits included: each test has its own runtime.
