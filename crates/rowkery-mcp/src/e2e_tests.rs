@@ -54,6 +54,27 @@ async fn query(mcp: &RowkeryMcp, sql: &str) -> Result<Json, String> {
     call(mcp, "query", json!({ "connection": ID, "sql": sql })).await
 }
 
+/// The newest Rowkery backend other than `setup`'s: the MCP server's
+/// session (agents can't call pg_backend_pid() themselves).
+async fn mcp_backend(setup: &rowkery_core::db::postgres::PostgresSession) -> Json {
+    let mut pid = Json::Null;
+    rowkery_core::db::postgres::session_query_stream(
+        setup,
+        "SELECT pid FROM pg_stat_activity
+         WHERE application_name LIKE 'Rowkery %' AND pid <> pg_backend_pid()
+         ORDER BY backend_start DESC LIMIT 1",
+        |batch, _| {
+            if let Some(row) = batch.rows.first() {
+                pid = json!(format!("{:?}", row[0]));
+            }
+            Ok(())
+        },
+    )
+    .await
+    .expect("backend");
+    pid
+}
+
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
@@ -124,6 +145,76 @@ async fn guards_hold_against_a_real_postgres() {
     query(&mcp, "SELECT v FROM mcp_e2e_big WHERE id = 5")
         .await
         .expect("indexed read");
+    // Rows are shaped as they arrive: 800 MB of cells, read to the row cap,
+    // answers in its first 200 characters each.
+    let big = query(
+        &mcp,
+        "SELECT repeat('x', 4000000) FROM generate_series(1, 400)",
+    )
+    .await
+    .expect("big cells");
+    assert_eq!(big["more"], true);
+    assert_eq!(big["row_count"], 200);
+    assert_eq!(big["notes"], json!(["text over 200 chars was cut"]));
+    let before = mcp_backend(&setup).await;
+    assert_ne!(before, Json::Null);
+    // A read stopped at 64 KB with a few rows left keeps its session: they
+    // are read off before the next call.
+    let cut = query(
+        &mcp,
+        "SELECT repeat('x', 1000), repeat('y', 1000) FROM generate_series(1, 400)",
+    )
+    .await
+    .expect("cut at 64 KB");
+    assert!(
+        cut["notes"].to_string().contains("64 KB"),
+        "{}",
+        cut["notes"]
+    );
+    let kept = mcp_backend(&setup).await;
+    assert_eq!(kept, before, "a short drain keeps the session");
+    // One whose rest takes seconds to come is cancelled and its session
+    // dropped; the next call opens a fresh one.
+    let slow = query(
+        &mcp,
+        "SELECT repeat('x', 1000), repeat('y', 1000),
+                (SELECT count(*) FROM generate_series(1, 200000 + g))
+         FROM generate_series(1, 400) g",
+    )
+    .await
+    .expect("cut at 64 KB, slow rest");
+    assert!(
+        slow["notes"].to_string().contains("64 KB"),
+        "{}",
+        slow["notes"]
+    );
+    query(&mcp, "SELECT 1").await.expect("fresh session");
+    let fresh = mcp_backend(&setup).await;
+    assert_ne!(fresh, before, "a slow drain drops the session");
+    let ok = query(&mcp, "SELECT n FROM mcp_e2e_visible")
+        .await
+        .expect("read after a cancelled one");
+    assert_eq!(ok["rows"], json!([[0]]));
+
+    // `'now'` is folded into the plan when it's made: the checked EXPLAIN
+    // and the run plan at one moment, so a filter on its microseconds can't
+    // leave the hidden table out of the check and read it in the run.
+    let flip = "SELECT ssn FROM mcp_e2e_secret \
+                WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0";
+    let (mut ran, mut refused) = (0, 0);
+    for _ in 0..40 {
+        match query(&mcp, flip).await {
+            Ok(out) => {
+                assert_eq!(out["rows"], json!([]), "the run read the hidden table");
+                ran += 1;
+            }
+            Err(err) => {
+                assert!(err.starts_with("Refused"), "{err}");
+                refused += 1;
+            }
+        }
+    }
+    assert!(ran > 0 && refused > 0, "{ran} ran, {refused} refused");
 
     // Everyday analytics stay open: aggregates, dates, JSON, windows, and
     // the system views that describe tables.
@@ -375,7 +466,8 @@ async fn masked_columns_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events CASCADE;
+        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people, mcp_mask_tagged, mcp_mask_upart, mcp_mask_log_2024, mcp_mask_log_2025, mcp_mask_vc CASCADE;
+         DROP SCHEMA IF EXISTS mcp_mask_s CASCADE;
          DROP FUNCTION IF EXISTS mcp_mask_lookup(int);
          CREATE TABLE mcp_mask_customers (id int PRIMARY KEY, email text, plan text);
          CREATE INDEX mcp_mask_customers_email ON mcp_mask_customers (lower(email));
@@ -386,7 +478,27 @@ async fn masked_columns_hold_against_a_real_postgres() {
          CREATE TABLE mcp_mask_events (id int, email text, at date) PARTITION BY RANGE (at);
          CREATE TABLE mcp_mask_events_a PARTITION OF mcp_mask_events
            FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
-         INSERT INTO mcp_mask_events VALUES (1, 'mara@fjord.se', '2026-02-01');
+         CREATE SCHEMA mcp_mask_s;
+         CREATE TABLE mcp_mask_s.events_b PARTITION OF mcp_mask_events
+           FOR VALUES FROM ('2026-07-01') TO ('2027-01-01');
+         INSERT INTO mcp_mask_events VALUES (1, 'mara@fjord.se', '2026-02-01'),
+           (2, 'tomas@ibarra.dev', '2026-08-01');
+         CREATE TABLE mcp_mask_people (id int, email text);
+         CREATE TABLE mcp_mask_staff () INHERITS (mcp_mask_people);
+         INSERT INTO mcp_mask_people VALUES (1, 'mara@fjord.se');
+         INSERT INTO mcp_mask_staff VALUES (2, 'tomas@ibarra.dev');
+         CREATE TABLE mcp_mask_tagged (id int, tag text);
+         CREATE TABLE mcp_mask_both () INHERITS (mcp_mask_people, mcp_mask_tagged);
+         INSERT INTO mcp_mask_both VALUES (3, 'kim@x.io', 'vip');
+         CREATE TABLE mcp_mask_upart (id int) PARTITION BY RANGE (id);
+         CREATE TABLE mcp_mask_upart_a PARTITION OF mcp_mask_upart FOR VALUES FROM (0) TO (100);
+         INSERT INTO mcp_mask_upart VALUES (1), (2);
+         CREATE TABLE mcp_mask_log_2024 (id int, email text);
+         CREATE TABLE mcp_mask_log_2025 (id int, email text);
+         INSERT INTO mcp_mask_log_2024 VALUES (1, 'mara@fjord.se');
+         INSERT INTO mcp_mask_log_2025 VALUES (2, 'tomas@ibarra.dev');
+         CREATE TABLE mcp_mask_vc (id int, email varchar(100));
+         INSERT INTO mcp_mask_vc VALUES (1, 'mara@fjord.se');
          CREATE VIEW mcp_mask_view AS SELECT id, email FROM mcp_mask_customers;
          CREATE FUNCTION mcp_mask_lookup(i int) RETURNS text LANGUAGE plpgsql STABLE AS
            $$ BEGIN RETURN (SELECT email FROM mcp_mask_customers WHERE id = i); END $$;",
@@ -413,6 +525,10 @@ async fn masked_columns_hold_against_a_real_postgres() {
         vec![
             "public.mcp_mask_customers.email".to_string(),
             "public.mcp_mask_events.email".to_string(),
+            "public.mcp_mask_people.email".to_string(),
+            "public.mcp_mask_log_2024.email".to_string(),
+            "public.mcp_mask_log_2025.email".to_string(),
+            "public.mcp_mask_vc.email".to_string(),
         ],
     )]
     .into_iter()
@@ -443,11 +559,21 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT * FROM mcp_mask_customers",
         "SELECT * FROM mcp_mask_view",
         "SELECT c.email, o.total FROM mcp_mask_orders o JOIN mcp_mask_customers c ON c.id = o.customer_id",
-        "SELECT plan FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers",
+        "SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_events",
         "SELECT e.email FROM mcp_mask_events e",
         "SELECT email FROM mcp_mask_customers ORDER BY id LIMIT 2",
         "SELECT row_number() OVER (ORDER BY id), email FROM mcp_mask_customers",
         "WITH x AS (SELECT email FROM mcp_mask_customers) SELECT email FROM x",
+        // Partitions (one in another schema) and child tables answer for
+        // the table that was marked.
+        "SELECT email FROM mcp_mask_events",
+        "SELECT email FROM mcp_mask_events WHERE at > '2026-07-01'",
+        "SELECT email FROM mcp_mask_s.events_b",
+        "SELECT email FROM mcp_mask_people",
+        "SELECT email FROM mcp_mask_staff",
+        "SELECT p.email FROM mcp_mask_people p JOIN mcp_mask_orders o ON o.customer_id = p.id",
+        // Tables whose own names end in a number.
+        "SELECT email FROM mcp_mask_log_2024 UNION ALL SELECT email FROM mcp_mask_log_2025",
     ] {
         let out = query(&mcp, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
         let text = out["rows"].to_string();
@@ -486,6 +612,28 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT email FROM mcp_mask_customers INTERSECT SELECT 'mara@fjord.se'",
         "SELECT email FROM mcp_mask_customers EXCEPT SELECT 'mara@fjord.se'",
         "SELECT email FROM mcp_mask_customers UNION SELECT 'x'",
+        // A union names its column after the first part: masked values
+        // under a literal's name, a guess masked to compare, or an unmarked
+        // column beside one.
+        "SELECT 'x' UNION ALL SELECT email FROM mcp_mask_customers",
+        "SELECT * FROM (SELECT NULL::text AS e UNION ALL SELECT email FROM mcp_mask_customers) s",
+        "SELECT email FROM mcp_mask_customers WHERE id = 1 UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT count(DISTINCT e) FROM (SELECT email AS e FROM mcp_mask_customers UNION ALL SELECT 'mara@fjord.se') s",
+        "SELECT plan FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers",
+        "WITH RECURSIVE r(e, n) AS (SELECT 'x'::text, 0 UNION ALL SELECT c.email, r.n + 1 FROM r JOIN mcp_mask_customers c ON c.id = r.n + 1) SELECT e FROM r",
+        // The same through a union or partitions nested a level down.
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s",
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_events OFFSET 0) s",
+        "SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT email FROM mcp_mask_people UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT email FROM mcp_mask_events f_1 WHERE at = '2026-02-01' UNION ALL SELECT f.email FROM unnest(ARRAY['mara@fjord.se', 'zz']) f(email)",
+        "WITH RECURSIVE r(e) AS (SELECT email FROM mcp_mask_events UNION ALL SELECT e FROM r WHERE false) SELECT e FROM r",
+        "WITH x AS MATERIALIZED (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_events) SELECT y.email FROM x y",
+        "SELECT ARRAY(SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_events)",
+        "SELECT ARRAY(SELECT email FROM mcp_mask_events)",
+        "SELECT s.e FROM (SELECT email AS e, id FROM mcp_mask_customers UNION ALL SELECT email, id FROM mcp_mask_events OFFSET 0) s WHERE s.id > 0",
+        "SELECT email FROM mcp_mask_events EXCEPT ALL SELECT 'zz'",
+        "SELECT email FROM mcp_mask_people EXCEPT ALL SELECT 'zz'",
         "SELECT id FROM mcp_mask_events WHERE email LIKE 'm%'",
         "SELECT id FROM mcp_mask_view WHERE email > 'm'",
         "SELECT count(email) FILTER (WHERE email LIKE 'm%') FROM mcp_mask_customers",
@@ -495,6 +643,80 @@ async fn masked_columns_hold_against_a_real_postgres() {
         assert!(err.starts_with("Refused"), "{sql}: {err}");
         assert!(!err.contains("mara@"), "{sql}: {err}");
     }
+    // Postgres names a table read in parts by its alias, numbered when
+    // something with no node of its own (another partitioned table, a
+    // union's subquery) took it first, and cuts a long one to fit: never
+    // the real values.
+    let long = "a".repeat(63);
+    for sql in [
+        "SELECT o.id, x.email FROM mcp_mask_upart o JOIN (SELECT id, email FROM mcp_mask_events o) x ON x.id = o.id".to_string(),
+        "SELECT x.email FROM (SELECT 1 AS k UNION ALL SELECT 2) e, (SELECT email FROM mcp_mask_events e) x".to_string(),
+        "SELECT x.email FROM (SELECT 1 AS k UNION ALL SELECT 2) p, (SELECT email FROM mcp_mask_people p) x".to_string(),
+        format!("SELECT {long}.email FROM mcp_mask_events {long}"),
+        format!("SELECT {long}.email FROM mcp_mask_people {long}"),
+        format!("SELECT {long}.id FROM mcp_mask_events {long} ORDER BY {long}.email"),
+    ] {
+        match query(&mcp, &sql).await {
+            Ok(out) => assert!(!out["rows"].to_string().contains('@'), "{sql} leaked: {out}"),
+            Err(err) => assert!(err.starts_with("Refused"), "{sql}: {err}"),
+        }
+    }
+    // A reused alias with no marked column read is fine.
+    for sql in [
+        "SELECT id FROM mcp_mask_log_2024 UNION ALL SELECT id FROM mcp_mask_log_2025",
+        // A child of a marked table and an unmarked one, read through the
+        // unmarked one without the marked column.
+        "SELECT t.id, t.tag FROM mcp_mask_tagged t",
+        "SELECT t.id FROM mcp_mask_orders t UNION ALL SELECT t.id FROM mcp_mask_customers t",
+        "SELECT c.id FROM mcp_mask_orders c WHERE c.customer_id IN (SELECT c.id FROM mcp_mask_people c)",
+    ] {
+        query(&mcp, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+
+    // The union cases above are refused for the union, not by chance.
+    for sql in [
+        "SELECT 'x' UNION ALL SELECT email FROM mcp_mask_customers",
+        "SELECT email FROM mcp_mask_customers WHERE id = 1 UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s",
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_events OFFSET 0) s",
+        "SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT email FROM mcp_mask_people UNION ALL SELECT 'mara@fjord.se'",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.contains("without the UNION ALL"), "{sql}: {err}");
+    }
+    // Marked columns of different types can't be followed through a union.
+    let err = query(
+        &mcp,
+        "SELECT email FROM mcp_mask_vc UNION ALL SELECT email FROM mcp_mask_customers",
+    )
+    .await
+    .expect_err("varchar beside text");
+    assert!(err.contains("different types"), "{err}");
+    // However high an alias's number, the check answers at once.
+    let started = std::time::Instant::now();
+    match query(
+        &mcp,
+        "SELECT email FROM mcp_mask_events x_99999999999 UNION ALL SELECT email FROM mcp_mask_customers y",
+    )
+    .await
+    {
+        Ok(out) => assert!(!out["rows"].to_string().contains('@'), "{out}"),
+        Err(err) => assert!(err.starts_with("Refused"), "{err}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // The agent's own `f` beside a partition it named `f_1` is never
+    // masked: no stand-in of a guess to compare.
+    match query(
+        &mcp,
+        "SELECT f.email FROM unnest(ARRAY['mara@fjord.se', 'zz']) f(email), mcp_mask_events f_1 WHERE f_1.at = '2026-02-01'",
+    )
+    .await
+    {
+        Ok(out) => assert_eq!(out["rows"], json!([["mara@fjord.se"], ["zz"]]), "{out}"),
+        Err(err) => assert!(err.starts_with("Refused"), "{err}"),
+    }
+
     // A column alias list renames the masked column in the plan, so a
     // filter on it would go unseen: refused. A plain alias is fine.
     for sql in [
@@ -525,6 +747,30 @@ async fn masked_columns_hold_against_a_real_postgres() {
     .await
     .expect_err("explain");
     assert!(err.contains("is masked"), "{err}");
+
+    // Nor an index on a partition in another schema, walked here because
+    // the planner is told to avoid plain scans.
+    session_execute(
+        &setup,
+        "CREATE INDEX mcp_mask_events_b_email ON mcp_mask_s.events_b (email);
+         ALTER ROLE CURRENT_USER SET enable_seqscan = off;
+         ALTER ROLE CURRENT_USER SET enable_bitmapscan = off;",
+    )
+    .await
+    .expect("partition index");
+    let forced = RowkeryMcp::default();
+    let walked = query(&forced, "SELECT email FROM mcp_mask_s.events_b").await;
+    let walked_parent = query(&forced, "SELECT email FROM mcp_mask_events").await;
+    session_execute(
+        &setup,
+        "ALTER ROLE CURRENT_USER RESET enable_seqscan; ALTER ROLE CURRENT_USER RESET enable_bitmapscan;",
+    )
+    .await
+    .expect("reset planner");
+    for walked in [walked, walked_parent] {
+        let err = walked.expect_err("an index on a partition elsewhere");
+        assert!(err.contains("mcp_mask_events_b_email"), "{err}");
+    }
 
     // An index on the column (here an expression index) can't be walked for
     // its order. Forced with the planner settings so the plan really uses it.
@@ -684,7 +930,8 @@ async fn masked_columns_hold_against_a_real_postgres() {
 
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events CASCADE;
+        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people, mcp_mask_tagged, mcp_mask_upart, mcp_mask_log_2024, mcp_mask_log_2025, mcp_mask_vc CASCADE;
+         DROP SCHEMA IF EXISTS mcp_mask_s CASCADE;
          DROP FUNCTION IF EXISTS mcp_mask_lookup(int);",
     )
     .await
@@ -973,6 +1220,44 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         .await
         .unwrap();
     assert_eq!(seats["rows"], json!([[50]]));
+
+    // A commit checks the change again in its own transaction, where
+    // `'now'` folds the same way for the check and the run.
+    let flip = "UPDATE mcp_p_orders SET note = (SELECT max(id)::text FROM mcp_p_hidden \
+                WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0) WHERE id = 1";
+    let (mut committed, mut refused) = (0, 0);
+    for _ in 0..40 {
+        let id = match propose(flip).await {
+            Ok(sent) => sent["id"].as_str().unwrap().to_string(),
+            Err(err) => {
+                assert!(err.starts_with("Refused"), "{err}");
+                refused += 1;
+                continue;
+            }
+        };
+        match proposals::commit(&id, &[1]).await {
+            Ok(CommitOutcome::Committed { .. }) => committed += 1,
+            Ok(CommitOutcome::Failed { error }) | Err(error) => {
+                assert!(error.starts_with("Refused"), "{error}");
+                refused += 1;
+            }
+            Ok(other) => panic!("{other:?}"),
+        }
+        // A refused commit leaves the proposal waiting; the queue holds five.
+        let _ = proposals::reject(&id, None);
+        let note = query(&mcp, "SELECT note FROM mcp_p_orders WHERE id = 1")
+            .await
+            .unwrap();
+        assert_ne!(
+            note["rows"],
+            json!([["4242"]]),
+            "the commit read the hidden table"
+        );
+    }
+    assert!(
+        committed > 0 && refused > 0,
+        "{committed} committed, {refused} refused"
+    );
 
     // Read-only connections take no proposals.
     pg.safe_mode = rowkery_core::safety::SafeMode::ReadOnly;

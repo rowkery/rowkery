@@ -9,6 +9,11 @@ pub use introspect::{
     TableIndexes, TableKind, TableNode, TableRef,
 };
 
+/// A batch is sent once its cells hold this many bytes of text and binary,
+/// before its row count is reached, so a result of big cells is never held
+/// a full batch at a time.
+pub(crate) const BATCH_BYTES: usize = 1 << 20;
+
 /// A cell. In JSON (the IPC to the webview) NULL is `null`, and an `Int`
 /// outside ±(2^53 − 1), where a JavaScript number would round it, is written
 /// as `{"BigInt": "<digits>"}` so it arrives exact; every other `Int` stays a
@@ -21,6 +26,17 @@ pub enum Value {
     Float(f64),
     Text(String),
     Bytes(Vec<u8>),
+}
+
+impl Value {
+    /// The bytes the cell holds beyond its own size (text and binary).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Value::Text(t) => t.len(),
+            Value::Bytes(b) => b.len(),
+            _ => 0,
+        }
+    }
 }
 
 /// Largest integer a JavaScript number holds exactly (`Number.MAX_SAFE_INTEGER`).

@@ -1,15 +1,15 @@
 //! Reaching a shared connection: read-only sessions, the schema catalog
 //! cache, and running a capped read on Postgres or SQLite.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rowkery_core::config::AppConfig;
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session, session_activity, session_execute, session_introspect,
-    session_list_databases, session_query_stream, session_table_indexes, PostgresSession,
-    ServerSession,
+    session_list_databases, session_ping, session_query_stream, session_table_indexes,
+    PostgresSession, ServerSession,
 };
 use rowkery_core::db::sqlite::SqliteDriver;
 use rowkery_core::db::{Column, Driver, DriverError, SchemaCatalog, Value};
@@ -96,17 +96,38 @@ pub struct CachedCatalog {
     pub loaded: Instant,
 }
 
-/// Rows of one capped read.
+/// Rows of one read, all kept.
 pub struct ReadResult {
-    pub columns: Vec<Column>,
     pub rows: Vec<Vec<Value>>,
+}
+
+/// What a read gave besides what its `each` kept.
+pub struct Read<S> {
+    pub columns: Vec<Column>,
+    pub state: S,
     pub elapsed_ms: u64,
 }
+
+/// How long a stopped Postgres read may take to read off the rows it left on
+/// the wire, checked with an empty round trip. Past this the statement is
+/// cancelled and the session dropped instead.
+const DRAIN_WAIT: Duration = Duration::from_millis(500);
+
+/// How long a cancel request may take before the session is dropped anyway.
+const CANCEL_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct Store {
     sessions: HashMap<(String, String), PostgresSession>,
     catalogs: HashMap<(String, String), CachedCatalog>,
+    /// The session a call holds one transaction open on (`begin`).
+    open: Option<(String, String)>,
+    /// Sessions a `begin` opened a transaction on and no `end` has rolled
+    /// back yet.
+    left_open: HashSet<(String, String)>,
+    /// A session handed in with its transaction already open (`on_session`),
+    /// kept as it came.
+    adopted: Option<(String, String)>,
 }
 
 fn message(err: DriverError) -> String {
@@ -119,15 +140,19 @@ fn message(err: DriverError) -> String {
     }
 }
 
-/// Opens the file with writes refused (`PRAGMA query_only`).
+/// Opens the file read-only, with `PRAGMA query_only` on top.
 fn open_sqlite(path: &str) -> Result<SqliteDriver, String> {
-    let mut driver = SqliteDriver::new(path).read_only(true);
+    let mut driver = SqliteDriver::new(path).read_only_file();
     driver.connect().map_err(message)?;
     Ok(driver)
 }
 
-/// Runs `sql` on a read-only SQLite connection, interrupted after the timeout.
-fn sqlite_read(path: &str, sql: &str) -> Result<ReadResult, String> {
+/// Runs `sql` on a read-only SQLite connection, interrupted after the timeout,
+/// handing each row to `each` until it wants no more.
+fn sqlite_read<S, F>(path: &str, sql: &str, mut state: S, mut each: F) -> Result<Read<S>, String>
+where
+    F: FnMut(&mut S, Vec<Value>) -> bool,
+{
     let mut driver = open_sqlite(path)?;
     let interrupt = driver.take_interrupt_handle();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
@@ -140,20 +165,27 @@ fn sqlite_read(path: &str, sql: &str) -> Result<ReadResult, String> {
     });
     let started = Instant::now();
     let mut columns = Vec::new();
-    let mut rows = Vec::new();
+    let mut stopped = false;
     let result = driver.query_stream(sql, |batch, first| {
         if first {
             columns = batch.columns;
         }
-        rows.extend(batch.rows);
+        for row in batch.rows {
+            if !each(&mut state, row) {
+                stopped = true;
+                return Err(DriverError::Message(String::new()));
+            }
+        }
         Ok(())
     });
     let _ = done_tx.send(());
     let _ = watchdog.join();
-    result.map_err(message)?;
-    Ok(ReadResult {
+    if !stopped {
+        result.map_err(message)?;
+    }
+    Ok(Read {
         columns,
-        rows,
+        state,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -163,16 +195,41 @@ impl Store {
     /// The guards are set again before every statement, so a `set_config` in
     /// an earlier SELECT can't loosen them.
     async fn session(&mut self, target: &Target) -> Result<&PostgresSession, String> {
+        self.session_then(target, "").await
+    }
+
+    /// [`Self::session`], running `then` after the guards in the same trip.
+    async fn session_then(
+        &mut self,
+        target: &Target,
+        then: &str,
+    ) -> Result<&PostgresSession, String> {
         let ConnectionRecord::Postgres(pg) = &target.record else {
             return Err("not a Postgres connection".into());
         };
         let key = target.key();
+        if self.adopted.as_ref() == Some(&key) {
+            debug_assert!(
+                then.is_empty(),
+                "an adopted session's owner runs its own statements"
+            );
+            return self
+                .sessions
+                .get(&key)
+                .ok_or_else(|| "The connection closed.".to_string());
+        }
         if self
             .sessions
             .get(&key)
             .is_some_and(|s| s.is_closed() || s.config() != &read_only(pg, &target.database))
         {
             self.sessions.remove(&key);
+        }
+        // A fresh session mid-call would run the rest outside the call's
+        // transaction, planned at another moment.
+        if self.open.as_ref() == Some(&key) && !self.sessions.contains_key(&key) {
+            self.open = None;
+            return Err("The connection closed during the call.".into());
         }
         if !self.sessions.contains_key(&key) {
             let config = read_only(pg, &target.database);
@@ -181,18 +238,82 @@ impl Store {
                 .map_err(|_| "Timed out connecting.".to_string())?
                 .map_err(message)?;
             self.sessions.insert(key.clone(), session);
+            self.left_open.remove(&key);
         }
+        // Outside a call's transaction, one a call that stopped early left
+        // open is rolled back first.
+        let close = if self.open.as_ref() != Some(&key) && self.left_open.contains(&key) {
+            "ROLLBACK; "
+        } else {
+            ""
+        };
         let session = self.sessions.get(&key).expect("session");
         session_execute(
             session,
             &format!(
-                "SET default_transaction_read_only = on; SET statement_timeout = '{}s'",
+                "{close}SET default_transaction_read_only = on; SET statement_timeout = '{}s'{then}",
                 STATEMENT_TIMEOUT.as_secs()
             ),
         )
         .await
         .map_err(message)?;
         Ok(session)
+    }
+
+    /// Opens one read-only transaction on Postgres for every statement up to
+    /// [`Self::end`]: a check's `EXPLAIN` and the run it allows then plan
+    /// against the same moment, since `'now'` and `'today'` are the
+    /// transaction's start and are folded into the plan. Planned apart, the
+    /// same SQL can read a partition or table in the run that the checked
+    /// plan left out.
+    pub async fn begin(&mut self, target: &Target) -> Result<(), String> {
+        if !matches!(target.record, ConnectionRecord::Postgres(_)) {
+            return Ok(());
+        }
+        self.open = None;
+        self.session_then(target, "; BEGIN READ ONLY").await?;
+        self.left_open.insert(target.key());
+        self.open = Some(target.key());
+        Ok(())
+    }
+
+    /// Starts a call outside any transaction an earlier call didn't end, so
+    /// its first statement rolls that one back.
+    pub fn settle(&mut self) {
+        self.open = None;
+    }
+
+    /// Rolls back what [`Self::begin`] opened, or drops a session that
+    /// can't, so the next call starts clean.
+    pub async fn end(&mut self, target: &Target) {
+        let key = target.key();
+        if self.open.as_ref() != Some(&key) {
+            return;
+        }
+        self.open = None;
+        let rolled_back = match self.sessions.get(&key) {
+            Some(session) => session_execute(session, "ROLLBACK").await.is_ok(),
+            None => true,
+        };
+        self.left_open.remove(&key);
+        if !rolled_back {
+            self.sessions.remove(&key);
+        }
+    }
+
+    /// A store whose statements on `target` run on `session`, inside the
+    /// transaction its owner opened (a commit checks a change in the one
+    /// that runs it). [`Self::into_session`] hands it back.
+    pub fn on_session(target: &Target, session: PostgresSession) -> Self {
+        let mut store = Self::default();
+        store.sessions.insert(target.key(), session);
+        store.adopted = Some(target.key());
+        store
+    }
+
+    /// The session given to [`Self::on_session`].
+    pub fn into_session(mut self, target: &Target) -> Option<PostgresSession> {
+        self.sessions.remove(&target.key())
     }
 
     /// Drops whatever this process holds for connections no longer shared.
@@ -315,46 +436,81 @@ impl Store {
 
     /// Runs one read (already checked and capped) with the session guards on.
     pub async fn read(&mut self, target: &Target, sql: &str) -> Result<ReadResult, String> {
+        let read = self
+            .read_each(target, sql, usize::MAX, Vec::new(), |rows, row| {
+                rows.push(row);
+                true
+            })
+            .await?;
+        Ok(ReadResult { rows: read.state })
+    }
+
+    /// `read`, handing each row to `each` as it arrives instead of keeping
+    /// them all; the read stops at the first row `each` turns down. `limit`
+    /// is the most rows `sql` returns: after a stop short of it, a Postgres
+    /// session that can't read off the rest within [`DRAIN_WAIT`] has its
+    /// statement cancelled and is dropped.
+    pub async fn read_each<S, F>(
+        &mut self,
+        target: &Target,
+        sql: &str,
+        limit: usize,
+        mut state: S,
+        mut each: F,
+    ) -> Result<Read<S>, String>
+    where
+        S: Send + 'static,
+        F: FnMut(&mut S, Vec<Value>) -> bool + Send + 'static,
+    {
         match &target.record {
             ConnectionRecord::Sqlite(sqlite) => {
                 let path = sqlite.path.clone();
                 let sql = sql.to_string();
-                tokio::task::spawn_blocking(move || sqlite_read(&path, &sql))
+                tokio::task::spawn_blocking(move || sqlite_read(&path, &sql, state, each))
                     .await
                     .map_err(|e| e.to_string())?
             }
             ConnectionRecord::Postgres(_) => {
                 let key = target.key();
                 let session = self.session(target).await?;
+                let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
                 let started = Instant::now();
                 let mut columns = Vec::new();
-                let mut rows = Vec::new();
+                let (mut seen, mut stopped) = (0usize, false);
                 let run = session_query_stream(session, sql, |batch, first| {
                     if first {
                         columns = batch.columns;
                     }
-                    rows.extend(batch.rows);
+                    for row in batch.rows {
+                        seen += 1;
+                        if !each(&mut state, row) {
+                            stopped = true;
+                            return Err(DriverError::Message(String::new()));
+                        }
+                    }
                     Ok(())
                 });
-                match tokio::time::timeout(CALL_TIMEOUT, run).await {
-                    Ok(result) => {
-                        result.map_err(message)?;
-                    }
-                    Err(_) => {
-                        // The server's own timeout should have fired first;
-                        // cancel and drop a session that stopped answering.
-                        let _ = cancel_with_token(
-                            session.cancel_token.clone(),
-                            session.cancel_via.clone(),
-                        )
-                        .await;
-                        self.sessions.remove(&key);
-                        return Err("Timed out waiting for the server.".into());
-                    }
+                let timed_out = match tokio::time::timeout(CALL_TIMEOUT, run).await {
+                    Ok(Err(err)) if !stopped => return Err(message(err)),
+                    Ok(_) => false,
+                    Err(_) => true,
+                };
+                // The server's own timeout should have fired first: cancel
+                // and drop a session that stopped answering, too.
+                let drop = timed_out
+                    || stopped && seen < limit && !session_ping(session, DRAIN_WAIT).await;
+                if drop {
+                    let _ =
+                        tokio::time::timeout(CANCEL_WAIT, cancel_with_token(cancel.0, cancel.1))
+                            .await;
+                    self.sessions.remove(&key);
                 }
-                Ok(ReadResult {
+                if timed_out {
+                    return Err("Timed out waiting for the server.".into());
+                }
+                Ok(Read {
                     columns,
-                    rows,
+                    state,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 })
             }
@@ -595,6 +751,29 @@ mod tests {
             reads("with x as (select v from secret) select * from x").contains(&"secret".into())
         );
         assert_eq!(reads("select s from t"), vec!["t".to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sqlite_read_stops_at_the_first_row_turned_down() {
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-each-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let started = Instant::now();
+        let read = sqlite_read(
+            path.to_str().unwrap(),
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c",
+            0usize,
+            |seen, _| {
+                *seen += 1;
+                *seen < 3
+            },
+        )
+        .unwrap();
+        assert_eq!(read.state, 3);
+        assert_eq!(read.columns.len(), 1);
+        assert!(started.elapsed() < STATEMENT_TIMEOUT);
         let _ = std::fs::remove_dir_all(dir);
     }
 

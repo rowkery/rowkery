@@ -12,7 +12,7 @@ use super::introspect::{
     ColumnNode, DatabaseNode, ForeignKeyNode, IndexNode, RowEstimate, SchemaCatalog, SchemaNode,
     TableKind, TableNode,
 };
-use super::{Column, Driver, DriverError, RowBatch, Value};
+use super::{Column, Driver, DriverError, RowBatch, Value, BATCH_BYTES};
 
 const SQLITE_EXACT_COUNT_THRESHOLD: u64 = 10_000;
 
@@ -30,6 +30,9 @@ const BATCH_SIZE: usize = 200;
 /// an agent) for longer than the busy timeout rusqlite sets on every
 /// connection it opens (5 s).
 pub const SQLITE_LOCKED: &str = "database is locked";
+/// A read-only open finding a hot journal: a program stopped mid-write, and
+/// only a read-write open rolls that back.
+pub const SQLITE_UNFINISHED_WRITE: &str = "The file has a write left unfinished by a program that stopped. Open it in Rowkery once to recover it, then try again.";
 
 /// SQLite's own objects (`sqlite_sequence`, `sqlite_stat1`, …): names that
 /// start with exactly `sqlite_`. Not `LIKE 'sqlite_%'`, which ignores case
@@ -50,6 +53,9 @@ pub struct SqliteDriver {
     interrupt: Option<InterruptHandle>,
     cancelled: Arc<AtomicBool>,
     read_only: bool,
+    /// Opened read-only at the file (`SQLITE_OPEN_READ_ONLY`), so no
+    /// statement, `PRAGMA query_only = off` included, can write.
+    file_read_only: bool,
     /// The file the connection opened, to notice it was replaced.
     opened: Option<FileId>,
 }
@@ -81,6 +87,7 @@ impl SqliteDriver {
             interrupt: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             read_only: false,
+            file_read_only: false,
             opened: None,
         }
     }
@@ -89,6 +96,15 @@ impl SqliteDriver {
     /// read-only connections.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Read-only at the file as well as by `PRAGMA query_only`, for a
+    /// connection that never writes (the MCP server's): a statement that
+    /// turns the pragma off still can't write.
+    pub fn read_only_file(mut self) -> Self {
+        self.read_only = true;
+        self.file_read_only = true;
         self
     }
 
@@ -245,6 +261,7 @@ impl SqliteDriver {
         let mut total_rows = 0u64;
         let mut more = false;
         let mut batch_rows: Vec<Vec<Value>> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_bytes = 0usize;
         let mut first_batch = true;
 
         while let Some(row) = rows.next().map_err(map_query_error)? {
@@ -258,12 +275,20 @@ impl SqliteDriver {
             let mut values = Vec::with_capacity(column_count);
             for i in 0..column_count {
                 let value = row.get_ref(i).map_err(map_query_error)?;
-                values.push(sqlite_value_to_core(value));
+                let value = sqlite_value_to_core(value);
+                batch_bytes += value.heap_bytes();
+                values.push(value);
             }
             batch_rows.push(values);
             total_rows += 1;
 
-            if batch_rows.len() >= BATCH_SIZE {
+            // The first batch names untyped columns from its values, so it
+            // only goes early once each has one, or at a far larger size.
+            let full = batch_bytes >= BATCH_BYTES
+                && (!first_batch
+                    || batch_bytes >= FIRST_BATCH_BYTES
+                    || all_typed(&columns, &batch_rows));
+            if batch_rows.len() >= BATCH_SIZE || full {
                 if first_batch {
                     name_untyped(&mut columns, &batch_rows);
                 }
@@ -272,6 +297,7 @@ impl SqliteDriver {
                     rows: batch_rows,
                 };
                 batch_rows = Vec::with_capacity(BATCH_SIZE);
+                batch_bytes = 0;
                 on_batch(batch, first_batch)?;
                 first_batch = false;
             }
@@ -311,11 +337,19 @@ impl Driver for SqliteDriver {
                 self.path
             )));
         }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
-        .map_err(|e| DriverError::Message(e.to_string()))?;
+        let flags = if self.file_read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        };
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(|e| DriverError::Message(e.to_string()))?;
+        if self.file_read_only {
+            // The first read is where SQLite finds a write a crash left
+            // unfinished, which only a read-write open can roll back.
+            conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+                .map_err(map_query_error)?;
+        }
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
@@ -364,9 +398,15 @@ impl Driver for SqliteDriver {
 }
 
 /// Maps an `interrupt()` abort to `Cancelled` so callers can tell it from a
-/// real error, and a lock held elsewhere to `SQLITE_LOCKED`.
+/// real error, a lock held elsewhere to `SQLITE_LOCKED`, and a crashed
+/// write a read-only open can't undo to `SQLITE_UNFINISHED_WRITE`.
 fn map_query_error(e: rusqlite::Error) -> DriverError {
     match &e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK =>
+        {
+            DriverError::Message(SQLITE_UNFINISHED_WRITE.into())
+        }
         rusqlite::Error::SqliteFailure(err, _)
             if err.code == rusqlite::ErrorCode::OperationInterrupted =>
         {
@@ -855,6 +895,21 @@ fn result_columns(stmt: &rusqlite::Statement<'_>) -> Vec<Column> {
         .collect()
 }
 
+/// Past this the first batch goes even with an expression column that has
+/// had only NULLs, which then stays untyped.
+const FIRST_BATCH_BYTES: usize = 16 * BATCH_BYTES;
+
+/// Whether every untyped column has a non-null value in `rows` for
+/// [`name_untyped`] to name it by.
+fn all_typed(columns: &[Column], rows: &[Vec<Value>]) -> bool {
+    columns.iter().enumerate().all(|(i, column)| {
+        !column.type_name.is_empty()
+            || rows
+                .iter()
+                .any(|row| !matches!(row.get(i), None | Some(Value::Null)))
+    })
+}
+
 /// Names each untyped column by the storage class of its first non-null
 /// value in `rows` (`integer`, `real`, `text`, `blob`, as `typeof()` says),
 /// the way SQLite itself types an expression's value. A column with only
@@ -921,6 +976,48 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].rows.len(), 2);
         assert_eq!(batches[0].rows[0][1], Value::Text("alpha".into()));
+    }
+
+    #[test]
+    fn big_cells_send_a_batch_before_its_row_count() {
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut sizes = Vec::new();
+        driver
+            .query_stream(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10)
+                 SELECT x, zeroblob(600000) FROM c",
+                |batch, _| {
+                    sizes.push(batch.rows.len());
+                    Ok(())
+                },
+            )
+            .expect("query");
+        assert_eq!(sizes, vec![2, 2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn a_first_batch_of_big_cells_waits_to_type_its_columns() {
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let (mut sizes, mut types) = (Vec::new(), Vec::new());
+        driver
+            .query_stream(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10)
+                 SELECT CASE WHEN x < 4 THEN NULL ELSE x END AS late, zeroblob(600000) FROM c",
+                |batch, first| {
+                    if first {
+                        types = batch.columns.iter().map(|c| c.type_name.clone()).collect();
+                    }
+                    sizes.push(batch.rows.len());
+                    Ok(())
+                },
+            )
+            .expect("query");
+        assert_eq!(types, vec!["integer", "blob"]);
+        assert_eq!(sizes, vec![4, 2, 2, 2]);
     }
 
     #[test]
@@ -995,6 +1092,41 @@ mod tests {
                 Ok(())
             })
             .expect_err("read-only");
+        assert!(err.to_string().contains("readonly"), "{err}");
+        let count = driver
+            .query_stream("SELECT * FROM items", |_, _| Ok(()))
+            .expect("reads still run");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn a_write_a_crash_left_unfinished_is_named_on_a_read_only_open() {
+        // What a read-only open's first read gets from a hot journal, which
+        // only a read-write open can roll back.
+        let hot = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY_ROLLBACK),
+            None,
+        );
+        assert_eq!(map_query_error(hot).into_message(), SQLITE_UNFINISHED_WRITE);
+    }
+
+    #[test]
+    fn a_read_only_file_refuses_writes_with_the_pragma_off() {
+        let (_file, path) = temp_db();
+        // A WAL database: the read-only open makes its -wal and -shm files
+        // (the directory is writable) but writes nothing else.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "wal").unwrap();
+        }
+        let mut driver = SqliteDriver::new(path).read_only_file();
+        driver.connect().expect("connect");
+        driver
+            .query_stream("PRAGMA query_only = 0", |_, _| Ok(()))
+            .expect("pragma");
+        let err = driver
+            .query_stream("DELETE FROM items", |_, _| Ok(()))
+            .expect_err("read-only file");
         assert!(err.to_string().contains("readonly"), "{err}");
         let count = driver
             .query_stream("SELECT * FROM items", |_, _| Ok(()))

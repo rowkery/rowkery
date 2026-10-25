@@ -33,7 +33,7 @@ Every query an agent runs is held to these limits. They are fixed in the server,
 
 - **Rows.** The agent can ask for any number of rows from 1 to the maximum with `max_rows`. Rowkery caps the query by wrapping it in an outer `SELECT … LIMIT`, so the query's own `ORDER BY` and `LIMIT` stay as written. When the cap cuts the result, `more` is `true`.
 - **Time.** On Postgres the limit is the session's `statement_timeout`; on SQLite the query is interrupted. Separately, Rowkery gives up on any one step that waits on the database (connecting, reading the schema, running the query) after 20 seconds.
-- **Big tables.** Before running a query, Rowkery reads its plan. On Postgres, a plan that reads a table of more than 100,000 rows (by the planner's estimate) from start to end is refused, and the refusal names the table and its indexes so the agent can filter on one. A plain browse that stops early under the row cap is fine. On SQLite, a local file nobody else is waiting on, the query runs anyway with a note.
+- **Big tables.** Before running a query, Rowkery reads its plan. On Postgres, a plan that reads a table of more than 100,000 rows (by the planner's estimate) from start to end is refused, and the refusal names the table and its indexes so the agent can filter on one. A plain browse that stops early under the row cap is fine. On SQLite, a local file nobody else is waiting on, the query runs anyway with a note. A Postgres plan bigger than 8 MB, which a query over a table with thousands of partitions or many joins can produce, is refused rather than checked. The `explain` tool lists plan lines up to 64 KB and says how many more there are.
 - **Text and size.** Text longer than 200 characters is cut and ends with `…`; binary values come back as `<N bytes>`. Rows stop once the JSON would pass 64 KB. Either way the answer carries a note saying so.
 - **Read-only.** Every Postgres query runs on a read-only session (`default_transaction_read_only`), set again before every statement, so nothing a query does can loosen it. SQLite files are opened with writes refused.
 
@@ -189,7 +189,7 @@ Every message below is the exact text an agent gets back. Parts in capitals or q
 
 ### Functions
 
-Agents can call Postgres's own functions that only compute on their arguments (every immutable built-in, such as `lower` or `count`, plus a list of safe ones for dates, JSON, text search and catalog descriptions). Rowkery checks the SQL as sent and again in the plan, where views and SQL functions are expanded.
+Agents can call Postgres's own functions that only compute on their arguments (every immutable built-in, such as `lower` or `count`, plus a list of safe ones for dates, JSON, text search and catalog descriptions). Rowkery checks the SQL as sent and again in the plan, where views and SQL functions are expanded. On Postgres the checked plan and the run share one read-only transaction, so a value fixed when a plan is made, such as `'now'`, can't lead the run to a table the checked plan left out. A proposed change is checked again in the transaction that commits it.
 
 | Message | What it means |
 | --- | --- |
@@ -241,7 +241,7 @@ Any other error from the database, such as a syntax error or a missing column, c
 | --- | --- |
 | `SQLite has no other sessions to show; sessions is for Postgres connections.` | `sessions` was called on a SQLite connection |
 
-In a `sessions` answer, a query that reads a table you haven't shared shows as `(reads a table not shared with agents)`, and one the login can't see as `(not visible to this login)`.
+In a `sessions` answer, a query that reads a table you haven't shared shows as `(reads a table not shared with agents)`, and one the login can't see as `(not visible to this login)`. A query with a backslash in a string that could read two ways, depending on that session's `standard_conforming_strings`, shows as `(its literals can't be told apart without the session's settings)`, so a value never shows as SQL.
 
 ### Proposed changes
 

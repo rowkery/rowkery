@@ -28,7 +28,7 @@ use super::introspect::{
     ColumnNode, DatabaseNode, EnumNode, ForeignKeyNode, FunctionNode, IndexNode, RowEstimate,
     SchemaCatalog, SchemaNode, TableIndexes, TableKind, TableNode,
 };
-use super::{Column, DriverError, RowBatch, Value};
+use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 
 mod activity;
 mod text_types;
@@ -921,6 +921,7 @@ where
         .collect();
     let mut total_rows = 0u64;
     let mut batch_rows: Vec<Vec<Value>> = Vec::with_capacity(opts.batch_rows);
+    let mut batch_bytes = 0usize;
     let mut first_batch = true;
     let mut first_row = None;
     // When the oldest row of the batch being built arrived.
@@ -942,7 +943,9 @@ where
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
-            values.push(postgres_value_to_core(&row, i, money_shown));
+            let value = postgres_value_to_core(&row, i, money_shown);
+            batch_bytes += value.heap_bytes();
+            values.push(value);
         }
         if batch_rows.is_empty() {
             batch_since = std::time::Instant::now();
@@ -951,6 +954,7 @@ where
         total_rows += 1;
 
         if batch_rows.len() >= opts.batch_rows
+            || batch_bytes >= BATCH_BYTES
             || batch_since.elapsed() >= opts.max_wait
             || full(total_rows)
         {
@@ -959,6 +963,7 @@ where
                 rows: batch_rows,
             };
             batch_rows = Vec::with_capacity(opts.batch_rows);
+            batch_bytes = 0;
             on_batch(batch, first_batch)?;
             first_batch = false;
         }
