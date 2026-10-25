@@ -928,11 +928,7 @@ async fn run_read(
             let explain = store
                 .read(target, &format!("EXPLAIN (FORMAT JSON, VERBOSE) {capped}"))
                 .await?;
-            let text = match explain.rows.first().and_then(|r| r.first()) {
-                Some(rowkery_core::Value::Text(t)) => t.clone(),
-                _ => return Err("EXPLAIN returned no plan.".into()),
-            };
-            let plan: Json = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            let (plan, _) = guard::pg_plan_json(explain.rows)?;
             let planned = functions::scan_plan(&plan);
             if sessions::reads_activity(&planned.call_names()) {
                 return Err(sessions::ACTIVITY_REFUSAL.into());
@@ -1091,7 +1087,14 @@ async fn run_read(
     }
 
     if plan_only {
-        let mut out = json!({ "plan": plan_lines });
+        let (shown, more) = guard::plan_shown(plan_lines);
+        let mut out = json!({ "plan": shown });
+        if more > 0 {
+            out["plan_note"] = json!(format!(
+                "{more} more plan lines not shown: the answer stops at {} KB.",
+                PAYLOAD_BYTES / 1024
+            ));
+        }
         // The same reading of the plan the app shows on ⌘E: its slowest step
         // and one hint.
         let readable = match &pg_plan_json {

@@ -49,6 +49,7 @@ fn docs_json() -> Json {
             "big_table_rows": guard::BIG_TABLE_ROWS,
             "cell_chars": guard::CELL_CHARS,
             "payload_bytes": guard::PAYLOAD_BYTES,
+            "plan_bytes": guard::PLAN_BYTES,
         },
         "tools": tools,
     })
