@@ -189,8 +189,9 @@ fn tools() -> Vec<Tool> {
         ),
         tool(
             "list_tables",
-            "Tables and views with approximate row counts and column counts. Cached for the session; refresh reloads the schema.",
+            "Tables and views with approximate row counts and column counts: up to 500, schemas on the search path first, with a count per schema of any not listed. Cached for the session; refresh reloads the schema.",
             json!({ "connection": connection, "database": database,
+                    "schema": { "type": "string", "description": "List only this schema" },
                     "refresh": { "type": "boolean", "description": "Reload the schema from the database" } }),
             &["connection"],
         ),
@@ -428,7 +429,8 @@ impl RowkeryMcp {
             "list_databases" => list_databases(&mut store, &target).await,
             "list_tables" => {
                 let refresh = args.get("refresh").and_then(Json::as_bool).unwrap_or(false);
-                list_tables(&mut store, &target, refresh).await
+                let schema = args.get("schema").and_then(Json::as_str);
+                list_tables(&mut store, &target, refresh, schema).await
             }
             "search_schema" => match required(args, "text") {
                 Ok(text) => search_schema(&mut store, &target, text).await,
@@ -545,17 +547,52 @@ async fn list_databases(store: &mut Store, target: &Target) -> Outcome {
     Ok(json!({ "databases": names }))
 }
 
-async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outcome {
+/// Tables `list_tables` names. A schema of thousands would fill the agent's
+/// context; past this, it counts the rest per schema.
+const MAX_TABLES: usize = 500;
+
+async fn list_tables(
+    store: &mut Store,
+    target: &Target,
+    refresh: bool,
+    schema: Option<&str>,
+) -> Outcome {
     let rule = rule(target);
     let cached = store.catalog(target, refresh).await?;
     let catalog = &cached.catalog;
-    let tables: Vec<Json> = all_tables(catalog)
+    let wanted = |s: &str| schema.is_none_or(|want| s.eq_ignore_ascii_case(want.trim()));
+    // Counted in one pass: one per table is slow with thousands of them.
+    // A hidden partition isn't counted: the count would tell it's there.
+    let mut partitions = std::collections::HashMap::<(&str, &str), usize>::new();
+    for (s, t) in all_tables(catalog) {
+        if let Some(parent) = t.partition_of.as_deref() {
+            if rule.allows(s, &t.name) {
+                *partitions.entry((s, parent)).or_default() += 1;
+            }
+        }
+    }
+    let mut shared: Vec<(&str, &TableNode)> = all_tables(catalog)
+        .filter(|(s, _)| wanted(s))
         .filter(|(_, t)| t.partition_of.is_none())
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
-        .map(|(schema, t)| {
-            let partitions = all_tables(catalog)
-                .filter(|(s, p)| *s == schema && p.partition_of.as_deref() == Some(&t.name))
-                .count();
+        .collect();
+    if let Some(want) = schema.filter(|_| shared.is_empty()) {
+        if !catalog
+            .databases
+            .iter()
+            .flat_map(|db| db.schemas.iter())
+            .any(|s| wanted(&s.name))
+        {
+            return Err(format!("No schema \"{}\".", want.trim()));
+        }
+    }
+    // The schemas a bare name finds first are the ones the agent will want.
+    let rank = |s: &str| catalog.search_path.iter().position(|p| p == s);
+    shared.sort_by_key(|(s, _)| rank(s).unwrap_or(usize::MAX));
+    let tables: Vec<Json> = shared
+        .iter()
+        .take(MAX_TABLES)
+        .map(|&(schema, t)| {
             let mut line = format!("{schema}.{}", t.name);
             if t.kind != TableKind::Table {
                 line.push_str(&format!(" ({})", kind_label(t.kind)));
@@ -564,15 +601,25 @@ async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outco
                 line.push_str(&format!(" ~{rows} rows"));
             }
             line.push_str(&format!(", {} cols", t.columns.len()));
-            if partitions > 0 {
-                line.push_str(&format!(", {partitions} partitions"));
+            if let Some(n) = partitions.get(&(schema, t.name.as_str())) {
+                line.push_str(&format!(", {n} partitions"));
             }
             json!(line)
         })
         .collect();
-    Ok(
-        json!({ "database": target.database, "schema_loaded": age(cached.loaded), "tables": tables }),
-    )
+    let mut out = json!({ "database": target.database, "schema_loaded": age(cached.loaded), "tables": tables });
+    if shared.len() > MAX_TABLES {
+        let mut not_listed = Map::new();
+        for (schema, _) in &shared[MAX_TABLES..] {
+            let n = not_listed.entry(schema.to_string()).or_insert(json!(0));
+            *n = json!(n.as_u64().unwrap_or(0) + 1);
+        }
+        out["not_listed"] = Json::Object(not_listed);
+        out["note"] = json!(
+            "More tables than are listed: pass schema to list one schema, or find tables by name with search_schema."
+        );
+    }
+    Ok(out)
 }
 
 async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcome {
@@ -584,15 +631,22 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
     let marks = mask::parse(target.record.masked_columns(&target.database));
     let mut tables = Vec::new();
     let mut columns = Vec::new();
+    let (mut more_tables, mut more_columns) = (0usize, 0usize);
     for (schema, t) in all_tables(catalog)
         .filter(|(_, t)| t.partition_of.is_none())
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
     {
-        if t.name.to_lowercase().contains(&needle) && tables.len() < MAX_HITS {
-            tables.push(json!(format!("{schema}.{}", t.name)));
+        if t.name.to_lowercase().contains(&needle) {
+            if tables.len() == MAX_HITS {
+                more_tables += 1;
+            } else {
+                tables.push(json!(format!("{schema}.{}", t.name)));
+            }
         }
         for c in &t.columns {
-            if c.name.to_lowercase().contains(&needle) && columns.len() < MAX_HITS {
+            if c.name.to_lowercase().contains(&needle) && columns.len() == MAX_HITS {
+                more_columns += 1;
+            } else if c.name.to_lowercase().contains(&needle) {
                 let masked = marks
                     .iter()
                     .any(|m| m.schema == schema && m.table == t.name && m.column == c.name);
@@ -606,7 +660,13 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
             }
         }
     }
-    Ok(json!({ "tables": tables, "columns": columns }))
+    let mut out = json!({ "tables": tables, "columns": columns });
+    if more_tables + more_columns > 0 {
+        out["note"] = json!(format!(
+            "{more_tables} more tables and {more_columns} more columns match. Search for longer text."
+        ));
+    }
+    Ok(out)
 }
 
 async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outcome {
@@ -1628,6 +1688,110 @@ mod tests {
             .await
             .expect("statistics with nothing kept back");
 
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The env lock spans the whole test, awaits included: each test has its own runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn list_tables_stops_at_its_cap_and_says_how_many_more() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let db = dir.join("t.db");
+        let sql: String = (0..MAX_TABLES + 3)
+            .map(|i| format!("create table t{i:04}(id integer primary key);"))
+            .collect();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(&sql)
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.upsert_connection(ConnectionRecord::Sqlite(SqliteConnection {
+            id: "s".into(),
+            name: "s".into(),
+            path: db.to_string_lossy().to_string(),
+            environment: None,
+            safe_mode: Default::default(),
+            sample: false,
+            allow_mcp: true,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+        }));
+        config.save().unwrap();
+        let mcp = RowkeryMcp::default();
+        let listed = call(&mcp, "list_tables", json!({ "connection": "s" }))
+            .await
+            .unwrap();
+        let names = listed["tables"].as_array().unwrap();
+        assert_eq!(names.len(), MAX_TABLES);
+        assert_eq!(names[0], "main.t0000, 1 cols");
+        assert!(!listed.to_string().contains("t0500"));
+        assert_eq!(listed["not_listed"], json!({ "main": 3 }));
+        assert!(listed["note"].as_str().unwrap().contains("search_schema"));
+        let one = call(
+            &mcp,
+            "list_tables",
+            json!({ "connection": "s", "schema": "MAIN" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one["not_listed"], json!({ "main": 3 }));
+        assert!(call(
+            &mcp,
+            "list_tables",
+            json!({ "connection": "s", "schema": "nope" })
+        )
+        .await
+        .is_err());
+        let found = call(
+            &mcp,
+            "search_schema",
+            json!({ "connection": "s", "text": "t0502" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found["tables"], json!(["main.t0502"]));
+        assert!(found.get("note").is_none());
+        let many = call(
+            &mcp,
+            "search_schema",
+            json!({ "connection": "s", "text": "t0" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(many["tables"].as_array().unwrap().len(), 40);
+        assert_eq!(
+            many["note"],
+            "463 more tables and 0 more columns match. Search for longer text."
+        );
+
+        // Exactly the cap: nothing left over.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("drop table t0500; drop table t0501; drop table t0502;")
+            .unwrap();
+        let full = call(
+            &mcp,
+            "list_tables",
+            json!({ "connection": "s", "refresh": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(full["tables"].as_array().unwrap().len(), MAX_TABLES);
+        assert!(full.get("not_listed").is_none() && full.get("note").is_none());
+        // The description says the same cap.
+        assert!(tools().iter().any(|t| t.name == "list_tables"
+            && t.description
+                .as_deref()
+                .unwrap_or("")
+                .contains(&MAX_TABLES.to_string())));
         std::env::remove_var("ROWKERY_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }

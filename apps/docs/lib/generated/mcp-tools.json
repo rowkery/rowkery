@@ -31,7 +31,7 @@
       "read_only": true
     },
     {
-      "description": "Tables and views with approximate row counts and column counts. Cached for the session; refresh reloads the schema.",
+      "description": "Tables and views with approximate row counts and column counts: up to 500, schemas on the search path first, with a count per schema of any not listed. Cached for the session; refresh reloads the schema.",
       "inputs": [
         {
           "description": "Connection id or name from list_connections",
@@ -56,6 +56,14 @@
           "name": "refresh",
           "required": false,
           "type": "boolean"
+        },
+        {
+          "description": "List only this schema",
+          "maximum": null,
+          "minimum": null,
+          "name": "schema",
+          "required": false,
+          "type": "string"
         }
       ],
       "name": "list_tables",
