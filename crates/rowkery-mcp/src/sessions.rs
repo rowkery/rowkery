@@ -21,6 +21,8 @@ const MAX_SESSIONS: usize = 100;
 
 pub const HIDDEN_QUERY: &str = "(reads a table not shared with agents)";
 
+pub const UNCLEAR_QUERY: &str = "(its literals can't be told apart without the session's settings)";
+
 /// Functions that return other sessions' query text as typed.
 const ACTIVITY_FUNCTIONS: &[&str] = &[
     "pg_stat_get_activity",
@@ -39,12 +41,33 @@ pub const ACTIVITY_REFUSAL: &str = "Refused: pg_stat_activity and pg_stat_statem
 /// The query with string, number and dollar-quoted literals as `?`, comments
 /// dropped and whitespace folded; and the names it mentions (bare words
 /// folded to lower case, quoted ones as written).
+///
+/// A backslash escapes a quote in `E'…'`, and in every string on a server
+/// with `standard_conforming_strings` off, which the query's own session
+/// may have set. `'a\' AND token = 'x'` is two strings one way and one the
+/// other, so the query is read both ways, and blanked when they differ:
+/// one of them would show a literal as SQL.
 pub fn redact(sql: &str) -> (String, Vec<String>) {
+    let (text, mut names) = redact_reading(sql, false);
+    let (other, other_names) = redact_reading(sql, true);
+    names.extend(other_names);
+    if text == other {
+        (text, names)
+    } else {
+        (UNCLEAR_QUERY.into(), names)
+    }
+}
+
+/// `redact`, with a backslash escaping a quote in `E'…'` only, or in every
+/// string when `backslash_everywhere`.
+fn redact_reading(sql: &str, backslash_everywhere: bool) -> (String, Vec<String>) {
     let b = sql.as_bytes();
     let n = b.len();
     let mut out = String::with_capacity(n);
     let mut names = Vec::new();
     let mut i = 0;
+    // The word before a string was `E`.
+    let mut escaped = false;
     let space = |out: &mut String| {
         if !out.is_empty() && !out.ends_with(' ') {
             out.push(' ');
@@ -54,6 +77,7 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
         let c = b[i];
         match c {
             b'\'' => {
+                let backslash = backslash_everywhere || escaped;
                 i += 1;
                 while i < n {
                     if b[i] == b'\'' {
@@ -63,14 +87,14 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
                         }
                         break;
                     }
-                    // E'…' strings escape quotes with a backslash.
-                    if b[i] == b'\\' {
+                    if backslash && b[i] == b'\\' {
                         i += 1;
                     }
                     i += 1;
                 }
                 i = (i + 1).min(n);
                 out.push('?');
+                escaped = false;
             }
             b'"' => {
                 let start = i + 1;
@@ -142,10 +166,12 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
                 let prefix = word.len() == 1
                     && matches!(word.as_bytes()[0] | 0x20, b'e' | b'b' | b'x' | b'n')
                     && b.get(i) == Some(&b'\'');
-                if !prefix {
-                    names.push(word.to_lowercase());
-                    out.push_str(word);
+                if prefix {
+                    escaped = word.as_bytes()[0] | 0x20 == b'e';
+                    continue;
                 }
+                names.push(word.to_lowercase());
+                out.push_str(word);
             }
             _ if c.is_ascii_digit()
                 || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) =>
@@ -323,6 +349,26 @@ mod tests {
         // pg_stat_activity cuts long queries mid-literal.
         let (text, _) = redact("insert into t values ('half a sec");
         assert_eq!(text, "insert into t values (?");
+    }
+
+    #[test]
+    fn a_backslash_that_may_or_may_not_escape_blanks_the_query() {
+        // One string with standard_conforming_strings on, and a token in
+        // the clear read the other way: either way, nothing shows.
+        for sql in [
+            r"SELECT * FROM users WHERE name LIKE 'a%' ESCAPE '\' AND api_token = 'sk_live_51Hxyz' AND id = 1",
+            r"SELECT 'it\'s', 'sk_live_51Hxyz'",
+        ] {
+            let (text, _) = redact(sql);
+            assert_eq!(text, UNCLEAR_QUERY, "{sql}");
+            assert!(!shown_query(sql, &HashSet::new()).contains("sk_live"));
+        }
+        // A backslash that reads the same both ways changes nothing.
+        let (text, _) = redact(r"SELECT E'a\'b', 'c:\path' FROM t");
+        assert_eq!(text, "SELECT ?, ? FROM t");
+        // Names read either way are kept, so a hidden table still blanks.
+        let (_, names) = redact(r"SELECT 'x\' FROM payroll, ' FROM t");
+        assert!(names.contains(&"payroll".to_string()), "{names:?}");
     }
 
     #[test]

@@ -241,7 +241,7 @@ Any other error from the database, such as a syntax error or a missing column, c
 | --- | --- |
 | `SQLite has no other sessions to show; sessions is for Postgres connections.` | `sessions` was called on a SQLite connection |
 
-In a `sessions` answer, a query that reads a table you haven't shared shows as `(reads a table not shared with agents)`, and one the login can't see as `(not visible to this login)`.
+In a `sessions` answer, a query that reads a table you haven't shared shows as `(reads a table not shared with agents)`, and one the login can't see as `(not visible to this login)`. A query with a backslash in a string that could read two ways, depending on that session's `standard_conforming_strings`, shows as `(its literals can't be told apart without the session's settings)`, so a value never shows as SQL.
 
 ### Proposed changes
 
