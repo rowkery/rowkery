@@ -375,7 +375,8 @@ async fn masked_columns_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events CASCADE;
+        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people CASCADE;
+         DROP SCHEMA IF EXISTS mcp_mask_s CASCADE;
          DROP FUNCTION IF EXISTS mcp_mask_lookup(int);
          CREATE TABLE mcp_mask_customers (id int PRIMARY KEY, email text, plan text);
          CREATE INDEX mcp_mask_customers_email ON mcp_mask_customers (lower(email));
@@ -386,7 +387,15 @@ async fn masked_columns_hold_against_a_real_postgres() {
          CREATE TABLE mcp_mask_events (id int, email text, at date) PARTITION BY RANGE (at);
          CREATE TABLE mcp_mask_events_a PARTITION OF mcp_mask_events
            FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
-         INSERT INTO mcp_mask_events VALUES (1, 'mara@fjord.se', '2026-02-01');
+         CREATE SCHEMA mcp_mask_s;
+         CREATE TABLE mcp_mask_s.events_b PARTITION OF mcp_mask_events
+           FOR VALUES FROM ('2026-07-01') TO ('2027-01-01');
+         INSERT INTO mcp_mask_events VALUES (1, 'mara@fjord.se', '2026-02-01'),
+           (2, 'tomas@ibarra.dev', '2026-08-01');
+         CREATE TABLE mcp_mask_people (id int, email text);
+         CREATE TABLE mcp_mask_staff () INHERITS (mcp_mask_people);
+         INSERT INTO mcp_mask_people VALUES (1, 'mara@fjord.se');
+         INSERT INTO mcp_mask_staff VALUES (2, 'tomas@ibarra.dev');
          CREATE VIEW mcp_mask_view AS SELECT id, email FROM mcp_mask_customers;
          CREATE FUNCTION mcp_mask_lookup(i int) RETURNS text LANGUAGE plpgsql STABLE AS
            $$ BEGIN RETURN (SELECT email FROM mcp_mask_customers WHERE id = i); END $$;",
@@ -413,6 +422,7 @@ async fn masked_columns_hold_against_a_real_postgres() {
         vec![
             "public.mcp_mask_customers.email".to_string(),
             "public.mcp_mask_events.email".to_string(),
+            "public.mcp_mask_people.email".to_string(),
         ],
     )]
     .into_iter()
@@ -448,6 +458,14 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT email FROM mcp_mask_customers ORDER BY id LIMIT 2",
         "SELECT row_number() OVER (ORDER BY id), email FROM mcp_mask_customers",
         "WITH x AS (SELECT email FROM mcp_mask_customers) SELECT email FROM x",
+        // Partitions (one in another schema) and child tables answer for
+        // the table that was marked.
+        "SELECT email FROM mcp_mask_events",
+        "SELECT email FROM mcp_mask_events WHERE at > '2026-07-01'",
+        "SELECT email FROM mcp_mask_s.events_b",
+        "SELECT email FROM mcp_mask_people",
+        "SELECT email FROM mcp_mask_staff",
+        "SELECT p.email FROM mcp_mask_people p JOIN mcp_mask_orders o ON o.customer_id = p.id",
     ] {
         let out = query(&mcp, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
         let text = out["rows"].to_string();
@@ -495,6 +513,19 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT count(DISTINCT e) FROM (SELECT email AS e FROM mcp_mask_customers UNION ALL SELECT 'mara@fjord.se') s",
         "SELECT plan FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers",
         "WITH RECURSIVE r(e, n) AS (SELECT 'x'::text, 0 UNION ALL SELECT c.email, r.n + 1 FROM r JOIN mcp_mask_customers c ON c.id = r.n + 1) SELECT e FROM r",
+        // The same through a union or partitions nested a level down.
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s",
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_events OFFSET 0) s",
+        "SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT email FROM mcp_mask_people UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT email FROM mcp_mask_events f_1 WHERE at = '2026-02-01' UNION ALL SELECT f.email FROM unnest(ARRAY['mara@fjord.se', 'zz']) f(email)",
+        "WITH RECURSIVE r(e) AS (SELECT email FROM mcp_mask_events UNION ALL SELECT e FROM r WHERE false) SELECT e FROM r",
+        "WITH x AS MATERIALIZED (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_events) SELECT y.email FROM x y",
+        "SELECT ARRAY(SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_events)",
+        "SELECT ARRAY(SELECT email FROM mcp_mask_events)",
+        "SELECT s.e FROM (SELECT email AS e, id FROM mcp_mask_customers UNION ALL SELECT email, id FROM mcp_mask_events OFFSET 0) s WHERE s.id > 0",
+        "SELECT email FROM mcp_mask_events EXCEPT ALL SELECT 'zz'",
+        "SELECT email FROM mcp_mask_people EXCEPT ALL SELECT 'zz'",
         "SELECT id FROM mcp_mask_events WHERE email LIKE 'm%'",
         "SELECT id FROM mcp_mask_view WHERE email > 'm'",
         "SELECT count(email) FILTER (WHERE email LIKE 'm%') FROM mcp_mask_customers",
@@ -504,6 +535,30 @@ async fn masked_columns_hold_against_a_real_postgres() {
         assert!(err.starts_with("Refused"), "{sql}: {err}");
         assert!(!err.contains("mara@"), "{sql}: {err}");
     }
+    // The union cases above are refused for the union, not by chance.
+    for sql in [
+        "SELECT 'x' UNION ALL SELECT email FROM mcp_mask_customers",
+        "SELECT email FROM mcp_mask_customers WHERE id = 1 UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s",
+        "SELECT 'x' UNION ALL SELECT * FROM (SELECT email FROM mcp_mask_events OFFSET 0) s",
+        "SELECT * FROM (SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers OFFSET 0) s UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT email FROM mcp_mask_people UNION ALL SELECT 'mara@fjord.se'",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.contains("without the UNION ALL"), "{sql}: {err}");
+    }
+    // The agent's own `f` beside a partition it named `f_1` is never
+    // masked: no stand-in of a guess to compare.
+    match query(
+        &mcp,
+        "SELECT f.email FROM unnest(ARRAY['mara@fjord.se', 'zz']) f(email), mcp_mask_events f_1 WHERE f_1.at = '2026-02-01'",
+    )
+    .await
+    {
+        Ok(out) => assert_eq!(out["rows"], json!([["mara@fjord.se"], ["zz"]]), "{out}"),
+        Err(err) => assert!(err.starts_with("Refused"), "{err}"),
+    }
+
     // A column alias list renames the masked column in the plan, so a
     // filter on it would go unseen: refused. A plain alias is fine.
     for sql in [

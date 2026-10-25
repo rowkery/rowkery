@@ -67,9 +67,15 @@ pub fn stand_in(key: &[u8], value: &Value) -> Json {
 
 pub const SUBQUERY_REFUSAL: &str = "Refused: a masked column can only be returned from the main SELECT, not out of a subquery, WITH query, INTERSECT or EXCEPT. Select it from its table directly.";
 
-pub fn union_refusal(label: &str) -> String {
+pub fn union_refusal(label: &str, column: usize) -> String {
     format!(
-        "Refused: {label} is masked, and every part of a UNION ALL must return a masked column at the same place, not a value or another column. Query it on its own."
+        "Refused: {label} is masked, so every part of this UNION ALL must return a masked column as column {column}, not a value or another column. Select {label} without the UNION ALL."
+    )
+}
+
+pub fn alias_refusal(alias: &str) -> String {
+    format!(
+        "Refused: {alias} names something else in this query too, and Postgres names a table with masked columns that way when it reads its partitions or child tables. Give it another alias."
     )
 }
 
@@ -194,13 +200,14 @@ pub(crate) fn tokens(expr: &str) -> Vec<Tok> {
 }
 
 /// The marked columns of a relation as a plan names it (schema, relation),
-/// and whether that relation is a partition.
-pub type MarkedOf<'a> = &'a dyn Fn(Option<&str>, &str) -> (Vec<String>, bool);
+/// each with the table it was marked on (the relation itself, or the table
+/// it is a partition or child table of).
+pub type MarkedOf<'a> = &'a dyn Fn(Option<&str>, &str) -> Vec<(String, String)>;
 
 /// What the Postgres check needs to know beyond the plan.
 pub struct PgFacts<'a> {
     /// The marked columns of a relation as the plan names it (a partition
-    /// answers for its parent), and whether it is a partition.
+    /// or child table answers for its parent).
     pub marked_of: MarkedOf<'a>,
     /// Indexes on marked tables that cover a marked column (by name).
     pub marked_indexes: &'a HashSet<String>,
@@ -285,40 +292,25 @@ fn text<'a>(node: &'a Json, key: &str) -> Option<&'a str> {
 
 fn collect_scans(node: &Json, facts: &PgFacts, taint: &mut Taint) -> Result<(), String> {
     if let Some(rel) = text(node, "Relation Name") {
-        let (columns, partition) = (facts.marked_of)(text(node, "Schema"), rel);
-        if !columns.is_empty() {
+        let marked = (facts.marked_of)(text(node, "Schema"), rel);
+        if !marked.is_empty() {
             if let Some(index) = text(node, "Index Name") {
                 if facts.marked_indexes.contains(index) {
                     return Err(index_refusal(index));
                 }
             }
             let alias = text(node, "Alias").unwrap_or(rel).to_string();
-            let mut aliases = vec![alias.clone()];
-            // The parent of an appended partition is named by the alias
-            // without the `_1`, `_2` Postgres adds per partition.
-            if partition {
-                if let Some((base, n)) = alias.rsplit_once('_') {
-                    if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
-                        aliases.push(base.to_string());
-                    }
-                }
-            }
-            let table = text(node, "Relation Name").unwrap_or(rel);
-            for column in &columns {
+            for (column, table) in &marked {
                 let label = format!("{table}.{column}");
                 taint
                     .names
                     .entry(vec![column.clone()])
                     .or_insert(label.clone());
-                for a in &aliases {
-                    taint
-                        .names
-                        .insert(vec![a.clone(), column.clone()], label.clone());
-                }
+                taint
+                    .names
+                    .insert(vec![alias.clone(), column.clone()], label);
             }
-            for a in aliases {
-                taint.rows.insert(a, table.to_string());
-            }
+            taint.rows.insert(alias, marked[0].1.clone());
         }
     }
     for child in children(node) {
@@ -327,47 +319,153 @@ fn collect_scans(node: &Json, facts: &PgFacts, taint: &mut Taint) -> Result<(), 
     Ok(())
 }
 
-/// Names that stand for a marked column higher up: the first branch's names
-/// of a UNION ALL (Append, or a recursive CTE's Recursive Union) whose
-/// branches return one at the same place, and the row-cap wrapper's own
-/// names. Above a union, its column goes by the first branch's name, so a
-/// place where one branch returns a marked column and another returns
-/// anything else is refused: `SELECT 'x' UNION ALL SELECT email` would hand
-/// the emails out under the literal's name, and `SELECT email … UNION ALL
-/// SELECT 'guess'` would mask the guess with the same key, to compare.
-fn propagate(node: &Json, facts: &PgFacts, taint: &mut Taint) -> Result<(), String> {
-    for child in children(node) {
-        propagate(child, facts, taint)?;
+fn is_union(node: &Json) -> bool {
+    matches!(
+        text(node, "Node Type"),
+        Some("Append" | "Merge Append" | "Recursive Union")
+    )
+}
+
+/// The marked column at each place of what `node` returns. A union prints
+/// no columns of its own: each place is its parts' at that place, and a
+/// place where one part returns a marked column and another anything else
+/// is refused. Above a union its column goes by the first part's name, so
+/// `SELECT 'x' UNION ALL SELECT email` would hand out the emails under the
+/// literal's name, and `SELECT email … UNION ALL SELECT 'guess'` would mask
+/// the guess with the same key, to compare.
+fn labels(node: &Json, taint: &Taint) -> Result<Vec<Option<String>>, String> {
+    if node.get("Output").is_some() {
+        return Ok(outputs(node)
+            .iter()
+            .map(|e| Taint::bare(e).and_then(|chain| taint.hit(&chain).cloned()))
+            .collect());
     }
-    let kind = text(node, "Node Type").unwrap_or("");
-    let positional = |taint: &Taint, list: &[&str], i: usize| {
-        list.get(i)
-            .and_then(|e| Taint::bare(e))
-            .and_then(|chain| taint.hit(&chain).cloned())
-    };
-    if matches!(kind, "Append" | "Merge Append" | "Recursive Union") {
-        let branches: Vec<Vec<&str>> = children(node).iter().map(outputs).collect();
-        // Every branch a marked column at that place: the first branch's
-        // name is then already one the check knows.
-        for i in 0..branches.iter().map(Vec::len).max().unwrap_or(0) {
-            let labels: Vec<Option<String>> =
-                branches.iter().map(|b| positional(taint, b, i)).collect();
-            if let Some(label) = labels.iter().flatten().next() {
-                if labels.iter().any(Option::is_none) {
-                    return Err(union_refusal(label));
+    let parts = children(node)
+        .iter()
+        .map(|child| labels(child, taint))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !is_union(node) {
+        return Ok(parts.into_iter().next().unwrap_or_default());
+    }
+    (0..parts.iter().map(Vec::len).max().unwrap_or(0))
+        .map(|i| {
+            let at: Vec<Option<&String>> = parts
+                .iter()
+                .map(|p| p.get(i).and_then(Option::as_ref))
+                .collect();
+            match at.iter().flatten().next() {
+                Some(label) if at.iter().any(Option::is_none) => Err(union_refusal(label, i + 1)),
+                first => Ok(first.map(|l| (*l).clone())),
+            }
+        })
+        .collect()
+}
+
+/// Every scan under `node`.
+fn scans<'a>(node: &'a Json, out: &mut Vec<&'a Json>) {
+    if text(node, "Relation Name").is_some() {
+        out.push(node);
+    }
+    for child in children(node) {
+        scans(child, out);
+    }
+}
+
+/// Every alias in the plan, with its node.
+fn aliases<'a>(node: &'a Json, out: &mut Vec<(&'a str, &'a Json)>) {
+    if let Some(alias) = text(node, "Alias") {
+        out.push((alias, node));
+    }
+    for child in children(node) {
+        aliases(child, out);
+    }
+}
+
+/// Names that stand for a marked column higher up: union parts checked
+/// place by place, the names of a table read through its partitions or
+/// child tables, and the row-cap wrapper's own names.
+fn propagate(
+    node: &Json,
+    facts: &PgFacts,
+    taint: &mut Taint,
+    named: &[(&str, &Json)],
+) -> Result<(), String> {
+    for child in children(node) {
+        propagate(child, facts, taint, named)?;
+    }
+    if is_union(node) {
+        labels(node, taint)?;
+    }
+    // Reading a table's partitions or child tables, Postgres gives each
+    // scan the table's alias with `_1`, `_2`, and names the columns above
+    // the Append by the bare alias, which no node carries.
+    if matches!(text(node, "Node Type"), Some("Append" | "Merge Append")) {
+        let mut under = Vec::new();
+        scans(node, &mut under);
+        let mut found: Vec<(String, Vec<String>, String)> = Vec::new();
+        for scan in under {
+            let Some(alias) = text(scan, "Alias") else {
+                continue;
+            };
+            let Some((base, n)) = alias.rsplit_once('_') else {
+                continue;
+            };
+            if base.is_empty() || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            for (chain, label) in &taint.names {
+                if let [a, column] = chain.as_slice() {
+                    if a == alias {
+                        found.push((
+                            base.to_string(),
+                            vec![base.to_string(), column.clone()],
+                            label.clone(),
+                        ));
+                    }
                 }
             }
         }
+        for (base, chain, label) in found {
+            if taint.hit(&chain).is_some() {
+                continue;
+            }
+            // The bare alias may be the agent's own name for something it
+            // chose the values of; masking those would hand out a guess's
+            // stand-in to compare.
+            if named.iter().any(|(a, _)| *a == base) {
+                return Err(alias_refusal(&base));
+            }
+            let table = label
+                .rsplit_once('.')
+                .map_or(label.as_str(), |(t, _)| t)
+                .to_string();
+            taint.rows.insert(base, table);
+            taint.names.insert(chain, label);
+        }
     }
-    if kind == "Subquery Scan" && text(node, "Alias") == Some(facts.wrapper) {
-        let inner = children(node).first().map(outputs).unwrap_or_default();
+    if text(node, "Node Type") == Some("Subquery Scan")
+        && text(node, "Alias") == Some(facts.wrapper)
+    {
+        let inner = match children(node).first() {
+            Some(child) => labels(child, taint)?,
+            None => Vec::new(),
+        };
         for (i, entry) in outputs(node).iter().enumerate() {
-            if let (Some(label), Some(chain)) = (positional(taint, &inner, i), Taint::bare(entry)) {
-                taint.names.entry(chain).or_insert(label);
+            if let (Some(Some(label)), Some(chain)) = (inner.get(i), Taint::bare(entry)) {
+                taint.names.entry(chain).or_insert(label.clone());
             }
         }
     }
     Ok(())
+}
+
+/// Whether what `node` returns holds a marked column. A union prints no
+/// columns of its own, so it holds what its parts do.
+fn carries(node: &Json, taint: &Taint) -> bool {
+    match node.get("Output") {
+        Some(_) => outputs(node).iter().any(|e| taint.mentions(e)),
+        None => children(node).iter().any(|child| carries(child, taint)),
+    }
 }
 
 fn check_expr(expr: &str, output: bool, sort_ok: bool, taint: &Taint) -> Result<(), String> {
@@ -410,7 +508,7 @@ fn check(node: &Json, parent: Option<&Json>, facts: &PgFacts, taint: &Taint) -> 
     });
     if matches!(relation, "InitPlan" | "SubPlan" | "Subquery")
         && !under_wrapper
-        && outputs(node).iter().any(|e| taint.mentions(e))
+        && carries(node, taint)
     {
         return Err(SUBQUERY_REFUSAL.into());
     }
@@ -456,7 +554,9 @@ pub fn pg_check(explain_json: &Json, facts: &PgFacts) -> Result<Vec<usize>, Stri
     if taint.names.is_empty() {
         return Ok(Vec::new());
     }
-    propagate(root, facts, &mut taint)?;
+    let mut named = Vec::new();
+    aliases(root, &mut named);
+    propagate(root, facts, &mut taint, &named)?;
     check(root, None, facts, &taint)?;
     Ok(outputs(root)
         .iter()
@@ -567,11 +667,11 @@ mod tests {
         }
     }
 
-    fn customers(_: Option<&str>, rel: &str) -> (Vec<String>, bool) {
+    fn customers(_: Option<&str>, rel: &str) -> Vec<(String, String)> {
         match rel {
-            "customers" => (vec!["email".into()], false),
-            "ev_a" | "ev_b" => (vec!["email".into()], true),
-            _ => (Vec::new(), false),
+            "customers" => vec![("email".into(), "customers".into())],
+            "ev_a" | "ev_b" => vec![("email".into(), "events".into())],
+            _ => Vec::new(),
         }
     }
 
@@ -710,11 +810,57 @@ mod tests {
             let err = run(root).expect_err("a union mixing a masked column");
             assert!(err.contains("UNION ALL"), "{err}");
         }
+        // A union inside a part has no columns printed: its parts count.
+        let nested = |first: Json| {
+            json!({ "Node Type": "Limit", "Output": ["('x'::text)"], "Plans": [
+                { "Node Type": "Append", "Plans": [first,
+                    { "Node Type": "Append", "Plans": [
+                        scan("customers", "customers", &["customers.email"]),
+                        scan("customers_1", "customers", &["customers_1.email"])] }] }] })
+        };
+        let err = run(nested(
+            json!({ "Node Type": "Result", "Output": ["'x'::text"] }),
+        ))
+        .expect_err("a literal beside a nested union");
+        assert!(err.contains("as column 1"), "{err}");
+        let both = nested(scan("customers_2", "customers", &["customers_2.email"]));
+        assert!(run(both).is_ok());
+
+        // Partitions: each scan is the alias with `_1`, `_2`; the columns
+        // above go by the bare alias, which is masked too.
         let parts = json!({ "Node Type": "Limit", "Output": ["e.email", "e.id"], "Plans": [
             { "Node Type": "Append", "Plans": [
                 scan("e_1", "ev_a", &["e_1.email", "e_1.id"]),
                 scan("e_2", "ev_b", &["e_2.email", "e_2.id"])] }] });
         assert_eq!(run(parts), Ok(vec![0]));
+        let label = run(
+            json!({ "Node Type": "Limit", "Output": ["lower(e.email)"], "Plans": [
+            { "Node Type": "Append", "Plans": [scan("e_1", "ev_a", &["e_1.email"])] }] }),
+        )
+        .unwrap_err();
+        assert!(label.contains("events.email is masked"), "{label}");
+        // ... unless the bare alias names something of the agent's own,
+        // whose values would come back masked to compare.
+        let guess = json!({ "Node Type": "Nested Loop", "Output": ["f.email"], "Plans": [
+            { "Node Type": "Function Scan", "Alias": "f", "Output": ["f.email"] },
+            { "Node Type": "Append", "Plans": [
+                scan("f_1", "ev_a", &["f_1.id"]), scan("f_2", "ev_b", &["f_2.id"])] }] });
+        assert_eq!(run(guess), Err(alias_refusal("f")));
+        // A lone partition under the agent's `f_1` is just `f_1`.
+        let lone = json!({ "Node Type": "Nested Loop", "Output": ["f.email"], "Plans": [
+            { "Node Type": "Function Scan", "Alias": "f", "Output": ["f.email"] },
+            scan("f_1", "ev_a", &["f_1.id"])] });
+        assert_eq!(run(lone), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_union_returned_from_a_subquery_is_refused() {
+        // ARRAY(SELECT email … UNION ALL …): the InitPlan is the union.
+        let array = json!({ "Node Type": "Result", "Output": ["($0)"], "Plans": [
+            { "Node Type": "Append", "Parent Relationship": "InitPlan", "Plans": [
+                scan("customers", "customers", &["customers.email"]),
+                scan("customers_1", "customers", &["customers_1.email"])] }] });
+        assert_eq!(run(array), Err(SUBQUERY_REFUSAL.into()));
     }
 
     #[test]
