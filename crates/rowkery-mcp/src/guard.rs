@@ -444,7 +444,7 @@ pub fn cell(value: &Value, cut: &mut bool) -> Json {
             .map(Json::Number)
             .unwrap_or_else(|| Json::String(f.to_string())),
         Value::Text(s) => {
-            if s.chars().count() > CELL_CHARS {
+            if s.chars().nth(CELL_CHARS).is_some() {
                 *cut = true;
                 let mut short: String = s.chars().take(CELL_CHARS).collect();
                 short.push('…');
