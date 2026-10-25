@@ -870,7 +870,9 @@ async fn pg_commit(
     let mut store = Store::on_session(target, session);
     let checked = crate::change::check(&mut store, target, sql).await;
     let Some(session) = store.into_session(target) else {
-        return Err("The connection closed before the change ran. Nothing was saved.".into());
+        return Err(checked.err().unwrap_or_else(|| {
+            "The connection closed before the change ran. Nothing was saved.".into()
+        }));
     };
     let changes = match checked {
         Ok(changes) if changes.len() == expected.len() => changes,

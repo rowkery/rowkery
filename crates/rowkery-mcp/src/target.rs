@@ -1,7 +1,7 @@
 //! Reaching a shared connection: read-only sessions, the schema catalog
 //! cache, and running a capped read on Postgres or SQLite.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rowkery_core::config::AppConfig;
@@ -109,6 +109,9 @@ pub struct Store {
     catalogs: HashMap<(String, String), CachedCatalog>,
     /// The session a call holds one transaction open on (`begin`).
     open: Option<(String, String)>,
+    /// Sessions a `begin` opened a transaction on and no `end` has rolled
+    /// back yet.
+    left_open: HashSet<(String, String)>,
     /// A session handed in with its transaction already open (`on_session`),
     /// kept as it came.
     adopted: Option<(String, String)>,
@@ -182,6 +185,10 @@ impl Store {
         };
         let key = target.key();
         if self.adopted.as_ref() == Some(&key) {
+            debug_assert!(
+                then.is_empty(),
+                "an adopted session's owner runs its own statements"
+            );
             return self
                 .sessions
                 .get(&key)
@@ -207,13 +214,14 @@ impl Store {
                 .map_err(|_| "Timed out connecting.".to_string())?
                 .map_err(message)?;
             self.sessions.insert(key.clone(), session);
+            self.left_open.remove(&key);
         }
         // Outside a call's transaction, one a call that stopped early left
         // open is rolled back first.
-        let close = if self.open.as_ref() == Some(&key) {
-            ""
-        } else {
+        let close = if self.open.as_ref() != Some(&key) && self.left_open.contains(&key) {
             "ROLLBACK; "
+        } else {
+            ""
         };
         let session = self.sessions.get(&key).expect("session");
         session_execute(
@@ -240,8 +248,15 @@ impl Store {
         }
         self.open = None;
         self.session_then(target, "; BEGIN READ ONLY").await?;
+        self.left_open.insert(target.key());
         self.open = Some(target.key());
         Ok(())
+    }
+
+    /// Starts a call outside any transaction an earlier call didn't end, so
+    /// its first statement rolls that one back.
+    pub fn settle(&mut self) {
+        self.open = None;
     }
 
     /// Rolls back what [`Self::begin`] opened, or drops a session that
@@ -256,6 +271,7 @@ impl Store {
             Some(session) => session_execute(session, "ROLLBACK").await.is_ok(),
             None => true,
         };
+        self.left_open.remove(&key);
         if !rolled_back {
             self.sessions.remove(&key);
         }

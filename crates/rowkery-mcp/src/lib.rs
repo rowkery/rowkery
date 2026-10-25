@@ -393,6 +393,7 @@ impl RowkeryMcp {
             }
         };
         let mut store = self.store.lock().await;
+        store.settle();
         store.forget_unshared(&config);
         if name == "list_connections" {
             entry.rows = Some(config.connections.iter().filter(|c| c.allow_mcp()).count() as u64);

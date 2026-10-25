@@ -130,12 +130,20 @@ async fn guards_hold_against_a_real_postgres() {
     // leave the hidden table out of the check and read it in the run.
     let flip = "SELECT ssn FROM mcp_e2e_secret \
                 WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0";
+    let (mut ran, mut refused) = (0, 0);
     for _ in 0..40 {
         match query(&mcp, flip).await {
-            Ok(out) => assert_eq!(out["rows"], json!([]), "the run read the hidden table"),
-            Err(err) => assert!(err.starts_with("Refused"), "{err}"),
+            Ok(out) => {
+                assert_eq!(out["rows"], json!([]), "the run read the hidden table");
+                ran += 1;
+            }
+            Err(err) => {
+                assert!(err.starts_with("Refused"), "{err}");
+                refused += 1;
+            }
         }
     }
+    assert!(ran > 0 && refused > 0, "{ran} ran, {refused} refused");
 
     // Everyday analytics stay open: aggregates, dates, JSON, windows, and
     // the system views that describe tables.
@@ -990,11 +998,26 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     // `'now'` folds the same way for the check and the run.
     let flip = "UPDATE mcp_p_orders SET note = (SELECT max(id)::text FROM mcp_p_hidden \
                 WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0) WHERE id = 1";
+    let (mut committed, mut refused) = (0, 0);
     for _ in 0..40 {
-        let Ok(sent) = propose(flip).await else {
-            continue;
+        let id = match propose(flip).await {
+            Ok(sent) => sent["id"].as_str().unwrap().to_string(),
+            Err(err) => {
+                assert!(err.starts_with("Refused"), "{err}");
+                refused += 1;
+                continue;
+            }
         };
-        let _ = proposals::commit(sent["id"].as_str().unwrap(), &[1]).await;
+        match proposals::commit(&id, &[1]).await {
+            Ok(CommitOutcome::Committed { .. }) => committed += 1,
+            Ok(CommitOutcome::Failed { error }) | Err(error) => {
+                assert!(error.starts_with("Refused"), "{error}");
+                refused += 1;
+            }
+            Ok(other) => panic!("{other:?}"),
+        }
+        // A refused commit leaves the proposal waiting; the queue holds five.
+        let _ = proposals::reject(&id, None);
         let note = query(&mcp, "SELECT note FROM mcp_p_orders WHERE id = 1")
             .await
             .unwrap();
@@ -1004,6 +1027,10 @@ async fn proposed_changes_hold_against_a_real_postgres() {
             "the commit read the hidden table"
         );
     }
+    assert!(
+        committed > 0 && refused > 0,
+        "{committed} committed, {refused} refused"
+    );
 
     // Read-only connections take no proposals.
     pg.safe_mode = rowkery_core::safety::SafeMode::ReadOnly;
