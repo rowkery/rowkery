@@ -50,6 +50,9 @@ pub struct SqliteDriver {
     interrupt: Option<InterruptHandle>,
     cancelled: Arc<AtomicBool>,
     read_only: bool,
+    /// Opened read-only at the file (`SQLITE_OPEN_READ_ONLY`), so no
+    /// statement, `PRAGMA query_only = off` included, can write.
+    file_read_only: bool,
     /// The file the connection opened, to notice it was replaced.
     opened: Option<FileId>,
 }
@@ -81,6 +84,7 @@ impl SqliteDriver {
             interrupt: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             read_only: false,
+            file_read_only: false,
             opened: None,
         }
     }
@@ -89,6 +93,15 @@ impl SqliteDriver {
     /// read-only connections.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Read-only at the file as well as by `PRAGMA query_only`, for a
+    /// connection that never writes (the MCP server's): a statement that
+    /// turns the pragma off still can't write.
+    pub fn read_only_file(mut self) -> Self {
+        self.read_only = true;
+        self.file_read_only = true;
         self
     }
 
@@ -311,11 +324,13 @@ impl Driver for SqliteDriver {
                 self.path
             )));
         }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
-        .map_err(|e| DriverError::Message(e.to_string()))?;
+        let flags = if self.file_read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        };
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(|e| DriverError::Message(e.to_string()))?;
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
@@ -995,6 +1010,29 @@ mod tests {
                 Ok(())
             })
             .expect_err("read-only");
+        assert!(err.to_string().contains("readonly"), "{err}");
+        let count = driver
+            .query_stream("SELECT * FROM items", |_, _| Ok(()))
+            .expect("reads still run");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn a_read_only_file_refuses_writes_with_the_pragma_off() {
+        let (_file, path) = temp_db();
+        // A WAL database closed cleanly has no -wal or -shm file to share.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "wal").unwrap();
+        }
+        let mut driver = SqliteDriver::new(path).read_only_file();
+        driver.connect().expect("connect");
+        driver
+            .query_stream("PRAGMA query_only = 0", |_, _| Ok(()))
+            .expect("pragma");
+        let err = driver
+            .query_stream("DELETE FROM items", |_, _| Ok(()))
+            .expect_err("read-only file");
         assert!(err.to_string().contains("readonly"), "{err}");
         let count = driver
             .query_stream("SELECT * FROM items", |_, _| Ok(()))
