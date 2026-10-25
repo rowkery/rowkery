@@ -4,7 +4,9 @@
 //!
 //! Query text is shown with every literal replaced by `?` and comments
 //! dropped, so values typed into other people's queries never reach the
-//! agent. A query naming a table the user hasn't shared is blanked. Reading
+//! agent. A query naming a table the user hasn't shared is blanked (one
+//! named only inside a string, as in a `DO` block, isn't caught, but the
+//! string itself shows as `?`). Reading
 //! `pg_stat_activity` through `query` is refused for the same reason
 //! ([`ACTIVITY_REFUSAL`]).
 
@@ -20,6 +22,11 @@ use crate::access::Tables;
 const MAX_SESSIONS: usize = 100;
 
 pub const HIDDEN_QUERY: &str = "(reads a table not shared with agents)";
+
+/// Stands in the names of a query for one it spells in escapes (`U&"…"`).
+const UNREAD_NAME: &str = "\0unread";
+
+pub const UNCLEAR_QUERY: &str = "(its literals can't be told apart without the session's settings)";
 
 /// Functions that return other sessions' query text as typed.
 const ACTIVITY_FUNCTIONS: &[&str] = &[
@@ -39,12 +46,33 @@ pub const ACTIVITY_REFUSAL: &str = "Refused: pg_stat_activity and pg_stat_statem
 /// The query with string, number and dollar-quoted literals as `?`, comments
 /// dropped and whitespace folded; and the names it mentions (bare words
 /// folded to lower case, quoted ones as written).
+///
+/// A backslash escapes a quote in `E'…'`, and in every string on a server
+/// with `standard_conforming_strings` off, which the query's own session
+/// may have set. `'a\' AND token = 'x'` is two strings one way and one the
+/// other, so the query is read both ways, and blanked when they differ:
+/// one of them would show a literal as SQL.
 pub fn redact(sql: &str) -> (String, Vec<String>) {
+    let (text, mut names) = redact_reading(sql, false);
+    let (other, other_names) = redact_reading(sql, true);
+    names.extend(other_names);
+    if text == other {
+        (text, names)
+    } else {
+        (UNCLEAR_QUERY.into(), names)
+    }
+}
+
+/// `redact`, with a backslash escaping a quote in `E'…'` only, or in every
+/// string when `backslash_everywhere`.
+fn redact_reading(sql: &str, backslash_everywhere: bool) -> (String, Vec<String>) {
     let b = sql.as_bytes();
     let n = b.len();
     let mut out = String::with_capacity(n);
     let mut names = Vec::new();
     let mut i = 0;
+    // The word before a string was `E`.
+    let mut escaped = false;
     let space = |out: &mut String| {
         if !out.is_empty() && !out.ends_with(' ') {
             out.push(' ');
@@ -54,6 +82,7 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
         let c = b[i];
         match c {
             b'\'' => {
+                let backslash = backslash_everywhere || escaped;
                 i += 1;
                 while i < n {
                     if b[i] == b'\'' {
@@ -63,40 +92,69 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
                         }
                         break;
                     }
-                    // E'…' strings escape quotes with a backslash.
-                    if b[i] == b'\\' {
+                    if backslash && b[i] == b'\\' {
                         i += 1;
                     }
                     i += 1;
                 }
                 i = (i + 1).min(n);
                 out.push('?');
+                escaped = false;
             }
             b'"' => {
+                // `U&"…"` spells its name in escapes Rowkery doesn't decode
+                // (`menu&"x"` is the `&` operator).
+                let before = out.len().saturating_sub(2);
+                if (out.ends_with("U&") || out.ends_with("u&"))
+                    && !out[..before]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
+                {
+                    names.push(UNREAD_NAME.into());
+                }
                 let start = i + 1;
                 i = start;
-                while i < n && b[i] != b'"' {
-                    i += 1;
+                // `""` is a quote inside the name.
+                while i < n && (b[i] != b'"' || b.get(i + 1) == Some(&b'"')) {
+                    i += if b[i] == b'"' { 2 } else { 1 };
                 }
-                let name = &sql[start..i.min(n)];
-                names.push(name.to_string());
+                if i >= n {
+                    // Unclosed: what follows may be strings Postgres never
+                    // got to read.
+                    out.push('?');
+                    break;
+                }
+                let quoted = &sql[start..i];
+                names.push(quoted.replace("\"\"", "\""));
                 out.push('"');
-                out.push_str(name);
+                out.push_str(quoted);
                 out.push('"');
-                i = (i + 1).min(n);
+                i += 1;
             }
             b'-' if b.get(i + 1) == Some(&b'-') => {
-                while i < n && b[i] != b'\n' {
+                // Postgres ends one at a carriage return too.
+                while i < n && b[i] != b'\n' && b[i] != b'\r' {
                     i += 1;
                 }
                 space(&mut out);
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
+                // Block comments nest in Postgres.
                 i += 2;
-                while i < n && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
-                    i += 1;
+                let mut depth = 1;
+                while i < n && depth > 0 {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                 }
-                i = (i + 2).min(n);
+                i = i.min(n);
                 space(&mut out);
             }
             b'$' if b.get(i + 1).is_some_and(u8::is_ascii_digit) => {
@@ -113,7 +171,7 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
                 let tag_end = sql[i + 1..].find('$').map(|p| i + 1 + p).filter(|&e| {
                     sql[i + 1..e]
                         .bytes()
-                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch >= 0x80)
                 });
                 match tag_end {
                     Some(e) => {
@@ -142,10 +200,12 @@ pub fn redact(sql: &str) -> (String, Vec<String>) {
                 let prefix = word.len() == 1
                     && matches!(word.as_bytes()[0] | 0x20, b'e' | b'b' | b'x' | b'n')
                     && b.get(i) == Some(&b'\'');
-                if !prefix {
-                    names.push(word.to_lowercase());
-                    out.push_str(word);
+                if prefix {
+                    escaped = word.as_bytes()[0] | 0x20 == b'e';
+                    continue;
                 }
+                names.push(word.to_lowercase());
+                out.push_str(word);
             }
             _ if c.is_ascii_digit()
                 || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) =>
@@ -185,17 +245,30 @@ pub fn hidden_names(catalog: &SchemaCatalog, rule: &Tables) -> HashSet<String> {
         .flat_map(|db| db.schemas.iter())
         .flat_map(|s| s.tables.iter().map(move |t| (s.name.as_str(), t)))
         .filter(|(s, t)| !rule.allows_node(catalog, s, t))
-        .map(|(_, t)| t.name.clone())
+        .map(|(_, t)| folded(&t.name))
         .collect()
 }
 
-/// The query as an agent sees it.
+/// A name as compared with [`hidden_names`]: in lower case, accented
+/// letters too (a database in a single-byte encoding folds them, and
+/// blanking more is safe), and cut to the 63 bytes Postgres keeps.
+fn folded(name: &str) -> String {
+    let mut name = name.to_lowercase();
+    let mut end = name.len().min(63);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    name
+}
+
+/// The query as an agent sees it; `hidden` from [`hidden_names`].
 pub fn shown_query(sql: &str, hidden: &HashSet<String>) -> String {
     let (text, names) = redact(sql);
-    if names
-        .iter()
-        .any(|name| hidden.iter().any(|h| h.eq_ignore_ascii_case(name)))
-    {
+    let hides = |name: &String| {
+        (name == UNREAD_NAME && !hidden.is_empty()) || hidden.contains(&folded(name))
+    };
+    if names.iter().any(hides) {
         HIDDEN_QUERY.into()
     } else {
         text
@@ -306,7 +379,7 @@ mod tests {
     use super::*;
 
     fn hidden(names: &[&str]) -> HashSet<String> {
-        names.iter().map(|s| s.to_string()).collect()
+        names.iter().map(|s| folded(s)).collect()
     }
 
     #[test]
@@ -323,6 +396,90 @@ mod tests {
         // pg_stat_activity cuts long queries mid-literal.
         let (text, _) = redact("insert into t values ('half a sec");
         assert_eq!(text, "insert into t values (?");
+    }
+
+    #[test]
+    fn comments_nest_and_dollar_tags_take_any_letter() {
+        let (text, _) = redact("SELECT 1 /* /* */ ' */, 'sk_live_xyz' AS k");
+        assert_eq!(text, "SELECT ? , ? AS k");
+        let (text, _) = redact("SELECT 1 /* outer /* inner */ api_key=sk_live_secret */ FROM t");
+        assert_eq!(text, "SELECT ? FROM t");
+        let (text, _) = redact("SELECT $é$sk_live_secret$é$");
+        assert_eq!(text, "SELECT ?");
+        let h = hidden(&["payroll"]);
+        assert_eq!(
+            shown_query("/* /* */ ' */ SELECT * FROM payroll WHERE a = '1'", &h),
+            HIDDEN_QUERY
+        );
+    }
+
+    #[test]
+    fn line_ends_and_unclosed_names_never_show_a_literal() {
+        for sql in [
+            "SELECT 1 -- note\r, ' --\n' AS a, 'sk_live_secret' AS b",
+            "SELECT \"a, 'sk_live_secret' FROM t",
+        ] {
+            let shown = shown_query(sql, &HashSet::new());
+            assert!(!shown.contains("sk_live"), "{sql:?} showed {shown}");
+        }
+    }
+
+    #[test]
+    fn long_names_match_as_postgres_cuts_them() {
+        let h = hidden(&[&"a".repeat(63)]);
+        let sql = format!("SELECT * FROM {}_x", "a".repeat(63));
+        assert_eq!(shown_query(&sql, &h), HIDDEN_QUERY);
+        // An operator after a word isn't a U& name.
+        assert_eq!(
+            shown_query(r#"SELECT menu&"x" FROM t"#, &hidden(&["payroll"])),
+            r#"SELECT menu&"x" FROM t"#
+        );
+    }
+
+    #[test]
+    fn hidden_names_match_however_they_are_written() {
+        assert_eq!(
+            shown_query("SELECT * FROM Ärzte", &hidden(&["ärzte"])),
+            HIDDEN_QUERY
+        );
+        assert_eq!(
+            shown_query("SELECT * FROM ärzte", &hidden(&["Ärzte"])),
+            HIDDEN_QUERY
+        );
+        let h = hidden(&["payroll", "pay\"roll"]);
+        assert_eq!(
+            shown_query(r#"SELECT * FROM U&"p\0061yroll""#, &h),
+            HIDDEN_QUERY
+        );
+        assert_eq!(
+            shown_query(r#"SELECT * FROM "pay""roll""#, &h),
+            HIDDEN_QUERY
+        );
+        // Nothing hidden: an escaped name is shown as written.
+        assert_eq!(
+            shown_query(r#"SELECT * FROM U&"p\0061yroll""#, &HashSet::new()),
+            r#"SELECT * FROM U&"p\0061yroll""#
+        );
+    }
+
+    #[test]
+    fn a_backslash_that_may_or_may_not_escape_blanks_the_query() {
+        // One string with standard_conforming_strings on, and a token in
+        // the clear read the other way: either way, nothing shows.
+        for sql in [
+            r"SELECT * FROM users WHERE name LIKE 'a%' ESCAPE '\' AND api_token = 'sk_live_51Hxyz' AND id = 1",
+            r"SELECT 'it\'s', 'sk_live_51Hxyz'",
+        ] {
+            let (text, _) = redact(sql);
+            assert_eq!(text, UNCLEAR_QUERY, "{sql}");
+            assert!(!shown_query(sql, &HashSet::new()).contains("sk_live"));
+        }
+        // A backslash that reads the same both ways changes nothing.
+        let (text, _) = redact(r"SELECT E'a\'b', 'c:\path' FROM t");
+        assert_eq!(text, "SELECT ?, ? FROM t");
+        // Names read either way are kept, so a hidden table still blanks.
+        let (_, names) = redact(r"SELECT 'x\' FROM payroll, ' FROM t");
+        assert!(names.contains(&"payroll".to_string()), "{names:?}");
     }
 
     #[test]

@@ -146,10 +146,7 @@ pub(crate) async fn pg_read_relations(
     let mut touched = guard::pg_relations(plan);
     if guard::pg_pruned(plan) {
         let found = store.read_unpruned(target, explain).await?;
-        let Some(Value::Text(text)) = found.rows.first().and_then(|r| r.first()) else {
-            return Err("EXPLAIN returned no plan.".into());
-        };
-        let whole: Json = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let (whole, _) = guard::pg_plan_json(found.rows)?;
         for rel in guard::pg_relations(&whole) {
             if !touched.contains(&rel) {
                 touched.push(rel);

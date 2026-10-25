@@ -190,8 +190,9 @@ fn tools() -> Vec<Tool> {
         ),
         tool(
             "list_tables",
-            "Tables and views with approximate row counts and column counts. Cached for the session; refresh reloads the schema.",
+            "Tables and views with approximate row counts and column counts: up to 500, schemas on the search path first, with a count per schema of any not listed. Cached for the session; refresh reloads the schema.",
             json!({ "connection": connection, "database": database,
+                    "schema": { "type": "string", "description": "List only this schema" },
                     "refresh": { "type": "boolean", "description": "Reload the schema from the database" } }),
             &["connection"],
         ),
@@ -395,6 +396,7 @@ impl RowkeryMcp {
             }
         };
         let mut store = self.store.lock().await;
+        store.settle();
         store.forget_unshared(&config);
         if name == "list_connections" {
             entry.rows = Some(config.connections.iter().filter(|c| c.allow_mcp()).count() as u64);
@@ -430,7 +432,8 @@ impl RowkeryMcp {
             "list_databases" => list_databases(&mut store, &target).await,
             "list_tables" => {
                 let refresh = args.get("refresh").and_then(Json::as_bool).unwrap_or(false);
-                list_tables(&mut store, &target, refresh).await
+                let schema = args.get("schema").and_then(Json::as_str);
+                list_tables(&mut store, &target, refresh, schema).await
             }
             "search_schema" => match required(args, "text") {
                 Ok(text) => search_schema(&mut store, &target, text).await,
@@ -443,15 +446,23 @@ impl RowkeryMcp {
             "explain" | "query" => match required(args, "sql") {
                 Ok(sql) => {
                     let max_rows = args.get("max_rows").and_then(Json::as_u64);
-                    run_read(
-                        &mut store,
-                        &target,
-                        sql,
-                        max_rows,
-                        name == "explain",
-                        &mut entry,
-                    )
-                    .await
+                    // The checks and the run in one transaction (`Store::begin`).
+                    match store.begin(&target).await {
+                        Ok(()) => {
+                            let read = run_read(
+                                &mut store,
+                                &target,
+                                sql,
+                                max_rows,
+                                name == "explain",
+                                &mut entry,
+                            )
+                            .await;
+                            store.end(&target).await;
+                            read
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
                 Err(e) => Err(e),
             },
@@ -594,19 +605,58 @@ fn default_schema(record: &ConnectionRecord) -> &'static str {
     }
 }
 
-async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outcome {
+/// Tables `list_tables` names. A schema of thousands would fill the agent's
+/// context; past this, it counts the rest per schema.
+const MAX_TABLES: usize = 500;
+
+async fn list_tables(
+    store: &mut Store,
+    target: &Target,
+    refresh: bool,
+    schema: Option<&str>,
+) -> Outcome {
     let rule = rule(target);
     let cached = store.catalog(target, refresh).await?;
     let catalog = &cached.catalog;
-    let tables: Vec<Json> = all_tables(catalog)
+    let wanted = |s: &str| schema.is_none_or(|want| s.eq_ignore_ascii_case(want.trim()));
+    // Counted in one pass: one per table is slow with thousands of them.
+    // A hidden partition isn't counted: the count would tell it's there.
+    let mut partitions = std::collections::HashMap::<(&str, &str), usize>::new();
+    for (s, t) in all_tables(catalog) {
+        if !is_partition(t) || !rule.allows_node(catalog, s, t) {
+            continue;
+        }
+        let parent = t
+            .inherits_from
+            .first()
+            .map(|(s, n)| (s.as_str(), n.as_str()))
+            .or_else(|| t.partition_of.as_deref().map(|p| (s, p)));
+        if let Some(parent) = parent {
+            *partitions.entry(parent).or_default() += 1;
+        }
+    }
+    let mut shared: Vec<(&str, &TableNode)> = all_tables(catalog)
+        .filter(|(s, _)| wanted(s))
         .filter(|(s, t)| own_line(&rule, catalog, s, t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
-        .map(|(schema, t)| {
-            let partitions = catalog
-                .inherited_by(schema, &t.name)
-                .iter()
-                .filter(|(s, p)| catalog.table(s, p).is_some_and(is_partition))
-                .count();
+        .collect();
+    if let Some(want) = schema.filter(|_| shared.is_empty()) {
+        if !catalog
+            .databases
+            .iter()
+            .flat_map(|db| db.schemas.iter())
+            .any(|s| wanted(&s.name))
+        {
+            return Err(format!("No schema \"{}\".", want.trim()));
+        }
+    }
+    // The schemas a bare name finds first are the ones the agent will want.
+    let rank = |s: &str| catalog.search_path.iter().position(|p| p == s);
+    shared.sort_by_key(|(s, _)| rank(s).unwrap_or(usize::MAX));
+    let tables: Vec<Json> = shared
+        .iter()
+        .take(MAX_TABLES)
+        .map(|&(schema, t)| {
             let mut line = format!("{schema}.{}", t.name);
             if t.kind != TableKind::Table {
                 line.push_str(&format!(" ({})", kind_label(t.kind)));
@@ -618,15 +668,25 @@ async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outco
                 ", {} cols",
                 column_source(catalog, schema, t).columns.len()
             ));
-            if partitions > 0 {
-                line.push_str(&format!(", {partitions} partitions"));
+            if let Some(n) = partitions.get(&(schema, t.name.as_str())) {
+                line.push_str(&format!(", {n} partitions"));
             }
             json!(line)
         })
         .collect();
-    Ok(
-        json!({ "database": target.database, "schema_loaded": age(cached.loaded), "tables": tables }),
-    )
+    let mut out = json!({ "database": target.database, "schema_loaded": age(cached.loaded), "tables": tables });
+    if shared.len() > MAX_TABLES {
+        let mut not_listed = Map::new();
+        for (schema, _) in &shared[MAX_TABLES..] {
+            let n = not_listed.entry(schema.to_string()).or_insert(json!(0));
+            *n = json!(n.as_u64().unwrap_or(0) + 1);
+        }
+        out["not_listed"] = Json::Object(not_listed);
+        out["note"] = json!(
+            "More tables than are listed: pass schema to list one schema, or find tables by name with search_schema."
+        );
+    }
+    Ok(out)
 }
 
 async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcome {
@@ -638,16 +698,23 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
     let marks = mask::parse(target.record.masked_columns(&target.database));
     let mut tables = Vec::new();
     let mut columns = Vec::new();
+    let (mut more_tables, mut more_columns) = (0usize, 0usize);
     for (schema, t) in all_tables(catalog)
         .filter(|(s, t)| own_line(&rule, catalog, s, t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
     {
-        if t.name.to_lowercase().contains(&needle) && tables.len() < MAX_HITS {
-            tables.push(json!(format!("{schema}.{}", t.name)));
+        if t.name.to_lowercase().contains(&needle) {
+            if tables.len() == MAX_HITS {
+                more_tables += 1;
+            } else {
+                tables.push(json!(format!("{schema}.{}", t.name)));
+            }
         }
         let above = access::above(catalog, schema, t);
         for c in &column_source(catalog, schema, t).columns {
-            if c.name.to_lowercase().contains(&needle) && columns.len() < MAX_HITS {
+            if c.name.to_lowercase().contains(&needle) && columns.len() == MAX_HITS {
+                more_columns += 1;
+            } else if c.name.to_lowercase().contains(&needle) {
                 let masked = marks.iter().any(|m| {
                     m.column == c.name && above.contains(&(m.schema.as_str(), m.table.as_str()))
                 });
@@ -661,7 +728,13 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
             }
         }
     }
-    Ok(json!({ "tables": tables, "columns": columns }))
+    let mut out = json!({ "tables": tables, "columns": columns });
+    if more_tables + more_columns > 0 {
+        out["note"] = json!(format!(
+            "{more_tables} more tables and {more_columns} more columns match. Search for longer text."
+        ));
+    }
+    Ok(out)
 }
 
 async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outcome {
@@ -847,6 +920,47 @@ pub(crate) async fn refuse_credentials(
     }
 }
 
+/// A read's rows shaped for the agent as they arrive (masked places as
+/// stand-ins, long text cut), so no more than the cap and 64 KB is held.
+#[derive(Default)]
+struct Shaper {
+    cap: usize,
+    masked_at: Vec<usize>,
+    key: Option<String>,
+    rows: Vec<Json>,
+    size: usize,
+    /// Rows read, the one past the cap included.
+    seen: usize,
+    cut: bool,
+    payload_cut: bool,
+}
+
+impl Shaper {
+    /// Takes one row; false once no more are wanted.
+    fn take(&mut self, row: Vec<rowkery_core::Value>) -> bool {
+        self.seen += 1;
+        if self.seen > self.cap {
+            return false;
+        }
+        let cells: Vec<Json> = row
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match &self.key {
+                Some(key) if self.masked_at.contains(&i) => mask::stand_in(key.as_bytes(), v),
+                _ => guard::cell(v, &mut self.cut),
+            })
+            .collect();
+        let shaped = Json::Array(cells);
+        self.size += shaped.to_string().len() + 1;
+        if self.size > PAYLOAD_BYTES {
+            self.payload_cut = true;
+            return false;
+        }
+        self.rows.push(shaped);
+        true
+    }
+}
+
 /// `explain` and `query`: the same checks, then either the plan or the rows.
 async fn run_read(
     store: &mut Store,
@@ -876,11 +990,7 @@ async fn run_read(
             functions::check_pg(store, target, &written, true).await?;
             let explain_sql = format!("EXPLAIN (FORMAT JSON, VERBOSE) {capped}");
             let explain = store.read(target, &explain_sql).await?;
-            let text = match explain.rows.first().and_then(|r| r.first()) {
-                Some(rowkery_core::Value::Text(t)) => t.clone(),
-                _ => return Err("EXPLAIN returned no plan.".into()),
-            };
-            let plan: Json = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            let (plan, _) = guard::pg_plan_json(explain.rows)?;
             let planned = functions::scan_plan(&plan);
             if sessions::reads_activity(&planned.call_names()) {
                 return Err(sessions::ACTIVITY_REFUSAL.into());
@@ -979,7 +1089,13 @@ async fn run_read(
     let mask_key = if masked_at.is_empty() || plan_only {
         None
     } else {
-        Some(rowkery_core::secrets::mask_key(target.id()).map_err(|e| {
+        // Off the async threads: it can wait on the app's keychain prompt.
+        let id = target.id().to_string();
+        let key = tokio::task::spawn_blocking(move || rowkery_core::secrets::mask_key(&id))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|key| key.map_err(|e| e.to_string()));
+        Some(key.map_err(|e| {
             format!("Refused: Rowkery couldn't read the key it masks values with from the keychain ({e}).")
         })?)
     };
@@ -1036,7 +1152,14 @@ async fn run_read(
     }
 
     if plan_only {
-        let mut out = json!({ "plan": plan_lines });
+        let (shown, more) = guard::plan_shown(plan_lines);
+        let mut out = json!({ "plan": shown });
+        if more > 0 {
+            out["plan_note"] = json!(format!(
+                "{more} more plan lines not shown: the answer stops at {} KB.",
+                PAYLOAD_BYTES / 1024
+            ));
+        }
         // The same reading of the plan the app shows on ⌘E: its slowest step
         // and one hint.
         let readable = match &pg_plan_json {
@@ -1097,29 +1220,23 @@ async fn run_read(
         }
     }
 
-    let result = store.read(target, &capped).await?;
-    let more = result.rows.len() > cap;
-    let mut cut = false;
-    let mut rows = Vec::new();
-    let mut size = 0usize;
-    let mut payload_cut = false;
-    for row in result.rows.iter().take(cap) {
-        let cells: Vec<Json> = row
-            .iter()
-            .enumerate()
-            .map(|(i, v)| match &mask_key {
-                Some(key) if masked_at.contains(&i) => mask::stand_in(key.as_bytes(), v),
-                _ => guard::cell(v, &mut cut),
-            })
-            .collect();
-        let shaped = Json::Array(cells);
-        size += shaped.to_string().len() + 1;
-        if size > PAYLOAD_BYTES {
-            payload_cut = true;
-            break;
-        }
-        rows.push(shaped);
-    }
+    let shaper = Shaper {
+        cap,
+        masked_at: masked_at.clone(),
+        key: mask_key,
+        ..Shaper::default()
+    };
+    let result = store
+        .read_each(target, &capped, cap + 1, shaper, Shaper::take)
+        .await?;
+    let Shaper {
+        rows,
+        seen,
+        cut,
+        payload_cut,
+        ..
+    } = result.state;
+    let more = seen > cap;
     if cut {
         notes.push(format!("text over {} chars was cut", guard::CELL_CHARS));
     }
@@ -1172,52 +1289,90 @@ async fn pg_masked(
     alias: &str,
     written_calls: &[String],
 ) -> Result<Vec<usize>, String> {
-    const INDEXES: &str = "SELECT ci.relname, n.nspname || '.' || coalesce(pt.relname, t.relname), pg_get_indexdef(i.indexrelid) \
-        FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
-        JOIN pg_namespace n ON n.oid = t.relnamespace \
-        LEFT JOIN pg_inherits inh ON inh.inhrelid = t.oid LEFT JOIN pg_class pt ON pt.oid = inh.inhparent \
-        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')";
-    let facts = store.read(target, INDEXES).await?;
     let text = |v: Option<&rowkery_core::Value>| match v {
         Some(rowkery_core::Value::Text(t)) => t.clone(),
         _ => String::new(),
     };
+    // The tables each relation the plan reads is a partition or child table
+    // of, from the server: the catalog links only partitions in their
+    // parent's schema, and no child tables.
+    let names: Vec<String> = touched
+        .iter()
+        .filter_map(|(s, t)| {
+            let lit = |v: &str| {
+                rowkery_core::query_util::sql_literal(
+                    EngineKind::Postgres,
+                    &rowkery_core::Value::Text(v.to_string()),
+                )
+            };
+            Some(format!(
+                "({}, {})",
+                lit(s.as_deref().unwrap_or("public"))?,
+                lit(t)?
+            ))
+        })
+        .collect();
+    let mut ancestors: std::collections::HashMap<(String, String), Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    if !names.is_empty() {
+        // UNION, not UNION ALL: a table under several parents is reached
+        // once per parent, not once per path, and pg_inherits has no
+        // cycles, so the walk ends at the top of every chain however deep.
+        let sql = format!(
+            "WITH RECURSIVE up(child, parent) AS ( \
+               SELECT i.inhrelid, i.inhparent FROM pg_inherits i \
+                 JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE (n.nspname, c.relname) IN (VALUES {}) \
+               UNION SELECT up.child, i.inhparent FROM up \
+                 JOIN pg_inherits i ON i.inhrelid = up.parent) \
+             SELECT cn.nspname, c.relname, pn.nspname, p.relname FROM up \
+               JOIN pg_class c ON c.oid = up.child JOIN pg_namespace cn ON cn.oid = c.relnamespace \
+               JOIN pg_class p ON p.oid = up.parent JOIN pg_namespace pn ON pn.oid = p.relnamespace",
+            names.join(", ")
+        );
+        for row in store.read(target, &sql).await?.rows {
+            ancestors
+                .entry((text(row.first()), text(row.get(1))))
+                .or_default()
+                .push((text(row.get(2)), text(row.get(3))));
+        }
+    }
+    let lineage = |schema: &str, rel: &str| {
+        let mut all = vec![(schema.to_string(), rel.to_string())];
+        if let Some(up) = ancestors.get(&(schema.to_string(), rel.to_string())) {
+            all.extend(up.iter().cloned());
+        }
+        all
+    };
+
+    const INDEXES: &str = "SELECT ci.relname, n.nspname, t.relname, pg_get_indexdef(i.indexrelid) \
+        FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
+        JOIN pg_namespace n ON n.oid = t.relnamespace \
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')";
+    // An index covering a marked column, on the marked table or any of its
+    // partitions and child tables, wherever they live.
     let mut indexes = std::collections::HashSet::new();
-    for row in &facts.rows {
-        let table = text(row.get(1));
-        let definition = text(row.get(2));
-        if marks.iter().any(|m| {
-            table == format!("{}.{}", m.schema, m.table)
-                && mask::index_covers(&definition, &m.column)
-        }) {
+    for row in store.read(target, INDEXES).await?.rows {
+        let definition = text(row.get(3));
+        let marked = lineage(&text(row.get(1)), &text(row.get(2)))
+            .iter()
+            .any(|(s, t)| {
+                marks.iter().any(|m| {
+                    m.schema == *s && m.table == *t && mask::index_covers(&definition, &m.column)
+                })
+            });
+        if marked {
             indexes.insert(text(row.first()));
         }
     }
 
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
-    // A relation's parent when it is a partition (same schema).
-    let parent = |schema: &str, rel: &str| {
-        access::find_exact(catalog, schema, rel).and_then(|t| t.partition_of.clone())
-    };
-    let root_of = |schema: &str, rel: &str| {
-        let mut name = rel.to_string();
-        let mut partition = false;
-        for _ in 0..8 {
-            match parent(schema, &name) {
-                Some(p) => {
-                    name = p;
-                    partition = true;
-                }
-                None => break,
-            }
-        }
-        (name, partition)
-    };
     for m in marks {
         let reads_it = touched.iter().any(|(s, t)| {
-            let schema = s.as_deref().unwrap_or("public");
-            schema == m.schema && root_of(schema, t).0 == m.table
+            lineage(s.as_deref().unwrap_or("public"), t)
+                .iter()
+                .any(|(s, t)| *s == m.schema && *t == m.table)
         });
         if !reads_it {
             continue;
@@ -1231,36 +1386,41 @@ async fn pg_masked(
             }
         }
     }
+    // A partition or child table answers for the tables above it.
     let marked_of = |schema: Option<&str>, rel: &str| {
-        let schema = schema.unwrap_or("public");
-        let (root, partition) = root_of(schema, rel);
-        let columns: Vec<String> = marks
-            .iter()
-            .filter(|m| m.schema == schema && m.table == root)
-            .map(|m| m.column.clone())
-            .collect();
-        (columns, partition)
+        let mut columns: Vec<(String, String)> = Vec::new();
+        for (s, t) in lineage(schema.unwrap_or("public"), rel) {
+            for m in marks.iter().filter(|m| m.schema == s && m.table == t) {
+                if !columns.iter().any(|(c, _)| *c == m.column) {
+                    columns.push((m.column.clone(), m.table.clone()));
+                }
+            }
+        }
+        columns
     };
     // A table with masked columns, by every name its columns have.
     let columns_of = |schema: Option<&str>, rel: &str| {
-        let (marked, _) = marked_of(schema, rel);
+        let marked = marked_of(schema, rel);
         if marked.is_empty() {
             return None;
         }
-        let schema = schema.unwrap_or("public");
-        // A partition's columns are its parent's.
-        let table = access::find_exact(catalog, schema, &root_of(schema, rel).0);
-        Some(
-            table
-                .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
-                .unwrap_or_default(),
-        )
+        // The catalog may list a partition without its columns.
+        let columns = lineage(schema.unwrap_or("public"), rel)
+            .iter()
+            .filter_map(|(s, t)| access::find_exact(catalog, s, t))
+            .find(|t| !t.columns.is_empty())
+            .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        Some(columns)
     };
     mask::pg_renamed(plan, &columns_of, written_calls)?;
     mask::pg_check(
         plan,
         &mask::PgFacts {
             marked_of: &marked_of,
+            is_part: &|schema, rel| {
+                ancestors.contains_key(&(schema.unwrap_or("public").to_string(), rel.to_string()))
+            },
             marked_indexes: &indexes,
             wrapper: alias,
         },
@@ -1369,19 +1529,23 @@ impl ServerHandler for RowkeryMcp {
             Err(message) => message.clone(),
         };
         entry.bytes = Some(text.len() as u64);
-        if keep_sample && outcome.is_ok() {
-            samples::save(
-                &samples::shape(entry.session.unwrap_or(0), entry.ts, &text),
-                entry.ts,
-            );
-        }
+        let sample = (keep_sample && outcome.is_ok())
+            .then(|| samples::shape(entry.session.unwrap_or(0), entry.ts, &text));
         if entry.verdict.is_none() {
             entry.verdict = Some(match &outcome {
                 Ok(_) => "ok".into(),
                 Err(e) => e.clone(),
             });
         }
-        audit::append(&entry);
+        // File writes, which can wait up to a second for another process's
+        // lock: off the async workers.
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(sample) = sample {
+                samples::save(&sample, entry.ts);
+            }
+            audit::append(&entry);
+        })
+        .await;
         let mut result = text_result(&outcome);
         if views && request.name == "query" && outcome.is_ok() {
             result.content.push(ContentBlock::text(views::SHOWN_NOTE));
@@ -1470,6 +1634,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok["rows"], json!([[2]]));
+        // The query asks for 2.4 GB of cells. Rows are shaped as they
+        // arrive, so it answers within 64 KB and stops reading there.
+        let big = call(
+            &mcp,
+            "query",
+            q(
+                "with recursive c(x) as (select 1 union all select x + 1 from c where x < 400)
+               select x, printf('%.*c', 3000000, 'x'), printf('%.*c', 3000000, 'y') from c",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(big["more"], true);
+        assert!(
+            big["row_count"].as_u64().unwrap() < 200,
+            "{}",
+            big["row_count"]
+        );
+        assert!(
+            big["notes"].to_string().contains("64 KB"),
+            "{}",
+            big["notes"]
+        );
         // explain reads the plan the way the app's ⌘E does.
         let plan = call(&mcp, "explain", q("select id from orders where n = 7"))
             .await
@@ -1582,6 +1769,110 @@ mod tests {
             .await
             .expect("statistics with nothing kept back");
 
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The env lock spans the whole test, awaits included: each test has its own runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn list_tables_stops_at_its_cap_and_says_how_many_more() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let db = dir.join("t.db");
+        let sql: String = (0..MAX_TABLES + 3)
+            .map(|i| format!("create table t{i:04}(id integer primary key);"))
+            .collect();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(&sql)
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.upsert_connection(ConnectionRecord::Sqlite(SqliteConnection {
+            id: "s".into(),
+            name: "s".into(),
+            path: db.to_string_lossy().to_string(),
+            environment: None,
+            safe_mode: Default::default(),
+            sample: false,
+            allow_mcp: true,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+        }));
+        config.save().unwrap();
+        let mcp = RowkeryMcp::default();
+        let listed = call(&mcp, "list_tables", json!({ "connection": "s" }))
+            .await
+            .unwrap();
+        let names = listed["tables"].as_array().unwrap();
+        assert_eq!(names.len(), MAX_TABLES);
+        assert_eq!(names[0], "main.t0000, 1 cols");
+        assert!(!listed.to_string().contains("t0500"));
+        assert_eq!(listed["not_listed"], json!({ "main": 3 }));
+        assert!(listed["note"].as_str().unwrap().contains("search_schema"));
+        let one = call(
+            &mcp,
+            "list_tables",
+            json!({ "connection": "s", "schema": "MAIN" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one["not_listed"], json!({ "main": 3 }));
+        assert!(call(
+            &mcp,
+            "list_tables",
+            json!({ "connection": "s", "schema": "nope" })
+        )
+        .await
+        .is_err());
+        let found = call(
+            &mcp,
+            "search_schema",
+            json!({ "connection": "s", "text": "t0502" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found["tables"], json!(["main.t0502"]));
+        assert!(found.get("note").is_none());
+        let many = call(
+            &mcp,
+            "search_schema",
+            json!({ "connection": "s", "text": "t0" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(many["tables"].as_array().unwrap().len(), 40);
+        assert_eq!(
+            many["note"],
+            "463 more tables and 0 more columns match. Search for longer text."
+        );
+
+        // Exactly the cap: nothing left over.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("drop table t0500; drop table t0501; drop table t0502;")
+            .unwrap();
+        let full = call(
+            &mcp,
+            "list_tables",
+            json!({ "connection": "s", "refresh": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(full["tables"].as_array().unwrap().len(), MAX_TABLES);
+        assert!(full.get("not_listed").is_none() && full.get("note").is_none());
+        // The description says the same cap.
+        assert!(tools().iter().any(|t| t.name == "list_tables"
+            && t.description
+                .as_deref()
+                .unwrap_or("")
+                .contains(&MAX_TABLES.to_string())));
         std::env::remove_var("ROWKERY_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }

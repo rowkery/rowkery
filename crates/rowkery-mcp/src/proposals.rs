@@ -26,7 +26,7 @@ use rowkery_core::Value;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 
-use crate::target::{resolve, Store};
+use crate::target::{resolve, Store, Target};
 
 const QUEUE_FILE: &str = "proposals.jsonl";
 const OUTCOMES_FILE: &str = "proposal-outcomes.jsonl";
@@ -563,7 +563,13 @@ pub async fn commit(id: &str, rows: &[u64]) -> Result<CommitOutcome, String> {
         return Err("The change moved since you reviewed it. Review it again.".into());
     }
     let ran = match &record {
-        ConnectionRecord::Postgres(pg) => pg_commit(pg, &database, &changes, rows).await,
+        ConnectionRecord::Postgres(pg) => {
+            let target = Target {
+                record: record.clone(),
+                database: database.clone(),
+            };
+            pg_commit(pg, &target, &proposal.sql, rows).await
+        }
         ConnectionRecord::Sqlite(c) => {
             let path = c.path.clone();
             let changes = changes.clone();
@@ -848,16 +854,37 @@ fn finish(
 /// retried.
 async fn pg_commit(
     pg: &PostgresConnection,
-    database: &str,
-    changes: &[RowChange],
+    target: &Target,
+    sql: &str,
     expected: &[u64],
 ) -> Result<RunResult, String> {
-    let session = open_session(pg.id.clone(), pg_config(pg, database))
+    let session = open_session(pg.id.clone(), pg_config(pg, &target.database))
         .await
         .map_err(|e| e.into_message())?;
     session_execute(&session, &format!("BEGIN; {}", timeouts_sql(LOCK_TIMEOUT)))
         .await
         .map_err(|e| e.into_message())?;
+    // Checked again in the transaction that runs it: planned at another
+    // moment, `'now'` can fold into a plan that reads what the check never
+    // saw (`Store::begin`).
+    let mut store = Store::on_session(target, session);
+    let checked = crate::change::check(&mut store, target, sql).await;
+    let Some(session) = store.into_session(target) else {
+        return Err(checked.err().unwrap_or_else(|| {
+            "The connection closed before the change ran. Nothing was saved.".into()
+        }));
+    };
+    let changes = match checked {
+        Ok(changes) if changes.len() == expected.len() => changes,
+        Ok(_) => {
+            let _ = session_execute(&session, "ROLLBACK").await;
+            return Ok(RunResult::Moved);
+        }
+        Err(e) => {
+            let _ = session_execute(&session, "ROLLBACK").await;
+            return Err(e);
+        }
+    };
     let mut counts = Vec::new();
     for (change, want) in changes.iter().zip(expected) {
         let ran = session_query_stream(&session, &change.sql, |_, _| Ok(())).await;

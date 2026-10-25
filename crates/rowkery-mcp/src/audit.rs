@@ -137,7 +137,13 @@ pub fn append(entry: &Entry) {
     line.push('\n');
     let path = dir.join(LOG_FILE);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
-        let _ = std::fs::rename(&path, dir.join("mcp-log.1.jsonl"));
+        // Checked again under the lock: two processes moving it at once
+        // would put a nearly empty log over the old one.
+        crate::samples::locked(|| {
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
+                let _ = std::fs::rename(&path, dir.join("mcp-log.1.jsonl"));
+            }
+        });
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
@@ -238,16 +244,23 @@ pub fn find_call(id: &str) -> Option<Entry> {
         })
 }
 
-/// Empties the log (⌘K MCP activity > Clear log).
+/// Empties the log and the samples (Agents page > Clear log), all under the
+/// one lock, so an agent's rotation can't keep the old log as `.1`.
 pub fn clear() -> std::io::Result<()> {
-    crate::samples::clear()?;
-    let path = log_path();
-    let _ = std::fs::remove_file(config_dir().join("mcp-log.1.jsonl"));
-    match File::create(path) {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    crate::samples::locked(|| {
+        crate::samples::remove_all()?;
+        let _ = std::fs::remove_file(config_dir().join("mcp-log.1.jsonl"));
+        match File::create(log_path()) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    })
+    .unwrap_or_else(|| {
+        Err(std::io::Error::other(
+            "an agent is writing to the log; try again",
+        ))
+    })
 }
 
 #[cfg(test)]
