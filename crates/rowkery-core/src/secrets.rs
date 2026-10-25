@@ -19,6 +19,7 @@ const SERVICE: &str = if crate::config::DEV_BUILD {
 };
 const FALLBACK_FILE: &str = "secrets.enc";
 const FALLBACK_KEY_FILE: &str = "secrets.key";
+const LOCK_FILE: &str = "secrets.lock";
 
 #[derive(Debug, Error)]
 pub enum SecretError {
@@ -247,6 +248,12 @@ fn cache_put(account: &str, value: Option<String>) {
     }
 }
 
+fn cache_forget(account: &str) {
+    if let Ok(mut c) = cache().lock() {
+        c.remove(&cache_key(account));
+    }
+}
+
 /// Each connection's keychain item as read this run; `Err` after a failed
 /// read (a denied prompt), so one denial doesn't ask again for every secret.
 type ItemCache =
@@ -293,12 +300,59 @@ fn keychain_item(connection_id: &str) -> Result<Item, ()> {
     read
 }
 
+/// Holds a lock every Rowkery process takes around a change to a
+/// connection's secrets (the app and each agent's MCP server), so two
+/// read-change-saves never interleave. Never nested. Without a lock file,
+/// no lock: a change is still made.
+fn locked<T>(change: impl FnOnce() -> T) -> T {
+    let file = fs::create_dir_all(config_dir()).ok().and_then(|_| {
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(config_dir().join(LOCK_FILE))
+            .ok()
+    });
+    let held = file.as_ref().is_some_and(|f| f.lock().is_ok());
+    let out = change();
+    if held {
+        let _ = file.as_ref().map(fs::File::unlock);
+    }
+    out
+}
+
 /// The connection's keychain item as it is now, for a change to it: another
-/// process (the app, or an MCP server) may have saved it since this one
-/// read it, and a write from the older copy would undo that save.
+/// process may have saved it since this one read it, and a save from the
+/// older copy would undo that. A read refused earlier this run isn't asked
+/// again, and a failed read leaves this run's copy as it was.
 fn fresh_item(connection_id: &str) -> Result<Item, ()> {
-    forget_cached(connection_id);
-    keychain_item(connection_id)
+    let key = cache_key(connection_id);
+    let before = item_cache().lock().ok().and_then(|mut c| c.remove(&key));
+    if let Some(Err(())) = before {
+        if let Ok(mut c) = item_cache().lock() {
+            c.insert(key, Err(()));
+        }
+        return Err(());
+    }
+    match keychain_item(connection_id) {
+        Ok(item) => {
+            // What this run remembers of each secret follows the item.
+            for kind in KINDS.into_iter().chain(NEWER_KINDS) {
+                let account = entry_account(connection_id, kind);
+                match item.get(kind.label()) {
+                    Some(value) => cache_put(&account, Some(value.clone())),
+                    None => cache_forget(&account),
+                }
+            }
+            Ok(item)
+        }
+        Err(()) => {
+            if let (Some(before), Ok(mut c)) = (before, item_cache().lock()) {
+                c.insert(key, before);
+            }
+            Err(())
+        }
+    }
 }
 
 fn item_save(connection_id: &str, item: &Item) -> Result<(), SecretError> {
@@ -323,57 +377,76 @@ pub fn store_secret(
 
 /// Stores several of a connection's secrets with one keychain write.
 fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<(), SecretError> {
-    let fresh = keychain_enabled().then(|| fresh_item(connection_id));
-    for (kind, secret) in secrets {
-        cache_put(
-            &entry_account(connection_id, *kind),
-            Some(secret.to_string()),
-        );
-    }
-    if let Some(Ok(mut item)) = fresh {
-        for (kind, secret) in secrets {
-            item.insert(kind.label().to_string(), secret.to_string());
-        }
-        if item_save(connection_id, &item).is_ok() {
-            // Drop any copy an older build left in the file.
-            for (kind, _) in secrets {
-                let _ = fallback_remove_if_present(&entry_account(connection_id, *kind));
+    change_secrets(connection_id, secrets, &[])
+}
+
+/// Stores `set` and removes `remove` with one read and one write of the
+/// connection's keychain item, made from the item as it is now.
+fn change_secrets(
+    connection_id: &str,
+    set: &[(SecretKind, &str)],
+    remove: &[SecretKind],
+) -> Result<(), SecretError> {
+    locked(|| {
+        // A failed fresh read falls back on this run's copy, if it has one.
+        let item = keychain_enabled()
+            .then(|| fresh_item(connection_id).or_else(|()| keychain_item(connection_id)));
+        if let Some(Ok(read)) = item {
+            let mut item = read.clone();
+            for (kind, secret) in set {
+                item.insert(kind.label().to_string(), secret.to_string());
             }
-            return Ok(());
-        }
-        // Too big for the keychain (Windows' Credential Manager holds
-        // about 1,250 characters, less than a service account key): the
-        // file takes them, and the item drops its older copies, which
-        // reads would otherwise find first. The small ones move back
-        // into the item on their next read.
-        if let Ok(mut item) = keychain_item(connection_id) {
-            let before = item.len();
-            for (kind, _) in secrets {
+            for kind in remove {
                 item.remove(kind.label());
             }
-            if item.len() != before {
+            if item == read || item_save(connection_id, &item).is_ok() {
+                for (kind, secret) in set {
+                    let account = entry_account(connection_id, *kind);
+                    cache_put(&account, Some(secret.to_string()));
+                    // Drop any copy an older build left in the file.
+                    let _ = fallback_remove_if_present(&account);
+                }
+                for kind in remove {
+                    let account = entry_account(connection_id, *kind);
+                    fallback_remove_if_present(&account)?;
+                    cache_put(&account, None);
+                }
+                return Ok(());
+            }
+            // Too big for the keychain (Windows' Credential Manager holds
+            // about 1,250 characters, less than a service account key): the
+            // file takes them, and the item drops its older copies, which
+            // reads would otherwise find first. The small ones move back
+            // into the item on their next read.
+            let mut item = read.clone();
+            for (kind, _) in set {
+                item.remove(kind.label());
+            }
+            for kind in remove {
+                item.remove(kind.label());
+            }
+            if item != read {
                 let _ = item_save(connection_id, &item);
             }
         }
-    }
-    for (kind, secret) in secrets {
-        fallback_set(&entry_account(connection_id, *kind), secret)?;
-    }
-    Ok(())
+        for (kind, secret) in set {
+            let account = entry_account(connection_id, *kind);
+            fallback_set(&account, secret)?;
+            cache_put(&account, Some(secret.to_string()));
+        }
+        for kind in remove {
+            let account = entry_account(connection_id, *kind);
+            fallback_remove_if_present(&account)?;
+            cache_put(&account, None);
+        }
+        Ok(())
+    })
 }
 
 /// Removes one of a connection's secrets (a service account key the
 /// connection no longer signs in with).
 pub fn delete_secret(connection_id: &str, kind: SecretKind) -> Result<(), SecretError> {
-    let account = entry_account(connection_id, kind);
-    let fresh = keychain_enabled().then(|| fresh_item(connection_id));
-    cache_put(&account, None);
-    if let Some(Ok(mut item)) = fresh {
-        if item.remove(kind.label()).is_some() {
-            item_save(connection_id, &item)?;
-        }
-    }
-    fallback_remove_if_present(&account)
+    change_secrets(connection_id, &[], &[kind])
 }
 
 /// Read a connection secret. A secret still in the fallback file is moved into
@@ -398,11 +471,17 @@ pub fn get_secret(connection_id: &str, kind: SecretKind) -> Result<Option<String
         return Ok(Some(value.clone()));
     }
     let value = fallback_get(&account)?;
-    if let (Some(v), Some(mut item)) = (&value, item) {
-        item.insert(kind.label().to_string(), v.clone());
-        if item_save(connection_id, &item).is_ok() {
-            let _ = fallback_remove_if_present(&account);
-        }
+    if let (Some(v), Some(_)) = (&value, item) {
+        locked(|| {
+            if let Ok(mut item) = fresh_item(connection_id) {
+                if !item.contains_key(kind.label()) {
+                    item.insert(kind.label().to_string(), v.clone());
+                    if item_save(connection_id, &item).is_ok() {
+                        let _ = fallback_remove_if_present(&account);
+                    }
+                }
+            }
+        });
     }
     cache_put(&account, value.clone());
     Ok(value)
@@ -438,27 +517,40 @@ pub fn keychain_refused(connection_id: &str) -> bool {
 /// The connection's key for the stand-ins agents get in place of sensitive
 /// values (`rowkery_mcp::mask`): 32 random bytes as hex, made on first use.
 /// It lives in the connection's keychain item beside its passwords, so the
-/// MCP server reading it asks the keychain nothing more. An error (a denied
-/// keychain) means no stand-ins can be made, so marked columns are refused.
+/// MCP server reading it asks the keychain nothing more; with no keychain
+/// to hand (a denied read), in the encrypted file. Every process gets the
+/// same key: one made elsewhere since this one looked is used, not
+/// replaced.
 pub fn mask_key(connection_id: &str) -> Result<String, SecretError> {
     if let Some(key) = get_secret(connection_id, SecretKind::MaskKey)? {
         if !key.is_empty() {
             return Ok(key);
         }
     }
-    // Another process (the app, or another agent's server) may have made
-    // one since this one looked: two keys would give one value two stand-ins.
-    forget_cached(connection_id);
-    if let Some(key) = get_secret(connection_id, SecretKind::MaskKey)? {
-        if !key.is_empty() {
+    let account = entry_account(connection_id, SecretKind::MaskKey);
+    let label = SecretKind::MaskKey.label();
+    locked(|| {
+        let item = keychain_enabled().then(|| fresh_item(connection_id));
+        if let Some(Ok(mut item)) = item {
+            if let Some(key) = item.get(label).filter(|k| !k.is_empty()) {
+                return Ok(key.clone());
+            }
+            let key = random_hex(32);
+            item.insert(label.to_string(), key.clone());
+            if item_save(connection_id, &item).is_ok() {
+                cache_put(&account, Some(key.clone()));
+                return Ok(key);
+            }
+        }
+        if let Some(key) = fallback_get(&account)?.filter(|k| !k.is_empty()) {
+            cache_put(&account, Some(key.clone()));
             return Ok(key);
         }
-    }
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let key: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    store_secret(connection_id, SecretKind::MaskKey, &key)?;
-    Ok(key)
+        let key = random_hex(32);
+        fallback_set(&account, &key)?;
+        cache_put(&account, Some(key.clone()));
+        Ok(key)
+    })
 }
 
 /// `bytes` from the OS's secure random source, as hex.
@@ -520,8 +612,9 @@ impl ConnectionSecrets {
         }
     }
 
-    pub fn persist(&self, connection_id: &str) -> Result<(), SecretError> {
-        let typed: Vec<(SecretKind, &str)> = [
+    /// The secrets typed in, by kind.
+    fn typed(&self) -> Vec<(SecretKind, &str)> {
+        [
             (SecretKind::DbPassword, &self.db_password),
             (SecretKind::SshPassword, &self.ssh_password),
             (SecretKind::SshKeyPassphrase, &self.ssh_key_passphrase),
@@ -529,11 +622,28 @@ impl ConnectionSecrets {
         ]
         .into_iter()
         .filter_map(|(kind, v)| v.as_deref().filter(|v| !v.is_empty()).map(|v| (kind, v)))
-        .collect();
-        if typed.is_empty() {
+        .collect()
+    }
+
+    pub fn persist(&self, connection_id: &str) -> Result<(), SecretError> {
+        self.persist_removing(connection_id, &[])
+    }
+
+    /// `persist`, also removing `remove`, in the same keychain write.
+    pub fn persist_removing(
+        &self,
+        connection_id: &str,
+        remove: &[SecretKind],
+    ) -> Result<(), SecretError> {
+        let typed: Vec<(SecretKind, &str)> = self
+            .typed()
+            .into_iter()
+            .filter(|(kind, _)| !remove.contains(kind))
+            .collect();
+        if typed.is_empty() && remove.is_empty() {
             return Ok(());
         }
-        store_secrets(connection_id, &typed)
+        change_secrets(connection_id, &typed, remove)
     }
 }
 
@@ -864,6 +974,131 @@ mod tests {
         let item: Item = mock_state(|k| serde_json::from_str(&k.items["k9"]).unwrap());
         assert_eq!(item["db-password"], "newer");
         assert!(!item.contains_key("gcp-key"));
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    fn put_item(id: &str, json: &str) {
+        mock::KEYCHAIN
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .items
+            .insert(id.into(), json.into());
+    }
+    fn set_deny(deny: bool) {
+        mock::KEYCHAIN.lock().unwrap().as_mut().unwrap().deny = deny;
+    }
+    fn reads() -> usize {
+        mock_state(|k| k.reads)
+    }
+
+    #[test]
+    fn a_failed_fresh_read_keeps_this_runs_copy() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        put_item(
+            "k10",
+            r#"{"db-password":"old","ssh-password":"sshpw","gcp-key":"g"}"#,
+        );
+        assert_eq!(
+            get_secret("k10", SecretKind::DbPassword)
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        // The prompt for the fresh read is dismissed: the edit still goes
+        // into the item, from the copy this run read.
+        set_deny(true);
+        store_secret("k10", SecretKind::DbPassword, "new").unwrap();
+        delete_secret("k10", SecretKind::GcpKey).unwrap();
+        assert!(!keychain_refused("k10"));
+        assert_eq!(
+            get_secret("k10", SecretKind::SshPassword)
+                .unwrap()
+                .as_deref(),
+            Some("sshpw")
+        );
+        set_deny(false);
+        forget_cached("k10");
+        assert_eq!(
+            get_secret("k10", SecretKind::DbPassword)
+                .unwrap()
+                .as_deref(),
+            Some("new")
+        );
+        assert_eq!(get_secret("k10", SecretKind::GcpKey).unwrap(), None);
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn writes_ask_the_keychain_no_more_than_they_must() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        // A mask key for a connection already read: one fresh read.
+        put_item("k11", r#"{"db-password":"pw"}"#);
+        get_secret("k11", SecretKind::DbPassword).unwrap();
+        let before = reads();
+        mask_key("k11").unwrap();
+        assert_eq!(reads() - before, 1);
+        // Saving a connection and dropping its key: one read, one write.
+        let (before, writes) = (reads(), mock_state(|k| k.writes));
+        ConnectionSecrets {
+            db_password: Some("pw2".into()),
+            ..Default::default()
+        }
+        .persist_removing("k11", &[SecretKind::GcpKey])
+        .unwrap();
+        assert_eq!(reads() - before, 1);
+        assert_eq!(mock_state(|k| k.writes) - writes, 1);
+        // After a denied read this run, writes and the mask key ask nothing
+        // more: they go to the file.
+        set_deny(true);
+        put_item("k12", r#"{"db-password":"pw"}"#);
+        assert!(get_secret("k12", SecretKind::DbPassword).is_ok());
+        let before = reads();
+        store_secret("k12", SecretKind::DbPassword, "x").unwrap();
+        let key = mask_key("k12").unwrap();
+        assert_eq!(reads() - before, 0);
+        assert_eq!(mask_key("k12").unwrap(), key);
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn mask_keys_made_at_once_are_one_key() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        put_item("k14", r#"{"db-password":"pw"}"#);
+        let keys: Vec<String> = (0..8)
+            .map(|_| std::thread::spawn(|| mask_key("k14").unwrap()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert!(keys.iter().all(|k| *k == keys[0]), "{keys:?}");
+        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k14"]).unwrap());
+        assert_eq!(item["mask-key"], keys[0]);
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_file_secret_moving_in_keeps_what_another_process_saved() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        put_item("k13", r#"{"db-password":"old"}"#);
+        get_secret("k13", SecretKind::DbPassword).unwrap();
+        fallback_set(&entry_account("k13", SecretKind::SshPassword), "filed").unwrap();
+        put_item("k13", r#"{"db-password":"new","mask-key":"K"}"#);
+        assert_eq!(
+            get_secret("k13", SecretKind::SshPassword)
+                .unwrap()
+                .as_deref(),
+            Some("filed")
+        );
+        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k13"]).unwrap());
+        assert_eq!(item["db-password"], "new");
+        assert_eq!(item["mask-key"], "K");
+        assert_eq!(item["ssh-password"], "filed");
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
