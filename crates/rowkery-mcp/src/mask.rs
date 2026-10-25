@@ -67,6 +67,12 @@ pub fn stand_in(key: &[u8], value: &Value) -> Json {
 
 pub const SUBQUERY_REFUSAL: &str = "Refused: a masked column can only be returned from the main SELECT, not out of a subquery, WITH query, INTERSECT or EXCEPT. Select it from its table directly.";
 
+pub fn union_refusal(label: &str) -> String {
+    format!(
+        "Refused: {label} is masked, and every part of a UNION ALL must return a masked column at the same place, not a value or another column. Query it on its own."
+    )
+}
+
 pub fn use_refusal(label: &str) -> String {
     format!(
         "Refused: {label} is masked. You can return it as it is or count it, but not filter, sort, group or join on it, or use it in an expression."
@@ -322,11 +328,16 @@ fn collect_scans(node: &Json, facts: &PgFacts, taint: &mut Taint) -> Result<(), 
 }
 
 /// Names that stand for a marked column higher up: the first branch's names
-/// of a UNION ALL (Append) whose other branches return one at the same
-/// place, and the row-cap wrapper's own names.
-fn propagate(node: &Json, facts: &PgFacts, taint: &mut Taint) {
+/// of a UNION ALL (Append, or a recursive CTE's Recursive Union) whose
+/// branches return one at the same place, and the row-cap wrapper's own
+/// names. Above a union, its column goes by the first branch's name, so a
+/// place where one branch returns a marked column and another returns
+/// anything else is refused: `SELECT 'x' UNION ALL SELECT email` would hand
+/// the emails out under the literal's name, and `SELECT email … UNION ALL
+/// SELECT 'guess'` would mask the guess with the same key, to compare.
+fn propagate(node: &Json, facts: &PgFacts, taint: &mut Taint) -> Result<(), String> {
     for child in children(node) {
-        propagate(child, facts, taint);
+        propagate(child, facts, taint)?;
     }
     let kind = text(node, "Node Type").unwrap_or("");
     let positional = |taint: &Taint, list: &[&str], i: usize| {
@@ -334,15 +345,17 @@ fn propagate(node: &Json, facts: &PgFacts, taint: &mut Taint) {
             .and_then(|e| Taint::bare(e))
             .and_then(|chain| taint.hit(&chain).cloned())
     };
-    if matches!(kind, "Append" | "Merge Append") {
+    if matches!(kind, "Append" | "Merge Append" | "Recursive Union") {
         let branches: Vec<Vec<&str>> = children(node).iter().map(outputs).collect();
-        let Some(first) = branches.first() else {
-            return;
-        };
-        for (i, entry) in first.iter().enumerate() {
-            let label = branches.iter().find_map(|b| positional(taint, b, i));
-            if let (Some(label), Some(chain)) = (label, Taint::bare(entry)) {
-                taint.names.entry(chain).or_insert(label);
+        // Every branch a marked column at that place: the first branch's
+        // name is then already one the check knows.
+        for i in 0..branches.iter().map(Vec::len).max().unwrap_or(0) {
+            let labels: Vec<Option<String>> =
+                branches.iter().map(|b| positional(taint, b, i)).collect();
+            if let Some(label) = labels.iter().flatten().next() {
+                if labels.iter().any(Option::is_none) {
+                    return Err(union_refusal(label));
+                }
             }
         }
     }
@@ -354,6 +367,7 @@ fn propagate(node: &Json, facts: &PgFacts, taint: &mut Taint) {
             }
         }
     }
+    Ok(())
 }
 
 fn check_expr(expr: &str, output: bool, sort_ok: bool, taint: &Taint) -> Result<(), String> {
@@ -442,7 +456,7 @@ pub fn pg_check(explain_json: &Json, facts: &PgFacts) -> Result<Vec<usize>, Stri
     if taint.names.is_empty() {
         return Ok(Vec::new());
     }
-    propagate(root, facts, &mut taint);
+    propagate(root, facts, &mut taint)?;
     check(root, None, facts, &taint)?;
     Ok(outputs(root)
         .iter()
@@ -670,13 +684,32 @@ mod tests {
 
     #[test]
     fn union_branches_and_partitions_carry_the_mark_up() {
-        // `select phone … union all select email …`: the parent names the
-        // first branch's column, which holds emails at that place.
-        let union = json!({ "Node Type": "Limit", "Output": ["customers.phone"], "Plans": [
+        // Two marked columns at one place stay masked.
+        let union = json!({ "Node Type": "Limit", "Output": ["customers.email"], "Plans": [
             { "Node Type": "Append", "Plans": [
-                scan("customers", "customers", &["customers.phone"]),
+                scan("customers", "customers", &["customers.email"]),
                 scan("customers_1", "customers", &["customers_1.email"])] }] });
         assert_eq!(run(union), Ok(vec![0]));
+        // The parent names the first branch's column. `select 'x' union all
+        // select email` would hand out the emails under the literal's name,
+        // `select email … union all select 'guess'` would mask the guess to
+        // compare, and an unmarked column beside one is the same.
+        let literal = |kind: &str, first: Json, second: Json| {
+            json!({ "Node Type": "Limit", "Output": ["('x'::text)"], "Plans": [
+                { "Node Type": kind, "Plans": [first, second] }] })
+        };
+        let x = json!({ "Node Type": "Result", "Output": ["'x'::text"] });
+        let email = scan("customers", "customers", &["customers.email"]);
+        let phone = scan("customers_1", "customers", &["customers_1.phone"]);
+        for root in [
+            literal("Append", x.clone(), email.clone()),
+            literal("Append", email.clone(), x.clone()),
+            literal("Merge Append", phone, email.clone()),
+            literal("Recursive Union", x, email),
+        ] {
+            let err = run(root).expect_err("a union mixing a masked column");
+            assert!(err.contains("UNION ALL"), "{err}");
+        }
         let parts = json!({ "Node Type": "Limit", "Output": ["e.email", "e.id"], "Plans": [
             { "Node Type": "Append", "Plans": [
                 scan("e_1", "ev_a", &["e_1.email", "e_1.id"]),

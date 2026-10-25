@@ -443,7 +443,7 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT * FROM mcp_mask_customers",
         "SELECT * FROM mcp_mask_view",
         "SELECT c.email, o.total FROM mcp_mask_orders o JOIN mcp_mask_customers c ON c.id = o.customer_id",
-        "SELECT plan FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers",
+        "SELECT email FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_events",
         "SELECT e.email FROM mcp_mask_events e",
         "SELECT email FROM mcp_mask_customers ORDER BY id LIMIT 2",
         "SELECT row_number() OVER (ORDER BY id), email FROM mcp_mask_customers",
@@ -486,6 +486,15 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT email FROM mcp_mask_customers INTERSECT SELECT 'mara@fjord.se'",
         "SELECT email FROM mcp_mask_customers EXCEPT SELECT 'mara@fjord.se'",
         "SELECT email FROM mcp_mask_customers UNION SELECT 'x'",
+        // A union names its column after the first part: masked values
+        // under a literal's name, a guess masked to compare, or an unmarked
+        // column beside one.
+        "SELECT 'x' UNION ALL SELECT email FROM mcp_mask_customers",
+        "SELECT * FROM (SELECT NULL::text AS e UNION ALL SELECT email FROM mcp_mask_customers) s",
+        "SELECT email FROM mcp_mask_customers WHERE id = 1 UNION ALL SELECT 'mara@fjord.se'",
+        "SELECT count(DISTINCT e) FROM (SELECT email AS e FROM mcp_mask_customers UNION ALL SELECT 'mara@fjord.se') s",
+        "SELECT plan FROM mcp_mask_customers UNION ALL SELECT email FROM mcp_mask_customers",
+        "WITH RECURSIVE r(e, n) AS (SELECT 'x'::text, 0 UNION ALL SELECT c.email, r.n + 1 FROM r JOIN mcp_mask_customers c ON c.id = r.n + 1) SELECT e FROM r",
         "SELECT id FROM mcp_mask_events WHERE email LIKE 'm%'",
         "SELECT id FROM mcp_mask_view WHERE email > 'm'",
         "SELECT count(email) FILTER (WHERE email LIKE 'm%') FROM mcp_mask_customers",
