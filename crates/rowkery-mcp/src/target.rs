@@ -111,9 +111,12 @@ pub struct Read<S> {
 /// What every MCP statement on Postgres runs under besides read-only, which
 /// the session sends ahead of each statement itself. Sent again ahead of
 /// each call, in the same round trip, so a `set_config` in an earlier
-/// SELECT can't loosen it.
+/// SELECT can't loosen it. Pruning is put back after [`Store::read_unpruned`].
 fn guards() -> String {
-    format!("SET statement_timeout = '{}s'", STATEMENT_TIMEOUT.as_secs())
+    format!(
+        "SET statement_timeout = '{}s'; RESET enable_partition_pruning",
+        STATEMENT_TIMEOUT.as_secs()
+    )
 }
 
 /// How long a stopped Postgres read may take to read off the rows it left on
@@ -236,13 +239,19 @@ impl Store {
         Ok(self.sessions.get(&key).expect("session"))
     }
 
-    /// [`guards`], after rolling back a transaction a call that stopped
-    /// early left open, when this statement isn't inside a call's own.
-    fn guards_for(&self, key: &(String, String)) -> String {
-        if self.open.as_ref() != Some(key) && self.left_open.contains(key) {
+    /// [`guards`], with pruning turned off when `unpruned`, after rolling
+    /// back a transaction a call that stopped early left open, when this
+    /// statement isn't inside a call's own.
+    fn guards_for(&self, key: &(String, String), unpruned: bool) -> String {
+        let guards = if self.open.as_ref() != Some(key) && self.left_open.contains(key) {
             format!("ROLLBACK; {}", guards())
         } else {
             guards()
+        };
+        if unpruned {
+            format!("{guards}; SET enable_partition_pruning = off")
+        } else {
+            guards
         }
     }
 
@@ -320,17 +329,40 @@ impl Store {
         late: &str,
         call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
     ) -> Result<T, String> {
+        self.guarded_as(target, late, false, call).await
+    }
+
+    /// [`Self::guarded`], with partition pruning off for `call` when
+    /// `unpruned`.
+    async fn guarded_as<T>(
+        &mut self,
+        target: &Target,
+        late: &str,
+        unpruned: bool,
+        call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
+    ) -> Result<T, String> {
         let key = target.key();
         self.session(target).await?;
-        // An adopted session's owner set it up for its own transaction.
-        let guards = (self.adopted.as_ref() != Some(&key)).then(|| self.guards_for(&key));
+        // An adopted session's owner set it up for its own transaction, and
+        // goes on to run its change there planned as usual.
+        let adopted = self.adopted.as_ref() == Some(&key);
+        let guards = if adopted {
+            unpruned.then(|| "SET LOCAL enable_partition_pruning = off".to_string())
+        } else {
+            Some(self.guards_for(&key, unpruned))
+        };
         let session = self.sessions.get(&key).expect("session");
         let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
         let run = async {
-            match &guards {
+            let (set, out) = match &guards {
                 Some(guards) => tokio::join!(session_execute(session, guards), call(session)),
                 None => (Ok(()), call(session).await),
+            };
+            if adopted && unpruned && set.is_ok() && out.is_ok() {
+                let reset = session_execute(session, "RESET enable_partition_pruning").await;
+                return (reset, out);
             }
+            (set, out)
         };
         let (set, out) = match tokio::time::timeout(CALL_TIMEOUT, run).await {
             Ok(done) => done,
@@ -485,6 +517,42 @@ impl Store {
         target: &Target,
         sql: &str,
         limit: usize,
+        state: S,
+        each: F,
+    ) -> Result<Read<S>, String>
+    where
+        S: Send + 'static,
+        F: FnMut(&mut S, Vec<Value>) -> bool + Send + 'static,
+    {
+        self.read_as(target, false, sql, limit, state, each).await
+    }
+
+    /// [`Self::read`] on Postgres with partition pruning off, for an
+    /// `EXPLAIN` that lists every partition the run could read. The next
+    /// statement's guards put pruning back (on an adopted session, it's put
+    /// back straight after).
+    pub async fn read_unpruned(
+        &mut self,
+        target: &Target,
+        sql: &str,
+    ) -> Result<ReadResult, String> {
+        let read = self
+            .read_as(target, true, sql, usize::MAX, Vec::new(), |rows, row| {
+                rows.push(row);
+                true
+            })
+            .await?;
+        Ok(ReadResult { rows: read.state })
+    }
+
+    /// [`Self::read_each`], with partition pruning off when `unpruned`
+    /// (Postgres).
+    async fn read_as<S, F>(
+        &mut self,
+        target: &Target,
+        unpruned: bool,
+        sql: &str,
+        limit: usize,
         mut state: S,
         mut each: F,
     ) -> Result<Read<S>, String>
@@ -504,26 +572,31 @@ impl Store {
                 let started = Instant::now();
                 let mut columns = Vec::new();
                 let (mut seen, mut stopped) = (0usize, false);
-                self.guarded(target, "Timed out waiting for the server.", async |s| {
-                    let read = session_query_stream(s, sql, |batch, first| {
-                        if first {
-                            columns = batch.columns;
-                        }
-                        for row in batch.rows {
-                            seen += 1;
-                            if !each(&mut state, row) {
-                                stopped = true;
-                                return Err(DriverError::Message(String::new()));
+                self.guarded_as(
+                    target,
+                    "Timed out waiting for the server.",
+                    unpruned,
+                    async |s| {
+                        let read = session_query_stream(s, sql, |batch, first| {
+                            if first {
+                                columns = batch.columns;
                             }
+                            for row in batch.rows {
+                                seen += 1;
+                                if !each(&mut state, row) {
+                                    stopped = true;
+                                    return Err(DriverError::Message(String::new()));
+                                }
+                            }
+                            Ok(())
+                        })
+                        .await;
+                        match read {
+                            Err(_) if stopped => Ok(()),
+                            read => read.map(|_| ()),
                         }
-                        Ok(())
-                    })
-                    .await;
-                    match read {
-                        Err(_) if stopped => Ok(()),
-                        read => read.map(|_| ()),
-                    }
-                })
+                    },
+                )
                 .await?;
                 // Rows left on the wire are read off before the session
                 // answers again: if that takes long, cancel and drop it.

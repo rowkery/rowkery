@@ -40,12 +40,8 @@ pub async fn check(
                 // The statement as sent, before the planner evaluates any of
                 // it; then the plan, views and SQL functions expanded.
                 functions::check_pg(store, target, &functions::scan_sql(&change.sql), true).await?;
-                let explain = store
-                    .read(
-                        target,
-                        &format!("EXPLAIN (FORMAT JSON, VERBOSE) {}", change.sql),
-                    )
-                    .await?;
+                let explain_sql = format!("EXPLAIN (FORMAT JSON, VERBOSE) {}", change.sql);
+                let explain = store.read(target, &explain_sql).await?;
                 let (plan, text) = guard::pg_plan_json(explain.rows)?;
                 // The plan also holds what the table fills in itself (a
                 // serial key's nextval), which the agent didn't write.
@@ -70,14 +66,27 @@ pub async fn check(
                 };
                 let own = without_fills(&plan, &fills);
                 functions::check_pg(store, target, &functions::scan_plan(&own), false).await?;
-                let touched = guard::pg_relations(&plan);
+                // What it's a partition or child table of matters only when
+                // something is hidden or masked.
+                let guarded = rule_restricts(target) || !marks.is_empty();
+                let touched = if guarded {
+                    crate::lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
+                } else {
+                    guard::pg_relations(&plan)
+                };
                 let written = functions::scan_sql(&change.sql);
                 crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
-                refuse_unshared(store, target, &touched).await?;
+                let above = if guarded {
+                    crate::lineage::above(store, target, &touched).await?
+                } else {
+                    crate::lineage::Above::default()
+                };
+                refuse_unshared(target, &above, &touched)?;
                 masked_mention(
                     store,
                     target,
                     &marks,
+                    &above,
                     &touched,
                     change,
                     Some((&plan, &text)),
@@ -93,7 +102,8 @@ pub async fn check(
                     .iter()
                     .map(|(s, t)| (Some(s.clone()), t.clone()))
                     .collect();
-                refuse_unshared(store, target, &touched).await?;
+                let above = crate::lineage::Above::default();
+                refuse_unshared(target, &above, &touched)?;
                 for m in marks
                     .iter()
                     .filter(|m| m.schema.eq_ignore_ascii_case("main"))
@@ -103,7 +113,7 @@ pub async fn check(
                         return Err(masked_refusal(m));
                     }
                 }
-                masked_mention(store, target, &marks, &touched, change, None).await?;
+                masked_mention(store, target, &marks, &above, &touched, change, None).await?;
             }
         }
     }
@@ -232,37 +242,33 @@ fn masked_refusal(m: &mask::Marked) -> String {
     )
 }
 
+/// What the connection shares with agents; nothing when it can't be read.
+fn share_rule(target: &Target) -> access::Tables<'_> {
+    access::tables(&target.record, &target.database).unwrap_or(access::Tables::Only(&[]))
+}
+
+fn rule_restricts(target: &Target) -> bool {
+    share_rule(target).restricts()
+}
+
 /// Every relation a statement touches must be shared (statistics never are).
-async fn refuse_unshared(
-    store: &mut Store,
+fn refuse_unshared(
     target: &Target,
+    above: &crate::lineage::Above,
     touched: &[(Option<String>, String)],
 ) -> Result<(), String> {
-    let rule =
-        access::tables(&target.record, &target.database).unwrap_or(access::Tables::Only(&[]));
+    let rule = share_rule(target);
     let statistics = touched
         .iter()
         .any(|(s, t)| guard::is_statistics(s.as_deref(), t));
     if statistics {
         return Err(guard::STATISTICS_REFUSAL.into());
     }
-    if !rule.restricts() {
-        return Ok(());
-    }
-    let cached = store.catalog(target, false).await?;
-    let catalog = &cached.catalog;
     let default = match target.record {
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
     };
-    let blocked = touched.iter().any(|(schema, table)| {
-        let schema = schema.as_deref().unwrap_or(default);
-        match access::find_exact(catalog, schema, table) {
-            Some(t) => !rule.allows_node(catalog, schema, t),
-            None => !rule.allows(schema, table),
-        }
-    });
-    if blocked {
+    if rule.restricts() && crate::lineage::keeps_back(&rule, above, touched, default) {
         return Err(guard::HIDDEN_REFUSAL.into());
     }
     Ok(())
@@ -275,6 +281,7 @@ async fn masked_mention(
     store: &mut Store,
     target: &Target,
     marks: &[mask::Marked],
+    above: &crate::lineage::Above,
     touched: &[(Option<String>, String)],
     change: &RowChange,
     pg_plan: Option<(&Json, &str)>,
@@ -289,28 +296,26 @@ async fn masked_mention(
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
     };
-    // A partition counts as its parent table.
-    let root = |schema: &str, rel: &str| {
-        let mut name = rel.to_string();
-        for _ in 0..8 {
-            match access::find_exact(catalog, schema, &name).and_then(|t| t.partition_of.clone()) {
-                Some(p) => name = p,
-                None => break,
-            }
-        }
-        name
+    // A partition or child table counts as the tables it's part of, in
+    // any schema.
+    let part_of = |m: &mask::Marked, schema: &str, rel: &str| {
+        let is = |s: &str, t: &str| {
+            s.eq_ignore_ascii_case(&m.schema) && t.eq_ignore_ascii_case(&m.table)
+        };
+        is(schema, rel) || above.of(schema, rel).iter().any(|l| is(&l.schema, &l.name))
     };
+    let marked_above = |schema: &str, rel: &str| marks.iter().find(|m| part_of(m, schema, rel));
     // Postgres: a column alias list on a table with masked columns hides
     // their names from the plan (`mask::pg_renamed`).
     if let Some((plan, _)) = pg_plan {
         let columns_of = |schema: Option<&str>, rel: &str| {
             let schema = schema.unwrap_or(default);
-            let table = root(schema, rel);
-            if !marks.iter().any(|m| m.schema == schema && m.table == table) {
-                return None;
-            }
-            // A partition's columns are its parent's.
-            let found = access::find_exact(catalog, schema, &table);
+            let m = marked_above(schema, rel)?;
+            // A child table's own columns, or a partition's (its parent's:
+            // the catalog doesn't repeat them).
+            let found = access::find_exact(catalog, schema, rel)
+                .filter(|t| !t.columns.is_empty())
+                .or_else(|| access::find_exact(catalog, &m.schema, &m.table));
             Some(
                 found
                     .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
@@ -323,10 +328,9 @@ async fn masked_mention(
     let named = safety::identifiers(&change.sql);
     let plan_words = words(plan_text);
     for m in marks {
-        let touches = touched.iter().any(|(s, t)| {
-            let schema = s.as_deref().unwrap_or(default);
-            schema.eq_ignore_ascii_case(&m.schema) && root(schema, t).eq_ignore_ascii_case(&m.table)
-        });
+        let touches = touched
+            .iter()
+            .any(|(s, t)| part_of(m, s.as_deref().unwrap_or(default), t));
         let column = m.column.to_lowercase();
         // `c::text`, `row_to_json(c)`: a whole row carries every column
         // (the plan writes it `c.*`).

@@ -145,7 +145,7 @@ export type RowEstimate =
   | { Approximate: number }
   | "Unknown";
 
-export type TableKind = "table" | "view" | "materialized_view";
+export type TableKind = "table" | "view" | "materialized_view" | "foreign_table";
 
 export interface TableNode {
   name: string;

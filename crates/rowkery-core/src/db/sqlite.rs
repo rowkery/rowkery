@@ -569,6 +569,8 @@ fn list_sqlite_tables(
                 // view's rows stay unknown (counting them runs the view).
                 row_estimate: RowEstimate::Unknown,
                 partition_of: None,
+                inherits_from: Vec::new(),
+                is_partition: false,
                 foreign_keys: Vec::new(),
                 table_bytes: None,
                 index_bytes: None,

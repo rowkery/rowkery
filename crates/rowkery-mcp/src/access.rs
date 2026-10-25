@@ -85,21 +85,26 @@ impl Tables<'_> {
         }
     }
 
-    /// Whether a catalog table is reachable. A partition goes with its
-    /// parent: shared when the parent is ticked, hidden when it's hidden.
+    /// Whether a catalog table is reachable, the same way
+    /// `lineage::keeps_back` judges a statement. A whitelist shares a
+    /// partition of a ticked table, in any schema; a child table made with
+    /// `INHERITS` needs its own tick. A hide list hides a partition or child
+    /// table of a hidden table, and a table with one below it, since reading
+    /// it reads their rows.
     pub fn allows_node(&self, catalog: &SchemaCatalog, schema: &str, t: &TableNode) -> bool {
-        let mut chain = vec![t.name.as_str()];
-        let mut parent = t.partition_of.as_deref();
-        while let Some(p) = parent {
-            if chain.len() > 8 || chain.contains(&p) {
-                break;
-            }
-            chain.push(p);
-            parent = find_exact(catalog, schema, p).and_then(|n| n.partition_of.as_deref());
-        }
         match self {
-            Tables::Only(_) => chain.iter().any(|n| self.allows(schema, n)),
-            Tables::AllBut(_) => chain.iter().all(|n| self.allows(schema, n)),
+            Tables::Only(_) => partition_of(catalog, schema, t)
+                .iter()
+                .any(|(s, n)| self.allows(s, n)),
+            Tables::AllBut(_) => {
+                lineage(catalog, schema, t, Direction::Down).is_some_and(|below| {
+                    below.iter().all(|&(s, n)| match catalog.table(s, n) {
+                        Some(node) => lineage(catalog, s, node, Direction::Up)
+                            .is_some_and(|up| up.iter().all(|(s, n)| self.allows(s, n))),
+                        None => self.allows(s, n),
+                    })
+                })
+            }
         }
     }
 
@@ -122,19 +127,112 @@ impl Tables<'_> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Direction {
+    /// The tables a table is a partition or child table of.
+    Up,
+    /// Its partitions and child tables.
+    Down,
+}
+
+/// Most tables walked from one. A bigger tree is refused whole rather than
+/// read in part.
+const LINEAGE_MAX: usize = 100_000;
+
+/// `schema.t` and every table above it, or below it, in any schema; `None`
+/// past [`LINEAGE_MAX`].
+fn lineage<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+    direction: Direction,
+) -> Option<Vec<(&'a str, &'a str)>> {
+    let mut seen = vec![(schema, t.name.as_str())];
+    let mut known: std::collections::HashSet<(&str, &str)> = seen.iter().copied().collect();
+    let mut next = 0;
+    while let Some(&(s, name)) = seen.get(next) {
+        next += 1;
+        let linked: Vec<(&str, &str)> = match direction {
+            Direction::Up => {
+                let node = if next == 1 {
+                    Some(t)
+                } else {
+                    find_exact(catalog, s, name)
+                };
+                node.map(|n| {
+                    n.inherits_from
+                        .iter()
+                        .map(|(s, n)| (s.as_str(), n.as_str()))
+                        // A catalog cached before `inherits_from` has only this.
+                        .chain(n.partition_of.as_deref().map(|p| (s, p)))
+                        .collect()
+                })
+                .unwrap_or_default()
+            }
+            Direction::Down => catalog
+                .inherited_by(s, name)
+                .iter()
+                .map(|(s, n)| (s.as_str(), n.as_str()))
+                .collect(),
+        };
+        for link in linked {
+            if known.insert(link) {
+                seen.push(link);
+            }
+        }
+        if seen.len() > LINEAGE_MAX {
+            return None;
+        }
+    }
+    Some(seen)
+}
+
+/// `schema.t` and every table it's a partition or child table of, in any
+/// schema: the tables whose marks reach its rows.
+pub(crate) fn above<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+) -> Vec<(&'a str, &'a str)> {
+    lineage(catalog, schema, t, Direction::Up).unwrap_or_else(|| vec![(schema, t.name.as_str())])
+}
+
+/// `schema.t` and the tables it's a partition of, up through partitions
+/// only, in any schema.
+pub(crate) fn partition_of<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+) -> Vec<(&'a str, &'a str)> {
+    let mut chain = vec![(schema, t.name.as_str())];
+    let mut node = Some(t);
+    while let Some(n) = node.filter(|n| n.is_partition || n.partition_of.is_some()) {
+        let &(s, _) = chain.last().expect("chain");
+        let Some(parent) = n
+            .inherits_from
+            .first()
+            .map(|(s, n)| (s.as_str(), n.as_str()))
+            // A catalog cached before `inherits_from` has only this.
+            .or_else(|| n.partition_of.as_deref().map(|p| (s, p)))
+        else {
+            break;
+        };
+        if chain.contains(&parent) {
+            break;
+        }
+        chain.push(parent);
+        node = catalog.table(parent.0, parent.1);
+    }
+    chain
+}
+
 /// The table `schema.name` with that exact spelling.
 pub fn find_exact<'a>(
     catalog: &'a SchemaCatalog,
     schema: &str,
     name: &str,
 ) -> Option<&'a TableNode> {
-    catalog
-        .databases
-        .iter()
-        .flat_map(|db| db.schemas.iter())
-        .filter(|s| s.name == schema)
-        .flat_map(|s| s.tables.iter())
-        .find(|t| t.name == name)
+    catalog.table(schema, name)
 }
 
 #[cfg(test)]
@@ -172,6 +270,96 @@ mod tests {
             }),
             masked_columns: Default::default(),
         })
+    }
+
+    /// `(schema, table, parents, partition)`.
+    type Row<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], bool);
+
+    fn catalog(tables: &[Row]) -> SchemaCatalog {
+        use rowkery_core::db::{DatabaseNode, RowEstimate, SchemaNode, TableKind};
+        let mut schemas: Vec<SchemaNode> = Vec::new();
+        for &(schema, name, parents, partition) in tables {
+            let node = TableNode {
+                name: name.into(),
+                kind: TableKind::Table,
+                columns: Vec::new(),
+                primary_key: Vec::new(),
+                indexes: Vec::new(),
+                row_estimate: RowEstimate::Unknown,
+                partition_of: None,
+                inherits_from: parents
+                    .iter()
+                    .map(|(s, n)| (s.to_string(), n.to_string()))
+                    .collect(),
+                is_partition: partition,
+                foreign_keys: Vec::new(),
+                table_bytes: None,
+                index_bytes: None,
+                indexes_deferred: false,
+                comment: None,
+            };
+            match schemas.iter_mut().find(|s| s.name == schema) {
+                Some(s) => s.tables.push(node),
+                None => schemas.push(SchemaNode {
+                    name: schema.into(),
+                    tables: vec![node],
+                }),
+            }
+        }
+        let mut c = SchemaCatalog::default();
+        c.databases.push(DatabaseNode {
+            name: "db".into(),
+            schemas,
+        });
+        c
+    }
+
+    #[test]
+    fn partitions_and_child_tables_are_judged_with_every_table_above_and_below() {
+        // ledger is partitioned into a partition in another schema, itself
+        // partitioned again; vip inherits from people and from staff.
+        let c = catalog(&[
+            ("public", "ledger", &[], false),
+            ("other", "ledger_2024", &[("public", "ledger")], true),
+            ("arch", "ledger_2024_q1", &[("other", "ledger_2024")], true),
+            ("public", "people", &[], false),
+            ("public", "staff", &[], false),
+            (
+                "public",
+                "vip",
+                &[("public", "people"), ("public", "staff")],
+                false,
+            ),
+        ]);
+        assert_eq!(
+            c.inherited_by("public", "ledger"),
+            [("other".to_string(), "ledger_2024".to_string())]
+        );
+        assert_eq!(c.inherited_by("public", "staff").len(), 1);
+        assert!(c.table("arch", "ledger_2024_q1").is_some());
+        assert!(c.table("public", "LEDGER").is_none());
+        let node = |s: &str, n: &str| c.table(s, n).expect(n);
+
+        // Hiding the middle partition keeps back everything it's part of.
+        let hidden = ["other.ledger_2024".to_string()];
+        let hide = Tables::AllBut(&hidden);
+        assert!(!hide.allows_node(&c, "public", node("public", "ledger")));
+        assert!(!hide.allows_node(&c, "arch", node("arch", "ledger_2024_q1")));
+        assert!(hide.allows_node(&c, "public", node("public", "people")));
+        // A child of a hidden parent is hidden, and so is its other parent,
+        // whose rows include it.
+        let hidden = ["public.staff".to_string()];
+        let hide = Tables::AllBut(&hidden);
+        assert!(!hide.allows_node(&c, "public", node("public", "vip")));
+        assert!(!hide.allows_node(&c, "public", node("public", "people")));
+
+        // Ticking the root shares its partitions at every level; a child
+        // table needs its own tick.
+        let ticked = ["public.ledger".to_string(), "public.people".to_string()];
+        let only = Tables::Only(&ticked);
+        assert!(only.allows_node(&c, "arch", node("arch", "ledger_2024_q1")));
+        assert!(only.allows_node(&c, "other", node("other", "ledger_2024")));
+        assert!(!only.allows_node(&c, "public", node("public", "vip")));
     }
 
     #[test]

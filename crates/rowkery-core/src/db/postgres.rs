@@ -1512,7 +1512,7 @@ pub async fn session_catalog_fingerprint(session: &PostgresSession) -> Result<St
                      WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')), '')
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind IN ('r', 'p', 'v', 'm')
+            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
               AND n.nspname NOT LIKE 'pg_toast%'
             ",
@@ -1536,14 +1536,22 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                parent.relname AS partition_of,
                c.relpages::bigint * current_setting('block_size')::bigint AS table_bytes,
                c.relkind::text AS relkind,
-               pg_catalog.obj_description(c.oid, 'pg_class') AS comment
+               pg_catalog.obj_description(c.oid, 'pg_class') AS comment,
+               ARRAY(SELECT pn.nspname::text FROM pg_catalog.pg_inherits i
+                       JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
+                       JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace
+                     WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_schemas,
+               ARRAY(SELECT p.relname::text FROM pg_catalog.pg_inherits i
+                       JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
+                     WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_names,
+               c.relispartition
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         LEFT JOIN pg_catalog.pg_inherits inh
                ON c.relispartition AND inh.inhrelid = c.oid
         LEFT JOIN pg_catalog.pg_class parent
                ON parent.oid = inh.inhparent AND parent.relnamespace = c.relnamespace
-        WHERE c.relkind IN ('r', 'p', 'v', 'm')
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
         ORDER BY 1, 2
         ",
@@ -1569,7 +1577,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-        WHERE c.relkind IN ('r', 'p', 'v', 'm')
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND NOT c.relispartition
           AND a.attnum > 0
           AND NOT a.attisdropped
@@ -1685,13 +1693,21 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         let table = row.get::<_, String>(1);
         let reltuples: f64 = row.get(2);
         let partition_of: Option<String> = row.get(3);
+        let inherits_from: Vec<(String, String)> = row
+            .get::<_, Vec<String>>(7)
+            .into_iter()
+            .zip(row.get::<_, Vec<String>>(8))
+            .collect();
         let kind = match row.get::<_, String>(5).as_str() {
             "v" => TableKind::View,
             "m" => TableKind::MaterializedView,
+            "f" => TableKind::ForeignTable,
             _ => TableKind::Table,
         };
-        // A plain view has no storage and no statistics of its own.
-        let table_bytes: Option<i64> = if kind == TableKind::View {
+        // A plain view has no storage and no statistics of its own; a
+        // foreign table's rows are stored elsewhere.
+        let table_bytes: Option<i64> = if matches!(kind, TableKind::View | TableKind::ForeignTable)
+        {
             None
         } else {
             row.get(4)
@@ -1711,11 +1727,13 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                 indexes: Vec::new(),
                 row_estimate,
                 partition_of,
+                inherits_from,
+                is_partition: row.get(9),
                 foreign_keys: Vec::new(),
                 table_bytes,
                 index_bytes: None,
-                // A plain view has no indexes to fetch.
-                indexes_deferred: kind != TableKind::View,
+                // A plain view or foreign table has no indexes to fetch.
+                indexes_deferred: !matches!(kind, TableKind::View | TableKind::ForeignTable),
                 comment: row.get(6),
             },
         );
@@ -1812,6 +1830,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         search_path,
         enums,
         functions,
+        ..Default::default()
     })
 }
 

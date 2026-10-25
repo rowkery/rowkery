@@ -4,7 +4,6 @@
 //! cache the server uses, for any saved connection, shared or not.
 
 use rowkery_core::config::AppConfig;
-use rowkery_core::db::TableKind;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -87,11 +86,7 @@ impl Picker {
                 PickTable {
                     schema: schema.to_string(),
                     name: t.name.clone(),
-                    kind: match t.kind {
-                        TableKind::Table => "table",
-                        TableKind::View => "view",
-                        TableKind::MaterializedView => "materialized view",
-                    },
+                    kind: crate::kind_label(t.kind),
                     rows,
                     big: rows.is_some_and(|n| n > BIG_TABLE_ROWS),
                     columns: t

@@ -28,6 +28,11 @@ export function isView(t: SidebarTable) {
   return t.table.kind === "view" || t.table.kind === "materialized_view";
 }
 
+/** A table rows can be imported into: not a view, and not a foreign table, whose rows live elsewhere. */
+export function takesImport(t: SidebarTable) {
+  return !isView(t) && t.table.kind !== "foreign_table";
+}
+
 /** Every table, partition and view, flat. */
 export function allTables(schemas: SidebarSchema[]): SidebarTable[] {
   return schemas.flatMap((s) => [...s.tables.flatMap((t) => [t, ...t.partitions]), ...s.views]);

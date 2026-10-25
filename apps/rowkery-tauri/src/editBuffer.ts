@@ -383,6 +383,7 @@ export function editRefusal(
 ): string | null {
   if (safeMode === "read_only") return "Read-only connection · Change safe mode…";
   if (!table) return "This table isn't in the schema yet";
+  if (table.kind === "foreign_table") return "Foreign tables can't be edited";
   if (table.kind && table.kind !== "table") return "Views can't be edited";
   const pk = table.primary_key ?? [];
   if (!pk.length) return "No primary key · rows here can't be edited";

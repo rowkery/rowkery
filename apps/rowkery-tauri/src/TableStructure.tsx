@@ -124,7 +124,9 @@ export function TableStructure({
       ? "View"
       : node.kind === "materialized_view"
         ? "Materialized view"
-        : null;
+        : node.kind === "foreign_table"
+          ? "Foreign table"
+          : null;
 
   let stats: { label: string; value: string }[] = [
     {

@@ -17,6 +17,7 @@ mod change;
 mod e2e_tests;
 mod functions;
 mod guard;
+mod lineage;
 pub mod mask;
 pub mod picker;
 pub mod proposals;
@@ -291,6 +292,7 @@ fn kind_label(kind: TableKind) -> &'static str {
         TableKind::Table => "table",
         TableKind::View => "view",
         TableKind::MaterializedView => "materialized view",
+        TableKind::ForeignTable => "foreign table",
     }
 }
 
@@ -556,6 +558,53 @@ async fn list_databases(store: &mut Store, target: &Target) -> Outcome {
     Ok(json!({ "databases": names }))
 }
 
+/// A partition, in its parent's schema or another.
+fn is_partition(t: &TableNode) -> bool {
+    t.is_partition || t.partition_of.is_some()
+}
+
+/// Whether `schema.t` gets a line of its own: a partition is counted with
+/// its parent instead, unless the parent isn't shared (a partition ticked
+/// on its own).
+fn own_line(rule: &access::Tables, catalog: &SchemaCatalog, schema: &str, t: &TableNode) -> bool {
+    if !is_partition(t) {
+        return true;
+    }
+    let parent = t
+        .inherits_from
+        .first()
+        .map(|(s, n)| (s.as_str(), n.as_str()))
+        .or_else(|| t.partition_of.as_deref().map(|p| (schema, p)));
+    match parent.and_then(|(s, n)| catalog.table(s, n).map(|p| (s, p))) {
+        Some((s, p)) => !rule.allows_node(catalog, s, p),
+        None => true,
+    }
+}
+
+/// The table whose columns `schema.t` has: a partition's are its root
+/// table's, since the catalog lists them once per partitioned table.
+fn column_source<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+) -> &'a TableNode {
+    if !t.columns.is_empty() || !is_partition(t) {
+        return t;
+    }
+    access::partition_of(catalog, schema, t)
+        .last()
+        .and_then(|&(s, n)| catalog.table(s, n))
+        .unwrap_or(t)
+}
+
+/// The schema a relation named without one is in.
+fn default_schema(record: &ConnectionRecord) -> &'static str {
+    match record {
+        ConnectionRecord::Postgres(_) => "public",
+        ConnectionRecord::Sqlite(_) => "main",
+    }
+}
+
 /// Tables `list_tables` names. A schema of thousands would fill the agent's
 /// context; past this, it counts the rest per schema.
 const MAX_TABLES: usize = 500;
@@ -574,15 +623,21 @@ async fn list_tables(
     // A hidden partition isn't counted: the count would tell it's there.
     let mut partitions = std::collections::HashMap::<(&str, &str), usize>::new();
     for (s, t) in all_tables(catalog) {
-        if let Some(parent) = t.partition_of.as_deref() {
-            if rule.allows(s, &t.name) {
-                *partitions.entry((s, parent)).or_default() += 1;
-            }
+        if !is_partition(t) || !rule.allows_node(catalog, s, t) {
+            continue;
+        }
+        let parent = t
+            .inherits_from
+            .first()
+            .map(|(s, n)| (s.as_str(), n.as_str()))
+            .or_else(|| t.partition_of.as_deref().map(|p| (s, p)));
+        if let Some(parent) = parent {
+            *partitions.entry(parent).or_default() += 1;
         }
     }
     let mut shared: Vec<(&str, &TableNode)> = all_tables(catalog)
         .filter(|(s, _)| wanted(s))
-        .filter(|(_, t)| t.partition_of.is_none())
+        .filter(|(s, t)| own_line(&rule, catalog, s, t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
         .collect();
     if let Some(want) = schema.filter(|_| shared.is_empty()) {
@@ -609,7 +664,10 @@ async fn list_tables(
             if let Some(rows) = rows_estimate(&t.row_estimate) {
                 line.push_str(&format!(" ~{rows} rows"));
             }
-            line.push_str(&format!(", {} cols", t.columns.len()));
+            line.push_str(&format!(
+                ", {} cols",
+                column_source(catalog, schema, t).columns.len()
+            ));
             if let Some(n) = partitions.get(&(schema, t.name.as_str())) {
                 line.push_str(&format!(", {n} partitions"));
             }
@@ -642,7 +700,7 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
     let mut columns = Vec::new();
     let (mut more_tables, mut more_columns) = (0usize, 0usize);
     for (schema, t) in all_tables(catalog)
-        .filter(|(_, t)| t.partition_of.is_none())
+        .filter(|(s, t)| own_line(&rule, catalog, s, t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
     {
         if t.name.to_lowercase().contains(&needle) {
@@ -652,13 +710,14 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
                 tables.push(json!(format!("{schema}.{}", t.name)));
             }
         }
-        for c in &t.columns {
+        let above = access::above(catalog, schema, t);
+        for c in &column_source(catalog, schema, t).columns {
             if c.name.to_lowercase().contains(&needle) && columns.len() == MAX_HITS {
                 more_columns += 1;
             } else if c.name.to_lowercase().contains(&needle) {
-                let masked = marks
-                    .iter()
-                    .any(|m| m.schema == schema && m.table == t.name && m.column == c.name);
+                let masked = marks.iter().any(|m| {
+                    m.column == c.name && above.contains(&(m.schema.as_str(), m.table.as_str()))
+                });
                 columns.push(json!(format!(
                     "{schema}.{}.{} {}{}",
                     t.name,
@@ -692,8 +751,9 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
     let (_, t) = find_table(catalog, &format!("{schema}.{table}"))?;
+    let own = column_source(catalog, &schema, t);
 
-    let columns: Vec<Json> = t
+    let columns: Vec<Json> = own
         .columns
         .iter()
         .map(|c| {
@@ -764,7 +824,7 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
         })
         .collect();
     let mut enums = Map::new();
-    for c in &t.columns {
+    for c in &own.columns {
         let ty = c.type_name.trim_end_matches("[]");
         if let Some(e) = catalog
             .enums
@@ -796,11 +856,14 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
     if !enums.is_empty() {
         out["enum_values"] = Json::Object(enums);
     }
-    let masked: Vec<String> = mask::parse(target.record.masked_columns(&target.database))
+    let above = access::above(catalog, &schema, t);
+    let mut masked: Vec<String> = mask::parse(target.record.masked_columns(&target.database))
         .into_iter()
-        .filter(|m| m.schema == schema && m.table == table)
+        .filter(|m| above.contains(&(m.schema.as_str(), m.table.as_str())))
         .map(|m| m.column)
         .collect();
+    masked.sort();
+    masked.dedup();
     if !masked.is_empty() {
         out["masked"] = json!(masked);
     }
@@ -925,9 +988,8 @@ async fn run_read(
                 return Err(sessions::ACTIVITY_REFUSAL.into());
             }
             functions::check_pg(store, target, &written, true).await?;
-            let explain = store
-                .read(target, &format!("EXPLAIN (FORMAT JSON, VERBOSE) {capped}"))
-                .await?;
+            let explain_sql = format!("EXPLAIN (FORMAT JSON, VERBOSE) {capped}");
+            let explain = store.read(target, &explain_sql).await?;
             let (plan, _) = guard::pg_plan_json(explain.rows)?;
             let planned = functions::scan_plan(&plan);
             if sessions::reads_activity(&planned.call_names()) {
@@ -937,7 +999,11 @@ async fn run_read(
             let (lines, scans) = guard::pg_plan(&plan);
             let scans: Vec<(Option<String>, String)> =
                 scans.into_iter().map(|s| (s.schema, s.table)).collect();
-            let touched = guard::pg_relations(&plan);
+            let touched = if rule.restricts() || !marks.is_empty() {
+                lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
+            } else {
+                guard::pg_relations(&plan)
+            };
             refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }
@@ -991,18 +1057,11 @@ async fn run_read(
         return Err(guard::STATISTICS_REFUSAL.into());
     }
     if rule.restricts() {
-        let cached = store.catalog(target, false).await?;
-        let catalog = &cached.catalog;
         // Every relation the plan reads (views and CTEs resolved to the
-        // tables underneath) must be shared, matched by its exact name.
-        let blocked = touched.iter().any(|(schema, table)| {
-            let schema = schema.as_deref().unwrap_or("main");
-            match access::find_exact(catalog, schema, table) {
-                Some(t) => !rule.allows_node(catalog, schema, t),
-                None => !rule.allows(schema, table),
-            }
-        });
-        if blocked {
+        // tables underneath) must be shared, matched by its exact name, with
+        // what it's a partition or child table of.
+        let above = lineage::above(store, target, &touched).await?;
+        if lineage::keeps_back(&rule, &above, &touched, default_schema(&target.record)) {
             return Err(guard::HIDDEN_REFUSAL.into());
         }
     }

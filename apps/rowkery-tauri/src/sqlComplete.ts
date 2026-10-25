@@ -735,7 +735,8 @@ function relationDetail(r: RelEntry, showSchema: boolean): string {
   const parts: string[] = [];
   if (showSchema) parts.push(r.schema);
   if (r.kind === "table" && r.rows !== null) parts.push(`${formatRowCount(r.rows)} rows`);
-  else if (r.kind !== "table") parts.push(r.kind === "view" ? "view" : "mat view");
+  else if (r.kind !== "table")
+    parts.push(r.kind === "view" ? "view" : r.kind === "foreign_table" ? "foreign" : "mat view");
   return parts.join(" · ");
 }
 

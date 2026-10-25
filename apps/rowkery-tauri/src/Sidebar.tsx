@@ -28,7 +28,7 @@ import { commandTip } from "./commands";
 import {
   filterSchemaTree,
   findTable,
-  isView,
+  takesImport,
   type SidebarSchema,
   type SidebarTable,
 } from "./schemaTree";
@@ -422,7 +422,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
           items={panelRowMenu({
             pinned: !!rowMenu.target && pins.includes(rowMenu.target.key),
             mac: isMacPlatform(),
-            importable: !!onImportCsv && !!rowMenu.target && !isView(rowMenu.target),
+            importable: !!onImportCsv && !!rowMenu.target && takesImport(rowMenu.target),
           })}
           onPick={pickRow}
           onClose={rowMenu.close}

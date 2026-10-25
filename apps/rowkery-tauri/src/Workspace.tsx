@@ -78,7 +78,7 @@ import type { KeyColumns, QuickLookView } from "./gridTypes";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
 import { sqlStatementRanges, type CharRange } from "./sqlStatements";
-import { allTables, buildSchemaTree, findTable, isView, tableKey, type SidebarTable } from "./schemaTree";
+import { allTables, buildSchemaTree, findTable, isView, tableKey, takesImport, type SidebarTable } from "./schemaTree";
 import { prefetchOn } from "./prefetchSwitch";
 import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
@@ -1415,13 +1415,13 @@ export function Workspace({
     if (!prev) return d;
     return { ...d, empty: prev.empty, onConflict: prev.onConflict === "update" && !key.length ? "stop" : prev.onConflict };
   };
-  /** Tables the file can go into, best fit first (views are left out). */
+  /** Tables the file can go into, best fit first (views and foreign tables are left out). */
   const importTargets = (preview: CsvPreview) =>
     rankTables(
       preview.rows[0] ?? [],
       preview.file_name,
       allTables(schemaTree)
-        .filter((t) => !isView(t))
+        .filter(takesImport)
         .map((t) => ({ key: t.key, name: t.name, columns: (t.table.columns ?? []).map((c) => c.name), primaryKey: t.table.primary_key ?? [] })),
     );
   /**
@@ -1434,6 +1434,7 @@ export function Workspace({
   const startImport = async (target?: SidebarTable, path?: string) => {
     if (!activeConnection || connState !== "connected") return;
     if (target && isView(target)) return showToast("Views can't be imported into", target.name, "error");
+    if (target && !takesImport(target)) return showToast("Foreign tables can't be imported into", target.name, "error");
     if (activeConnection.safe_mode === "read_only")
       return showToast("Read-only connection · Change safe mode…", undefined, "error");
     if (csvImportRef.current?.run) return showToast("An import is already running", csvImportRef.current.table, "error");
@@ -1446,7 +1447,7 @@ export function Workspace({
       return showToast("Couldn't read the file", String(e), "error");
     }
     const onImport = isImportTab && csvImportRef.current?.tableKey ? findTable(schemaTree, csvImportRef.current.tableKey) : undefined;
-    const shown = isTableTab && activeTable && !isView(activeTable) ? activeTable : onImport;
+    const shown = isTableTab && activeTable && takesImport(activeTable) ? activeTable : onImport;
     // On a view's tab the user picks the table: a guess elsewhere would surprise.
     const onView = isTableTab && !!activeTable && isView(activeTable);
     const guess = target || shown || onView ? undefined : guessTable(importTargets(preview));

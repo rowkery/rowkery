@@ -23,6 +23,78 @@ pub struct SchemaCatalog {
     /// User-defined functions (not `pg_catalog`, not owned by an extension).
     #[serde(default)]
     pub functions: Vec<FunctionNode>,
+    /// Lookups built from the tables the first time they're asked for
+    /// ([`Self::inherited_by`], [`Self::table`]). Built once: a catalog whose
+    /// tables are added or removed afterwards must be a new one.
+    #[serde(skip)]
+    pub(crate) derived: Derived,
+}
+
+/// Derived from the tables, so two catalogs are equal whether or not it has
+/// been built yet.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Derived(std::sync::OnceLock<Lookups>);
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Lookups {
+    /// Each table's direct partitions and child tables.
+    children: HashMap<SchemaTable, Vec<SchemaTable>>,
+    /// Where each table is: database, schema and table index (the first,
+    /// when two databases have the same name).
+    at: HashMap<SchemaTable, (usize, usize, usize)>,
+}
+
+/// `(schema, name)`.
+type SchemaTable = (String, String);
+
+impl PartialEq for Derived {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl SchemaCatalog {
+    fn lookups(&self) -> &Lookups {
+        self.derived.0.get_or_init(|| {
+            let mut found = Lookups::default();
+            for (d, db) in self.databases.iter().enumerate() {
+                for (i, s) in db.schemas.iter().enumerate() {
+                    for (j, t) in s.tables.iter().enumerate() {
+                        found
+                            .at
+                            .entry((s.name.clone(), t.name.clone()))
+                            .or_insert((d, i, j));
+                        for parent in &t.inherits_from {
+                            found
+                                .children
+                                .entry(parent.clone())
+                                .or_default()
+                                .push((s.name.clone(), t.name.clone()));
+                        }
+                    }
+                }
+            }
+            found
+        })
+    }
+
+    /// The direct partitions and child tables of `schema.name`, as
+    /// `(schema, name)`, wherever they live.
+    pub fn inherited_by(&self, schema: &str, name: &str) -> &[(String, String)] {
+        self.lookups()
+            .children
+            .get(&(schema.to_string(), name.to_string()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The table `schema.name` with that exact spelling, in any database.
+    pub fn table(&self, schema: &str, name: &str) -> Option<&TableNode> {
+        let &(d, i, j) = self
+            .lookups()
+            .at
+            .get(&(schema.to_string(), name.to_string()))?;
+        Some(&self.databases[d].schemas[i].tables[j])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,6 +143,8 @@ pub enum TableKind {
     View,
     /// Postgres only.
     MaterializedView,
+    /// Postgres only: rows kept outside the database (`CREATE FOREIGN TABLE`).
+    ForeignTable,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +159,16 @@ pub struct TableNode {
     /// Postgres: name of the partitioned parent (same schema) when this table is a partition.
     #[serde(default)]
     pub partition_of: Option<String>,
+    /// Postgres: every table this one is a partition or child table of
+    /// (`pg_inherits`), as `(schema, name)`, in any schema. Its rows are
+    /// theirs too: `SELECT` from a parent reads them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherits_from: Vec<(String, String)>,
+    /// Postgres: a partition (`relispartition`), in any schema. Its one
+    /// parent in `inherits_from` holds its rows as its own; a child table
+    /// made with `INHERITS` is a table of its own as well.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_partition: bool,
     /// Outgoing foreign keys. "Referenced by" is derived from the whole catalog.
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKeyNode>,
