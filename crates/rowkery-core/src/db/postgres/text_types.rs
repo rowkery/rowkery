@@ -7,12 +7,12 @@ use super::format_time_of_day;
 
 /// `interval`: microseconds, days, months, each kept apart as Postgres does.
 pub(super) fn interval(b: &[u8]) -> Option<String> {
-    let time = i64::from_be_bytes(b.get(0..8)?.try_into().ok()?);
-    let days = i32::from_be_bytes(b.get(8..12)?.try_into().ok()?);
-    let months = i32::from_be_bytes(b.get(12..16)?.try_into().ok()?);
     if b.len() != 16 {
         return None;
     }
+    let time = i64::from_be_bytes(b[0..8].try_into().ok()?);
+    let days = i32::from_be_bytes(b[8..12].try_into().ok()?);
+    let months = i32::from_be_bytes(b[12..16].try_into().ok()?);
     match (time, days, months) {
         (i64::MAX, i32::MAX, i32::MAX) => return Some("infinity".into()),
         (i64::MIN, i32::MIN, i32::MIN) => return Some("-infinity".into()),
@@ -78,8 +78,8 @@ pub(super) fn inet(b: &[u8]) -> Option<String> {
 }
 
 /// An IPv6 address as Postgres writes it: the longest run of two or more
-/// zero groups as `::`, and the last four bytes in dotted form after `::`
-/// or `::ffff:` (but `::1` stays `::1`).
+/// zero groups as `::`, and the last four bytes dotted after six zero
+/// groups (`::1.2.3.4`) or five and `ffff` (`::ffff:1.2.3.4`).
 fn ipv6(bytes: [u8; 16]) -> String {
     let words: Vec<u16> = bytes
         .chunks(2)
@@ -114,9 +114,7 @@ fn ipv6(bytes: [u8; 16]) -> String {
         if i != 0 {
             out.push(':');
         }
-        let ipv4_tail = i == 6
-            && base == 0
-            && (len == 6 || (len == 7 && words[7] != 1) || (len == 5 && words[5] == 0xffff));
+        let ipv4_tail = i == 6 && base == 0 && (len == 6 || (len == 5 && words[5] == 0xffff));
         if ipv4_tail {
             out.push_str(&format!(
                 "{}.{}.{}.{}",
@@ -130,9 +128,10 @@ fn ipv6(bytes: [u8; 16]) -> String {
     out
 }
 
-/// `macaddr` and `macaddr8`: the bytes as lower-case hex pairs.
-pub(super) fn macaddr(b: &[u8]) -> Option<String> {
-    if b.len() != 6 && b.len() != 8 {
+/// `macaddr` (6 bytes) and `macaddr8` (8): the bytes as lower-case hex
+/// pairs.
+pub(super) fn macaddr(b: &[u8], len: usize) -> Option<String> {
+    if b.len() != len {
         return None;
     }
     Some(
@@ -200,10 +199,11 @@ pub(super) fn timetz(b: &[u8]) -> Option<String> {
     Some(format!("{}{zone}", format_time_of_day(time)))
 }
 
-/// `"char"`: one byte, written as itself, or as `\ooo` past ASCII.
+/// `"char"`: one byte, written as itself, or as `\ooo` past ASCII; NUL
+/// (`''::"char"`) as nothing.
 pub(super) fn char(b: &[u8]) -> Option<String> {
     match b {
-        [] => Some(String::new()),
+        [0] => Some(String::new()),
         [byte] if byte.is_ascii() => Some((*byte as char).to_string()),
         [byte] => Some(format!("\\{byte:03o}")),
         _ => None,
@@ -282,9 +282,25 @@ mod tests {
         tz.extend((-19_800i32).to_be_bytes());
         assert_eq!(timetz(&tz).unwrap(), "12:00:00+05:30");
         assert_eq!(
-            macaddr(&[8, 0, 0x2b, 1, 2, 3]).unwrap(),
+            macaddr(&[8, 0, 0x2b, 1, 2, 3], 6).unwrap(),
             "08:00:2b:01:02:03"
         );
         assert_eq!(char(b"a").unwrap(), "a");
+        assert_eq!(char(&[0]).unwrap(), "");
+        assert_eq!(char(&[0xe9]).unwrap(), "\\351");
+    }
+
+    #[test]
+    fn malformed_values_are_refused_not_read() {
+        assert_eq!(interval(&[0; 15]), None);
+        assert_eq!(interval(&[0; 17]), None);
+        assert_eq!(inet(&[2, 32, 0, 4, 10, 1, 2]), None);
+        assert_eq!(inet(&[3, 128, 0, 4, 10, 1, 2, 3]), None);
+        assert_eq!(macaddr(&[0; 8], 6), None);
+        assert_eq!(money(&[0; 7]), None);
+        assert_eq!(bits(&[0xff, 0xff, 0xff, 0xff]), None);
+        assert_eq!(bits(&[0, 0, 0, 9, 0]), None);
+        assert_eq!(timetz(&[0; 13]), None);
+        assert_eq!(char(&[1, 2]), None);
     }
 }

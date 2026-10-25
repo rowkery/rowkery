@@ -146,6 +146,8 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'01:02:03.5-08'::timetz",
         "'00:00:00+00'::timetz",
         "'a'::\"char\"",
+        "''::\"char\"",
+        "ARRAY['a', 'b']::\"char\"[]",
     ];
     for expr in cases {
         // format('%s') writes the type's own output, as psql shows it
