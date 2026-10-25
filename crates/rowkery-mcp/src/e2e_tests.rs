@@ -54,6 +54,27 @@ async fn query(mcp: &RowkeryMcp, sql: &str) -> Result<Json, String> {
     call(mcp, "query", json!({ "connection": ID, "sql": sql })).await
 }
 
+/// The newest Rowkery backend other than `setup`'s: the MCP server's
+/// session (agents can't call pg_backend_pid() themselves).
+async fn mcp_backend(setup: &rowkery_core::db::postgres::PostgresSession) -> Json {
+    let mut pid = Json::Null;
+    rowkery_core::db::postgres::session_query_stream(
+        setup,
+        "SELECT pid FROM pg_stat_activity
+         WHERE application_name LIKE 'Rowkery %' AND pid <> pg_backend_pid()
+         ORDER BY backend_start DESC LIMIT 1",
+        |batch, _| {
+            if let Some(row) = batch.rows.first() {
+                pid = json!(format!("{:?}", row[0]));
+            }
+            Ok(())
+        },
+    )
+    .await
+    .expect("backend");
+    pid
+}
+
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
@@ -135,8 +156,8 @@ async fn guards_hold_against_a_real_postgres() {
     assert_eq!(big["more"], true);
     assert_eq!(big["row_count"], 200);
     assert_eq!(big["notes"], json!(["text over 200 chars was cut"]));
-    let pid = |r: &Json| r["rows"][0][0].clone();
-    let before = pid(&query(&mcp, "SELECT pg_backend_pid()").await.expect("pid"));
+    let before = mcp_backend(&setup).await;
+    assert_ne!(before, Json::Null);
     // A read stopped at 64 KB with a few rows left keeps its session: they
     // are read off before the next call.
     let cut = query(
@@ -150,7 +171,7 @@ async fn guards_hold_against_a_real_postgres() {
         "{}",
         cut["notes"]
     );
-    let kept = pid(&query(&mcp, "SELECT pg_backend_pid()").await.expect("pid"));
+    let kept = mcp_backend(&setup).await;
     assert_eq!(kept, before, "a short drain keeps the session");
     // One whose rest takes seconds to come is cancelled and its session
     // dropped; the next call opens a fresh one.
@@ -167,7 +188,8 @@ async fn guards_hold_against_a_real_postgres() {
         "{}",
         slow["notes"]
     );
-    let fresh = pid(&query(&mcp, "SELECT pg_backend_pid()").await.expect("pid"));
+    query(&mcp, "SELECT 1").await.expect("fresh session");
+    let fresh = mcp_backend(&setup).await;
     assert_ne!(fresh, before, "a slow drain drops the session");
     let ok = query(&mcp, "SELECT n FROM mcp_e2e_visible")
         .await
