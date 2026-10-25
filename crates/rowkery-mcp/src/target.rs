@@ -107,6 +107,11 @@ pub struct ReadResult {
 pub struct Store {
     sessions: HashMap<(String, String), PostgresSession>,
     catalogs: HashMap<(String, String), CachedCatalog>,
+    /// The session a call holds one transaction open on (`begin`).
+    open: Option<(String, String)>,
+    /// A session handed in with its transaction already open (`on_session`),
+    /// kept as it came.
+    adopted: Option<(String, String)>,
 }
 
 fn message(err: DriverError) -> String {
@@ -163,16 +168,37 @@ impl Store {
     /// The guards are set again before every statement, so a `set_config` in
     /// an earlier SELECT can't loosen them.
     async fn session(&mut self, target: &Target) -> Result<&PostgresSession, String> {
+        self.session_then(target, "").await
+    }
+
+    /// [`Self::session`], running `then` after the guards in the same trip.
+    async fn session_then(
+        &mut self,
+        target: &Target,
+        then: &str,
+    ) -> Result<&PostgresSession, String> {
         let ConnectionRecord::Postgres(pg) = &target.record else {
             return Err("not a Postgres connection".into());
         };
         let key = target.key();
+        if self.adopted.as_ref() == Some(&key) {
+            return self
+                .sessions
+                .get(&key)
+                .ok_or_else(|| "The connection closed.".to_string());
+        }
         if self
             .sessions
             .get(&key)
             .is_some_and(|s| s.is_closed() || s.config() != &read_only(pg, &target.database))
         {
             self.sessions.remove(&key);
+        }
+        // A fresh session mid-call would run the rest outside the call's
+        // transaction, planned at another moment.
+        if self.open.as_ref() == Some(&key) && !self.sessions.contains_key(&key) {
+            self.open = None;
+            return Err("The connection closed during the call.".into());
         }
         if !self.sessions.contains_key(&key) {
             let config = read_only(pg, &target.database);
@@ -182,17 +208,72 @@ impl Store {
                 .map_err(message)?;
             self.sessions.insert(key.clone(), session);
         }
+        // Outside a call's transaction, one a call that stopped early left
+        // open is rolled back first.
+        let close = if self.open.as_ref() == Some(&key) {
+            ""
+        } else {
+            "ROLLBACK; "
+        };
         let session = self.sessions.get(&key).expect("session");
         session_execute(
             session,
             &format!(
-                "SET default_transaction_read_only = on; SET statement_timeout = '{}s'",
+                "{close}SET default_transaction_read_only = on; SET statement_timeout = '{}s'{then}",
                 STATEMENT_TIMEOUT.as_secs()
             ),
         )
         .await
         .map_err(message)?;
         Ok(session)
+    }
+
+    /// Opens one read-only transaction on Postgres for every statement up to
+    /// [`Self::end`]: a check's `EXPLAIN` and the run it allows then plan
+    /// against the same moment, since `'now'` and `'today'` are the
+    /// transaction's start and are folded into the plan. Planned apart, the
+    /// same SQL can read a partition or table in the run that the checked
+    /// plan left out.
+    pub async fn begin(&mut self, target: &Target) -> Result<(), String> {
+        if !matches!(target.record, ConnectionRecord::Postgres(_)) {
+            return Ok(());
+        }
+        self.open = None;
+        self.session_then(target, "; BEGIN READ ONLY").await?;
+        self.open = Some(target.key());
+        Ok(())
+    }
+
+    /// Rolls back what [`Self::begin`] opened, or drops a session that
+    /// can't, so the next call starts clean.
+    pub async fn end(&mut self, target: &Target) {
+        let key = target.key();
+        if self.open.as_ref() != Some(&key) {
+            return;
+        }
+        self.open = None;
+        let rolled_back = match self.sessions.get(&key) {
+            Some(session) => session_execute(session, "ROLLBACK").await.is_ok(),
+            None => true,
+        };
+        if !rolled_back {
+            self.sessions.remove(&key);
+        }
+    }
+
+    /// A store whose statements on `target` run on `session`, inside the
+    /// transaction its owner opened (a commit checks a change in the one
+    /// that runs it). [`Self::into_session`] hands it back.
+    pub fn on_session(target: &Target, session: PostgresSession) -> Self {
+        let mut store = Self::default();
+        store.sessions.insert(target.key(), session);
+        store.adopted = Some(target.key());
+        store
+    }
+
+    /// The session given to [`Self::on_session`].
+    pub fn into_session(mut self, target: &Target) -> Option<PostgresSession> {
+        self.sessions.remove(&target.key())
     }
 
     /// Drops whatever this process holds for connections no longer shared.

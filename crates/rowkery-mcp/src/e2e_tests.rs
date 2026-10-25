@@ -125,6 +125,18 @@ async fn guards_hold_against_a_real_postgres() {
         .await
         .expect("indexed read");
 
+    // `'now'` is folded into the plan when it's made: the checked EXPLAIN
+    // and the run plan at one moment, so a filter on its microseconds can't
+    // leave the hidden table out of the check and read it in the run.
+    let flip = "SELECT ssn FROM mcp_e2e_secret \
+                WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0";
+    for _ in 0..40 {
+        match query(&mcp, flip).await {
+            Ok(out) => assert_eq!(out["rows"], json!([]), "the run read the hidden table"),
+            Err(err) => assert!(err.starts_with("Refused"), "{err}"),
+        }
+    }
+
     // Everyday analytics stay open: aggregates, dates, JSON, windows, and
     // the system views that describe tables.
     for sql in [
@@ -973,6 +985,25 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         .await
         .unwrap();
     assert_eq!(seats["rows"], json!([[50]]));
+
+    // A commit checks the change again in its own transaction, where
+    // `'now'` folds the same way for the check and the run.
+    let flip = "UPDATE mcp_p_orders SET note = (SELECT max(id)::text FROM mcp_p_hidden \
+                WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0) WHERE id = 1";
+    for _ in 0..40 {
+        let Ok(sent) = propose(flip).await else {
+            continue;
+        };
+        let _ = proposals::commit(sent["id"].as_str().unwrap(), &[1]).await;
+        let note = query(&mcp, "SELECT note FROM mcp_p_orders WHERE id = 1")
+            .await
+            .unwrap();
+        assert_ne!(
+            note["rows"],
+            json!([["4242"]]),
+            "the commit read the hidden table"
+        );
+    }
 
     // Read-only connections take no proposals.
     pg.safe_mode = rowkery_core::safety::SafeMode::ReadOnly;
