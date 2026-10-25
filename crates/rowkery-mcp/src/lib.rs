@@ -26,6 +26,7 @@ pub mod sessions;
 mod target;
 mod views;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
@@ -155,9 +156,13 @@ pub fn run_stdio() -> i32 {
     })
 }
 
+type Stores = HashMap<(String, String), Arc<Mutex<Store>>>;
+
 #[derive(Clone, Default)]
 pub struct RowkeryMcp {
-    store: Arc<Mutex<Store>>,
+    /// One store per connection and database: a call waits only for calls
+    /// on the same one, which share its session.
+    stores: Arc<std::sync::Mutex<Stores>>,
     /// The client's name from its handshake, kept with what it proposes.
     client: Arc<std::sync::Mutex<Option<String>>>,
 }
@@ -374,6 +379,19 @@ fn age(loaded: std::time::Instant) -> String {
 }
 
 impl RowkeryMcp {
+    /// The target's store, after dropping those of connections no longer
+    /// shared.
+    fn store_for(&self, config: &AppConfig, target: &Target) -> Arc<Mutex<Store>> {
+        let mut stores = self.stores.lock().unwrap_or_else(|e| e.into_inner());
+        stores.retain(|(id, _), _| {
+            config
+                .connections
+                .iter()
+                .any(|c| c.allow_mcp() && c.id() == id)
+        });
+        stores.entry(target.key()).or_default().clone()
+    }
+
     /// Runs one tool call; the entry to log, and whether a sample of the
     /// response may be kept (off per connection with `mcp_samples_off`).
     async fn dispatch(
@@ -395,9 +413,6 @@ impl RowkeryMcp {
                 )
             }
         };
-        let mut store = self.store.lock().await;
-        store.settle();
-        store.forget_unshared(&config);
         if name == "list_connections" {
             entry.rows = Some(config.connections.iter().filter(|c| c.allow_mcp()).count() as u64);
             // The list names every shared connection, so it's kept only when
@@ -422,6 +437,10 @@ impl RowkeryMcp {
         };
         entry.connection = Some(target.id().to_string());
         entry.database = Some(target.database.clone());
+        let store = self.store_for(&config, &target);
+        let mut store = store.lock().await;
+        store.settle();
+        store.forget_unshared(&config);
         let cap =
             (name == "query").then(|| guard::row_cap(args.get("max_rows").and_then(Json::as_u64)));
         entry.scope = Some(rule(&target).scope(&target.record, cap));

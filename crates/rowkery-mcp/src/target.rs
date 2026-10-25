@@ -32,7 +32,7 @@ impl Target {
         self.record.id()
     }
 
-    fn key(&self) -> (String, String) {
+    pub(crate) fn key(&self) -> (String, String) {
         (self.id().to_string(), self.database.clone())
     }
 }
