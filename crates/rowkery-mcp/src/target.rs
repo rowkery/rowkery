@@ -257,6 +257,10 @@ impl Store {
             return Ok(());
         }
         let key = target.key();
+        // A commit's adopted session is in its owner's transaction already.
+        if self.adopted.as_ref() == Some(&key) {
+            return Ok(());
+        }
         self.open = None;
         self.guarded(target, "Timed out waiting for the server.", async |s| {
             session_execute(s, "BEGIN READ ONLY").await
@@ -340,6 +344,10 @@ impl Store {
         if let Err(err) = set {
             self.sessions.remove(&key);
             return Err(message(err));
+        }
+        // A transaction an earlier call left open is closed now.
+        if guards.as_deref().is_some_and(|g| g.starts_with("ROLLBACK")) {
+            self.left_open.remove(&key);
         }
         out.map_err(message)
     }
