@@ -108,9 +108,51 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'<a b=\"1\">x</a>'::xml",
         r#"ARRAY['{"a": 1}', '{"b": [2, "c d"]}']::jsonb[]"#,
         r#"ARRAY['{"a":1}']::json[]"#,
+        // Shown as Postgres writes them, not as `<interval>`.
+        "'1 year 2 mons -3 days 04:05:06.5'::interval",
+        "'-1 day'::interval",
+        "'-04:00:00'::interval",
+        "'1 day -00:00:01'::interval",
+        "'0'::interval",
+        "'100 hours 0.000001 sec'::interval",
+        "'-1 mon'::interval",
+        "'-2 years -3 mons'::interval",
+        "ARRAY['1 day', '2 hours']::interval[]",
+        "'::ffff:1.2.3.4'::inet",
+        "'::1.2.3.4'::inet",
+        "'::1'::inet",
+        "'::'::inet",
+        "'::0.0.0.2'::inet",
+        "'2001:db8::1/64'::inet",
+        "'fe80::1:2:3:4'::inet",
+        "'1:0:0:1:0:0:0:1'::inet",
+        "'0:0:1::'::inet",
+        "'1:2:3:4:5:6:7:8'::inet",
+        "'192.168.1.5'::inet",
+        "'192.168.1.5/24'::inet",
+        "'10.0.0.0/8'::cidr",
+        "'2001:db8::/32'::cidr",
+        "ARRAY['10.0.0.1', '::1']::inet[]",
+        "'-1234.5'::money",
+        "'1234567.891'::money",
+        "'0'::money",
+        "ARRAY['1234.5']::money[]",
+        "'08:00:2b:01:02:03'::macaddr",
+        "'08:00:2b:01:02:03:04:05'::macaddr8",
+        "B'0101'::bit(4)",
+        "B'101100111'::varbit",
+        "B''::varbit",
+        "'12:00:00+05:30'::timetz",
+        "'01:02:03.5-08'::timetz",
+        "'00:00:00+00'::timetz",
+        "'a'::\"char\"",
+        "''::\"char\"",
+        "ARRAY['a', 'b']::\"char\"[]",
     ];
     for expr in cases {
-        let sql = format!("SELECT {expr} AS v, ({expr})::text AS t");
+        // format('%s') writes the type's own output, as psql shows it
+        // (`::text` on an inet always adds its prefix).
+        let sql = format!("SELECT {expr} AS v, format('%s', {expr}) AS t");
         let mut got = None;
         session_query_stream(&session, &sql, |batch, _| {
             got = batch.rows.into_iter().next();

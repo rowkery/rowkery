@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -31,6 +31,7 @@ use super::introspect::{
 use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 
 mod activity;
+mod text_types;
 pub use activity::{
     rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
     HeldLock, ServerSession, StopKind,
@@ -134,6 +135,9 @@ pub struct PostgresSession {
     /// Whatever the owner ties to the session's life (the bridge keeps its
     /// place under the per-connection cap here): dropped with the session.
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// Whether the session writes money as `text_types::money` does, as of
+    /// the last result with money in it ([`query_prepared`]).
+    money_shown: AtomicBool,
 }
 
 /// Prepared statements kept per session: a re-run, and every cursor
@@ -449,6 +453,7 @@ pub async fn open_session_via(
         tag,
         cancel_aborted: false,
         guard: None,
+        money_shown: AtomicBool::new(false),
     })
 }
 
@@ -684,10 +689,9 @@ async fn start_query_now(
     session: &PostgresSession,
     sql: &str,
 ) -> Result<(Statement, tokio_postgres::RowStream), tokio_postgres::Error> {
-    let none = std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>;
     let outside_txn = session.txn == TxnState::None && session.cursor.is_none();
     let (st, cached) = prepared(session, sql, outside_txn && cacheable_sql(sql)).await?;
-    match session.client.query_raw(&st, none()).await {
+    match query_prepared(session, &st).await {
         Err(e)
             if cached
                 && (e.code() == Some(&SqlState::FEATURE_NOT_SUPPORTED)
@@ -697,11 +701,54 @@ async fn start_query_now(
                 cache.retain(|(k, _)| k != sql);
             }
             let (st, _) = prepared(session, sql, true).await?;
-            let rows = session.client.query_raw(&st, none()).await?;
+            let rows = query_prepared(session, &st).await?;
             Ok((st, rows))
         }
         Err(e) => Err(e),
         Ok(rows) => Ok((st, rows)),
+    }
+}
+
+/// How the session writes two amounts of money, and how `text_types::money`
+/// writes them. money's binary value is in units of the server locale's
+/// `lc_monetary` (no cents in ja_JP), written in its symbols (`1.234,50 €`
+/// in de_DE), and the user may `SET` it: the decoder is only right where
+/// the session writes these the same way.
+const MONEY_PROBE: &str = "SELECT '-1234567.89'::money::text, '1234567.89'::money::text";
+const MONEY_AS_DECODED: [&str; 2] = ["-$1,234,567.89", "$1,234,567.89"];
+
+/// Runs a prepared statement. One with money in its result asks
+/// [`MONEY_PROBE`] too, pipelined ahead of it, so it costs no round trip.
+async fn query_prepared(
+    session: &PostgresSession,
+    st: &Statement,
+) -> Result<tokio_postgres::RowStream, tokio_postgres::Error> {
+    let none = std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>;
+    if !st.columns().iter().any(|c| holds_money(c.type_())) {
+        return session.client.query_raw(st, none()).await;
+    }
+    let (written, rows) = tokio::join!(
+        session.client.simple_query(MONEY_PROBE),
+        session.client.query_raw(st, none())
+    );
+    let shown = written.is_ok_and(|messages| {
+        messages.iter().any(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                [row.get(0), row.get(1)] == MONEY_AS_DECODED.map(Some)
+            }
+            _ => false,
+        })
+    });
+    session.money_shown.store(shown, Ordering::SeqCst);
+    rows
+}
+
+/// Whether values of `ty` hold money: itself, or as an array or domain.
+fn holds_money(ty: &Type) -> bool {
+    use tokio_postgres::types::Kind;
+    match ty.kind() {
+        Kind::Array(element) | Kind::Domain(element) => holds_money(element),
+        _ => *ty == Type::MONEY,
     }
 }
 
@@ -860,6 +907,7 @@ where
     let (st, stream) = start_query(session, trimmed, ahead)
         .await
         .map_err(|e| map_query_error(&e, &username))?;
+    let money_shown = session.money_shown.load(Ordering::SeqCst);
     futures::pin_mut!(stream);
     // From the statement, not the first row: a result with no rows still
     // has its columns.
@@ -895,7 +943,7 @@ where
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
-            let value = postgres_value_to_core(&row, i);
+            let value = postgres_value_to_core(&row, i, money_shown);
             batch_bytes += value.heap_bytes();
             values.push(value);
         }
@@ -2130,10 +2178,17 @@ pub fn map_postgres_error_to_fields(message: &str) -> crate::connections::Postgr
 
 /// One cell: decoded from its binary wire value when the type is known
 /// (`decode_raw`), else through tokio-postgres's own conversions, else
-/// `<type name>`.
-fn postgres_value_to_core(row: &Row, index: usize) -> Value {
+/// `<type name>`. Money only `money_shown` ([`query_prepared`]): written
+/// wrong, a key or an edit sent back would fail or mean another amount.
+fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool) -> Value {
     let ty = row.columns().get(index).map(|c| c.type_().clone());
     if let Some(ty) = ty.as_ref() {
+        if !money_shown && holds_money(ty) {
+            return match row.try_get::<_, Option<RawValue>>(index) {
+                Ok(None) => Value::Null,
+                _ => Value::Text(format!("<{}>", ty.name())),
+            };
+        }
         if let Some(v) = decode_known_type(row, index, ty) {
             return v;
         }
@@ -2236,6 +2291,14 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
             std::str::from_utf8(b).ok().map(|s| Value::Text(s.into()))
         }
         Type::BYTEA => Some(Value::Bytes(b.to_vec())),
+        Type::INTERVAL => text_types::interval(b).map(Value::Text),
+        Type::INET | Type::CIDR => text_types::inet(b).map(Value::Text),
+        Type::MACADDR => text_types::macaddr(b, 6).map(Value::Text),
+        Type::MACADDR8 => text_types::macaddr(b, 8).map(Value::Text),
+        Type::MONEY => text_types::money(b).map(Value::Text),
+        Type::BIT | Type::VARBIT => text_types::bits(b).map(Value::Text),
+        Type::TIMETZ => text_types::timetz(b).map(Value::Text),
+        Type::CHAR => text_types::char(b).map(Value::Text),
         // As stored, never through serde_json's f64: big integers and long
         // decimals keep every digit, so an edit writes back what was read.
         // xml's binary value is its text; jsonb's is a version byte (1) and
@@ -2276,6 +2339,16 @@ fn array_element_shown(element: &Type) -> bool {
                 | Type::JSON
                 | Type::JSONB
                 | Type::XML
+                | Type::INTERVAL
+                | Type::INET
+                | Type::CIDR
+                | Type::MACADDR
+                | Type::MACADDR8
+                | Type::MONEY
+                | Type::BIT
+                | Type::VARBIT
+                | Type::TIMETZ
+                | Type::CHAR
         )
 }
 
@@ -2524,6 +2597,14 @@ mod decode_tests {
         );
         // An unknown jsonb version isn't guessed at.
         assert_eq!(decode_raw(&Type::JSONB, &[2, b'1']), None);
+    }
+
+    #[test]
+    fn money_is_found_in_arrays_too() {
+        assert!(holds_money(&Type::MONEY));
+        assert!(holds_money(&Type::MONEY_ARRAY));
+        assert!(!holds_money(&Type::NUMERIC));
+        assert!(!holds_money(&Type::TEXT_ARRAY));
     }
 
     #[test]
