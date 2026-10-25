@@ -21,6 +21,9 @@ const MAX_SESSIONS: usize = 100;
 
 pub const HIDDEN_QUERY: &str = "(reads a table not shared with agents)";
 
+/// Stands in the names of a query for one it spells in escapes (`U&"…"`).
+const UNREAD_NAME: &str = "\0unread";
+
 pub const UNCLEAR_QUERY: &str = "(its literals can't be told apart without the session's settings)";
 
 /// Functions that return other sessions' query text as typed.
@@ -97,15 +100,20 @@ fn redact_reading(sql: &str, backslash_everywhere: bool) -> (String, Vec<String>
                 escaped = false;
             }
             b'"' => {
+                // `U&"…"` spells its name in escapes Rowkery doesn't decode.
+                if out.ends_with("U&") || out.ends_with("u&") {
+                    names.push(UNREAD_NAME.into());
+                }
                 let start = i + 1;
                 i = start;
-                while i < n && b[i] != b'"' {
-                    i += 1;
+                // `""` is a quote inside the name.
+                while i < n && (b[i] != b'"' || b.get(i + 1) == Some(&b'"')) {
+                    i += if b[i] == b'"' { 2 } else { 1 };
                 }
-                let name = &sql[start..i.min(n)];
-                names.push(name.to_string());
+                let quoted = &sql[start..i.min(n)];
+                names.push(quoted.replace("\"\"", "\""));
                 out.push('"');
-                out.push_str(name);
+                out.push_str(quoted);
                 out.push('"');
                 i = (i + 1).min(n);
             }
@@ -116,11 +124,21 @@ fn redact_reading(sql: &str, backslash_everywhere: bool) -> (String, Vec<String>
                 space(&mut out);
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
+                // Block comments nest in Postgres.
                 i += 2;
-                while i < n && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
-                    i += 1;
+                let mut depth = 1;
+                while i < n && depth > 0 {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                 }
-                i = (i + 2).min(n);
+                i = i.min(n);
                 space(&mut out);
             }
             b'$' if b.get(i + 1).is_some_and(u8::is_ascii_digit) => {
@@ -137,7 +155,7 @@ fn redact_reading(sql: &str, backslash_everywhere: bool) -> (String, Vec<String>
                 let tag_end = sql[i + 1..].find('$').map(|p| i + 1 + p).filter(|&e| {
                     sql[i + 1..e]
                         .bytes()
-                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch >= 0x80)
                 });
                 match tag_end {
                     Some(e) => {
@@ -218,10 +236,15 @@ pub fn hidden_names(catalog: &SchemaCatalog, rule: &Tables) -> HashSet<String> {
 /// The query as an agent sees it.
 pub fn shown_query(sql: &str, hidden: &HashSet<String>) -> String {
     let (text, names) = redact(sql);
-    if names
-        .iter()
-        .any(|name| hidden.iter().any(|h| h.eq_ignore_ascii_case(name)))
-    {
+    // Folded the same way on both sides, accented letters too: a database
+    // in a single-byte encoding folds them, and blanking more is safe.
+    let hides = |name: &String| {
+        (name == UNREAD_NAME && !hidden.is_empty())
+            || hidden
+                .iter()
+                .any(|h| h.to_lowercase() == name.to_lowercase())
+    };
+    if names.iter().any(hides) {
         HIDDEN_QUERY.into()
     } else {
         text
@@ -349,6 +372,47 @@ mod tests {
         // pg_stat_activity cuts long queries mid-literal.
         let (text, _) = redact("insert into t values ('half a sec");
         assert_eq!(text, "insert into t values (?");
+    }
+
+    #[test]
+    fn comments_nest_and_dollar_tags_take_any_letter() {
+        let (text, _) = redact("SELECT 1 /* /* */ ' */, 'sk_live_xyz' AS k");
+        assert_eq!(text, "SELECT ? , ? AS k");
+        let (text, _) = redact("SELECT 1 /* outer /* inner */ api_key=sk_live_secret */ FROM t");
+        assert_eq!(text, "SELECT ? FROM t");
+        let (text, _) = redact("SELECT $é$sk_live_secret$é$");
+        assert_eq!(text, "SELECT ?");
+        let h = hidden(&["payroll"]);
+        assert_eq!(
+            shown_query("/* /* */ ' */ SELECT * FROM payroll WHERE a = '1'", &h),
+            HIDDEN_QUERY
+        );
+    }
+
+    #[test]
+    fn hidden_names_match_however_they_are_written() {
+        assert_eq!(
+            shown_query("SELECT * FROM Ärzte", &hidden(&["ärzte"])),
+            HIDDEN_QUERY
+        );
+        assert_eq!(
+            shown_query("SELECT * FROM ärzte", &hidden(&["Ärzte"])),
+            HIDDEN_QUERY
+        );
+        let h = hidden(&["payroll", "pay\"roll"]);
+        assert_eq!(
+            shown_query(r#"SELECT * FROM U&"p\0061yroll""#, &h),
+            HIDDEN_QUERY
+        );
+        assert_eq!(
+            shown_query(r#"SELECT * FROM "pay""roll""#, &h),
+            HIDDEN_QUERY
+        );
+        // Nothing hidden: an escaped name is shown as written.
+        assert_eq!(
+            shown_query(r#"SELECT * FROM U&"p\0061yroll""#, &HashSet::new()),
+            r#"SELECT * FROM U&"p\0061yroll""#
+        );
     }
 
     #[test]
