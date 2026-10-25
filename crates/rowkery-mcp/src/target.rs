@@ -8,8 +8,8 @@ use rowkery_core::config::AppConfig;
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session, session_activity, session_execute, session_introspect,
-    session_list_databases, session_query_stream, session_table_indexes, PostgresSession,
-    ServerSession,
+    session_list_databases, session_ping, session_query_stream, session_table_indexes,
+    PostgresSession, ServerSession,
 };
 use rowkery_core::db::sqlite::SqliteDriver;
 use rowkery_core::db::{Column, Driver, DriverError, SchemaCatalog, Value};
@@ -108,10 +108,13 @@ pub struct Read<S> {
     pub elapsed_ms: u64,
 }
 
-/// Unread rows a stopped Postgres read may leave on the wire: the session
-/// reads them off before it answers again. Past this the statement is
+/// How long a stopped Postgres read may take to read off the rows it left on
+/// the wire, checked with an empty round trip. Past this the statement is
 /// cancelled and the session dropped instead.
-const DRAIN_BYTES: usize = 8 << 20;
+const DRAIN_WAIT: Duration = Duration::from_millis(500);
+
+/// How long a cancel request may take before the session is dropped anyway.
+const CANCEL_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct Store {
@@ -347,9 +350,9 @@ impl Store {
 
     /// `read`, handing each row to `each` as it arrives instead of keeping
     /// them all; the read stops at the first row `each` turns down. `limit`
-    /// is the most rows `sql` returns: after a stop, a Postgres statement
-    /// whose unread rows would be more than [`DRAIN_BYTES`] is cancelled and
-    /// its session dropped, rather than left to be read to its end.
+    /// is the most rows `sql` returns: after a stop short of it, a Postgres
+    /// session that can't read off the rest within [`DRAIN_WAIT`] has its
+    /// statement cancelled and is dropped.
     pub async fn read_each<S, F>(
         &mut self,
         target: &Target,
@@ -376,14 +379,13 @@ impl Store {
                 let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
                 let started = Instant::now();
                 let mut columns = Vec::new();
-                let (mut seen, mut bytes, mut stopped) = (0usize, 0usize, false);
+                let (mut seen, mut stopped) = (0usize, false);
                 let run = session_query_stream(session, sql, |batch, first| {
                     if first {
                         columns = batch.columns;
                     }
                     for row in batch.rows {
                         seen += 1;
-                        bytes += row.iter().map(Value::heap_bytes).sum::<usize>();
                         if !each(&mut state, row) {
                             stopped = true;
                             return Err(DriverError::Message(String::new()));
@@ -396,12 +398,14 @@ impl Store {
                     Ok(_) => false,
                     Err(_) => true,
                 };
-                let unread = stopped
-                    && (bytes / seen).saturating_mul(limit.saturating_sub(seen)) > DRAIN_BYTES;
                 // The server's own timeout should have fired first: cancel
                 // and drop a session that stopped answering, too.
-                if unread || timed_out {
-                    let _ = cancel_with_token(cancel.0, cancel.1).await;
+                let drop = timed_out
+                    || stopped && seen < limit && !session_ping(session, DRAIN_WAIT).await;
+                if drop {
+                    let _ =
+                        tokio::time::timeout(CANCEL_WAIT, cancel_with_token(cancel.0, cancel.1))
+                            .await;
                     self.sessions.remove(&key);
                 }
                 if timed_out {

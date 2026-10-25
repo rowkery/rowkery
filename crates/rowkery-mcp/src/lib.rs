@@ -1450,8 +1450,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok["rows"], json!([[2]]));
-        // Rows are shaped as they arrive: 2.4 GB of cells answers within
-        // 64 KB, with the rest left unread.
+        // The query asks for 2.4 GB of cells. Rows are shaped as they
+        // arrive, so it answers within 64 KB and stops reading there.
         let big = call(
             &mcp,
             "query",

@@ -124,8 +124,8 @@ async fn guards_hold_against_a_real_postgres() {
     query(&mcp, "SELECT v FROM mcp_e2e_big WHERE id = 5")
         .await
         .expect("indexed read");
-    // 1.6 GB of cells answers within 64 KB; the statement is cancelled
-    // rather than read to its end, and the next call gets a fresh session.
+    // Rows are shaped as they arrive: 800 MB of cells, read to the row cap,
+    // answers in its first 200 characters each.
     let big = query(
         &mcp,
         "SELECT repeat('x', 4000000) FROM generate_series(1, 400)",
@@ -135,17 +135,40 @@ async fn guards_hold_against_a_real_postgres() {
     assert_eq!(big["more"], true);
     assert_eq!(big["row_count"], 200);
     assert_eq!(big["notes"], json!(["text over 200 chars was cut"]));
-    let big = query(
+    let pid = |r: &Json| r["rows"][0][0].clone();
+    let before = pid(&query(&mcp, "SELECT pg_backend_pid()").await.expect("pid"));
+    // A read stopped at 64 KB with a few rows left keeps its session: they
+    // are read off before the next call.
+    let cut = query(
         &mcp,
-        "SELECT repeat('x', 4000000), repeat('y', 4000000) FROM generate_series(1, 400)",
+        "SELECT repeat('x', 1000), repeat('y', 1000) FROM generate_series(1, 400)",
     )
     .await
-    .expect("big cells past 64 KB");
+    .expect("cut at 64 KB");
     assert!(
-        big["notes"].to_string().contains("64 KB"),
+        cut["notes"].to_string().contains("64 KB"),
         "{}",
-        big["notes"]
+        cut["notes"]
     );
+    let kept = pid(&query(&mcp, "SELECT pg_backend_pid()").await.expect("pid"));
+    assert_eq!(kept, before, "a short drain keeps the session");
+    // One whose rest takes seconds to come is cancelled and its session
+    // dropped; the next call opens a fresh one.
+    let slow = query(
+        &mcp,
+        "SELECT repeat('x', 1000), repeat('y', 1000),
+                (SELECT count(*) FROM generate_series(1, 200000 + g))
+         FROM generate_series(1, 400) g",
+    )
+    .await
+    .expect("cut at 64 KB, slow rest");
+    assert!(
+        slow["notes"].to_string().contains("64 KB"),
+        "{}",
+        slow["notes"]
+    );
+    let fresh = pid(&query(&mcp, "SELECT pg_backend_pid()").await.expect("pid"));
+    assert_ne!(fresh, before, "a slow drain drops the session");
     let ok = query(&mcp, "SELECT n FROM mcp_e2e_visible")
         .await
         .expect("read after a cancelled one");
