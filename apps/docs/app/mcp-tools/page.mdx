@@ -189,7 +189,7 @@ Every message below is the exact text an agent gets back. Parts in capitals or q
 
 ### Functions
 
-Agents can call Postgres's own functions that only compute on their arguments (every immutable built-in, such as `lower` or `count`, plus a list of safe ones for dates, JSON, text search and catalog descriptions). Rowkery checks the SQL as sent and again in the plan, where views and SQL functions are expanded.
+Agents can call Postgres's own functions that only compute on their arguments (every immutable built-in, such as `lower` or `count`, plus a list of safe ones for dates, JSON, text search and catalog descriptions). Rowkery checks the SQL as sent and again in the plan, where views and SQL functions are expanded. On Postgres the checked plan and the run share one read-only transaction, so a value fixed when a plan is made, such as `'now'`, can't lead the run to a table the checked plan left out. A proposed change is checked again in the transaction that commits it.
 
 | Message | What it means |
 | --- | --- |

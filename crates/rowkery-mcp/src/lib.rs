@@ -394,6 +394,7 @@ impl RowkeryMcp {
             }
         };
         let mut store = self.store.lock().await;
+        store.settle();
         store.forget_unshared(&config);
         if name == "list_connections" {
             entry.rows = Some(config.connections.iter().filter(|c| c.allow_mcp()).count() as u64);
@@ -443,15 +444,23 @@ impl RowkeryMcp {
             "explain" | "query" => match required(args, "sql") {
                 Ok(sql) => {
                     let max_rows = args.get("max_rows").and_then(Json::as_u64);
-                    run_read(
-                        &mut store,
-                        &target,
-                        sql,
-                        max_rows,
-                        name == "explain",
-                        &mut entry,
-                    )
-                    .await
+                    // The checks and the run in one transaction (`Store::begin`).
+                    match store.begin(&target).await {
+                        Ok(()) => {
+                            let read = run_read(
+                                &mut store,
+                                &target,
+                                sql,
+                                max_rows,
+                                name == "explain",
+                                &mut entry,
+                            )
+                            .await;
+                            store.end(&target).await;
+                            read
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
                 Err(e) => Err(e),
             },
