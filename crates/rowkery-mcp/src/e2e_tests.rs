@@ -1472,6 +1472,10 @@ async fn a_slow_call_holds_up_only_its_own_connection() {
     let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
     let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    let ids = [ID, "mcp-e2e-pg-other"];
+    for id in ids {
+        store_secret(id, SecretKind::DbPassword, &password).expect("store password");
+    }
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
@@ -1480,8 +1484,7 @@ async fn a_slow_call_holds_up_only_its_own_connection() {
     .await
     .expect("fixtures");
     let mut config = AppConfig::default();
-    for id in [ID, "mcp-e2e-pg-other"] {
-        store_secret(id, SecretKind::DbPassword, &password).expect("store password");
+    for id in ids {
         let mut pg = pg_config();
         pg.id = id.into();
         pg.name = id.into();
