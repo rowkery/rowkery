@@ -238,7 +238,7 @@ The website's palette: white or black sheets, neutral grey rules, black or white
 
 ## Typography
 
-**Display Font:** IBM Plex Sans at 600, behind `--font-display` (like the website; no serif)
+**Display Font:** IBM Plex Sans at 600, behind `--font-display` (no serif; the website's headings are Plex Sans at 500)
 **Body Font:** IBM Plex Sans (with the system sans)
 **Label/Mono Font:** IBM Plex Mono (with SF Mono, Menlo)
 

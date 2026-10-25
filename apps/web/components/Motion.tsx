@@ -10,7 +10,6 @@ import { useEffect } from "react";
  */
 export function Motion() {
   useEffect(() => {
-    document.documentElement.setAttribute("data-ready", "");
     const io = new IntersectionObserver(
       (es) =>
         es.forEach((e) => {
@@ -21,6 +20,7 @@ export function Motion() {
       { rootMargin: "0px 0px -6% 0px" },
     );
     document.querySelectorAll(".rv").forEach((el) => io.observe(el));
+    document.documentElement.setAttribute("data-ready", "");
     return () => io.disconnect();
   }, []);
   return null;

@@ -4,8 +4,9 @@
 // scrolled to; How it works playing its steps (the chat lines in, the pager filling, the next
 // step's clip playing, its bar following); the looping clips playing on screen and stopping off
 // it. Then Reduce Motion (nothing hidden or moving by itself: the chat whole, every bar full, the
-// clips on their posters with controls), no scripts (every block and chat line showing) and the
-// 404. Fails on any page error. Writes one full-page photo per size.
+// clips on their posters with controls), a clip scrolled away and back picking up where it was,
+// clips that can't autoplay (controls, and the steps still moving on), no scripts (every block
+// and chat line showing) and the 404. Fails on any page error. Writes one full-page photo per size.
 //
 //   npm run build && node scripts/resolution-check.mjs [outDir]
 //
@@ -112,12 +113,57 @@ for (const [w, h] of SIZES) {
     hidden: [...document.querySelectorAll(".rv, [data-at]")].filter((e) => getComputedStyle(e).opacity !== "1").length,
     playing: [...document.querySelectorAll("video")].filter((v) => !v.paused).length,
     controls: [...document.querySelectorAll("video")].every((v) => v.controls),
-    bars: [...document.querySelectorAll("[data-dot] i")].every((b) => new DOMMatrix(getComputedStyle(b).transform).a === 1),
+    bars: [...document.querySelectorAll("[data-dot] i")].map((b) => new DOMMatrix(getComputedStyle(b).transform).a).join(),
   }));
   if (r.js || r.hidden) fail("reduce motion", `${r.hidden} blocks or chat lines hidden`);
   if (r.playing) fail("reduce motion", `${r.playing} clips play by themselves`);
   if (!r.controls) fail("reduce motion", "a clip has no controls");
-  if (!r.bars) fail("reduce motion", "the pager bars aren't full");
+  if (r.bars !== "1,0,0") fail("reduce motion", `the pager bars read ${r.bars}, not the first one full`);
+  await context.close();
+}
+
+// A clip scrolled away mid-step picks up where it stopped when it comes back.
+{
+  const { context, page } = await open(1440, 900);
+  const stage = () => page.evaluate(() => document.querySelector("[data-stage]").scrollIntoView({ block: "center", behavior: "instant" }));
+  await stage();
+  await page.click("[data-dot]:nth-child(2)");
+  await page.waitForTimeout(2500);
+  await page.evaluate(() => scrollTo({ top: 0, behavior: "instant" }));
+  await page.waitForTimeout(600);
+  const left = await page.evaluate(() => document.querySelectorAll("[data-slide] video")[0].currentTime);
+  await stage();
+  await page.waitForTimeout(800);
+  const back = await page.evaluate(() => {
+    const v = document.querySelectorAll("[data-slide] video")[0];
+    return { on: v.closest("[data-slide]").classList.contains("on"), t: v.currentTime, playing: !v.paused };
+  });
+  if (left < 1) fail("resume", "the clip didn't play before scrolling away");
+  if (!back.on || !back.playing || back.t < left) fail("resume", `back on screen the clip is at ${back.t.toFixed(1)} s (left at ${left.toFixed(1)} s)`);
+  await context.close();
+}
+
+// Clips that can't autoplay (as in Low Power Mode): their controls show and the steps move on.
+{
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await context.addInitScript(() => (HTMLMediaElement.prototype.play = () => Promise.reject(new DOMException("refused", "NotAllowedError"))));
+  const page = await context.newPage();
+  page.on("pageerror", (e) => fail("no autoplay", `page error: ${e.message}`));
+  await page.goto(server.url, { waitUntil: "networkidle" });
+  await page.evaluate(() => document.querySelector("[data-stage]").scrollIntoView({ block: "center", behavior: "instant" }));
+  await page.click("[data-dot]:nth-child(2)");
+  await page.waitForTimeout(800);
+  const controls = await page.evaluate(() => document.querySelectorAll("[data-slide] video")[0].controls);
+  await page.waitForTimeout(7200);
+  const third = await page.evaluate(() => document.querySelectorAll("[data-slide]")[2].classList.contains("on"));
+  const loops = await page.evaluate(() => {
+    const d = document.querySelector(".duo");
+    d.scrollIntoView({ block: "center", behavior: "instant" });
+    return new Promise((r) => setTimeout(() => r([...d.querySelectorAll("video")].every((v) => v.controls)), 800));
+  });
+  if (!controls) fail("no autoplay", "the refused clip has no controls");
+  if (!third) fail("no autoplay", "the steps stall on the refused clip");
+  if (!loops) fail("no autoplay", "a refused keyboard clip has no controls");
   await context.close();
 }
 
@@ -140,5 +186,5 @@ for (const [w, h] of SIZES) {
 await browser.close();
 server.close();
 for (const p of problems) console.error(p);
-console.log(problems.length ? `${problems.length} problems` : `All ${SIZES.length} sizes, Reduce Motion, no scripts and the 404 look right. Photos in ${OUT}`);
+console.log(problems.length ? `${problems.length} problems` : `All ${SIZES.length} sizes, Reduce Motion, resuming, no autoplay, no scripts and the 404 look right. Photos in ${OUT}`);
 process.exit(problems.length ? 1 : 0);

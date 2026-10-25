@@ -16,17 +16,29 @@ export function Clip({ name, w, h, label }: { name: string; w: number; h: number
       v.controls = true;
       return;
     }
+    // Starts loading a screen ahead; plays while 40% shows. A clip that can't autoplay (Low Power
+    // Mode, say) gets its controls instead.
+    const near = new IntersectionObserver(
+      (es) => {
+        if (!es[es.length - 1].isIntersecting) return;
+        v.preload = "auto";
+        near.disconnect();
+      },
+      { rootMargin: "300px 0px" },
+    );
     const io = new IntersectionObserver(
-      ([e]) => {
-        if (e.isIntersecting) {
-          v.preload = "auto";
-          v.play().catch(() => {});
-        } else v.pause();
+      (es) => {
+        if (es[es.length - 1].isIntersecting) v.play().catch(() => (v.controls = true));
+        else v.pause();
       },
       { threshold: 0.4 },
     );
+    near.observe(v);
     io.observe(v);
-    return () => io.disconnect();
+    return () => {
+      near.disconnect();
+      io.disconnect();
+    };
   }, []);
 
   return <video ref={ref} className="clip" src={`/clips/${name}.mp4`} poster={`/clips/${name}.jpg`} width={w} height={h} muted loop playsInline preload="none" aria-label={label} />;

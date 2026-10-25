@@ -2,7 +2,7 @@ import { AGENTS } from "@/lib/agents";
 import { APP_EXE } from "@/lib/site";
 import { CopyButton } from "./CopyButton";
 
-/** Claude Code's own command for adding Rowkery (what the app's Connect an agent runs for it). */
+/** Claude Code's own command for adding Rowkery (what the app's Connect Claude Code or Claude Desktop runs for it). */
 const COMMAND = `claude mcp add --scope user rowkery -- ${APP_EXE} --mcp`;
 
 /** The agents Rowkery works with, and the one line that connects Claude Code. */
@@ -31,7 +31,7 @@ export function Agents() {
             </code>
           </div>
           <p className="hint">
-            Or press <kbd>⌘K</kbd> and pick Connect an agent in the app.
+            Or press <kbd>⌘K</kbd> and pick Connect Claude Code or Claude Desktop in the app.
           </p>
         </div>
       </div>

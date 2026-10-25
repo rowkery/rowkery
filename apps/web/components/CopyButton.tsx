@@ -22,7 +22,7 @@ export function CopyButton({ text }: { text: string }) {
     setTimeout(() => setSaid("Copy"), 1400);
   };
   return (
-    <button type="button" className="copy" onClick={copy} data-copy>
+    <button type="button" className="copy" onClick={copy}>
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <rect x="5" y="5" width="8.5" height="8.5" rx="2" />
         <path d="M11 3.2V3a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 2 3v6a1.5 1.5 0 0 0 1.5 1.5h.2" />
