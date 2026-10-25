@@ -1268,3 +1268,57 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     assert!(err.contains("Read-only"), "{err}");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn guards_go_ahead_of_every_call() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-g-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    save(pg);
+    let target = crate::target::resolve(&AppConfig::load().unwrap(), ID, None).unwrap();
+    let mut store = crate::target::Store::default();
+
+    // A read puts them back, read-only too.
+    store
+        .loosen(
+            &target,
+            "SET statement_timeout = 0; SET default_transaction_read_only = off",
+        )
+        .await;
+    let read = store
+        .read(
+            &target,
+            "SELECT current_setting('statement_timeout'), current_setting('default_transaction_read_only')",
+        )
+        .await
+        .expect("read");
+    assert_eq!(
+        read.rows,
+        vec![vec![
+            rowkery_core::Value::Text("10s".into()),
+            rowkery_core::Value::Text("on".into())
+        ]]
+    );
+    // So does every other call.
+    for call in ["databases", "catalog", "activity"] {
+        store.loosen(&target, "SET statement_timeout = 0").await;
+        match call {
+            "databases" => drop(store.list_databases(&target).await.expect(call)),
+            "catalog" => drop(store.catalog(&target, true).await.expect(call)),
+            _ => drop(store.activity(&target).await.expect(call)),
+        }
+        assert_eq!(
+            store.setting(&target, "statement_timeout").await,
+            "10s",
+            "{call}"
+        );
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
