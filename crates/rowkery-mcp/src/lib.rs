@@ -924,7 +924,12 @@ async fn run_read(
     let mask_key = if masked_at.is_empty() || plan_only {
         None
     } else {
-        Some(rowkery_core::secrets::mask_key(target.id()).map_err(|e| {
+        // Off the async threads: it can wait on the app's keychain prompt.
+        let id = target.id().to_string();
+        let key = tokio::task::spawn_blocking(move || rowkery_core::secrets::mask_key(&id))
+            .await
+            .map_err(|e| e.to_string())?;
+        Some(key.map_err(|e| {
             format!("Refused: Rowkery couldn't read the key it masks values with from the keychain ({e}).")
         })?)
     };
