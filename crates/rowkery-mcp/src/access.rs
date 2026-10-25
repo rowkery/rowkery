@@ -265,6 +265,96 @@ mod tests {
         })
     }
 
+    /// `(schema, table, parents, partition)`.
+    type Row<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], bool);
+
+    fn catalog(tables: &[Row]) -> SchemaCatalog {
+        use rowkery_core::db::{DatabaseNode, RowEstimate, SchemaNode, TableKind};
+        let mut schemas: Vec<SchemaNode> = Vec::new();
+        for &(schema, name, parents, partition) in tables {
+            let node = TableNode {
+                name: name.into(),
+                kind: TableKind::Table,
+                columns: Vec::new(),
+                primary_key: Vec::new(),
+                indexes: Vec::new(),
+                row_estimate: RowEstimate::Unknown,
+                partition_of: None,
+                inherits_from: parents
+                    .iter()
+                    .map(|(s, n)| (s.to_string(), n.to_string()))
+                    .collect(),
+                is_partition: partition,
+                foreign_keys: Vec::new(),
+                table_bytes: None,
+                index_bytes: None,
+                indexes_deferred: false,
+                comment: None,
+            };
+            match schemas.iter_mut().find(|s| s.name == schema) {
+                Some(s) => s.tables.push(node),
+                None => schemas.push(SchemaNode {
+                    name: schema.into(),
+                    tables: vec![node],
+                }),
+            }
+        }
+        let mut c = SchemaCatalog::default();
+        c.databases.push(DatabaseNode {
+            name: "db".into(),
+            schemas,
+        });
+        c
+    }
+
+    #[test]
+    fn partitions_and_child_tables_are_judged_with_every_table_above_and_below() {
+        // ledger is partitioned into a partition in another schema, itself
+        // partitioned again; vip inherits from people and from staff.
+        let c = catalog(&[
+            ("public", "ledger", &[], false),
+            ("other", "ledger_2024", &[("public", "ledger")], true),
+            ("arch", "ledger_2024_q1", &[("other", "ledger_2024")], true),
+            ("public", "people", &[], false),
+            ("public", "staff", &[], false),
+            (
+                "public",
+                "vip",
+                &[("public", "people"), ("public", "staff")],
+                false,
+            ),
+        ]);
+        assert_eq!(
+            c.inherited_by("public", "ledger"),
+            [("other".to_string(), "ledger_2024".to_string())]
+        );
+        assert_eq!(c.inherited_by("public", "staff").len(), 1);
+        assert!(c.table("arch", "ledger_2024_q1").is_some());
+        assert!(c.table("public", "LEDGER").is_none());
+        let node = |s: &str, n: &str| c.table(s, n).expect(n);
+
+        // Hiding the middle partition keeps back everything it's part of.
+        let hidden = ["other.ledger_2024".to_string()];
+        let hide = Tables::AllBut(&hidden);
+        assert!(!hide.allows_node(&c, "public", node("public", "ledger")));
+        assert!(!hide.allows_node(&c, "arch", node("arch", "ledger_2024_q1")));
+        assert!(hide.allows_node(&c, "public", node("public", "people")));
+        // A child of a hidden parent is hidden, and so is its other parent,
+        // whose rows include it.
+        let hidden = ["public.staff".to_string()];
+        let hide = Tables::AllBut(&hidden);
+        assert!(!hide.allows_node(&c, "public", node("public", "vip")));
+        assert!(!hide.allows_node(&c, "public", node("public", "people")));
+
+        // Ticking the root shares its partitions at every level; a child
+        // table needs its own tick.
+        let ticked = ["public.ledger".to_string(), "public.people".to_string()];
+        let only = Tables::Only(&ticked);
+        assert!(only.allows_node(&c, "arch", node("arch", "ledger_2024_q1")));
+        assert!(only.allows_node(&c, "other", node("other", "ledger_2024")));
+        assert!(!only.allows_node(&c, "public", node("public", "vip")));
+    }
+
     #[test]
     fn an_old_connection_shares_every_database_minus_its_hidden_tables() {
         let c = sqlite(None, &["main.secret"]);

@@ -515,13 +515,25 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
     query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
         .await
         .expect("the ticked partition");
+    // Ticked on its own, a partition gets its own line.
+    let tables = call(&mcp, "list_tables", json!({ "connection": ID }))
+        .await
+        .unwrap()
+        .to_string();
+    assert!(
+        tables.contains("mcp_e2e_other.mcp_e2e_ledger_1")
+            && !tables.contains("public.mcp_e2e_ledger"),
+        "{tables}"
+    );
     let pruned =
         "SELECT amount FROM mcp_e2e_ledger WHERE id < date_part('year', now())::int - 1950";
     let err = query(&mcp, pruned).await.expect_err("pruned at the start");
     assert!(err.starts_with("Refused"), "{err}");
-    query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
+    // Only planning with pruning on leaves the unticked partitions out.
+    let next = query(&mcp, "SELECT amount FROM mcp_e2e_ledger WHERE id = 1")
         .await
         .expect("pruning is back on for the next");
+    assert_eq!(next["rows"], json!([[42]]));
 
     let _ = session_execute(&setup, cleanup).await;
     std::env::remove_var("ROWKERY_CONFIG_DIR");

@@ -1459,7 +1459,7 @@ pub async fn session_catalog_fingerprint(session: &PostgresSession) -> Result<St
                      WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')), '')
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind IN ('r', 'p', 'v', 'm')
+            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
               AND n.nspname NOT LIKE 'pg_toast%'
             ",
@@ -1498,7 +1498,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                ON c.relispartition AND inh.inhrelid = c.oid
         LEFT JOIN pg_catalog.pg_class parent
                ON parent.oid = inh.inhparent AND parent.relnamespace = c.relnamespace
-        WHERE c.relkind IN ('r', 'p', 'v', 'm')
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
         ORDER BY 1, 2
         ",
@@ -1524,7 +1524,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-        WHERE c.relkind IN ('r', 'p', 'v', 'm')
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND NOT c.relispartition
           AND a.attnum > 0
           AND NOT a.attisdropped

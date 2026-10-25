@@ -546,9 +546,27 @@ async fn list_databases(store: &mut Store, target: &Target) -> Outcome {
     Ok(json!({ "databases": names }))
 }
 
-/// A partition, in its parent's schema or another: listed with its parent.
+/// A partition, in its parent's schema or another.
 fn is_partition(t: &TableNode) -> bool {
     t.is_partition || t.partition_of.is_some()
+}
+
+/// Whether `schema.t` gets a line of its own: a partition is counted with
+/// its parent instead, unless the parent isn't shared (a partition ticked
+/// on its own).
+fn own_line(rule: &access::Tables, catalog: &SchemaCatalog, schema: &str, t: &TableNode) -> bool {
+    if !is_partition(t) {
+        return true;
+    }
+    let parent = t
+        .inherits_from
+        .first()
+        .map(|(s, n)| (s.as_str(), n.as_str()))
+        .or_else(|| t.partition_of.as_deref().map(|p| (schema, p)));
+    match parent.and_then(|(s, n)| catalog.table(s, n).map(|p| (s, p))) {
+        Some((s, p)) => !rule.allows_node(catalog, s, p),
+        None => true,
+    }
 }
 
 /// The schema a relation named without one is in.
@@ -564,7 +582,7 @@ async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outco
     let cached = store.catalog(target, refresh).await?;
     let catalog = &cached.catalog;
     let tables: Vec<Json> = all_tables(catalog)
-        .filter(|(_, t)| !is_partition(t))
+        .filter(|(s, t)| own_line(&rule, catalog, s, t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
         .map(|(schema, t)| {
             let partitions = catalog
@@ -601,7 +619,7 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
     let mut tables = Vec::new();
     let mut columns = Vec::new();
     for (schema, t) in all_tables(catalog)
-        .filter(|(_, t)| !is_partition(t))
+        .filter(|(s, t)| own_line(&rule, catalog, s, t))
         .filter(|(s, t)| rule.allows_node(catalog, s, t))
     {
         if t.name.to_lowercase().contains(&needle) && tables.len() < MAX_HITS {

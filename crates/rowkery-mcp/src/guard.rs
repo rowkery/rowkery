@@ -483,6 +483,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn partitions_left_out_as_the_run_starts_are_seen_at_any_depth() {
+        let pruned = json!([{ "Plan": { "Node Type": "Limit", "Plans": [
+            { "Node Type": "Append", "Subplans Removed": 2, "Plans": [] }
+        ] } }]);
+        assert!(pg_pruned(&pruned));
+        let none = json!([{ "Plan": { "Node Type": "Append", "Subplans Removed": 0, "Plans": [
+            { "Node Type": "Seq Scan", "Relation Name": "ledger_1" }
+        ] } }]);
+        assert!(!pg_pruned(&none));
+    }
+
+    #[test]
     fn reads_pass_and_lose_their_semicolon() {
         assert_eq!(
             single_read("select 1;  ", Dialect::Either).unwrap(),

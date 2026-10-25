@@ -70,11 +70,21 @@ pub async fn check(
                 };
                 let own = without_fills(&plan, &fills);
                 functions::check_pg(store, target, &functions::scan_plan(&own), false).await?;
-                let touched =
-                    crate::lineage::pg_read_relations(store, target, &explain_sql, &plan).await?;
+                // What it's a partition or child table of matters only when
+                // something is hidden or masked.
+                let guarded = rule_restricts(target) || !marks.is_empty();
+                let touched = if guarded {
+                    crate::lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
+                } else {
+                    guard::pg_relations(&plan)
+                };
                 let written = functions::scan_sql(&change.sql);
                 crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
-                let above = crate::lineage::above(store, target, &touched).await?;
+                let above = if guarded {
+                    crate::lineage::above(store, target, &touched).await?
+                } else {
+                    crate::lineage::Above::default()
+                };
                 refuse_unshared(target, &above, &touched)?;
                 masked_mention(store, target, &marks, &above, &touched, change, &text).await?;
             }
@@ -227,14 +237,22 @@ fn masked_refusal(m: &mask::Marked) -> String {
     )
 }
 
+/// What the connection shares with agents; nothing when it can't be read.
+fn share_rule(target: &Target) -> access::Tables<'_> {
+    access::tables(&target.record, &target.database).unwrap_or(access::Tables::Only(&[]))
+}
+
+fn rule_restricts(target: &Target) -> bool {
+    share_rule(target).restricts()
+}
+
 /// Every relation a statement touches must be shared (statistics never are).
 fn refuse_unshared(
     target: &Target,
     above: &crate::lineage::Above,
     touched: &[(Option<String>, String)],
 ) -> Result<(), String> {
-    let rule =
-        access::tables(&target.record, &target.database).unwrap_or(access::Tables::Only(&[]));
+    let rule = share_rule(target);
     let statistics = touched
         .iter()
         .any(|(s, t)| guard::is_statistics(s.as_deref(), t));

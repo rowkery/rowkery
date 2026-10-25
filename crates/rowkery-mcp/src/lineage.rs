@@ -24,12 +24,9 @@ pub(crate) struct Link {
     pub partition: bool,
 }
 
-/// The tables above each relation a statement reads, nearest first.
+/// The tables above each relation a statement reads.
 #[derive(Debug, Default)]
 pub(crate) struct Above(HashMap<(String, String), Vec<Link>>);
-
-/// Deepest chain of partitions or child tables followed up.
-const DEPTH: usize = 64;
 
 /// Every table above the `touched` relations of a Postgres statement; none
 /// on SQLite, which has no partitions.
@@ -59,21 +56,23 @@ pub(crate) async fn above(
     if names.is_empty() {
         return Ok(Above::default());
     }
+    // UNION, not UNION ALL: a table under several parents is reached once
+    // per parent, not once per path, and pg_inherits has no cycles, so the
+    // walk ends at the top of every chain however deep.
     let sql = format!(
-        "WITH RECURSIVE up(child, parent, part, depth) AS ( \
-           SELECT i.inhrelid, i.inhparent, c.relispartition, 1 FROM pg_catalog.pg_inherits i \
+        "WITH RECURSIVE up(child, parent, part) AS ( \
+           SELECT i.inhrelid, i.inhparent, c.relispartition FROM pg_catalog.pg_inherits i \
              JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE (n.nspname::text, c.relname::text) IN (VALUES {}) \
-           UNION ALL SELECT up.child, i.inhparent, up.part AND p.relispartition, up.depth + 1 \
+           UNION SELECT up.child, i.inhparent, up.part AND p.relispartition \
              FROM up JOIN pg_catalog.pg_inherits i ON i.inhrelid = up.parent \
-             JOIN pg_catalog.pg_class p ON p.oid = up.parent WHERE up.depth < {DEPTH}) \
+             JOIN pg_catalog.pg_class p ON p.oid = up.parent) \
          SELECT cn.nspname::text, c.relname::text, pn.nspname::text, p.relname::text, up.part::text \
            FROM up JOIN pg_catalog.pg_class c ON c.oid = up.child \
            JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace \
            JOIN pg_catalog.pg_class p ON p.oid = up.parent \
-           JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace \
-         ORDER BY up.depth",
+           JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace",
         names.join(", ")
     );
     let text = |v: Option<&Value>| match v {
@@ -98,7 +97,7 @@ pub(crate) async fn above(
 }
 
 impl Above {
-    /// The tables above `schema.rel`, nearest first.
+    /// The tables above `schema.rel`.
     pub fn of(&self, schema: &str, rel: &str) -> &[Link] {
         self.0
             .get(&(schema.to_string(), rel.to_string()))
