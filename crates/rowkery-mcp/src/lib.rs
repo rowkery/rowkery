@@ -788,6 +788,47 @@ pub(crate) async fn refuse_credentials(
     }
 }
 
+/// A read's rows shaped for the agent as they arrive (masked places as
+/// stand-ins, long text cut), so no more than the cap and 64 KB is held.
+#[derive(Default)]
+struct Shaper {
+    cap: usize,
+    masked_at: Vec<usize>,
+    key: Option<String>,
+    rows: Vec<Json>,
+    size: usize,
+    /// Rows read, the one past the cap included.
+    seen: usize,
+    cut: bool,
+    payload_cut: bool,
+}
+
+impl Shaper {
+    /// Takes one row; false once no more are wanted.
+    fn take(&mut self, row: Vec<rowkery_core::Value>) -> bool {
+        self.seen += 1;
+        if self.seen > self.cap {
+            return false;
+        }
+        let cells: Vec<Json> = row
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match &self.key {
+                Some(key) if self.masked_at.contains(&i) => mask::stand_in(key.as_bytes(), v),
+                _ => guard::cell(v, &mut self.cut),
+            })
+            .collect();
+        let shaped = Json::Array(cells);
+        self.size += shaped.to_string().len() + 1;
+        if self.size > PAYLOAD_BYTES {
+            self.payload_cut = true;
+            return false;
+        }
+        self.rows.push(shaped);
+        true
+    }
+}
+
 /// `explain` and `query`: the same checks, then either the plan or the rows.
 async fn run_read(
     store: &mut Store,
@@ -1042,29 +1083,23 @@ async fn run_read(
         }
     }
 
-    let result = store.read(target, &capped).await?;
-    let more = result.rows.len() > cap;
-    let mut cut = false;
-    let mut rows = Vec::new();
-    let mut size = 0usize;
-    let mut payload_cut = false;
-    for row in result.rows.iter().take(cap) {
-        let cells: Vec<Json> = row
-            .iter()
-            .enumerate()
-            .map(|(i, v)| match &mask_key {
-                Some(key) if masked_at.contains(&i) => mask::stand_in(key.as_bytes(), v),
-                _ => guard::cell(v, &mut cut),
-            })
-            .collect();
-        let shaped = Json::Array(cells);
-        size += shaped.to_string().len() + 1;
-        if size > PAYLOAD_BYTES {
-            payload_cut = true;
-            break;
-        }
-        rows.push(shaped);
-    }
+    let shaper = Shaper {
+        cap,
+        masked_at: masked_at.clone(),
+        key: mask_key,
+        ..Shaper::default()
+    };
+    let result = store
+        .read_each(target, &capped, cap + 1, shaper, Shaper::take)
+        .await?;
+    let Shaper {
+        rows,
+        seen,
+        cut,
+        payload_cut,
+        ..
+    } = result.state;
+    let more = seen > cap;
     if cut {
         notes.push(format!("text over {} chars was cut", guard::CELL_CHARS));
     }
@@ -1415,6 +1450,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok["rows"], json!([[2]]));
+        // Rows are shaped as they arrive: 2.4 GB of cells answers within
+        // 64 KB, with the rest left unread.
+        let big = call(
+            &mcp,
+            "query",
+            q(
+                "with recursive c(x) as (select 1 union all select x + 1 from c where x < 400)
+               select x, printf('%.*c', 3000000, 'x'), printf('%.*c', 3000000, 'y') from c",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(big["more"], true);
+        assert!(
+            big["row_count"].as_u64().unwrap() < 200,
+            "{}",
+            big["row_count"]
+        );
+        assert!(
+            big["notes"].to_string().contains("64 KB"),
+            "{}",
+            big["notes"]
+        );
         // explain reads the plan the way the app's ⌘E does.
         let plan = call(&mcp, "explain", q("select id from orders where n = 7"))
             .await

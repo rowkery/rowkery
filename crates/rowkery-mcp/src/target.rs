@@ -96,12 +96,22 @@ pub struct CachedCatalog {
     pub loaded: Instant,
 }
 
-/// Rows of one capped read.
+/// Rows of one read, all kept.
 pub struct ReadResult {
-    pub columns: Vec<Column>,
     pub rows: Vec<Vec<Value>>,
+}
+
+/// What a read gave besides what its `each` kept.
+pub struct Read<S> {
+    pub columns: Vec<Column>,
+    pub state: S,
     pub elapsed_ms: u64,
 }
+
+/// Unread rows a stopped Postgres read may leave on the wire: the session
+/// reads them off before it answers again. Past this the statement is
+/// cancelled and the session dropped instead.
+const DRAIN_BYTES: usize = 8 << 20;
 
 #[derive(Default)]
 pub struct Store {
@@ -126,8 +136,12 @@ fn open_sqlite(path: &str) -> Result<SqliteDriver, String> {
     Ok(driver)
 }
 
-/// Runs `sql` on a read-only SQLite connection, interrupted after the timeout.
-fn sqlite_read(path: &str, sql: &str) -> Result<ReadResult, String> {
+/// Runs `sql` on a read-only SQLite connection, interrupted after the timeout,
+/// handing each row to `each` until it wants no more.
+fn sqlite_read<S, F>(path: &str, sql: &str, mut state: S, mut each: F) -> Result<Read<S>, String>
+where
+    F: FnMut(&mut S, Vec<Value>) -> bool,
+{
     let mut driver = open_sqlite(path)?;
     let interrupt = driver.take_interrupt_handle();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
@@ -140,20 +154,27 @@ fn sqlite_read(path: &str, sql: &str) -> Result<ReadResult, String> {
     });
     let started = Instant::now();
     let mut columns = Vec::new();
-    let mut rows = Vec::new();
+    let mut stopped = false;
     let result = driver.query_stream(sql, |batch, first| {
         if first {
             columns = batch.columns;
         }
-        rows.extend(batch.rows);
+        for row in batch.rows {
+            if !each(&mut state, row) {
+                stopped = true;
+                return Err(DriverError::Message(String::new()));
+            }
+        }
         Ok(())
     });
     let _ = done_tx.send(());
     let _ = watchdog.join();
-    result.map_err(message)?;
-    Ok(ReadResult {
+    if !stopped {
+        result.map_err(message)?;
+    }
+    Ok(Read {
         columns,
-        rows,
+        state,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -315,46 +336,80 @@ impl Store {
 
     /// Runs one read (already checked and capped) with the session guards on.
     pub async fn read(&mut self, target: &Target, sql: &str) -> Result<ReadResult, String> {
+        let read = self
+            .read_each(target, sql, usize::MAX, Vec::new(), |rows, row| {
+                rows.push(row);
+                true
+            })
+            .await?;
+        Ok(ReadResult { rows: read.state })
+    }
+
+    /// `read`, handing each row to `each` as it arrives instead of keeping
+    /// them all; the read stops at the first row `each` turns down. `limit`
+    /// is the most rows `sql` returns: after a stop, a Postgres statement
+    /// whose unread rows would be more than [`DRAIN_BYTES`] is cancelled and
+    /// its session dropped, rather than left to be read to its end.
+    pub async fn read_each<S, F>(
+        &mut self,
+        target: &Target,
+        sql: &str,
+        limit: usize,
+        mut state: S,
+        mut each: F,
+    ) -> Result<Read<S>, String>
+    where
+        S: Send + 'static,
+        F: FnMut(&mut S, Vec<Value>) -> bool + Send + 'static,
+    {
         match &target.record {
             ConnectionRecord::Sqlite(sqlite) => {
                 let path = sqlite.path.clone();
                 let sql = sql.to_string();
-                tokio::task::spawn_blocking(move || sqlite_read(&path, &sql))
+                tokio::task::spawn_blocking(move || sqlite_read(&path, &sql, state, each))
                     .await
                     .map_err(|e| e.to_string())?
             }
             ConnectionRecord::Postgres(_) => {
                 let key = target.key();
                 let session = self.session(target).await?;
+                let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
                 let started = Instant::now();
                 let mut columns = Vec::new();
-                let mut rows = Vec::new();
+                let (mut seen, mut bytes, mut stopped) = (0usize, 0usize, false);
                 let run = session_query_stream(session, sql, |batch, first| {
                     if first {
                         columns = batch.columns;
                     }
-                    rows.extend(batch.rows);
+                    for row in batch.rows {
+                        seen += 1;
+                        bytes += row.iter().map(Value::heap_bytes).sum::<usize>();
+                        if !each(&mut state, row) {
+                            stopped = true;
+                            return Err(DriverError::Message(String::new()));
+                        }
+                    }
                     Ok(())
                 });
-                match tokio::time::timeout(CALL_TIMEOUT, run).await {
-                    Ok(result) => {
-                        result.map_err(message)?;
-                    }
-                    Err(_) => {
-                        // The server's own timeout should have fired first;
-                        // cancel and drop a session that stopped answering.
-                        let _ = cancel_with_token(
-                            session.cancel_token.clone(),
-                            session.cancel_via.clone(),
-                        )
-                        .await;
-                        self.sessions.remove(&key);
-                        return Err("Timed out waiting for the server.".into());
-                    }
+                let timed_out = match tokio::time::timeout(CALL_TIMEOUT, run).await {
+                    Ok(Err(err)) if !stopped => return Err(message(err)),
+                    Ok(_) => false,
+                    Err(_) => true,
+                };
+                let unread = stopped
+                    && (bytes / seen).saturating_mul(limit.saturating_sub(seen)) > DRAIN_BYTES;
+                // The server's own timeout should have fired first: cancel
+                // and drop a session that stopped answering, too.
+                if unread || timed_out {
+                    let _ = cancel_with_token(cancel.0, cancel.1).await;
+                    self.sessions.remove(&key);
                 }
-                Ok(ReadResult {
+                if timed_out {
+                    return Err("Timed out waiting for the server.".into());
+                }
+                Ok(Read {
                     columns,
-                    rows,
+                    state,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 })
             }
@@ -595,6 +650,29 @@ mod tests {
             reads("with x as (select v from secret) select * from x").contains(&"secret".into())
         );
         assert_eq!(reads("select s from t"), vec!["t".to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sqlite_read_stops_at_the_first_row_turned_down() {
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-each-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let started = Instant::now();
+        let read = sqlite_read(
+            path.to_str().unwrap(),
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c",
+            0usize,
+            |seen, _| {
+                *seen += 1;
+                *seen < 3
+            },
+        )
+        .unwrap();
+        assert_eq!(read.state, 3);
+        assert_eq!(read.columns.len(), 1);
+        assert!(started.elapsed() < STATEMENT_TIMEOUT);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -12,7 +12,7 @@ use super::introspect::{
     ColumnNode, DatabaseNode, ForeignKeyNode, IndexNode, RowEstimate, SchemaCatalog, SchemaNode,
     TableKind, TableNode,
 };
-use super::{Column, Driver, DriverError, RowBatch, Value};
+use super::{Column, Driver, DriverError, RowBatch, Value, BATCH_BYTES};
 
 const SQLITE_EXACT_COUNT_THRESHOLD: u64 = 10_000;
 
@@ -245,6 +245,7 @@ impl SqliteDriver {
         let mut total_rows = 0u64;
         let mut more = false;
         let mut batch_rows: Vec<Vec<Value>> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_bytes = 0usize;
         let mut first_batch = true;
 
         while let Some(row) = rows.next().map_err(map_query_error)? {
@@ -258,12 +259,14 @@ impl SqliteDriver {
             let mut values = Vec::with_capacity(column_count);
             for i in 0..column_count {
                 let value = row.get_ref(i).map_err(map_query_error)?;
-                values.push(sqlite_value_to_core(value));
+                let value = sqlite_value_to_core(value);
+                batch_bytes += value.heap_bytes();
+                values.push(value);
             }
             batch_rows.push(values);
             total_rows += 1;
 
-            if batch_rows.len() >= BATCH_SIZE {
+            if batch_rows.len() >= BATCH_SIZE || batch_bytes >= BATCH_BYTES {
                 if first_batch {
                     name_untyped(&mut columns, &batch_rows);
                 }
@@ -272,6 +275,7 @@ impl SqliteDriver {
                     rows: batch_rows,
                 };
                 batch_rows = Vec::with_capacity(BATCH_SIZE);
+                batch_bytes = 0;
                 on_batch(batch, first_batch)?;
                 first_batch = false;
             }
@@ -921,6 +925,25 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].rows.len(), 2);
         assert_eq!(batches[0].rows[0][1], Value::Text("alpha".into()));
+    }
+
+    #[test]
+    fn big_cells_send_a_batch_before_its_row_count() {
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut sizes = Vec::new();
+        driver
+            .query_stream(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10)
+                 SELECT x, zeroblob(600000) FROM c",
+                |batch, _| {
+                    sizes.push(batch.rows.len());
+                    Ok(())
+                },
+            )
+            .expect("query");
+        assert_eq!(sizes, vec![2, 2, 2, 2, 2]);
     }
 
     #[test]

@@ -124,6 +124,32 @@ async fn guards_hold_against_a_real_postgres() {
     query(&mcp, "SELECT v FROM mcp_e2e_big WHERE id = 5")
         .await
         .expect("indexed read");
+    // 1.6 GB of cells answers within 64 KB; the statement is cancelled
+    // rather than read to its end, and the next call gets a fresh session.
+    let big = query(
+        &mcp,
+        "SELECT repeat('x', 4000000) FROM generate_series(1, 400)",
+    )
+    .await
+    .expect("big cells");
+    assert_eq!(big["more"], true);
+    assert_eq!(big["row_count"], 200);
+    assert_eq!(big["notes"], json!(["text over 200 chars was cut"]));
+    let big = query(
+        &mcp,
+        "SELECT repeat('x', 4000000), repeat('y', 4000000) FROM generate_series(1, 400)",
+    )
+    .await
+    .expect("big cells past 64 KB");
+    assert!(
+        big["notes"].to_string().contains("64 KB"),
+        "{}",
+        big["notes"]
+    );
+    let ok = query(&mcp, "SELECT n FROM mcp_e2e_visible")
+        .await
+        .expect("read after a cancelled one");
+    assert_eq!(ok["rows"], json!([[0]]));
 
     // Everyday analytics stay open: aggregates, dates, JSON, windows, and
     // the system views that describe tables.
