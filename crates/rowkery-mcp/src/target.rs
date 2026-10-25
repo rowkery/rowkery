@@ -108,6 +108,17 @@ pub struct Read<S> {
     pub elapsed_ms: u64,
 }
 
+/// What every MCP statement on Postgres runs under besides read-only, which
+/// the session sends ahead of each statement itself. Sent again ahead of
+/// each call, in the same round trip, so a `set_config` in an earlier
+/// SELECT can't loosen it. Pruning is put back after [`Store::read_unpruned`].
+fn guards() -> String {
+    format!(
+        "SET statement_timeout = '{}s'; RESET enable_partition_pruning",
+        STATEMENT_TIMEOUT.as_secs()
+    )
+}
+
 /// How long a stopped Postgres read may take to read off the rows it left on
 /// the wire, checked with an empty round trip. Past this the statement is
 /// cancelled and the session dropped instead.
@@ -140,9 +151,9 @@ fn message(err: DriverError) -> String {
     }
 }
 
-/// Opens the file read-only, with `PRAGMA query_only` on top.
+/// Opens the file with writes refused (`PRAGMA query_only`).
 fn open_sqlite(path: &str) -> Result<SqliteDriver, String> {
-    let mut driver = SqliteDriver::new(path).read_only_file();
+    let mut driver = SqliteDriver::new(path).read_only(true);
     driver.connect().map_err(message)?;
     Ok(driver)
 }
@@ -192,27 +203,12 @@ where
 
 impl Store {
     /// A read-only session on the target's database, opened once and reused.
-    /// The guards are set again before every statement, so a `set_config` in
-    /// an earlier SELECT can't loosen them.
     async fn session(&mut self, target: &Target) -> Result<&PostgresSession, String> {
-        self.session_then(target, "").await
-    }
-
-    /// [`Self::session`], running `then` after the guards in the same trip.
-    async fn session_then(
-        &mut self,
-        target: &Target,
-        then: &str,
-    ) -> Result<&PostgresSession, String> {
         let ConnectionRecord::Postgres(pg) = &target.record else {
             return Err("not a Postgres connection".into());
         };
         let key = target.key();
         if self.adopted.as_ref() == Some(&key) {
-            debug_assert!(
-                then.is_empty(),
-                "an adopted session's owner runs its own statements"
-            );
             return self
                 .sessions
                 .get(&key)
@@ -240,25 +236,18 @@ impl Store {
             self.sessions.insert(key.clone(), session);
             self.left_open.remove(&key);
         }
-        // Outside a call's transaction, one a call that stopped early left
-        // open is rolled back first.
-        let close = if self.open.as_ref() != Some(&key) && self.left_open.contains(&key) {
-            "ROLLBACK; "
+        Ok(self.sessions.get(&key).expect("session"))
+    }
+
+    /// [`guards`] then `then`, after rolling back a transaction a call that
+    /// stopped early left open, when this statement isn't inside a call's own.
+    fn guards_for(&self, key: &(String, String), then: &str) -> String {
+        let guards = if self.open.as_ref() != Some(key) && self.left_open.contains(key) {
+            format!("ROLLBACK; {}", guards())
         } else {
-            ""
+            guards()
         };
-        let session = self.sessions.get(&key).expect("session");
-        session_execute(
-            session,
-            &format!(
-                "{close}SET default_transaction_read_only = on; SET statement_timeout = '{}s'; \
-                 RESET enable_partition_pruning{then}",
-                STATEMENT_TIMEOUT.as_secs()
-            ),
-        )
-        .await
-        .map_err(message)?;
-        Ok(session)
+        format!("{guards}{then}")
     }
 
     /// Opens one read-only transaction on Postgres for every statement up to
@@ -271,10 +260,18 @@ impl Store {
         if !matches!(target.record, ConnectionRecord::Postgres(_)) {
             return Ok(());
         }
+        let key = target.key();
+        // A commit's adopted session is in its owner's transaction already.
+        if self.adopted.as_ref() == Some(&key) {
+            return Ok(());
+        }
         self.open = None;
-        self.session_then(target, "; BEGIN READ ONLY").await?;
-        self.left_open.insert(target.key());
-        self.open = Some(target.key());
+        self.guarded(target, "Timed out waiting for the server.", async |s| {
+            session_execute(s, "BEGIN READ ONLY").await
+        })
+        .await?;
+        self.left_open.insert(key.clone());
+        self.open = Some(key);
         Ok(())
     }
 
@@ -317,6 +314,64 @@ impl Store {
         self.sessions.remove(&target.key())
     }
 
+    /// Runs `call` on the target's session with [`guards`] sent ahead in the
+    /// same round trip, within [`CALL_TIMEOUT`]. A session that doesn't
+    /// answer in time has its statement cancelled and is dropped, as is one
+    /// that refuses the guards (what ran beside them is thrown away).
+    async fn guarded<T>(
+        &mut self,
+        target: &Target,
+        late: &str,
+        call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
+    ) -> Result<T, String> {
+        self.guarded_then(target, late, "", call).await
+    }
+
+    /// [`Self::guarded`], with `then` run after the guards.
+    async fn guarded_then<T>(
+        &mut self,
+        target: &Target,
+        late: &str,
+        then: &str,
+        call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
+    ) -> Result<T, String> {
+        let key = target.key();
+        self.session(target).await?;
+        // An adopted session's owner set it up for its own transaction.
+        let adopted = self.adopted.as_ref() == Some(&key);
+        debug_assert!(
+            !adopted || then.is_empty(),
+            "an adopted session's owner runs its own statements"
+        );
+        let guards = (!adopted).then(|| self.guards_for(&key, then));
+        let session = self.sessions.get(&key).expect("session");
+        let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
+        let run = async {
+            match &guards {
+                Some(guards) => tokio::join!(session_execute(session, guards), call(session)),
+                None => (Ok(()), call(session).await),
+            }
+        };
+        let (set, out) = match tokio::time::timeout(CALL_TIMEOUT, run).await {
+            Ok(done) => done,
+            Err(_) => {
+                let _ =
+                    tokio::time::timeout(CANCEL_WAIT, cancel_with_token(cancel.0, cancel.1)).await;
+                self.sessions.remove(&key);
+                return Err(late.into());
+            }
+        };
+        if let Err(err) = set {
+            self.sessions.remove(&key);
+            return Err(message(err));
+        }
+        // A transaction an earlier call left open is closed now.
+        if guards.as_deref().is_some_and(|g| g.starts_with("ROLLBACK")) {
+            self.left_open.remove(&key);
+        }
+        out.map_err(message)
+    }
+
     /// Drops whatever this process holds for connections no longer shared.
     pub fn forget_unshared(&mut self, config: &AppConfig) {
         let shared: Vec<&str> = config
@@ -338,11 +393,11 @@ impl Store {
         match &target.record {
             ConnectionRecord::Sqlite(_) => Ok(vec![("main".into(), None)]),
             ConnectionRecord::Postgres(_) => {
-                let session = self.session(target).await?;
-                let list = tokio::time::timeout(CALL_TIMEOUT, session_list_databases(session))
-                    .await
-                    .map_err(|_| "Timed out.".to_string())?
-                    .map_err(message)?;
+                let list = self
+                    .guarded(target, "Timed out.", async |s| {
+                        session_list_databases(s).await
+                    })
+                    .await?;
                 Ok(list.into_iter().map(|d| (d.name, d.size_bytes)).collect())
             }
         }
@@ -362,11 +417,10 @@ impl Store {
                     driver.introspect_catalog().map_err(message)?
                 }
                 ConnectionRecord::Postgres(_) => {
-                    let session = self.session(target).await?;
-                    tokio::time::timeout(CALL_TIMEOUT, session_introspect(session))
-                        .await
-                        .map_err(|_| "Timed out reading the schema.".to_string())?
-                        .map_err(message)?
+                    self.guarded(target, "Timed out reading the schema.", async |s| {
+                        session_introspect(s).await
+                    })
+                    .await?
                 }
             };
             self.catalogs.insert(
@@ -388,11 +442,8 @@ impl Store {
                     .into(),
             );
         }
-        let session = self.session(target).await?;
-        tokio::time::timeout(CALL_TIMEOUT, session_activity(session))
+        self.guarded(target, "Timed out.", async |s| session_activity(s).await)
             .await
-            .map_err(|_| "Timed out.".to_string())?
-            .map_err(message)
     }
 
     /// Fills in a Postgres table's indexes, which the catalog load leaves out.
@@ -411,14 +462,12 @@ impl Store {
         if !deferred {
             return Ok(());
         }
-        let session = self.session(target).await?;
-        let fetched = tokio::time::timeout(
-            CALL_TIMEOUT,
-            session_table_indexes(session, schema, &[table.to_string()]),
-        )
-        .await
-        .map_err(|_| "Timed out reading indexes.".to_string())?
-        .map_err(message)?;
+        let tables = [table.to_string()];
+        let fetched = self
+            .guarded(target, "Timed out reading indexes.", async |s| {
+                session_table_indexes(s, schema, &tables).await
+            })
+            .await?;
         if let Some(cached) = self.catalogs.get_mut(&key) {
             for db in &mut cached.catalog.databases {
                 for s in db.schemas.iter_mut().filter(|s| s.name == schema) {
@@ -513,42 +562,50 @@ impl Store {
                     .map_err(|e| e.to_string())?
             }
             ConnectionRecord::Postgres(_) => {
-                let key = target.key();
-                let session = self.session_then(target, then).await?;
-                let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
                 let started = Instant::now();
                 let mut columns = Vec::new();
                 let (mut seen, mut stopped) = (0usize, false);
-                let run = session_query_stream(session, sql, |batch, first| {
-                    if first {
-                        columns = batch.columns;
-                    }
-                    for row in batch.rows {
-                        seen += 1;
-                        if !each(&mut state, row) {
-                            stopped = true;
-                            return Err(DriverError::Message(String::new()));
+                self.guarded_then(
+                    target,
+                    "Timed out waiting for the server.",
+                    then,
+                    async |s| {
+                        let read = session_query_stream(s, sql, |batch, first| {
+                            if first {
+                                columns = batch.columns;
+                            }
+                            for row in batch.rows {
+                                seen += 1;
+                                if !each(&mut state, row) {
+                                    stopped = true;
+                                    return Err(DriverError::Message(String::new()));
+                                }
+                            }
+                            Ok(())
+                        })
+                        .await;
+                        match read {
+                            Err(_) if stopped => Ok(()),
+                            read => read.map(|_| ()),
+                        }
+                    },
+                )
+                .await?;
+                // Rows left on the wire are read off before the session
+                // answers again: if that takes long, cancel and drop it.
+                let key = target.key();
+                if stopped && seen < limit {
+                    if let Some(session) = self.sessions.get(&key) {
+                        if !session_ping(session, DRAIN_WAIT).await {
+                            let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
+                            let _ = tokio::time::timeout(
+                                CANCEL_WAIT,
+                                cancel_with_token(cancel.0, cancel.1),
+                            )
+                            .await;
+                            self.sessions.remove(&key);
                         }
                     }
-                    Ok(())
-                });
-                let timed_out = match tokio::time::timeout(CALL_TIMEOUT, run).await {
-                    Ok(Err(err)) if !stopped => return Err(message(err)),
-                    Ok(_) => false,
-                    Err(_) => true,
-                };
-                // The server's own timeout should have fired first: cancel
-                // and drop a session that stopped answering, too.
-                let drop = timed_out
-                    || stopped && seen < limit && !session_ping(session, DRAIN_WAIT).await;
-                if drop {
-                    let _ =
-                        tokio::time::timeout(CANCEL_WAIT, cancel_with_token(cancel.0, cancel.1))
-                            .await;
-                    self.sessions.remove(&key);
-                }
-                if timed_out {
-                    return Err("Timed out waiting for the server.".into());
                 }
                 Ok(Read {
                     columns,
@@ -557,6 +614,35 @@ impl Store {
                 })
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "postgres-integration"))]
+impl Store {
+    /// Runs `sql` on the target's session past the guards, as a function an
+    /// agent called might.
+    pub async fn loosen(&mut self, target: &Target, sql: &str) {
+        let session = self.session(target).await.expect("session");
+        session_execute(session, sql).await.expect("loosen");
+    }
+
+    /// A setting of the target's session as it stands, read past the guards.
+    pub async fn setting(&mut self, target: &Target, name: &str) -> String {
+        let session = self.session(target).await.expect("session");
+        let mut value = String::new();
+        session_query_stream(
+            session,
+            &format!("SELECT current_setting('{name}')"),
+            |batch, _| {
+                if let Some(Value::Text(v)) = batch.rows.first().and_then(|r| r.first()) {
+                    value = v.clone();
+                }
+                Ok(())
+            },
+        )
+        .await
+        .expect("setting");
+        value
     }
 }
 
