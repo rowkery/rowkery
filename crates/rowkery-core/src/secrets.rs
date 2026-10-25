@@ -188,6 +188,14 @@ fn keyring_set(account: &str, secret: &str) -> Result<(), SecretError> {
 }
 
 fn keyring_get(account: &str) -> Result<Option<String>, SecretError> {
+    let read = keyring_get_now(account);
+    if read.is_ok() {
+        mark_used();
+    }
+    read
+}
+
+fn keyring_get_now(account: &str) -> Result<Option<String>, SecretError> {
     #[cfg(test)]
     if let Some(r) = mock::get(account) {
         return r;
@@ -211,8 +219,9 @@ fn keyring_get(account: &str) -> Result<Option<String>, SecretError> {
 ///
 /// Read alone, that can't tell a machine with no keychain from one whose
 /// keychain is out for a moment (a Secret Service that quit, a Windows
-/// service logon): [`read_item`] trusts it only where no keychain item was
-/// ever read or saved for this profile ([`keychain_used`]).
+/// service logon): it's trusted only where the keychain never answered
+/// this profile on this machine ([`keychain_used`]), checked again when a
+/// key would be made or a secret removed.
 fn no_keychain(err: &keyring::Error) -> bool {
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         matches!(err, keyring::Error::NoStorageAccess(_))
@@ -237,6 +246,7 @@ fn keyring_delete_now(account: &str) -> Result<(), SecretError> {
         keyring::Entry::new(SERVICE, account).map_err(|e| SecretError::Keyring(e.to_string()))?;
     match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) if no_keychain(&err) => Err(SecretError::NoKeychain(err.to_string())),
         Err(err) => Err(SecretError::Keyring(err.to_string())),
     }
 }
@@ -295,19 +305,42 @@ fn keychain_enabled() -> bool {
     std::env::var_os("ROWKERY_CONFIG_DIR").is_none()
 }
 
-/// Whether a keychain item was ever read or saved for this profile. Then a
-/// keychain that can't be reached is out for now, not missing: a key made
-/// in the file meanwhile would be a second one, and a removal from the
-/// file alone would leave the item's copy.
+/// Whether the keychain answered this profile on this machine before. Then
+/// one that can't be reached is out for now, not missing: a key made in the
+/// file meanwhile would be a second one, and a removal from the file alone
+/// would leave the item's copy. A profile copied to another machine starts
+/// unmarked there.
 fn keychain_used() -> bool {
-    config_dir().join(USED_FILE).exists()
+    fs::read_to_string(config_dir().join(USED_FILE)).is_ok_and(|id| id == machine_id())
 }
 
+/// Leaves the marker [`keychain_used`] reads, once per profile per run.
 fn mark_used() {
-    let path = config_dir().join(USED_FILE);
-    if !path.exists() {
-        let _ = fs::create_dir_all(config_dir()).and_then(|()| fs::write(path, b""));
+    static MARKED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let dir = config_dir();
+    let Ok(mut marked) = MARKED.lock() else {
+        return;
+    };
+    if marked.contains(&dir) && dir.join(USED_FILE).exists() {
+        return;
     }
+    if (keychain_used() || replace_whole(&dir.join(USED_FILE), machine_id().as_bytes()).is_ok())
+        && !marked.contains(&dir)
+    {
+        marked.push(dir);
+    }
+}
+
+/// This machine, as the marker records it.
+fn machine_id() -> String {
+    #[cfg(windows)]
+    return std::env::var("COMPUTERNAME").unwrap_or_default();
+    #[cfg(not(windows))]
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|path| fs::read_to_string(path).ok())
+        .map(|id| id.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// The secrets older builds kept as items of their own (`MaskKey` came
@@ -362,6 +395,10 @@ enum Unread {
     Refused,
     /// No keychain to ask: the file holds everything.
     NoKeychain,
+    /// A keychain this machine answered before can't be reached now (a
+    /// Secret Service that quit): refused, but asked again next time, never
+    /// remembered.
+    Outage,
     /// Another process held the lock past [`LOCK_WAIT`]; asked again next
     /// time, never remembered.
     Busy,
@@ -369,7 +406,7 @@ enum Unread {
 
 /// Each connection's keychain item as read this run; `Err` after a failed
 /// read (a denied prompt, or no keychain), so one denial doesn't ask again
-/// for every secret. Never [`Unread::Busy`].
+/// for every secret. Never [`Unread::Busy`] or [`Unread::Outage`].
 type ItemCache =
     std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, String), Result<Item, Unread>>>;
 
@@ -386,7 +423,7 @@ fn keychain_item(connection_id: &str) -> Result<Item, Unread> {
     }
     let saves = changes();
     let read = read_item(connection_id);
-    if read != Err(Unread::Busy) {
+    if !passing(&read) {
         if let Ok(mut c) = item_cache().lock() {
             if unchanged_since(saves) {
                 c.insert(key, read.clone());
@@ -394,6 +431,17 @@ fn keychain_item(connection_id: &str) -> Result<Item, Unread> {
         }
     }
     read
+}
+
+/// A failed read that may go another way next time: never remembered.
+fn passing(read: &Result<Item, Unread>) -> bool {
+    matches!(read, Err(Unread::Busy | Unread::Outage))
+}
+
+/// Whether a failed read found no keychain at all, as of now: the marker
+/// may have been left since a cached read (another process saved an item).
+fn none_here(unread: Unread) -> bool {
+    unread == Unread::NoKeychain && !keychain_used()
 }
 
 /// Saves and deletes this run, of the item or the file. A read made without
@@ -450,7 +498,8 @@ fn read_item(connection_id: &str) -> Result<Item, Unread> {
     // A value that isn't our JSON is left alone rather than overwritten.
     let parse = |json: String| serde_json::from_str::<Item>(&json).map_err(|_| Unread::Refused);
     let unread = |err: SecretError| match err {
-        SecretError::NoKeychain(_) if !keychain_used() => Unread::NoKeychain,
+        SecretError::NoKeychain(_) if keychain_used() => Unread::Outage,
+        SecretError::NoKeychain(_) => Unread::NoKeychain,
         _ => Unread::Refused,
     };
     let key = cache_key(connection_id);
@@ -588,7 +637,7 @@ fn fresh_item(connection_id: &str) -> Result<Item, Unread> {
             (Ok(item), _) => {
                 c.insert(key, Ok(item.clone()));
             }
-            (Err(Unread::Busy), _) | (Err(_), Some(_)) => {}
+            (Err(Unread::Busy | Unread::Outage), _) | (Err(_), Some(_)) => {}
             (Err(unread), None) => {
                 c.insert(key, Err(*unread));
             }
@@ -613,6 +662,9 @@ fn item_save(connection_id: &str, item: &Item) -> Result<(), SecretError> {
     if let Ok(mut c) = item_cache().lock() {
         c.insert(cache_key(connection_id), Ok(item.clone()));
     }
+    // A read that took the old copy from the cache before the insert
+    // isn't remembered after it.
+    changed();
     Ok(())
 }
 
@@ -650,7 +702,7 @@ fn change_secrets(
             match fresh_item(connection_id) {
                 Ok(read) => Some(read),
                 // No keychain: the file holds everything.
-                Err(Unread::NoKeychain) => None,
+                Err(unread) if none_here(unread) => None,
                 // A secret left in the item can't be removed from the file.
                 Err(_) if !remove.is_empty() => {
                     // Ask again on the next try.
@@ -788,6 +840,12 @@ pub fn get_secret(connection_id: &str, kind: SecretKind) -> Result<Option<String
             Ok(item) => value = item.get(kind.label()).cloned(),
             // Not "none saved", or a blank password would be tried.
             Err(Unread::Busy) => return Err(busy()),
+            Err(Unread::Outage) => {
+                return Err(SecretError::Message(
+                    "The keychain can't be reached right now, so the saved password can't be read. Try again."
+                        .into(),
+                ))
+            }
             Err(_) => {}
         }
     }
@@ -858,6 +916,8 @@ fn move_in(connection_id: &str) -> Result<(), SecretError> {
 /// keeps a password the app has since changed, or an item it read before
 /// the app saved one.
 pub fn forget_cached(connection_id: &str) {
+    // A read already out isn't remembered over the forgetting.
+    changed();
     if let Ok(mut c) = item_cache().lock() {
         c.remove(&cache_key(connection_id));
     }
@@ -926,7 +986,7 @@ fn mask_key_now(connection_id: &str, account: &str) -> Result<String, SecretErro
     let mut item = match read {
         Ok(item) => item,
         // Nowhere else a key could be: the file holds it.
-        Err(Unread::NoKeychain) => {
+        Err(unread) if !keychain_enabled() || none_here(unread) => {
             fallback_set(account, &key)?;
             return Ok(key);
         }
@@ -961,9 +1021,13 @@ pub fn delete_secrets_for_connection(connection_id: &str) -> Result<(), SecretEr
         // Counted first, and the caches cleared last: a read that began
         // before the deletes isn't remembered over them.
         changed();
-        if keychain_enabled() {
-            let _ = keyring_delete(connection_id);
-        }
+        // The item's delete failing (a keychain out for now) is told: left
+        // behind, its secrets would come back with the same id.
+        let deleted = match keychain_enabled().then(|| keyring_delete(connection_id)) {
+            Some(Err(SecretError::NoKeychain(_))) if !keychain_used() => Ok(()),
+            Some(Err(err)) => Err(err),
+            _ => Ok(()),
+        };
         let accounts: Vec<String> = KINDS
             .into_iter()
             .chain(NEWER_KINDS)
@@ -975,14 +1039,14 @@ pub fn delete_secrets_for_connection(connection_id: &str) -> Result<(), SecretEr
             }
         }
         let _ = drop_file_copies(&accounts);
-        changed();
         if let Ok(mut c) = item_cache().lock() {
             c.remove(&cache_key(connection_id));
         }
+        changed();
         for account in &accounts {
             cache_put(account, None);
         }
-        Ok(())
+        deleted
     })
 }
 
@@ -1667,8 +1731,24 @@ mod tests {
         mock::KEYCHAIN.lock().unwrap().as_mut().unwrap().absent = true;
         forget_cached("k24");
         assert!(mask_key("k24").is_err(), "never a second key");
-        assert!(keychain_refused("k24"));
         assert!(delete_secret("k24", SecretKind::DbPassword).is_err());
+        assert!(get_secret("k24", SecretKind::DbPassword).is_err());
+        // Back again: asked again, not remembered as gone.
+        mock::KEYCHAIN.lock().unwrap().as_mut().unwrap().absent = false;
+        assert_eq!(
+            get_secret("k24", SecretKind::DbPassword)
+                .unwrap()
+                .as_deref(),
+            Some("pw")
+        );
+        let key = mask_key("k24").unwrap();
+        assert!(file_copy(&entry_account("k24", SecretKind::MaskKey))
+            .unwrap()
+            .is_none());
+        assert_eq!(mask_key("k24").unwrap(), key);
+        // A profile copied to another machine starts unmarked there.
+        fs::write(config_dir().join(USED_FILE), "another-machine").unwrap();
+        assert!(!keychain_used());
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
