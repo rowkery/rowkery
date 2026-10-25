@@ -132,9 +132,9 @@ fn message(err: DriverError) -> String {
     }
 }
 
-/// Opens the file with writes refused (`PRAGMA query_only`).
+/// Opens the file read-only, with `PRAGMA query_only` on top.
 fn open_sqlite(path: &str) -> Result<SqliteDriver, String> {
-    let mut driver = SqliteDriver::new(path).read_only(true);
+    let mut driver = SqliteDriver::new(path).read_only_file();
     driver.connect().map_err(message)?;
     Ok(driver)
 }
