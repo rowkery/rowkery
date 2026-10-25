@@ -26,6 +26,7 @@ pub mod sessions;
 mod target;
 mod views;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
@@ -155,9 +156,13 @@ pub fn run_stdio() -> i32 {
     })
 }
 
+type Stores = HashMap<(String, String), Arc<Mutex<Store>>>;
+
 #[derive(Clone, Default)]
 pub struct RowkeryMcp {
-    store: Arc<Mutex<Store>>,
+    /// One store per connection and database: a call waits only for calls
+    /// on the same one, which share its session.
+    stores: Arc<std::sync::Mutex<Stores>>,
     /// The client's name from its handshake, kept with what it proposes.
     client: Arc<std::sync::Mutex<Option<String>>>,
 }
@@ -374,6 +379,33 @@ fn age(loaded: std::time::Instant) -> String {
 }
 
 impl RowkeryMcp {
+    fn stores(&self) -> std::sync::MutexGuard<'_, Stores> {
+        self.stores.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drops the sessions and schemas of connections no longer shared, so a
+    /// transaction a stopped call left open ends with the sharing.
+    fn forget_unshared(&self, config: &AppConfig) {
+        self.stores().retain(|(id, _), _| {
+            config
+                .connections
+                .iter()
+                .any(|c| c.allow_mcp() && c.id() == id)
+        });
+    }
+
+    /// Drops the target's store once a call leaves it holding nothing and
+    /// no other call is waiting on it, as for a database that isn't there.
+    fn forget_idle(&self, key: &(String, String)) {
+        let mut stores = self.stores();
+        let idle = stores.get(key).is_some_and(|store| {
+            Arc::strong_count(store) == 1 && store.try_lock().is_ok_and(|s| s.is_idle())
+        });
+        if idle {
+            stores.remove(key);
+        }
+    }
+
     /// Runs one tool call; the entry to log, and whether a sample of the
     /// response may be kept (off per connection with `mcp_samples_off`).
     async fn dispatch(
@@ -395,9 +427,7 @@ impl RowkeryMcp {
                 )
             }
         };
-        let mut store = self.store.lock().await;
-        store.settle();
-        store.forget_unshared(&config);
+        self.forget_unshared(&config);
         if name == "list_connections" {
             entry.rows = Some(config.connections.iter().filter(|c| c.allow_mcp()).count() as u64);
             // The list names every shared connection, so it's kept only when
@@ -422,6 +452,9 @@ impl RowkeryMcp {
         };
         entry.connection = Some(target.id().to_string());
         entry.database = Some(target.database.clone());
+        let shared = self.stores().entry(target.key()).or_default().clone();
+        let mut store = shared.lock().await;
+        store.settle();
         let cap =
             (name == "query").then(|| guard::row_cap(args.get("max_rows").and_then(Json::as_u64)));
         entry.scope = Some(rule(&target).scope(&target.record, cap));
@@ -479,6 +512,9 @@ impl RowkeryMcp {
             }
             other => Err(format!("Unknown tool \"{other}\".")),
         };
+        drop(store);
+        drop(shared);
+        self.forget_idle(&target.key());
         (outcome, entry, target.record.mcp_samples())
     }
 }

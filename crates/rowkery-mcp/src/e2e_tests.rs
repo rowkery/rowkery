@@ -1482,6 +1482,99 @@ async fn proposed_changes_hold_against_a_real_postgres() {
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
+async fn a_slow_call_holds_up_only_its_own_connection() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-slow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    let ids = [ID, "mcp-e2e-pg-other"];
+    for id in ids {
+        store_secret(id, SecretKind::DbPassword, &password).expect("store password");
+    }
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_slow_locked; CREATE TABLE mcp_slow_locked (id int)",
+    )
+    .await
+    .expect("fixtures");
+    let mut config = AppConfig::default();
+    for id in ids {
+        let mut pg = pg_config();
+        pg.id = id.into();
+        pg.name = id.into();
+        pg.allow_mcp = true;
+        config.upsert_connection(ConnectionRecord::Postgres(pg));
+    }
+    config.save().expect("save config");
+    let mcp = RowkeryMcp::default();
+
+    // A read held up by a lock, well inside its statement timeout.
+    session_execute(&setup, "BEGIN; LOCK TABLE mcp_slow_locked")
+        .await
+        .expect("lock");
+    let held = tokio::spawn({
+        let mcp = mcp.clone();
+        async move { query(&mcp, "SELECT count(*) FROM mcp_slow_locked").await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!held.is_finished(), "the read should wait for the lock");
+
+    // Another connection answers meanwhile.
+    let other = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        call(
+            &mcp,
+            "query",
+            json!({ "connection": "mcp-e2e-pg-other", "sql": "SELECT 1" }),
+        ),
+    )
+    .await
+    .expect("the other connection waited behind the slow call");
+    assert_eq!(other.expect("other")["rows"], json!([[1]]));
+    assert!(!held.is_finished());
+    let listed = call(&mcp, "list_connections", json!({})).await;
+    assert!(listed.is_ok());
+
+    session_execute(&setup, "ROLLBACK").await.expect("unlock");
+    let read = held.await.expect("join").expect("read");
+    assert_eq!(read["rows"], json!([[0]]));
+
+    // A database that isn't there leaves nothing behind.
+    let database = pg_config().database;
+    let missing = call(
+        &mcp,
+        "query",
+        json!({ "connection": ID, "database": "mcp_no_such_db", "sql": "SELECT 1" }),
+    )
+    .await;
+    assert!(missing.is_err());
+    assert!(!mcp
+        .stores()
+        .contains_key(&(ID.to_string(), "mcp_no_such_db".to_string())));
+
+    // Unsharing a connection drops its session on the next call, whichever.
+    let other = ("mcp-e2e-pg-other".to_string(), database.clone());
+    assert!(mcp.stores().contains_key(&other));
+    config.connections.retain(|c| c.id() == ID);
+    config.save().expect("save config");
+    call(&mcp, "list_connections", json!({}))
+        .await
+        .expect("list");
+    assert!(!mcp.stores().contains_key(&other));
+    assert!(mcp.stores().contains_key(&(ID.to_string(), database)));
+
+    session_execute(&setup, "DROP TABLE mcp_slow_locked")
+        .await
+        .expect("cleanup");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
 async fn guards_go_ahead_of_every_call() {
     let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-g-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
