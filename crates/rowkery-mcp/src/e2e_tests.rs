@@ -375,7 +375,7 @@ async fn masked_columns_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people, mcp_mask_upart CASCADE;
+        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people, mcp_mask_tagged, mcp_mask_upart, mcp_mask_log_2024, mcp_mask_log_2025, mcp_mask_vc CASCADE;
          DROP SCHEMA IF EXISTS mcp_mask_s CASCADE;
          DROP FUNCTION IF EXISTS mcp_mask_lookup(int);
          CREATE TABLE mcp_mask_customers (id int PRIMARY KEY, email text, plan text);
@@ -396,9 +396,18 @@ async fn masked_columns_hold_against_a_real_postgres() {
          CREATE TABLE mcp_mask_staff () INHERITS (mcp_mask_people);
          INSERT INTO mcp_mask_people VALUES (1, 'mara@fjord.se');
          INSERT INTO mcp_mask_staff VALUES (2, 'tomas@ibarra.dev');
+         CREATE TABLE mcp_mask_tagged (id int, tag text);
+         CREATE TABLE mcp_mask_both () INHERITS (mcp_mask_people, mcp_mask_tagged);
+         INSERT INTO mcp_mask_both VALUES (3, 'kim@x.io', 'vip');
          CREATE TABLE mcp_mask_upart (id int) PARTITION BY RANGE (id);
          CREATE TABLE mcp_mask_upart_a PARTITION OF mcp_mask_upart FOR VALUES FROM (0) TO (100);
          INSERT INTO mcp_mask_upart VALUES (1), (2);
+         CREATE TABLE mcp_mask_log_2024 (id int, email text);
+         CREATE TABLE mcp_mask_log_2025 (id int, email text);
+         INSERT INTO mcp_mask_log_2024 VALUES (1, 'mara@fjord.se');
+         INSERT INTO mcp_mask_log_2025 VALUES (2, 'tomas@ibarra.dev');
+         CREATE TABLE mcp_mask_vc (id int, email varchar(100));
+         INSERT INTO mcp_mask_vc VALUES (1, 'mara@fjord.se');
          CREATE VIEW mcp_mask_view AS SELECT id, email FROM mcp_mask_customers;
          CREATE FUNCTION mcp_mask_lookup(i int) RETURNS text LANGUAGE plpgsql STABLE AS
            $$ BEGIN RETURN (SELECT email FROM mcp_mask_customers WHERE id = i); END $$;",
@@ -426,6 +435,9 @@ async fn masked_columns_hold_against_a_real_postgres() {
             "public.mcp_mask_customers.email".to_string(),
             "public.mcp_mask_events.email".to_string(),
             "public.mcp_mask_people.email".to_string(),
+            "public.mcp_mask_log_2024.email".to_string(),
+            "public.mcp_mask_log_2025.email".to_string(),
+            "public.mcp_mask_vc.email".to_string(),
         ],
     )]
     .into_iter()
@@ -469,6 +481,8 @@ async fn masked_columns_hold_against_a_real_postgres() {
         "SELECT email FROM mcp_mask_people",
         "SELECT email FROM mcp_mask_staff",
         "SELECT p.email FROM mcp_mask_people p JOIN mcp_mask_orders o ON o.customer_id = p.id",
+        // Tables whose own names end in a number.
+        "SELECT email FROM mcp_mask_log_2024 UNION ALL SELECT email FROM mcp_mask_log_2025",
     ] {
         let out = query(&mcp, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
         let text = out["rows"].to_string();
@@ -558,6 +572,10 @@ async fn masked_columns_hold_against_a_real_postgres() {
     }
     // A reused alias with no marked column read is fine.
     for sql in [
+        "SELECT id FROM mcp_mask_log_2024 UNION ALL SELECT id FROM mcp_mask_log_2025",
+        // A child of a marked table and an unmarked one, read through the
+        // unmarked one without the marked column.
+        "SELECT t.id, t.tag FROM mcp_mask_tagged t",
         "SELECT t.id FROM mcp_mask_orders t UNION ALL SELECT t.id FROM mcp_mask_customers t",
         "SELECT c.id FROM mcp_mask_orders c WHERE c.customer_id IN (SELECT c.id FROM mcp_mask_people c)",
     ] {
@@ -576,6 +594,26 @@ async fn masked_columns_hold_against_a_real_postgres() {
         let err = query(&mcp, sql).await.expect_err(sql);
         assert!(err.contains("without the UNION ALL"), "{sql}: {err}");
     }
+    // Marked columns of different types can't be followed through a union.
+    let err = query(
+        &mcp,
+        "SELECT email FROM mcp_mask_vc UNION ALL SELECT email FROM mcp_mask_customers",
+    )
+    .await
+    .expect_err("varchar beside text");
+    assert!(err.contains("different types"), "{err}");
+    // However high an alias's number, the check answers at once.
+    let started = std::time::Instant::now();
+    match query(
+        &mcp,
+        "SELECT email FROM mcp_mask_events x_99999999999 UNION ALL SELECT email FROM mcp_mask_customers y",
+    )
+    .await
+    {
+        Ok(out) => assert!(!out["rows"].to_string().contains('@'), "{out}"),
+        Err(err) => assert!(err.starts_with("Refused"), "{err}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     // The agent's own `f` beside a partition it named `f_1` is never
     // masked: no stand-in of a guess to compare.
     match query(
@@ -801,7 +839,8 @@ async fn masked_columns_hold_against_a_real_postgres() {
 
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events CASCADE;
+        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people, mcp_mask_tagged, mcp_mask_upart, mcp_mask_log_2024, mcp_mask_log_2025, mcp_mask_vc CASCADE;
+         DROP SCHEMA IF EXISTS mcp_mask_s CASCADE;
          DROP FUNCTION IF EXISTS mcp_mask_lookup(int);",
     )
     .await

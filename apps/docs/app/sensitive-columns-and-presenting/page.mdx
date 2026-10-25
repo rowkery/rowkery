@@ -60,6 +60,7 @@ An agent never gets a marked column's real value. In its place it gets a stand-i
 | Return it out of a subquery, WITH query, INTERSECT or EXCEPT | No |
 | `UNION ALL` with a masked column in the same position in every part | Yes, as stand-ins |
 | `UNION ALL` with a value or another column in that position, such as `SELECT email … UNION ALL SELECT 'a@x.com'` | No: the agent's value would get a stand-in too, and matching stand-ins would show the guess was right |
+| `UNION ALL` of masked columns of different types, such as `varchar` in one table and `text` in another | No: select the column from each table in a query of its own |
 | The table's partitions or child tables (`INHERITS`), in any schema | Masked as the table itself |
 | A whole row of the table, such as `row_to_json(c)` | No: the agent names the columns it needs |
 | A plan that walks an index on it | No, since the index order would give the values away |

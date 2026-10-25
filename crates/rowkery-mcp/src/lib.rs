@@ -1244,6 +1244,9 @@ async fn pg_masked(
         plan,
         &mask::PgFacts {
             marked_of: &marked_of,
+            is_part: &|schema, rel| {
+                ancestors.contains_key(&(schema.unwrap_or("public").to_string(), rel.to_string()))
+            },
             marked_indexes: &indexes,
             wrapper: alias,
         },

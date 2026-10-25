@@ -73,6 +73,12 @@ pub fn union_refusal(label: &str, column: usize) -> String {
     )
 }
 
+pub fn type_refusal(label: &str) -> String {
+    format!(
+        "Refused: {label} is masked, and the parts of this UNION ALL return it as different types (varchar and text, say), which Rowkery can't follow. Select it from each table in a query of its own."
+    )
+}
+
 pub fn parent_refusal(table: &str) -> String {
     format!(
         "Refused: {table} has masked columns and is read through its partitions or child tables here, and Rowkery can't tell which name Postgres gave it in this query. Give each table in the query its own short alias."
@@ -204,11 +210,16 @@ pub(crate) fn tokens(expr: &str) -> Vec<Tok> {
 /// it is a partition or child table of).
 pub type MarkedOf<'a> = &'a dyn Fn(Option<&str>, &str) -> Vec<(String, String)>;
 
+pub type PartOf<'a> = &'a dyn Fn(Option<&str>, &str) -> bool;
+
 /// What the Postgres check needs to know beyond the plan.
 pub struct PgFacts<'a> {
     /// The marked columns of a relation as the plan names it (a partition
     /// or child table answers for its parent).
     pub marked_of: MarkedOf<'a>,
+    /// Whether a relation as the plan names it is a partition or child
+    /// table of another.
+    pub is_part: PartOf<'a>,
     /// Indexes on marked tables that cover a marked column (by name).
     pub marked_indexes: &'a HashSet<String>,
     /// The alias of the row-cap wrapper (`guard::wrap_limit`) for this call.
@@ -354,11 +365,23 @@ fn labels(node: &Json, taint: &Taint) -> Result<Vec<Option<String>>, String> {
                 .map(|p| p.get(i).and_then(Option::as_ref))
                 .collect();
             match at.iter().flatten().next() {
-                Some(label) if at.iter().any(Option::is_none) => Err(union_refusal(label, i + 1)),
-                first => Ok(first.map(|l| (*l).clone())),
+                Some(label) => match at.iter().position(Option::is_none) {
+                    // Postgres wraps a part it converts to the first
+                    // part's type (varchar to text) as `*SELECT* N`.
+                    Some(j) if converted(&children(node)[j]) => Err(type_refusal(label)),
+                    Some(_) => Err(union_refusal(label, i + 1)),
+                    None => Ok(Some((*label).clone())),
+                },
+                None => Ok(None),
             }
         })
         .collect()
+}
+
+/// A union part Postgres converted to another part's column types.
+fn converted(part: &Json) -> bool {
+    text(part, "Node Type") == Some("Subquery Scan")
+        && text(part, "Alias").is_some_and(|a| a.starts_with("*SELECT* "))
 }
 
 /// Every scan under `node`.
@@ -400,12 +423,22 @@ fn numbered(alias: &str) -> Option<(&str, u64)> {
 /// first part. With more than one, or a name long enough that Postgres cut
 /// it to fit the number, it is refused rather than guessed: a wrong guess
 /// would leave the real name unmarked.
-fn appended_parent(node: &Json, taint: &mut Taint, named: &[(&str, &Json)]) -> Result<(), String> {
+fn appended_parent(
+    node: &Json,
+    facts: &PgFacts,
+    taint: &mut Taint,
+    named: &[(&str, &Json)],
+) -> Result<(), String> {
     let mut under = Vec::new();
     scans(node, &mut under);
-    // Base name, the lowest number under it, and its marked scans.
+    let part = |scan: &Json| {
+        text(scan, "Relation Name").is_some_and(|rel| (facts.is_part)(text(scan, "Schema"), rel))
+    };
+    // Base name, the lowest number under it, and its marked scans. Only
+    // partitions and child tables are numbered after a parent: a table
+    // named `log_2024` is just that.
     let mut groups: Vec<(String, u64, Vec<String>)> = Vec::new();
-    for scan in under {
+    for scan in under.into_iter().filter(|scan| part(scan)) {
         let Some(alias) = text(scan, "Alias") else {
             continue;
         };
@@ -433,9 +466,11 @@ fn appended_parent(node: &Json, taint: &mut Taint, named: &[(&str, &Json)]) -> R
         if marked.iter().any(|a| a.len() >= 60) {
             return Err(parent_refusal(&table));
         }
+        // Two free names are enough to refuse.
         let candidates: Vec<String> = std::iter::once(base.clone())
             .chain((1..lowest).map(|k| format!("{base}_{k}")))
             .filter(|name| !held(name))
+            .take(2)
             .collect();
         let parent = match candidates.as_slice() {
             [] => continue,
@@ -445,9 +480,7 @@ fn appended_parent(node: &Json, taint: &mut Taint, named: &[(&str, &Json)]) -> R
         // Another table read in parts under the same name would have its
         // known values masked beside the marked ones, to compare.
         let unmarked = named.iter().any(|(a, n)| {
-            text(n, "Relation Name").is_some()
-                && !taint.rows.contains_key(*a)
-                && numbered(a).is_some_and(|(b, _)| b == base)
+            part(n) && !taint.rows.contains_key(*a) && numbered(a).is_some_and(|(b, _)| b == base)
         });
         if unmarked {
             return Err(parent_refusal(&table));
@@ -484,7 +517,7 @@ fn propagate(
         labels(node, taint)?;
     }
     if matches!(text(node, "Node Type"), Some("Append" | "Merge Append")) {
-        appended_parent(node, taint, named)?;
+        appended_parent(node, facts, taint, named)?;
     }
     if text(node, "Node Type") == Some("Subquery Scan")
         && text(node, "Alias") == Some(facts.wrapper)
@@ -634,9 +667,16 @@ pub fn pg_renamed(
         if let Some(rel) = text(node, "Relation Name") {
             if let Some(columns) = columns_of(text(node, "Schema"), rel) {
                 let alias = text(node, "Alias").unwrap_or(rel);
-                // Postgres tells a repeated alias apart with `_1`, `_2`.
+                // Postgres tells a repeated alias apart with `_1`, `_2`; a
+                // table read by its own name (`log_2024`) keeps it whole.
                 let base = match alias.rsplit_once('_') {
-                    Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => b,
+                    Some((b, n))
+                        if alias != rel
+                            && !n.is_empty()
+                            && n.bytes().all(|c| c.is_ascii_digit()) =>
+                    {
+                        b
+                    }
                     _ => alias,
                 };
                 if written_calls.iter().any(|c| c == alias || c == base) {
@@ -705,6 +745,7 @@ mod tests {
     fn facts_for<'a>(marked_of: MarkedOf<'a>, indexes: &'a HashSet<String>) -> PgFacts<'a> {
         PgFacts {
             marked_of,
+            is_part: &|_, rel| rel.starts_with("ev_") || rel.starts_with("up_"),
             marked_indexes: indexes,
             wrapper: "rowkery_q_1",
         }
@@ -907,8 +948,18 @@ mod tests {
         let beside = json!({ "Node Type": "Hash Join", "Output": ["e.email"], "Plans": [
             { "Node Type": "Append", "Plans": [
                 scan("e_1", "ev_a", &["e_1.email"]), scan("e_2", "ev_b", &["e_2.email"])] },
-            { "Node Type": "Append", "Plans": [scan("e_3", "orders", &["e_3.email"])] }] });
+            { "Node Type": "Append", "Plans": [scan("e_3", "up_a", &["e_3.email"])] }] });
         assert_eq!(run(beside), Err(parent_refusal("events")));
+        // Tables whose own names end in a number aren't parts of anything.
+        let years = json!({ "Node Type": "Append", "Output": ["log_2024.id"], "Plans": [
+            scan("log_2024", "customers", &["log_2024.id"]),
+            scan("log_2025", "customers", &["log_2025.id"])] });
+        assert_eq!(run(years), Ok(vec![]));
+        // However high the number, only a couple of names are looked at.
+        let high = json!({ "Node Type": "Append", "Output": ["x_99999999999.email"], "Plans": [
+            scan("x_99999999999", "ev_a", &["x_99999999999.email"]),
+            scan("y", "customers", &["y.email"])] });
+        assert_eq!(run(high), Err(parent_refusal("events")));
         // A union reusing an alias: Postgres numbers the second, and the
         // first, which a node holds, names the column above.
         let reused = json!({ "Node Type": "Limit", "Output": ["t.id"], "Plans": [
@@ -960,6 +1011,15 @@ mod tests {
             let calls: Vec<String> = calls.iter().map(|c| c.to_string()).collect();
             pg_renamed(&plan(root), &columns_of, &calls)
         };
+        // A table read by its own name ending in a number is that name,
+        // not a repeat of `customers` beside a `customers(` call.
+        let own = json!({ "Node Type": "Seq Scan", "Relation Name": "customers_2024",
+            "Alias": "customers_2024", "Output": ["customers_2024.email"] });
+        let columns_2024 = |_: Option<&str>, rel: &str| {
+            (rel == "customers_2024").then(|| vec!["id".to_string(), "email".to_string()])
+        };
+        let calls = vec!["customers".to_string()];
+        assert_eq!(pg_renamed(&plan(own), &columns_2024, &calls), Ok(()));
         // `customers AS c(i, e) WHERE e LIKE 'm%'`: the plan says `c.e`.
         let aliased = json!({ "Node Type": "Seq Scan", "Relation Name": "customers",
             "Alias": "c", "Output": ["i"], "Filter": "(c.e ~~ 'm%'::text)" });
