@@ -274,7 +274,11 @@ async fn postgres_introspects_structure() {
 
     let setup = r"
         DROP SCHEMA IF EXISTS it_structure CASCADE;
+        DROP FOREIGN DATA WRAPPER IF EXISTS it_structure_fdw CASCADE;
         CREATE SCHEMA it_structure;
+        CREATE FOREIGN DATA WRAPPER it_structure_fdw;
+        CREATE SERVER it_structure_srv FOREIGN DATA WRAPPER it_structure_fdw;
+        CREATE FOREIGN TABLE it_structure.remote_scores (id int, score int) SERVER it_structure_srv;
         CREATE TABLE it_structure.players (
             id bigserial PRIMARY KEY,
             handle text NOT NULL UNIQUE,
@@ -432,10 +436,24 @@ Balances live in wallet_counts.';
         .unwrap();
     assert_eq!(matview.kind, TableKind::MaterializedView);
     assert_eq!(matview.columns.len(), 2);
+    let foreign = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "remote_scores")
+        .expect("foreign table");
+    assert_eq!(foreign.kind, TableKind::ForeignTable);
+    assert_eq!(foreign.columns.len(), 2);
+    assert!(foreign.table_bytes.is_none());
+    assert!(!foreign.indexes_deferred);
 
-    session_query_stream(&session, "DROP SCHEMA it_structure CASCADE", |_b, _| Ok(()))
-        .await
-        .expect("cleanup");
+    for cleanup in [
+        "DROP SCHEMA it_structure CASCADE",
+        "DROP FOREIGN DATA WRAPPER it_structure_fdw CASCADE",
+    ] {
+        session_query_stream(&session, cleanup, |_b, _| Ok(()))
+            .await
+            .expect("cleanup");
+    }
 }
 
 /// Read-only connections are read-only at the server: a write the text check

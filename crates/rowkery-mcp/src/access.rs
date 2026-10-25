@@ -187,9 +187,19 @@ fn lineage<'a>(
     Some(seen)
 }
 
+/// `schema.t` and every table it's a partition or child table of, in any
+/// schema: the tables whose marks reach its rows.
+pub(crate) fn above<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+) -> Vec<(&'a str, &'a str)> {
+    lineage(catalog, schema, t, Direction::Up).unwrap_or_else(|| vec![(schema, t.name.as_str())])
+}
+
 /// `schema.t` and the tables it's a partition of, up through partitions
 /// only, in any schema.
-fn partition_of<'a>(
+pub(crate) fn partition_of<'a>(
     catalog: &'a SchemaCatalog,
     schema: &'a str,
     t: &'a TableNode,
@@ -207,7 +217,7 @@ fn partition_of<'a>(
         else {
             break;
         };
-        if chain.contains(&parent) || chain.len() > LINEAGE_DEPTH {
+        if chain.contains(&parent) {
             break;
         }
         chain.push(parent);
@@ -215,9 +225,6 @@ fn partition_of<'a>(
     }
     chain
 }
-
-/// Deepest chain of partitions followed up.
-const LINEAGE_DEPTH: usize = 64;
 
 /// The table `schema.name` with that exact spelling.
 pub fn find_exact<'a>(

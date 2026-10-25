@@ -495,6 +495,7 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
         "{tables}"
     );
     assert!(!tables.contains("mcp_e2e_ledger_1"), "{tables}");
+    assert!(tables.contains("2 cols, 3 partitions"), "{tables}");
 
     // Partitions Postgres leaves out as the run starts (`now()` is only
     // known then) still count: with one partition ticked, a query that the
@@ -524,6 +525,19 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
         tables.contains("mcp_e2e_other.mcp_e2e_ledger_1")
             && !tables.contains("public.mcp_e2e_ledger"),
         "{tables}"
+    );
+    // With its parent's columns, which the schema lists once for them all.
+    assert!(tables.contains(", 2 cols"), "{tables}");
+    let described = call(
+        &mcp,
+        "describe_table",
+        json!({ "connection": ID, "table": "mcp_e2e_other.mcp_e2e_ledger_1" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        described["columns"],
+        json!(["id integer", "amount integer"])
     );
     let pruned =
         "SELECT amount FROM mcp_e2e_ledger WHERE id < date_part('year', now())::int - 1950";

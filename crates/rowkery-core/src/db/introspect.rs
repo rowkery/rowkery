@@ -143,6 +143,8 @@ pub enum TableKind {
     View,
     /// Postgres only.
     MaterializedView,
+    /// Postgres only: rows kept outside the database (`CREATE FOREIGN TABLE`).
+    ForeignTable,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

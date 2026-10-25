@@ -69,7 +69,7 @@ export function sharedCount(rule: McpDbAccess, all: string[]): number {
 export interface PickTable {
   schema: string;
   name: string;
-  kind: "table" | "view" | "materialized view";
+  kind: "table" | "view" | "materialized view" | "foreign table";
   rows: number | null;
   big: boolean;
   columns: PickColumn[];

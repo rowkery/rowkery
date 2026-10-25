@@ -1648,10 +1648,13 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         let kind = match row.get::<_, String>(5).as_str() {
             "v" => TableKind::View,
             "m" => TableKind::MaterializedView,
+            "f" => TableKind::ForeignTable,
             _ => TableKind::Table,
         };
-        // A plain view has no storage and no statistics of its own.
-        let table_bytes: Option<i64> = if kind == TableKind::View {
+        // A plain view has no storage and no statistics of its own; a
+        // foreign table's rows are stored elsewhere.
+        let table_bytes: Option<i64> = if matches!(kind, TableKind::View | TableKind::ForeignTable)
+        {
             None
         } else {
             row.get(4)
@@ -1676,8 +1679,8 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                 foreign_keys: Vec::new(),
                 table_bytes,
                 index_bytes: None,
-                // A plain view has no indexes to fetch.
-                indexes_deferred: kind != TableKind::View,
+                // A plain view or foreign table has no indexes to fetch.
+                indexes_deferred: !matches!(kind, TableKind::View | TableKind::ForeignTable),
                 comment: row.get(6),
             },
         );

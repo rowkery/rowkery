@@ -291,6 +291,7 @@ fn kind_label(kind: TableKind) -> &'static str {
         TableKind::Table => "table",
         TableKind::View => "view",
         TableKind::MaterializedView => "materialized view",
+        TableKind::ForeignTable => "foreign table",
     }
 }
 
@@ -569,6 +570,22 @@ fn own_line(rule: &access::Tables, catalog: &SchemaCatalog, schema: &str, t: &Ta
     }
 }
 
+/// The table whose columns `schema.t` has: a partition's are its root
+/// table's, since the catalog lists them once per partitioned table.
+fn column_source<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+) -> &'a TableNode {
+    if !t.columns.is_empty() || !is_partition(t) {
+        return t;
+    }
+    access::partition_of(catalog, schema, t)
+        .last()
+        .and_then(|&(s, n)| catalog.table(s, n))
+        .unwrap_or(t)
+}
+
 /// The schema a relation named without one is in.
 fn default_schema(record: &ConnectionRecord) -> &'static str {
     match record {
@@ -597,7 +614,10 @@ async fn list_tables(store: &mut Store, target: &Target, refresh: bool) -> Outco
             if let Some(rows) = rows_estimate(&t.row_estimate) {
                 line.push_str(&format!(" ~{rows} rows"));
             }
-            line.push_str(&format!(", {} cols", t.columns.len()));
+            line.push_str(&format!(
+                ", {} cols",
+                column_source(catalog, schema, t).columns.len()
+            ));
             if partitions > 0 {
                 line.push_str(&format!(", {partitions} partitions"));
             }
@@ -625,11 +645,12 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
         if t.name.to_lowercase().contains(&needle) && tables.len() < MAX_HITS {
             tables.push(json!(format!("{schema}.{}", t.name)));
         }
-        for c in &t.columns {
+        let above = access::above(catalog, schema, t);
+        for c in &column_source(catalog, schema, t).columns {
             if c.name.to_lowercase().contains(&needle) && columns.len() < MAX_HITS {
-                let masked = marks
-                    .iter()
-                    .any(|m| m.schema == schema && m.table == t.name && m.column == c.name);
+                let masked = marks.iter().any(|m| {
+                    m.column == c.name && above.contains(&(m.schema.as_str(), m.table.as_str()))
+                });
                 columns.push(json!(format!(
                     "{schema}.{}.{} {}{}",
                     t.name,
@@ -657,8 +678,9 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
     let (_, t) = find_table(catalog, &format!("{schema}.{table}"))?;
+    let own = column_source(catalog, &schema, t);
 
-    let columns: Vec<Json> = t
+    let columns: Vec<Json> = own
         .columns
         .iter()
         .map(|c| {
@@ -729,7 +751,7 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
         })
         .collect();
     let mut enums = Map::new();
-    for c in &t.columns {
+    for c in &own.columns {
         let ty = c.type_name.trim_end_matches("[]");
         if let Some(e) = catalog
             .enums
@@ -761,11 +783,14 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
     if !enums.is_empty() {
         out["enum_values"] = Json::Object(enums);
     }
-    let masked: Vec<String> = mask::parse(target.record.masked_columns(&target.database))
+    let above = access::above(catalog, &schema, t);
+    let mut masked: Vec<String> = mask::parse(target.record.masked_columns(&target.database))
         .into_iter()
-        .filter(|m| m.schema == schema && m.table == table)
+        .filter(|m| above.contains(&(m.schema.as_str(), m.table.as_str())))
         .map(|m| m.column)
         .collect();
+    masked.sort();
+    masked.dedup();
     if !masked.is_empty() {
         out["masked"] = json!(masked);
     }
