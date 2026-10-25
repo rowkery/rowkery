@@ -928,7 +928,8 @@ async fn run_read(
         let id = target.id().to_string();
         let key = tokio::task::spawn_blocking(move || rowkery_core::secrets::mask_key(&id))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())
+            .and_then(|key| key.map_err(|e| e.to_string()));
         Some(key.map_err(|e| {
             format!("Refused: Rowkery couldn't read the key it masks values with from the keychain ({e}).")
         })?)
