@@ -1,7 +1,7 @@
 //! Reaching a shared connection: read-only sessions, the schema catalog
 //! cache, and running a capped read on Postgres or SQLite.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rowkery_core::config::AppConfig;
@@ -128,6 +128,14 @@ const CANCEL_WAIT: Duration = Duration::from_secs(1);
 pub struct Store {
     sessions: HashMap<(String, String), PostgresSession>,
     catalogs: HashMap<(String, String), CachedCatalog>,
+    /// The session a call holds one transaction open on (`begin`).
+    open: Option<(String, String)>,
+    /// Sessions a `begin` opened a transaction on and no `end` has rolled
+    /// back yet.
+    left_open: HashSet<(String, String)>,
+    /// A session handed in with its transaction already open (`on_session`),
+    /// kept as it came.
+    adopted: Option<(String, String)>,
 }
 
 fn message(err: DriverError) -> String {
@@ -197,12 +205,24 @@ impl Store {
             return Err("not a Postgres connection".into());
         };
         let key = target.key();
+        if self.adopted.as_ref() == Some(&key) {
+            return self
+                .sessions
+                .get(&key)
+                .ok_or_else(|| "The connection closed.".to_string());
+        }
         if self
             .sessions
             .get(&key)
             .is_some_and(|s| s.is_closed() || s.config() != &read_only(pg, &target.database))
         {
             self.sessions.remove(&key);
+        }
+        // A fresh session mid-call would run the rest outside the call's
+        // transaction, planned at another moment.
+        if self.open.as_ref() == Some(&key) && !self.sessions.contains_key(&key) {
+            self.open = None;
+            return Err("The connection closed during the call.".into());
         }
         if !self.sessions.contains_key(&key) {
             let config = read_only(pg, &target.database);
@@ -211,8 +231,79 @@ impl Store {
                 .map_err(|_| "Timed out connecting.".to_string())?
                 .map_err(message)?;
             self.sessions.insert(key.clone(), session);
+            self.left_open.remove(&key);
         }
         Ok(self.sessions.get(&key).expect("session"))
+    }
+
+    /// [`guards`], after rolling back a transaction a call that stopped
+    /// early left open, when this statement isn't inside a call's own.
+    fn guards_for(&self, key: &(String, String)) -> String {
+        if self.open.as_ref() != Some(key) && self.left_open.contains(key) {
+            format!("ROLLBACK; {}", guards())
+        } else {
+            guards()
+        }
+    }
+
+    /// Opens one read-only transaction on Postgres for every statement up to
+    /// [`Self::end`]: a check's `EXPLAIN` and the run it allows then plan
+    /// against the same moment, since `'now'` and `'today'` are the
+    /// transaction's start and are folded into the plan. Planned apart, the
+    /// same SQL can read a partition or table in the run that the checked
+    /// plan left out.
+    pub async fn begin(&mut self, target: &Target) -> Result<(), String> {
+        if !matches!(target.record, ConnectionRecord::Postgres(_)) {
+            return Ok(());
+        }
+        let key = target.key();
+        self.open = None;
+        self.guarded(target, "Timed out waiting for the server.", async |s| {
+            session_execute(s, "BEGIN READ ONLY").await
+        })
+        .await?;
+        self.left_open.insert(key.clone());
+        self.open = Some(key);
+        Ok(())
+    }
+
+    /// Starts a call outside any transaction an earlier call didn't end, so
+    /// its first statement rolls that one back.
+    pub fn settle(&mut self) {
+        self.open = None;
+    }
+
+    /// Rolls back what [`Self::begin`] opened, or drops a session that
+    /// can't, so the next call starts clean.
+    pub async fn end(&mut self, target: &Target) {
+        let key = target.key();
+        if self.open.as_ref() != Some(&key) {
+            return;
+        }
+        self.open = None;
+        let rolled_back = match self.sessions.get(&key) {
+            Some(session) => session_execute(session, "ROLLBACK").await.is_ok(),
+            None => true,
+        };
+        self.left_open.remove(&key);
+        if !rolled_back {
+            self.sessions.remove(&key);
+        }
+    }
+
+    /// A store whose statements on `target` run on `session`, inside the
+    /// transaction its owner opened (a commit checks a change in the one
+    /// that runs it). [`Self::into_session`] hands it back.
+    pub fn on_session(target: &Target, session: PostgresSession) -> Self {
+        let mut store = Self::default();
+        store.sessions.insert(target.key(), session);
+        store.adopted = Some(target.key());
+        store
+    }
+
+    /// The session given to [`Self::on_session`].
+    pub fn into_session(mut self, target: &Target) -> Option<PostgresSession> {
+        self.sessions.remove(&target.key())
     }
 
     /// Runs `call` on the target's session with [`guards`] sent ahead in the
@@ -226,10 +317,17 @@ impl Store {
         call: impl AsyncFnOnce(&PostgresSession) -> Result<T, DriverError>,
     ) -> Result<T, String> {
         let key = target.key();
-        let session = self.session(target).await?;
+        self.session(target).await?;
+        // An adopted session's owner set it up for its own transaction.
+        let guards = (self.adopted.as_ref() != Some(&key)).then(|| self.guards_for(&key));
+        let session = self.sessions.get(&key).expect("session");
         let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
-        let guards = guards();
-        let run = async { tokio::join!(session_execute(session, &guards), call(session)) };
+        let run = async {
+            match &guards {
+                Some(guards) => tokio::join!(session_execute(session, guards), call(session)),
+                None => (Ok(()), call(session).await),
+            }
+        };
         let (set, out) = match tokio::time::timeout(CALL_TIMEOUT, run).await {
             Ok(done) => done,
             Err(_) => {

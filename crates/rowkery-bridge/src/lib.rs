@@ -37,9 +37,7 @@ use rowkery_core::safety::{
     check_sql, hold_for, pages_by_cursor, plain_read, Dialect, SafeMode, SafetyHold, StatementKind,
 };
 use rowkery_core::sample;
-use rowkery_core::secrets::{
-    delete_secret, delete_secrets_for_connection, ConnectionSecrets, SecretKind,
-};
+use rowkery_core::secrets::{delete_secrets_for_connection, ConnectionSecrets, SecretKind};
 use rowkery_core::sql_file::{
     open_sqlite, run_postgres, run_sqlite, Progress, RunOptions, RunReport, Scan,
 };
@@ -4841,11 +4839,6 @@ impl CoreBridge {
         // written: the connection would be listed until a restart, with
         // keychain items nothing points to.
         self.save_gate.ready()?;
-        // Keychain IO on the caller's thread (the Tauri blocking pool), so a
-        // slow or prompting keychain never stalls the core thread's queries.
-        secrets
-            .persist(connection.id())
-            .map_err(|e| ConfigError::Message(e.to_string()))?;
         // A connection that stops signing in with a service account key
         // doesn't keep it.
         let uses_key = |c: &ConnectionRecord| {
@@ -4858,10 +4851,16 @@ impl CoreBridge {
             .list_connections()
             .iter()
             .any(|c| c.id() == connection.id() && uses_key(c));
-        if used_key && !uses_key(&connection) {
-            delete_secret(connection.id(), SecretKind::GcpKey)
-                .map_err(|e| ConfigError::Message(e.to_string()))?;
-        }
+        let remove: &[SecretKind] = if used_key && !uses_key(&connection) {
+            &[SecretKind::GcpKey]
+        } else {
+            &[]
+        };
+        // Keychain IO on the caller's thread (the Tauri blocking pool), so a
+        // slow or prompting keychain never stalls the core thread's queries.
+        secrets
+            .persist_removing(connection.id(), remove)
+            .map_err(|e| ConfigError::Message(e.to_string()))?;
         let event = self
             .send_command(|respond_to| Command::UpsertConnection {
                 connection,

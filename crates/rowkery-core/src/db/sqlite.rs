@@ -30,6 +30,9 @@ const BATCH_SIZE: usize = 200;
 /// an agent) for longer than the busy timeout rusqlite sets on every
 /// connection it opens (5 s).
 pub const SQLITE_LOCKED: &str = "database is locked";
+/// A read-only open finding a hot journal: a program stopped mid-write, and
+/// only a read-write open rolls that back.
+pub const SQLITE_UNFINISHED_WRITE: &str = "The file has a write left unfinished by a program that stopped. Open it in Rowkery once to recover it, then try again.";
 
 /// SQLite's own objects (`sqlite_sequence`, `sqlite_stat1`, …): names that
 /// start with exactly `sqlite_`. Not `LIKE 'sqlite_%'`, which ignores case
@@ -50,6 +53,9 @@ pub struct SqliteDriver {
     interrupt: Option<InterruptHandle>,
     cancelled: Arc<AtomicBool>,
     read_only: bool,
+    /// Opened read-only at the file (`SQLITE_OPEN_READ_ONLY`), so no
+    /// statement, `PRAGMA query_only = off` included, can write.
+    file_read_only: bool,
     /// The file the connection opened, to notice it was replaced.
     opened: Option<FileId>,
 }
@@ -81,6 +87,7 @@ impl SqliteDriver {
             interrupt: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             read_only: false,
+            file_read_only: false,
             opened: None,
         }
     }
@@ -89,6 +96,15 @@ impl SqliteDriver {
     /// read-only connections.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Read-only at the file as well as by `PRAGMA query_only`, for a
+    /// connection that never writes (the MCP server's): a statement that
+    /// turns the pragma off still can't write.
+    pub fn read_only_file(mut self) -> Self {
+        self.read_only = true;
+        self.file_read_only = true;
         self
     }
 
@@ -321,11 +337,19 @@ impl Driver for SqliteDriver {
                 self.path
             )));
         }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
-        .map_err(|e| DriverError::Message(e.to_string()))?;
+        let flags = if self.file_read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        };
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(|e| DriverError::Message(e.to_string()))?;
+        if self.file_read_only {
+            // The first read is where SQLite finds a write a crash left
+            // unfinished, which only a read-write open can roll back.
+            conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+                .map_err(map_query_error)?;
+        }
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
@@ -374,9 +398,15 @@ impl Driver for SqliteDriver {
 }
 
 /// Maps an `interrupt()` abort to `Cancelled` so callers can tell it from a
-/// real error, and a lock held elsewhere to `SQLITE_LOCKED`.
+/// real error, a lock held elsewhere to `SQLITE_LOCKED`, and a crashed
+/// write a read-only open can't undo to `SQLITE_UNFINISHED_WRITE`.
 fn map_query_error(e: rusqlite::Error) -> DriverError {
     match &e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK =>
+        {
+            DriverError::Message(SQLITE_UNFINISHED_WRITE.into())
+        }
         rusqlite::Error::SqliteFailure(err, _)
             if err.code == rusqlite::ErrorCode::OperationInterrupted =>
         {
@@ -1062,6 +1092,41 @@ mod tests {
                 Ok(())
             })
             .expect_err("read-only");
+        assert!(err.to_string().contains("readonly"), "{err}");
+        let count = driver
+            .query_stream("SELECT * FROM items", |_, _| Ok(()))
+            .expect("reads still run");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn a_write_a_crash_left_unfinished_is_named_on_a_read_only_open() {
+        // What a read-only open's first read gets from a hot journal, which
+        // only a read-write open can roll back.
+        let hot = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY_ROLLBACK),
+            None,
+        );
+        assert_eq!(map_query_error(hot).into_message(), SQLITE_UNFINISHED_WRITE);
+    }
+
+    #[test]
+    fn a_read_only_file_refuses_writes_with_the_pragma_off() {
+        let (_file, path) = temp_db();
+        // A WAL database: the read-only open makes its -wal and -shm files
+        // (the directory is writable) but writes nothing else.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "wal").unwrap();
+        }
+        let mut driver = SqliteDriver::new(path).read_only_file();
+        driver.connect().expect("connect");
+        driver
+            .query_stream("PRAGMA query_only = 0", |_, _| Ok(()))
+            .expect("pragma");
+        let err = driver
+            .query_stream("DELETE FROM items", |_, _| Ok(()))
+            .expect_err("read-only file");
         assert!(err.to_string().contains("readonly"), "{err}");
         let count = driver
             .query_stream("SELECT * FROM items", |_, _| Ok(()))
