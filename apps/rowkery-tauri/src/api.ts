@@ -298,6 +298,10 @@ export interface DoneFrame {
   hold: SafetyHold | null;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
+  /** The server's warnings, one per line. */
+  warning?: string | null;
+  /** Stopped without the server's answer: it may still finish the statement. */
+  forced?: boolean;
 }
 
 export interface RunOptions {
@@ -537,6 +541,8 @@ function stream<Started>(
             sqlstate: frame.sqlstate,
             error_position: frame.error_position,
             capped: frame.capped ?? false,
+            warning: frame.warning ?? null,
+            forced: frame.forced ?? false,
           };
           settle();
       }
@@ -549,6 +555,17 @@ function stream<Started>(
       run.fail,
     );
   });
+}
+
+/** A query tab whose session may hold the user's open transaction. */
+export interface OpenTransaction {
+  window_id: string;
+  tab_id: number;
+}
+
+/** The query tabs, in every window, whose open transaction a re-point or a new safe mode would roll back. */
+export async function openTransactions(): Promise<OpenTransaction[]> {
+  return invoke("open_transactions");
 }
 
 /** How an export or a copy-all ended (src-tauri `ExportFrame::Done`). */

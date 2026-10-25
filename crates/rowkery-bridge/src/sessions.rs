@@ -4,8 +4,8 @@
 
 use rowkery_core::connections::PostgresConnection;
 use rowkery_core::db::postgres::{
-    session_activity, session_locks_held, session_stop, HeldLock, PostgresSession, ServerSession,
-    StopKind,
+    session_activity, session_cancel_tagged, session_locks_held, session_stop, HeldLock,
+    PostgresSession, ServerSession, StopKind,
 };
 use rowkery_core::db::DriverError;
 use rowkery_core::safety::SafeMode;
@@ -140,6 +140,15 @@ pub(crate) async fn stop(
         .on_session(async |s| session_stop(s, pid, kind).await)
         .await?;
     Ok(StopOutcome::Stopped { gone: !sent })
+}
+
+/// After a force stop closed a tab's session: cancels what the server still
+/// runs for it (by the session's tag), on the window's Sessions session. Not
+/// through safe mode: it only stops what the user already stopped.
+pub(crate) async fn cancel_stopped(target: Target, tag: String) -> Result<bool, DriverError> {
+    target
+        .on_session(async |s| session_cancel_tagged(s, &tag).await)
+        .await
 }
 
 #[cfg(test)]

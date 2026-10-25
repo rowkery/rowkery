@@ -1174,12 +1174,24 @@ function ResultsGridView({
         {changed > 0
           ? `${changed.toLocaleString()} ${changed === 1 ? "row" : "rows"} changed`
           : "Query finished with no result set"}
+        {/* The server's warning: a COMMIT with nothing to commit says so only here. */}
+        {result.warning && (
+          <div className="results-warning" data-warning>
+            Warning: {result.warning}
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <>
+      {/* A RAISE WARNING from a query that returns rows, above them. */}
+      {result.warning && (
+        <div className="results-warning results-warning-bar" data-warning>
+          Warning: {result.warning}
+        </div>
+      )}
       <div
         data-testid="results-grid-wrap"
         className={`results-grid-wrap${revealing ? " rg-reveal" : ""}`}
