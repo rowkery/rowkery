@@ -108,6 +108,15 @@ pub struct Read<S> {
     pub elapsed_ms: u64,
 }
 
+/// What every MCP statement on Postgres runs under, set when the session
+/// opens and sent again ahead of each read.
+fn guards() -> String {
+    format!(
+        "SET default_transaction_read_only = on; SET statement_timeout = '{}s'",
+        STATEMENT_TIMEOUT.as_secs()
+    )
+}
+
 /// Unread rows a stopped Postgres read may leave on the wire: the session
 /// reads them off before it answers again. Past this the statement is
 /// cancelled and the session dropped instead.
@@ -180,9 +189,8 @@ where
 }
 
 impl Store {
-    /// A read-only session on the target's database, opened once and reused.
-    /// The guards are set again before every statement, so a `set_config` in
-    /// an earlier SELECT can't loosen them.
+    /// A read-only session on the target's database, opened once and reused,
+    /// with the guards set.
     async fn session(&mut self, target: &Target) -> Result<&PostgresSession, String> {
         let ConnectionRecord::Postgres(pg) = &target.record else {
             return Err("not a Postgres connection".into());
@@ -201,19 +209,12 @@ impl Store {
                 .await
                 .map_err(|_| "Timed out connecting.".to_string())?
                 .map_err(message)?;
+            session_execute(&session, &guards())
+                .await
+                .map_err(message)?;
             self.sessions.insert(key.clone(), session);
         }
-        let session = self.sessions.get(&key).expect("session");
-        session_execute(
-            session,
-            &format!(
-                "SET default_transaction_read_only = on; SET statement_timeout = '{}s'",
-                STATEMENT_TIMEOUT.as_secs()
-            ),
-        )
-        .await
-        .map_err(message)?;
-        Ok(session)
+        Ok(self.sessions.get(&key).expect("session"))
     }
 
     /// Drops whatever this process holds for connections no longer shared.
@@ -377,7 +378,10 @@ impl Store {
                 let started = Instant::now();
                 let mut columns = Vec::new();
                 let (mut seen, mut bytes, mut stopped) = (0usize, 0usize, false);
-                let run = session_query_stream(session, sql, |batch, first| {
+                // The guards again, in the same round trip as the read, so a
+                // `set_config` in an earlier SELECT can't loosen them.
+                let guards = guards();
+                let read = session_query_stream(session, sql, |batch, first| {
                     if first {
                         columns = batch.columns;
                     }
@@ -391,6 +395,10 @@ impl Store {
                     }
                     Ok(())
                 });
+                let run = async {
+                    let (set, read) = tokio::join!(session_execute(session, &guards), read);
+                    set.and(read)
+                };
                 let timed_out = match tokio::time::timeout(CALL_TIMEOUT, run).await {
                     Ok(Err(err)) if !stopped => return Err(message(err)),
                     Ok(_) => false,
