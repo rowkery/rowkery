@@ -19,6 +19,26 @@ pub const BIG_TABLE_ROWS: u64 = 100_000;
 pub const CELL_CHARS: usize = 200;
 /// Rows stop once the JSON passes this size.
 pub const PAYLOAD_BYTES: usize = 64 * 1024;
+/// Biggest Postgres plan read. Views over views can make a plan far bigger
+/// than its SQL, and parsed it takes several times its text.
+pub const PLAN_BYTES: usize = 4 * 1024 * 1024;
+
+/// The JSON plan in `EXPLAIN (FORMAT JSON …)`'s one cell, and its text;
+/// refused past [`PLAN_BYTES`] before it's parsed.
+pub fn pg_plan_json(rows: Vec<Vec<Value>>) -> Result<(Json, String), String> {
+    let Some(Value::Text(text)) = rows.into_iter().next().and_then(|r| r.into_iter().next()) else {
+        return Err("EXPLAIN returned no plan.".into());
+    };
+    if text.len() > PLAN_BYTES {
+        return Err(format!(
+            "Refused: the query's plan is {} MB, more than the {} MB Rowkery checks. Query fewer tables or views at once.",
+            text.len().div_ceil(1024 * 1024),
+            PLAN_BYTES / (1024 * 1024)
+        ));
+    }
+    let plan = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok((plan, text))
+}
 
 /// `sql` as exactly one read statement (SELECT, WITH, VALUES, TABLE) with
 /// its trailing `;` removed, or why it is refused. `dialect`: the
@@ -460,6 +480,24 @@ pub fn cell(value: &Value, cut: &mut bool) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plan_past_its_cap_is_refused_before_it_is_parsed() {
+        let cell = |t: String| vec![vec![Value::Text(t)]];
+        let (plan, text) = pg_plan_json(cell(r#"[{"Plan": {}}]"#.into())).unwrap();
+        assert_eq!(plan[0]["Plan"], serde_json::json!({}));
+        assert_eq!(text, r#"[{"Plan": {}}]"#);
+        let big = format!("[{}]", " ".repeat(PLAN_BYTES));
+        let err = pg_plan_json(cell(big)).unwrap_err();
+        assert!(
+            err.starts_with("Refused: the query's plan is 5 MB"),
+            "{err}"
+        );
+        assert_eq!(
+            pg_plan_json(Vec::new()).unwrap_err(),
+            "EXPLAIN returned no plan."
+        );
+    }
     use serde_json::json;
 
     #[test]

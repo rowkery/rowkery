@@ -168,6 +168,10 @@ export function McpLimits() {
         <td>Largest response</td>
         <td>{l.payload_bytes / 1024} KB of JSON</td>
       </tr>
+      <tr>
+        <td>Largest Postgres plan checked</td>
+        <td>{l.plan_bytes / 1024 / 1024} MB</td>
+      </tr>
     </Table>
   );
 }
