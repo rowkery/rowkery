@@ -1143,17 +1143,19 @@ async fn pg_masked(
     let mut ancestors: std::collections::HashMap<(String, String), Vec<(String, String)>> =
         std::collections::HashMap::new();
     if !names.is_empty() {
+        // UNION, not UNION ALL: a table under several parents is reached
+        // once per parent, not once per path, and pg_inherits has no
+        // cycles, so the walk ends at the top of every chain however deep.
         let sql = format!(
-            "WITH RECURSIVE up(child, parent, depth) AS ( \
-               SELECT i.inhrelid, i.inhparent, 1 FROM pg_inherits i \
+            "WITH RECURSIVE up(child, parent) AS ( \
+               SELECT i.inhrelid, i.inhparent FROM pg_inherits i \
                  JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE (n.nspname, c.relname) IN (VALUES {}) \
-               UNION ALL SELECT up.child, i.inhparent, up.depth + 1 FROM up \
-                 JOIN pg_inherits i ON i.inhrelid = up.parent WHERE up.depth < 64) \
+               UNION SELECT up.child, i.inhparent FROM up \
+                 JOIN pg_inherits i ON i.inhrelid = up.parent) \
              SELECT cn.nspname, c.relname, pn.nspname, p.relname FROM up \
                JOIN pg_class c ON c.oid = up.child JOIN pg_namespace cn ON cn.oid = c.relnamespace \
-               JOIN pg_class p ON p.oid = up.parent JOIN pg_namespace pn ON pn.oid = p.relnamespace \
-             ORDER BY up.depth",
+               JOIN pg_class p ON p.oid = up.parent JOIN pg_namespace pn ON pn.oid = p.relnamespace",
             names.join(", ")
         );
         for row in store.read(target, &sql).await?.rows {
