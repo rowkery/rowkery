@@ -74,7 +74,15 @@ pub async fn check(
                 let written = functions::scan_sql(&change.sql);
                 crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
                 refuse_unshared(store, target, &touched).await?;
-                masked_mention(store, target, &marks, &touched, change, &text).await?;
+                masked_mention(
+                    store,
+                    target,
+                    &marks,
+                    &touched,
+                    change,
+                    Some((&plan, &text)),
+                )
+                .await?;
             }
         }
         ConnectionRecord::Sqlite(c) => {
@@ -95,7 +103,7 @@ pub async fn check(
                         return Err(masked_refusal(m));
                     }
                 }
-                masked_mention(store, target, &marks, &touched, change, "").await?;
+                masked_mention(store, target, &marks, &touched, change, None).await?;
             }
         }
     }
@@ -269,8 +277,9 @@ async fn masked_mention(
     marks: &[mask::Marked],
     touched: &[(Option<String>, String)],
     change: &RowChange,
-    plan_text: &str,
+    pg_plan: Option<(&Json, &str)>,
 ) -> Result<(), String> {
+    let plan_text = pg_plan.map_or("", |(_, text)| text);
     if marks.is_empty() {
         return Ok(());
     }
@@ -293,7 +302,7 @@ async fn masked_mention(
     };
     // Postgres: a column alias list on a table with masked columns hides
     // their names from the plan (`mask::pg_renamed`).
-    if let Ok(plan) = serde_json::from_str::<Json>(plan_text) {
+    if let Some((plan, _)) = pg_plan {
         let columns_of = |schema: Option<&str>, rel: &str| {
             let schema = schema.unwrap_or(default);
             let table = root(schema, rel);
@@ -309,7 +318,7 @@ async fn masked_mention(
             )
         };
         let written = functions::scan_sql(&change.sql).call_names();
-        mask::pg_renamed(&plan, &columns_of, &written)?;
+        mask::pg_renamed(plan, &columns_of, &written)?;
     }
     let named = safety::identifiers(&change.sql);
     let plan_words = words(plan_text);

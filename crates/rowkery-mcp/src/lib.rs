@@ -977,7 +977,14 @@ async fn run_read(
     }
 
     if plan_only {
-        let mut out = json!({ "plan": plan_lines });
+        let (shown, more) = guard::plan_shown(plan_lines);
+        let mut out = json!({ "plan": shown });
+        if more > 0 {
+            out["plan_note"] = json!(format!(
+                "{more} more plan lines not shown: the answer stops at {} KB.",
+                PAYLOAD_BYTES / 1024
+            ));
+        }
         // The same reading of the plan the app shows on ⌘E: its slowest step
         // and one hint.
         let readable = match &pg_plan_json {

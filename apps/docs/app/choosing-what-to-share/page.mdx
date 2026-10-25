@@ -131,6 +131,7 @@ These limits apply to every shared connection, whatever you tick. The same rules
 | Response size | Rows stop once the answer passes 64 KB, and the agent is told |
 | Time | Each statement stops after 10 seconds; a whole call, connecting included, after 20 |
 | Large tables | A plan that reads a table of over 100,000 rows end to end is refused on Postgres. The agent gets the table's indexes so it can filter on one. On SQLite the query runs, with a note |
+| Large plans | A Postgres plan over 8 MB, such as a query across thousands of partitions, is refused rather than checked |
 | Functions | On Postgres, only functions built into Postgres that compute on their arguments, like `count`, `date_trunc` or `lower`. Functions defined in the database are refused, because their bodies don't show in the plan |
 | Server functions | Refused by name: reading files (`pg_read_file`), ending or cancelling sessions (`pg_terminate_backend`), changing settings (`set_config`), advisory locks, `pg_sleep`, network calls (`dblink`, `http`) and anything that runs a query given as text |
 | Other sessions' queries | `pg_stat_activity` and `pg_stat_statements` are refused, because they show the values typed into other people's queries. The `sessions` tool shows them with every value replaced by `?` |

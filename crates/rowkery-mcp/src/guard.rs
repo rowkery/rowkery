@@ -19,25 +19,48 @@ pub const BIG_TABLE_ROWS: u64 = 100_000;
 pub const CELL_CHARS: usize = 200;
 /// Rows stop once the JSON passes this size.
 pub const PAYLOAD_BYTES: usize = 64 * 1024;
-/// Biggest Postgres plan read. Views over views can make a plan far bigger
-/// than its SQL, and parsed it takes several times its text.
-pub const PLAN_BYTES: usize = 4 * 1024 * 1024;
+/// Biggest Postgres plan parsed. A query over a table with many partitions,
+/// or many joins, can make a plan far bigger than its SQL (about 26 bytes
+/// per partition and column), and parsed it takes several times its text.
+pub const PLAN_BYTES: usize = 8 * 1024 * 1024;
 
 /// The JSON plan in `EXPLAIN (FORMAT JSON …)`'s one cell, and its text;
 /// refused past [`PLAN_BYTES`] before it's parsed.
 pub fn pg_plan_json(rows: Vec<Vec<Value>>) -> Result<(Json, String), String> {
     let Some(Value::Text(text)) = rows.into_iter().next().and_then(|r| r.into_iter().next()) else {
-        return Err("EXPLAIN returned no plan.".into());
+        return Err("EXPLAIN returned no JSON plan.".into());
     };
     if text.len() > PLAN_BYTES {
         return Err(format!(
-            "Refused: the query's plan is {} MB, more than the {} MB Rowkery checks. Query fewer tables or views at once.",
-            text.len().div_ceil(1024 * 1024),
+            "Refused: the query's plan is {:.1} MB, more than the {} MB Rowkery checks. Filter on the partition key, select fewer columns, or join fewer tables or views.",
+            text.len() as f64 / (1024.0 * 1024.0),
             PLAN_BYTES / (1024 * 1024)
         ));
     }
-    let plan = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let plan = serde_json::from_str(&text).map_err(|e| {
+        if e.to_string().starts_with("recursion limit exceeded") {
+            "Refused: the query's plan is nested too deep to check. Join fewer tables at once."
+                .to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     Ok((plan, text))
+}
+
+/// Plan lines up to [`PAYLOAD_BYTES`], and how many more were left out.
+pub fn plan_shown(mut lines: Vec<String>) -> (Vec<String>, usize) {
+    let mut size = 0;
+    let keep = lines
+        .iter()
+        .position(|l| {
+            size += l.len() + 4;
+            size > PAYLOAD_BYTES
+        })
+        .unwrap_or(lines.len());
+    let more = lines.len() - keep;
+    lines.truncate(keep);
+    (lines, more)
 }
 
 /// `sql` as exactly one read statement (SELECT, WITH, VALUES, TABLE) with
@@ -480,25 +503,44 @@ pub fn cell(value: &Value, cut: &mut bool) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_plan_past_its_cap_is_refused_before_it_is_parsed() {
         let cell = |t: String| vec![vec![Value::Text(t)]];
         let (plan, text) = pg_plan_json(cell(r#"[{"Plan": {}}]"#.into())).unwrap();
-        assert_eq!(plan[0]["Plan"], serde_json::json!({}));
+        assert_eq!(plan[0]["Plan"], json!({}));
         assert_eq!(text, r#"[{"Plan": {}}]"#);
-        let big = format!("[{}]", " ".repeat(PLAN_BYTES));
+        let exact = format!("[{}]", " ".repeat(PLAN_BYTES - 2));
+        assert!(pg_plan_json(cell(exact)).is_ok());
+        let big = format!("[{}]", " ".repeat(PLAN_BYTES - 1));
         let err = pg_plan_json(cell(big)).unwrap_err();
         assert!(
-            err.starts_with("Refused: the query's plan is 5 MB"),
+            err.starts_with("Refused: the query's plan is 8.0 MB, more than the 8 MB"),
             "{err}"
         );
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert!(pg_plan_json(cell(deep))
+            .unwrap_err()
+            .contains("nested too deep"),);
         assert_eq!(
             pg_plan_json(Vec::new()).unwrap_err(),
-            "EXPLAIN returned no plan."
+            "EXPLAIN returned no JSON plan."
         );
     }
-    use serde_json::json;
+
+    #[test]
+    fn plan_lines_stop_at_the_answer_size() {
+        let lines: Vec<String> = (0..10_000).map(|i| format!("Seq Scan on p{i}")).collect();
+        let (shown, more) = plan_shown(lines);
+        assert!(more > 0);
+        assert_eq!(shown.len() + more, 10_000);
+        assert!(shown.iter().map(|l| l.len() + 4).sum::<usize>() <= PAYLOAD_BYTES);
+        assert_eq!(
+            plan_shown(vec!["Result".into()]),
+            (vec!["Result".into()], 0)
+        );
+    }
 
     #[test]
     fn reads_pass_and_lose_their_semicolon() {

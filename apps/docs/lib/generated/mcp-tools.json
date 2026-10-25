@@ -6,7 +6,7 @@
     "default_rows": 200,
     "max_rows": 1000,
     "payload_bytes": 65536,
-    "plan_bytes": 4194304,
+    "plan_bytes": 8388608,
     "timeout_s": 10
   },
   "tools": [
