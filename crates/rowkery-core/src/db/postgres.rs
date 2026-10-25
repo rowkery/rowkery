@@ -1483,7 +1483,14 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                parent.relname AS partition_of,
                c.relpages::bigint * current_setting('block_size')::bigint AS table_bytes,
                c.relkind::text AS relkind,
-               pg_catalog.obj_description(c.oid, 'pg_class') AS comment
+               pg_catalog.obj_description(c.oid, 'pg_class') AS comment,
+               ARRAY(SELECT pn.nspname::text FROM pg_catalog.pg_inherits i
+                       JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
+                       JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace
+                     WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_schemas,
+               ARRAY(SELECT p.relname::text FROM pg_catalog.pg_inherits i
+                       JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
+                     WHERE i.inhrelid = c.oid ORDER BY i.inhseqno) AS parent_names
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         LEFT JOIN pg_catalog.pg_inherits inh
@@ -1632,6 +1639,11 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         let table = row.get::<_, String>(1);
         let reltuples: f64 = row.get(2);
         let partition_of: Option<String> = row.get(3);
+        let inherits_from: Vec<(String, String)> = row
+            .get::<_, Vec<String>>(7)
+            .into_iter()
+            .zip(row.get::<_, Vec<String>>(8))
+            .collect();
         let kind = match row.get::<_, String>(5).as_str() {
             "v" => TableKind::View,
             "m" => TableKind::MaterializedView,
@@ -1658,6 +1670,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                 indexes: Vec::new(),
                 row_estimate,
                 partition_of,
+                inherits_from,
                 foreign_keys: Vec::new(),
                 table_bytes,
                 index_bytes: None,
@@ -1759,6 +1772,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         search_path,
         enums,
         functions,
+        ..Default::default()
     })
 }
 

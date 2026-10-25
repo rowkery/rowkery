@@ -23,6 +23,48 @@ pub struct SchemaCatalog {
     /// User-defined functions (not `pg_catalog`, not owned by an extension).
     #[serde(default)]
     pub functions: Vec<FunctionNode>,
+    /// Each table's direct partitions and child tables, from the tables'
+    /// `inherits_from` the first time it is asked ([`Self::inherited_by`]).
+    #[serde(skip)]
+    pub(crate) inherited: Inherited,
+}
+
+/// Derived from the tables, so two catalogs are equal whether or not it has
+/// been built yet.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Inherited(std::sync::OnceLock<HashMap<SchemaTable, Vec<SchemaTable>>>);
+
+/// `(schema, name)`.
+type SchemaTable = (String, String);
+
+impl PartialEq for Inherited {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl SchemaCatalog {
+    /// The direct partitions and child tables of `schema.name`, as
+    /// `(schema, name)`, wherever they live.
+    pub fn inherited_by(&self, schema: &str, name: &str) -> &[(String, String)] {
+        let index = self.inherited.0.get_or_init(|| {
+            let mut index: HashMap<SchemaTable, Vec<SchemaTable>> = HashMap::new();
+            for s in self.databases.iter().flat_map(|db| db.schemas.iter()) {
+                for t in &s.tables {
+                    for parent in &t.inherits_from {
+                        index
+                            .entry(parent.clone())
+                            .or_default()
+                            .push((s.name.clone(), t.name.clone()));
+                    }
+                }
+            }
+            index
+        });
+        index
+            .get(&(schema.to_string(), name.to_string()))
+            .map_or(&[], Vec::as_slice)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +127,11 @@ pub struct TableNode {
     /// Postgres: name of the partitioned parent (same schema) when this table is a partition.
     #[serde(default)]
     pub partition_of: Option<String>,
+    /// Postgres: every table this one is a partition or child table of
+    /// (`pg_inherits`), as `(schema, name)`, in any schema. Its rows are
+    /// theirs too: `SELECT` from a parent reads them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherits_from: Vec<(String, String)>,
     /// Outgoing foreign keys. "Referenced by" is derived from the whole catalog.
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKeyNode>,

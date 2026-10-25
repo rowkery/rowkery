@@ -17,6 +17,14 @@ use rowkery_core::safety::SafeMode;
 
 use crate::guard::STATEMENT_TIMEOUT;
 
+/// How old a catalog must be before a table it doesn't have reads it again
+/// ([`Store::catalog_for`]): a name that never resolves (a temporary table)
+/// doesn't reload it on every call.
+#[cfg(not(test))]
+const RELOAD_AFTER: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const RELOAD_AFTER: Duration = Duration::ZERO;
+
 /// Longest any one call waits on the database, connecting included.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -256,6 +264,31 @@ impl Store {
             );
         }
         Ok(self.catalogs.get(&key).expect("catalog"))
+    }
+
+    /// The catalog for judging the tables a statement touches, read again
+    /// first if it doesn't have one of them and is more than a few seconds
+    /// old: a table made since (a new partition of a hidden table) is
+    /// judged by what it's part of, not by its name alone.
+    pub async fn catalog_for(
+        &mut self,
+        target: &Target,
+        touched: &[(Option<String>, String)],
+        default_schema: &str,
+    ) -> Result<&CachedCatalog, String> {
+        let stale = {
+            let cached = self.catalog(target, false).await?;
+            cached.loaded.elapsed() > RELOAD_AFTER
+                && touched.iter().any(|(schema, table)| {
+                    crate::access::find_exact(
+                        &cached.catalog,
+                        schema.as_deref().unwrap_or(default_schema),
+                        table,
+                    )
+                    .is_none()
+                })
+        };
+        self.catalog(target, stale).await
     }
 
     /// The other client sessions on the target's database.

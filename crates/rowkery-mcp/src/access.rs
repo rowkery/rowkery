@@ -85,21 +85,22 @@ impl Tables<'_> {
         }
     }
 
-    /// Whether a catalog table is reachable. A partition goes with its
-    /// parent: shared when the parent is ticked, hidden when it's hidden.
+    /// Whether a catalog table is reachable. A partition or child table goes
+    /// with the tables it's part of, in any schema: shared when one of them
+    /// is ticked, hidden when one is hidden. And with a hide list, a table
+    /// with a hidden partition or child table below it is hidden too, since
+    /// reading it reads their rows.
     pub fn allows_node(&self, catalog: &SchemaCatalog, schema: &str, t: &TableNode) -> bool {
-        let mut chain = vec![t.name.as_str()];
-        let mut parent = t.partition_of.as_deref();
-        while let Some(p) = parent {
-            if chain.len() > 8 || chain.contains(&p) {
-                break;
-            }
-            chain.push(p);
-            parent = find_exact(catalog, schema, p).and_then(|n| n.partition_of.as_deref());
-        }
+        let Some(above) = lineage(catalog, schema, t, Direction::Up) else {
+            return false;
+        };
         match self {
-            Tables::Only(_) => chain.iter().any(|n| self.allows(schema, n)),
-            Tables::AllBut(_) => chain.iter().all(|n| self.allows(schema, n)),
+            Tables::Only(_) => above.iter().any(|(s, n)| self.allows(s, n)),
+            Tables::AllBut(_) => {
+                above.iter().all(|(s, n)| self.allows(s, n))
+                    && lineage(catalog, schema, t, Direction::Down)
+                        .is_some_and(|below| below.iter().all(|(s, n)| self.allows(s, n)))
+            }
         }
     }
 
@@ -120,6 +121,79 @@ impl Tables<'_> {
         }
         out
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Direction {
+    /// The tables a table is a partition or child table of.
+    Up,
+    /// Its partitions and child tables.
+    Down,
+}
+
+/// Most tables walked from one. A bigger tree is refused whole rather than
+/// read in part.
+const LINEAGE_MAX: usize = 100_000;
+
+/// `schema.t` and every table above it, or below it, in any schema; `None`
+/// past [`LINEAGE_MAX`].
+fn lineage<'a>(
+    catalog: &'a SchemaCatalog,
+    schema: &'a str,
+    t: &'a TableNode,
+    direction: Direction,
+) -> Option<Vec<(&'a str, &'a str)>> {
+    let mut seen = vec![(schema, t.name.as_str())];
+    let mut known: std::collections::HashSet<(&str, &str)> = seen.iter().copied().collect();
+    let mut next = 0;
+    while let Some(&(s, name)) = seen.get(next) {
+        next += 1;
+        let linked: Vec<(&str, &str)> = match direction {
+            Direction::Up => {
+                let node = if next == 1 {
+                    Some(t)
+                } else {
+                    find_exact(catalog, s, name)
+                };
+                node.map(|n| {
+                    n.inherits_from
+                        .iter()
+                        .map(|(s, n)| (s.as_str(), n.as_str()))
+                        // A catalog cached before `inherits_from` has only this.
+                        .chain(n.partition_of.as_deref().map(|p| (s, p)))
+                        .collect()
+                })
+                .unwrap_or_default()
+            }
+            Direction::Down => catalog
+                .inherited_by(s, name)
+                .iter()
+                .map(|(s, n)| (s.as_str(), n.as_str()))
+                .collect(),
+        };
+        for link in linked {
+            if known.insert(link) {
+                seen.push(link);
+            }
+        }
+        if seen.len() > LINEAGE_MAX {
+            return None;
+        }
+    }
+    Some(seen)
+}
+
+/// `schema.name` and every table it's a partition or child table of, in any
+/// schema (just itself when the catalog doesn't have it).
+pub fn above(catalog: &SchemaCatalog, schema: &str, name: &str) -> Vec<(String, String)> {
+    find_exact(catalog, schema, name)
+        .and_then(|t| lineage(catalog, schema, t, Direction::Up))
+        .map(|all| {
+            all.into_iter()
+                .map(|(s, n)| (s.to_string(), n.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![(schema.to_string(), name.to_string())])
 }
 
 /// The table `schema.name` with that exact spelling.

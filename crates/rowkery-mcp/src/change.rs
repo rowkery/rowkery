@@ -245,12 +245,12 @@ async fn refuse_unshared(
     if !rule.restricts() {
         return Ok(());
     }
-    let cached = store.catalog(target, false).await?;
-    let catalog = &cached.catalog;
     let default = match target.record {
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
     };
+    let cached = store.catalog_for(target, touched, default).await?;
+    let catalog = &cached.catalog;
     let blocked = touched.iter().any(|(schema, table)| {
         let schema = schema.as_deref().unwrap_or(default);
         match access::find_exact(catalog, schema, table) {
@@ -284,28 +284,27 @@ async fn masked_mention(
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
     };
-    // A partition counts as its parent table.
-    let root = |schema: &str, rel: &str| {
-        let mut name = rel.to_string();
-        for _ in 0..8 {
-            match access::find_exact(catalog, schema, &name).and_then(|t| t.partition_of.clone()) {
-                Some(p) => name = p,
-                None => break,
-            }
-        }
-        name
+    // A partition or child table counts as the tables it's part of, in
+    // any schema.
+    let marked_above = |schema: &str, rel: &str| -> Option<&mask::Marked> {
+        let above = access::above(catalog, schema, rel);
+        marks.iter().find(|m| {
+            above
+                .iter()
+                .any(|(s, t)| s.eq_ignore_ascii_case(&m.schema) && t.eq_ignore_ascii_case(&m.table))
+        })
     };
     // Postgres: a column alias list on a table with masked columns hides
     // their names from the plan (`mask::pg_renamed`).
     if let Ok(plan) = serde_json::from_str::<Json>(plan_text) {
         let columns_of = |schema: Option<&str>, rel: &str| {
             let schema = schema.unwrap_or(default);
-            let table = root(schema, rel);
-            if !marks.iter().any(|m| m.schema == schema && m.table == table) {
-                return None;
-            }
-            // A partition's columns are its parent's.
-            let found = access::find_exact(catalog, schema, &table);
+            let m = marked_above(schema, rel)?;
+            // A child table's own columns, or a partition's (its parent's:
+            // the catalog doesn't repeat them).
+            let found = access::find_exact(catalog, schema, rel)
+                .filter(|t| !t.columns.is_empty())
+                .or_else(|| access::find_exact(catalog, &m.schema, &m.table));
             Some(
                 found
                     .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
@@ -319,8 +318,9 @@ async fn masked_mention(
     let plan_words = words(plan_text);
     for m in marks {
         let touches = touched.iter().any(|(s, t)| {
-            let schema = s.as_deref().unwrap_or(default);
-            schema.eq_ignore_ascii_case(&m.schema) && root(schema, t).eq_ignore_ascii_case(&m.table)
+            access::above(catalog, s.as_deref().unwrap_or(default), t)
+                .iter()
+                .any(|(s, t)| s.eq_ignore_ascii_case(&m.schema) && t.eq_ignore_ascii_case(&m.table))
         });
         let column = m.column.to_lowercase();
         // `c::text`, `row_to_json(c)`: a whole row carries every column

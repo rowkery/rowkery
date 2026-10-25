@@ -359,6 +359,104 @@ async fn guards_hold_against_a_real_postgres() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A hidden table's rows can't be read through its partitions or child
+/// tables, in any schema, nor through a parent whose rows include them.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn hidden_tables_hold_through_partitions_and_child_tables() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-tree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    let cleanup = "DROP SCHEMA IF EXISTS mcp_e2e_other CASCADE;
+         DROP TABLE IF EXISTS mcp_e2e_ledger, mcp_e2e_people CASCADE;";
+    session_execute(&setup, cleanup).await.expect("cleanup");
+    session_execute(
+        &setup,
+        "CREATE SCHEMA mcp_e2e_other;
+         CREATE TABLE mcp_e2e_ledger (id int, amount int) PARTITION BY RANGE (id);
+         CREATE TABLE mcp_e2e_other.mcp_e2e_ledger_1 PARTITION OF mcp_e2e_ledger
+           FOR VALUES FROM (0) TO (100);
+         INSERT INTO mcp_e2e_ledger VALUES (1, 42);
+         CREATE TABLE mcp_e2e_people (id int, name text);
+         CREATE TABLE mcp_e2e_other.mcp_e2e_vip (perk text) INHERITS (mcp_e2e_people);
+         INSERT INTO mcp_e2e_people VALUES (1, 'ada');
+         INSERT INTO mcp_e2e_other.mcp_e2e_vip VALUES (2, 'grace', 'lounge');",
+    )
+    .await
+    .expect("fixtures");
+
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    pg.mcp_hidden_tables = vec![
+        "public.mcp_e2e_ledger".into(),
+        "mcp_e2e_other.mcp_e2e_vip".into(),
+    ];
+    save(pg.clone());
+    let mcp = RowkeryMcp::default();
+    for sql in [
+        // A partition in another schema is its hidden parent's rows.
+        "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1",
+        // A parent reads its hidden child table's rows.
+        "SELECT name FROM mcp_e2e_people",
+        "SELECT name FROM ONLY mcp_e2e_people",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused"), "{sql}: {err}");
+    }
+    let tables = call(&mcp, "list_tables", json!({ "connection": ID }))
+        .await
+        .unwrap()
+        .to_string();
+    assert!(
+        !tables.contains("mcp_e2e_ledger") && !tables.contains("mcp_e2e_people"),
+        "{tables}"
+    );
+    // A partition made after the schema was read is still its parent's.
+    session_execute(
+        &setup,
+        "CREATE TABLE mcp_e2e_other.mcp_e2e_ledger_2 PARTITION OF mcp_e2e_ledger
+           FOR VALUES FROM (100) TO (200);
+         INSERT INTO mcp_e2e_ledger VALUES (150, 7);",
+    )
+    .await
+    .expect("new partition");
+    let err = query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_2")
+        .await
+        .expect_err("new partition");
+    assert!(err.starts_with("Refused"), "{err}");
+
+    // Ticking the parent shares its partitions wherever they live.
+    pg.mcp_hidden_tables = Vec::new();
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::Picked,
+                tables: vec!["public.mcp_e2e_ledger".into()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    save(pg);
+    let mcp = RowkeryMcp::default();
+    let ok = query(&mcp, "SELECT amount FROM mcp_e2e_other.mcp_e2e_ledger_1")
+        .await
+        .expect("a ticked parent's partition");
+    assert_eq!(ok["rows"], json!([[42]]));
+    let err = query(&mcp, "SELECT name FROM mcp_e2e_other.mcp_e2e_vip")
+        .await
+        .expect_err("unticked");
+    assert!(err.starts_with("Refused"), "{err}");
+
+    let _ = session_execute(&setup, cleanup).await;
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// The leak table of the sensitive-columns proposal, row by row: a marked
 /// column comes back as a stand-in when returned or counted, and every
 /// other way of reading it is refused before anything runs.

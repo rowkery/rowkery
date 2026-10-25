@@ -885,7 +885,7 @@ async fn run_read(
         return Err(guard::STATISTICS_REFUSAL.into());
     }
     if rule.restricts() {
-        let cached = store.catalog(target, false).await?;
+        let cached = store.catalog_for(target, &touched, "main").await?;
         let catalog = &cached.catalog;
         // Every relation the plan reads (views and CTEs resolved to the
         // tables underneath) must be shared, matched by its exact name.
