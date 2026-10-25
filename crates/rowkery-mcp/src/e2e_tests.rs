@@ -54,6 +54,27 @@ async fn query(mcp: &RowkeryMcp, sql: &str) -> Result<Json, String> {
     call(mcp, "query", json!({ "connection": ID, "sql": sql })).await
 }
 
+/// The newest Rowkery backend other than `setup`'s: the MCP server's
+/// session (agents can't call pg_backend_pid() themselves).
+async fn mcp_backend(setup: &rowkery_core::db::postgres::PostgresSession) -> Json {
+    let mut pid = Json::Null;
+    rowkery_core::db::postgres::session_query_stream(
+        setup,
+        "SELECT pid FROM pg_stat_activity
+         WHERE application_name LIKE 'Rowkery %' AND pid <> pg_backend_pid()
+         ORDER BY backend_start DESC LIMIT 1",
+        |batch, _| {
+            if let Some(row) = batch.rows.first() {
+                pid = json!(format!("{:?}", row[0]));
+            }
+            Ok(())
+        },
+    )
+    .await
+    .expect("backend");
+    pid
+}
+
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
@@ -124,8 +145,8 @@ async fn guards_hold_against_a_real_postgres() {
     query(&mcp, "SELECT v FROM mcp_e2e_big WHERE id = 5")
         .await
         .expect("indexed read");
-    // 1.6 GB of cells answers within 64 KB; the statement is cancelled
-    // rather than read to its end, and the next call gets a fresh session.
+    // Rows are shaped as they arrive: 800 MB of cells, read to the row cap,
+    // answers in its first 200 characters each.
     let big = query(
         &mcp,
         "SELECT repeat('x', 4000000) FROM generate_series(1, 400)",
@@ -135,17 +156,41 @@ async fn guards_hold_against_a_real_postgres() {
     assert_eq!(big["more"], true);
     assert_eq!(big["row_count"], 200);
     assert_eq!(big["notes"], json!(["text over 200 chars was cut"]));
-    let big = query(
+    let before = mcp_backend(&setup).await;
+    assert_ne!(before, Json::Null);
+    // A read stopped at 64 KB with a few rows left keeps its session: they
+    // are read off before the next call.
+    let cut = query(
         &mcp,
-        "SELECT repeat('x', 4000000), repeat('y', 4000000) FROM generate_series(1, 400)",
+        "SELECT repeat('x', 1000), repeat('y', 1000) FROM generate_series(1, 400)",
     )
     .await
-    .expect("big cells past 64 KB");
+    .expect("cut at 64 KB");
     assert!(
-        big["notes"].to_string().contains("64 KB"),
+        cut["notes"].to_string().contains("64 KB"),
         "{}",
-        big["notes"]
+        cut["notes"]
     );
+    let kept = mcp_backend(&setup).await;
+    assert_eq!(kept, before, "a short drain keeps the session");
+    // One whose rest takes seconds to come is cancelled and its session
+    // dropped; the next call opens a fresh one.
+    let slow = query(
+        &mcp,
+        "SELECT repeat('x', 1000), repeat('y', 1000),
+                (SELECT count(*) FROM generate_series(1, 200000 + g))
+         FROM generate_series(1, 400) g",
+    )
+    .await
+    .expect("cut at 64 KB, slow rest");
+    assert!(
+        slow["notes"].to_string().contains("64 KB"),
+        "{}",
+        slow["notes"]
+    );
+    query(&mcp, "SELECT 1").await.expect("fresh session");
+    let fresh = mcp_backend(&setup).await;
+    assert_ne!(fresh, before, "a slow drain drops the session");
     let ok = query(&mcp, "SELECT n FROM mcp_e2e_visible")
         .await
         .expect("read after a cancelled one");
@@ -1007,5 +1052,59 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         .await
         .expect_err("read-only");
     assert!(err.contains("Read-only"), "{err}");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn guards_go_ahead_of_every_call() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-g-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    save(pg);
+    let target = crate::target::resolve(&AppConfig::load().unwrap(), ID, None).unwrap();
+    let mut store = crate::target::Store::default();
+
+    // A read puts them back, read-only too.
+    store
+        .loosen(
+            &target,
+            "SET statement_timeout = 0; SET default_transaction_read_only = off",
+        )
+        .await;
+    let read = store
+        .read(
+            &target,
+            "SELECT current_setting('statement_timeout'), current_setting('default_transaction_read_only')",
+        )
+        .await
+        .expect("read");
+    assert_eq!(
+        read.rows,
+        vec![vec![
+            rowkery_core::Value::Text("10s".into()),
+            rowkery_core::Value::Text("on".into())
+        ]]
+    );
+    // So does every other call.
+    for call in ["databases", "catalog", "activity"] {
+        store.loosen(&target, "SET statement_timeout = 0").await;
+        match call {
+            "databases" => drop(store.list_databases(&target).await.expect(call)),
+            "catalog" => drop(store.catalog(&target, true).await.expect(call)),
+            _ => drop(store.activity(&target).await.expect(call)),
+        }
+        assert_eq!(
+            store.setting(&target, "statement_timeout").await,
+            "10s",
+            "{call}"
+        );
+    }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
