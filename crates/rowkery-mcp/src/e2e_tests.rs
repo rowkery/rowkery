@@ -15,6 +15,12 @@ use crate::RowkeryMcp;
 
 const ID: &str = "mcp-e2e-pg";
 
+/// A condition Postgres folds to true or false at parse time, from the
+/// transaction's start: a check and a run planned apart can see it differ.
+/// Hashed, so a coarse server clock still lands on both sides.
+const NOW_COIN: &str =
+    "(hashint8((extract(epoch FROM 'now'::timestamp) * 1000000)::bigint) & 1) = 0";
+
 fn pg_config() -> PostgresConnection {
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.into());
     PostgresConnection {
@@ -199,19 +205,22 @@ async fn guards_hold_against_a_real_postgres() {
     // `'now'` is folded into the plan when it's made: the checked EXPLAIN
     // and the run plan at one moment, so a filter on its microseconds can't
     // leave the hidden table out of the check and read it in the run.
-    let flip = "SELECT ssn FROM mcp_e2e_secret \
-                WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0";
+    let flip = format!("SELECT ssn FROM mcp_e2e_secret WHERE {NOW_COIN}");
     let (mut ran, mut refused) = (0, 0);
-    for _ in 0..40 {
-        match query(&mcp, flip).await {
+    for _ in 0..200 {
+        match query(&mcp, &flip).await {
             Ok(out) => {
                 assert_eq!(out["rows"], json!([]), "the run read the hidden table");
                 ran += 1;
             }
             Err(err) => {
-                assert!(err.starts_with("Refused"), "{err}");
+                assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
                 refused += 1;
             }
+        }
+        // Each clean run is a chance to catch a run planned apart.
+        if ran >= 20 && refused > 0 {
+            break;
         }
     }
     assert!(ran > 0 && refused > 0, "{ran} ran, {refused} refused");
@@ -1417,14 +1426,21 @@ async fn proposed_changes_hold_against_a_real_postgres() {
 
     // A commit checks the change again in its own transaction, where
     // `'now'` folds the same way for the check and the run.
-    let flip = "UPDATE mcp_p_orders SET note = (SELECT max(id)::text FROM mcp_p_hidden \
-                WHERE extract(microseconds FROM 'now'::timestamp)::bigint % 2 = 0) WHERE id = 1";
+    let flip = format!(
+        "UPDATE mcp_p_orders SET note = (SELECT max(id)::text FROM mcp_p_hidden \
+         WHERE {NOW_COIN}) WHERE id = 1"
+    );
     let (mut committed, mut refused) = (0, 0);
-    for _ in 0..40 {
-        let id = match propose(flip).await {
+    // A commit lands only when its three checks (propose, commit, and in
+    // the commit's transaction) all come up clean, about one try in eight.
+    for _ in 0..300 {
+        if committed >= 5 && refused > 0 {
+            break;
+        }
+        let id = match propose(&flip).await {
             Ok(sent) => sent["id"].as_str().unwrap().to_string(),
             Err(err) => {
-                assert!(err.starts_with("Refused"), "{err}");
+                assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
                 refused += 1;
                 continue;
             }
@@ -1432,7 +1448,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         match proposals::commit(&id, &[1]).await {
             Ok(CommitOutcome::Committed { .. }) => committed += 1,
             Ok(CommitOutcome::Failed { error }) | Err(error) => {
-                assert!(error.starts_with("Refused"), "{error}");
+                assert_eq!(error, crate::guard::HIDDEN_REFUSAL);
                 refused += 1;
             }
             Ok(other) => panic!("{other:?}"),
