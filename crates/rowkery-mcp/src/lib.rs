@@ -1117,52 +1117,90 @@ async fn pg_masked(
     alias: &str,
     written_calls: &[String],
 ) -> Result<Vec<usize>, String> {
-    const INDEXES: &str = "SELECT ci.relname, n.nspname || '.' || coalesce(pt.relname, t.relname), pg_get_indexdef(i.indexrelid) \
-        FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
-        JOIN pg_namespace n ON n.oid = t.relnamespace \
-        LEFT JOIN pg_inherits inh ON inh.inhrelid = t.oid LEFT JOIN pg_class pt ON pt.oid = inh.inhparent \
-        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')";
-    let facts = store.read(target, INDEXES).await?;
     let text = |v: Option<&rowkery_core::Value>| match v {
         Some(rowkery_core::Value::Text(t)) => t.clone(),
         _ => String::new(),
     };
+    // The tables each relation the plan reads is a partition or child table
+    // of, from the server: the catalog links only partitions in their
+    // parent's schema, and no child tables.
+    let names: Vec<String> = touched
+        .iter()
+        .filter_map(|(s, t)| {
+            let lit = |v: &str| {
+                rowkery_core::query_util::sql_literal(
+                    EngineKind::Postgres,
+                    &rowkery_core::Value::Text(v.to_string()),
+                )
+            };
+            Some(format!(
+                "({}, {})",
+                lit(s.as_deref().unwrap_or("public"))?,
+                lit(t)?
+            ))
+        })
+        .collect();
+    let mut ancestors: std::collections::HashMap<(String, String), Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    if !names.is_empty() {
+        // UNION, not UNION ALL: a table under several parents is reached
+        // once per parent, not once per path, and pg_inherits has no
+        // cycles, so the walk ends at the top of every chain however deep.
+        let sql = format!(
+            "WITH RECURSIVE up(child, parent) AS ( \
+               SELECT i.inhrelid, i.inhparent FROM pg_inherits i \
+                 JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE (n.nspname, c.relname) IN (VALUES {}) \
+               UNION SELECT up.child, i.inhparent FROM up \
+                 JOIN pg_inherits i ON i.inhrelid = up.parent) \
+             SELECT cn.nspname, c.relname, pn.nspname, p.relname FROM up \
+               JOIN pg_class c ON c.oid = up.child JOIN pg_namespace cn ON cn.oid = c.relnamespace \
+               JOIN pg_class p ON p.oid = up.parent JOIN pg_namespace pn ON pn.oid = p.relnamespace",
+            names.join(", ")
+        );
+        for row in store.read(target, &sql).await?.rows {
+            ancestors
+                .entry((text(row.first()), text(row.get(1))))
+                .or_default()
+                .push((text(row.get(2)), text(row.get(3))));
+        }
+    }
+    let lineage = |schema: &str, rel: &str| {
+        let mut all = vec![(schema.to_string(), rel.to_string())];
+        if let Some(up) = ancestors.get(&(schema.to_string(), rel.to_string())) {
+            all.extend(up.iter().cloned());
+        }
+        all
+    };
+
+    const INDEXES: &str = "SELECT ci.relname, n.nspname, t.relname, pg_get_indexdef(i.indexrelid) \
+        FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
+        JOIN pg_namespace n ON n.oid = t.relnamespace \
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')";
+    // An index covering a marked column, on the marked table or any of its
+    // partitions and child tables, wherever they live.
     let mut indexes = std::collections::HashSet::new();
-    for row in &facts.rows {
-        let table = text(row.get(1));
-        let definition = text(row.get(2));
-        if marks.iter().any(|m| {
-            table == format!("{}.{}", m.schema, m.table)
-                && mask::index_covers(&definition, &m.column)
-        }) {
+    for row in store.read(target, INDEXES).await?.rows {
+        let definition = text(row.get(3));
+        let marked = lineage(&text(row.get(1)), &text(row.get(2)))
+            .iter()
+            .any(|(s, t)| {
+                marks.iter().any(|m| {
+                    m.schema == *s && m.table == *t && mask::index_covers(&definition, &m.column)
+                })
+            });
+        if marked {
             indexes.insert(text(row.first()));
         }
     }
 
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
-    // A relation's parent when it is a partition (same schema).
-    let parent = |schema: &str, rel: &str| {
-        access::find_exact(catalog, schema, rel).and_then(|t| t.partition_of.clone())
-    };
-    let root_of = |schema: &str, rel: &str| {
-        let mut name = rel.to_string();
-        let mut partition = false;
-        for _ in 0..8 {
-            match parent(schema, &name) {
-                Some(p) => {
-                    name = p;
-                    partition = true;
-                }
-                None => break,
-            }
-        }
-        (name, partition)
-    };
     for m in marks {
         let reads_it = touched.iter().any(|(s, t)| {
-            let schema = s.as_deref().unwrap_or("public");
-            schema == m.schema && root_of(schema, t).0 == m.table
+            lineage(s.as_deref().unwrap_or("public"), t)
+                .iter()
+                .any(|(s, t)| *s == m.schema && *t == m.table)
         });
         if !reads_it {
             continue;
@@ -1176,36 +1214,41 @@ async fn pg_masked(
             }
         }
     }
+    // A partition or child table answers for the tables above it.
     let marked_of = |schema: Option<&str>, rel: &str| {
-        let schema = schema.unwrap_or("public");
-        let (root, partition) = root_of(schema, rel);
-        let columns: Vec<String> = marks
-            .iter()
-            .filter(|m| m.schema == schema && m.table == root)
-            .map(|m| m.column.clone())
-            .collect();
-        (columns, partition)
+        let mut columns: Vec<(String, String)> = Vec::new();
+        for (s, t) in lineage(schema.unwrap_or("public"), rel) {
+            for m in marks.iter().filter(|m| m.schema == s && m.table == t) {
+                if !columns.iter().any(|(c, _)| *c == m.column) {
+                    columns.push((m.column.clone(), m.table.clone()));
+                }
+            }
+        }
+        columns
     };
     // A table with masked columns, by every name its columns have.
     let columns_of = |schema: Option<&str>, rel: &str| {
-        let (marked, _) = marked_of(schema, rel);
+        let marked = marked_of(schema, rel);
         if marked.is_empty() {
             return None;
         }
-        let schema = schema.unwrap_or("public");
-        // A partition's columns are its parent's.
-        let table = access::find_exact(catalog, schema, &root_of(schema, rel).0);
-        Some(
-            table
-                .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
-                .unwrap_or_default(),
-        )
+        // The catalog may list a partition without its columns.
+        let columns = lineage(schema.unwrap_or("public"), rel)
+            .iter()
+            .filter_map(|(s, t)| access::find_exact(catalog, s, t))
+            .find(|t| !t.columns.is_empty())
+            .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        Some(columns)
     };
     mask::pg_renamed(plan, &columns_of, written_calls)?;
     mask::pg_check(
         plan,
         &mask::PgFacts {
             marked_of: &marked_of,
+            is_part: &|schema, rel| {
+                ancestors.contains_key(&(schema.unwrap_or("public").to_string(), rel.to_string()))
+            },
             marked_indexes: &indexes,
             wrapper: alias,
         },
