@@ -110,7 +110,10 @@ fn encrypt_store(store: &FallbackStore) -> Result<(), SecretError> {
     let mut out = nonce_bytes.to_vec();
     out.extend(ciphertext);
     fs::create_dir_all(config_dir())?;
-    fs::write(fallback_path(), out)?;
+    // Whole or not at all: a reader in another process never sees half.
+    let tmp = fallback_path().with_extension("enc.tmp");
+    fs::write(&tmp, out)?;
+    fs::rename(&tmp, fallback_path())?;
     Ok(())
 }
 
