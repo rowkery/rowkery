@@ -1,17 +1,17 @@
 // Profiles scrolling the built site (out/) in Chromium: wheels from the top to the foot at a
 // steady pace and reports dropped frames, long tasks, and the main-thread layout, paint and
-// style work per second, both while scrolling and while the page sits still (what the looping
-// animations cost on their own): at the top (the hero's job cycle), in the middle of a pinned
-// scene, and on the close over the colony. Fails if the page lays out or paints on its own while
-// it sits still (every loop must move only transform and opacity), or if the story engine's frame
-// loop keeps asking for frames once everything has settled. Chromium only: Safari's compositor
-// is not measured, and headless frame pacing is a rough guide, not what a Mac shows.
+// style work per second, both while scrolling and while the page sits still (what the moving
+// parts cost on their own): at the top, on How it works while its steps play (the chat lines,
+// the pager bars, the clips), on the looping clips and on the close. Fails if the page lays out
+// or paints on its own while it sits still (everything that moves must move only transform and
+// opacity; a playing clip's frames are the compositor's; a step change may lay out once), or if
+// anything keeps asking for animation frames: the page has no frame loop. Chromium only:
+// Safari's compositor is not measured, and headless frame pacing is a rough guide, not what a Mac shows.
 //
 //   npm run build && node scripts/scroll-profile.mjs
 //
 // Env: THROTTLE=4 slows the CPU (default 4, to stand in for a busy laptop); W, H for the window.
 import { playwright, serveOut } from "./serve-out.mjs";
-import { MOMENTS, goTo } from "./story.mjs";
 
 const { chromium } = playwright();
 const THROTTLE = Number(process.env.THROTTLE ?? 4);
@@ -58,6 +58,9 @@ async function trace(fn) {
     "layouts/s": r(count(["Layout"]) / secs),
     "paint ms/s": r(sum(["Paint", "PrePaint"]) / secs),
     "paints/s": r(count(["Paint"]) / secs),
+    // Frames that painted at all (one 50 ms bucket each): a loop paints in nearly every one,
+    // a one-off change (a step switching, a clip starting) in a few.
+    "paint frames/s": r(new Set(events.filter((e) => e.tid === tid && e.name === "Paint").map((e) => Math.floor(e.ts / 50000))).size / secs),
     "raster ms/s": r(events.filter((e) => /Raster/.test(e.name) && e.dur).reduce((a, e) => a + e.dur / 1000, 0) / secs),
   };
 }
@@ -87,28 +90,36 @@ async function scrollDown() {
   }
 }
 
+/** Scrolls so `sel` sits in the middle of the window, and waits for the page to settle. */
+async function sitOn(sel) {
+  await page.evaluate((s) => document.querySelector(s).scrollIntoView({ block: "center", behavior: "instant" }), sel);
+  await page.waitForTimeout(2500);
+}
+
 const idle = await trace(() => page.waitForTimeout(4000));
 await page.evaluate(() => scrollTo(0, 0));
 await page.waitForTimeout(500);
 let scroll;
 const pacing = await frames(async () => { scroll = await trace(scrollDown); });
-// Sitting still in the middle of a scene, and on the close over the colony: the engine's loop
-// must have stopped asking for frames (counted over 2 s once settled).
+// Sitting still on each moving part: nothing may ask for frames (counted over 2 s), lay out or paint.
+const PLACES = { "on How it works": "[data-stage]", "on the keyboard clips": ".duo", "on the close": ".close" };
 const sits = {};
 const loops = [];
-for (const name of ["agent-checks", "get"]) {
-  await goTo(page, MOMENTS.find((m) => m.name === name), 2500);
+for (const [where, sel] of Object.entries(PLACES)) {
+  await sitOn(sel);
   const before = await page.evaluate(() => window.__rafs);
   await page.waitForTimeout(2000);
   const asked = (await page.evaluate(() => window.__rafs)) - before;
-  if (asked > 0) loops.push(`${name}: the page asked for ${asked} frames while sitting still`);
-  sits[name] = await trace(() => page.waitForTimeout(4000));
+  if (asked > 0) loops.push(`${where}: the page asked for ${asked} frames while sitting still`);
+  sits[where] = await trace(() => page.waitForTimeout(6000));
 }
-console.log(JSON.stringify({ throttle: THROTTLE, idleAtTop: idle, idleInScene: sits["agent-checks"], idleOnClose: sits.get, scrolling: scroll, scrollFramePacing: pacing }, null, 2));
+console.log(JSON.stringify({ throttle: THROTTLE, idleAtTop: idle, ...sits, scrolling: scroll, scrollFramePacing: pacing }, null, 2));
 await browser.close();
 server.close();
-const still = Object.entries({ "at the top": idle, "in a scene": sits["agent-checks"], "on the close": sits.get }).filter(([, r]) => r["layouts/s"] > 0 || r["paints/s"] > 2);
-for (const [where] of still) console.error(`The page lays out or paints by itself while it sits still ${where}: a loop is animating something other than transform or opacity.`);
-for (const l of loops) console.error(`The frame loop doesn't stop: ${l}.`);
+// How it works switching steps (every 5 to 11 s) may lay out and paint once as the next clip
+// starts: about one layout in a 6 s window. A loop would show as one or more every second.
+const still = Object.entries({ "at the top": idle, ...sits }).filter(([, r]) => r["layouts/s"] > 0.34 || r["paint frames/s"] > 1);
+for (const [where] of still) console.error(`The page lays out or paints by itself while it sits still ${where}: something is animating other than transform or opacity.`);
+for (const l of loops) console.error(`Something asks for animation frames: ${l}.`);
 if (!still.length && !loops.length) console.log("Sitting still: no layout, no paint, and no frames asked for.");
 process.exit(still.length || loops.length ? 1 : 0);

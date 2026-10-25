@@ -4,8 +4,8 @@ import localFont from "next/font/local";
 import { DOWNLOAD_URL, MAKER_URL, RELEASE } from "@/lib/site";
 import "./globals.css";
 
-// IBM Plex Sans for text, IBM Plex Mono for SQL, keys and numbers, and Gabarito for headings,
-// shipped with the build from app/fonts (SIL OFL) and preloaded.
+// IBM Plex Sans for text and headings, IBM Plex Mono for commands and numbers, shipped with the
+// build from app/fonts (SIL OFL) and preloaded.
 const sans = localFont({
   src: [
     { path: "./fonts/ibm-plex-sans-latin-400-normal.woff2", weight: "400" },
@@ -22,13 +22,6 @@ const mono = localFont({
   variable: "--font-mono",
   display: "swap",
 });
-const display = localFont({
-  src: "./fonts/gabarito-latin-wght-normal.woff2",
-  weight: "400 800",
-  variable: "--font-display",
-  display: "swap",
-});
-
 // Search results show the title and description; Google cuts the description near 155 characters.
 const TITLE = "Rowkery · Free Postgres and SQLite client for the Mac";
 const DESCRIPTION =
@@ -99,25 +92,23 @@ const STRUCTURED_DATA = {
   ],
 };
 
-// The story plays out as you scroll only with scripts and without Reduce Motion. This runs
-// before the first paint and marks the page, so the pinned layout (components/story/story.css)
-// is there from the start; without the mark every scene is a plain stack, fully shown. The
-// pinned scenes need the story engine to show anything, so the mark comes off again if the
-// page's own scripts fail to load, or if the engine hasn't started (data-story) a few seconds
-// after the page has loaded. The engine takes it off itself if it fails (story/engine.ts).
-const MOTION = `(function(){var d=document.documentElement;if(matchMedia("(prefers-reduced-motion: reduce)").matches)return;d.setAttribute("data-motion","");function off(){if(!d.hasAttribute("data-story"))d.removeAttribute("data-motion")}addEventListener("error",function(e){var s=e.target;if(s&&s.tagName==="SCRIPT"&&s.src.indexOf("/_next/")>=0)off()},true);addEventListener("load",function(){setTimeout(off,4000)})})()`;
+// The blocks that rise into view (components/Motion.tsx) start lowered only with scripts and
+// without Reduce Motion: this runs before the first paint and marks the page data-js. If the
+// page's own scripts never start (Motion marks data-ready), the mark comes off 4 s after load so
+// nothing stays hidden.
+const MOTION = `(function(){var d=document.documentElement;if(matchMedia("(prefers-reduced-motion: reduce)").matches)return;d.setAttribute("data-js","");addEventListener("load",function(){setTimeout(function(){if(!d.hasAttribute("data-ready"))d.removeAttribute("data-js")},4000)})})()`;
 
-// Dark only (2026-10-14).
+// Light only (2026-10-25: "light theme feels cleaner").
 export const viewport: Viewport = {
-  themeColor: "#0a0a0a",
-  colorScheme: "dark",
+  themeColor: "#fafaf9",
+  colorScheme: "light",
   width: "device-width",
   initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: MOTION }} />
       </head>

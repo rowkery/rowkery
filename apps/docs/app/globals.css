@@ -1,6 +1,6 @@
 /* ── Tokens ─────────────────────────────────────────────────────
-   The rowkery.com look (apps/web/app/globals.css): one black sheet, white headings, grey
-   copy, rounded #161616 panels, pill buttons, the real dark app screens. Dark only.
+   rowkery.com's look before its 2026-10-25 light redesign: one black sheet, white headings,
+   grey copy, rounded #161616 panels, pill buttons, the real dark app screens. Dark only.
    Layout: the bar on top, the page list on the left, one reading column, "On this page". */
 :root {
   --bg: #0a0a0a;

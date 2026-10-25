@@ -9,10 +9,10 @@ export const metadata: Metadata = {
 /** The 404 (static export: out/404.html): the penguin Tilted, and the way home. */
 export default function NotFound() {
   return (
-    <main className="lost" data-not-found>
+    <main className="lost wrap" data-not-found>
       <Pg tilted />
       <h1>Nothing at this address</h1>
-      <a className="btn ink" href="/">
+      <a className="btn ink lg" href="/">
         Back to Rowkery
       </a>
     </main>

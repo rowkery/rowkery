@@ -1,6 +1,6 @@
 # Rowkery docs (docs.rowkery.com)
 
-How to install and use Rowkery, in rowkery.com's look: the same black sheet, IBM Plex Sans and Mono (400, 500), rounded `#161616` panels and pill buttons, and the real dark app screens. Dark only, like the site. The tokens are at the top of `app/globals.css`, taken from `apps/web/app/globals.css`.
+How to install and use Rowkery, in the look rowkery.com had before its 2026-10-25 light redesign: one black sheet, IBM Plex Sans and Mono (400, 500), rounded `#161616` panels and pill buttons, and the real dark app screens. Dark only. The tokens are at the top of `app/globals.css`.
 
 - **Pages** are MDX: `app/page.mdx` is the introduction, every other page is `app/<slug>/page.mdx`. Each starts with its `metadata` title and a `crumb` line naming its group. `##` and `###` headings get their ids from their text (`lib/slug.ts`), so `## SSH tunnel` is `#ssh-tunnel`.
 - **A new page** is its `page.mdx` plus one entry in `lib/pages.ts`, which drives the sidebar, the previous / next links, "Edit this page" and search.

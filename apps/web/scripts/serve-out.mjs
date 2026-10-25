@@ -17,7 +17,7 @@ export function playwright() {
 }
 
 const ROOT = new URL("../out/", import.meta.url).pathname;
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".webp": "image/webp", ".txt": "text/plain" };
+const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".webp": "image/webp", ".txt": "text/plain", ".mp4": "video/mp4", ".jpg": "image/jpeg", ".png": "image/png" };
 
 /** Serves out/ on a free port; resolves to its URL and a close(). */
 export function serveOut() {
