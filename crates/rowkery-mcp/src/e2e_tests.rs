@@ -375,7 +375,7 @@ async fn masked_columns_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people CASCADE;
+        "DROP TABLE IF EXISTS mcp_mask_customers, mcp_mask_orders, mcp_mask_events, mcp_mask_people, mcp_mask_upart CASCADE;
          DROP SCHEMA IF EXISTS mcp_mask_s CASCADE;
          DROP FUNCTION IF EXISTS mcp_mask_lookup(int);
          CREATE TABLE mcp_mask_customers (id int PRIMARY KEY, email text, plan text);
@@ -396,6 +396,9 @@ async fn masked_columns_hold_against_a_real_postgres() {
          CREATE TABLE mcp_mask_staff () INHERITS (mcp_mask_people);
          INSERT INTO mcp_mask_people VALUES (1, 'mara@fjord.se');
          INSERT INTO mcp_mask_staff VALUES (2, 'tomas@ibarra.dev');
+         CREATE TABLE mcp_mask_upart (id int) PARTITION BY RANGE (id);
+         CREATE TABLE mcp_mask_upart_a PARTITION OF mcp_mask_upart FOR VALUES FROM (0) TO (100);
+         INSERT INTO mcp_mask_upart VALUES (1), (2);
          CREATE VIEW mcp_mask_view AS SELECT id, email FROM mcp_mask_customers;
          CREATE FUNCTION mcp_mask_lookup(i int) RETURNS text LANGUAGE plpgsql STABLE AS
            $$ BEGIN RETURN (SELECT email FROM mcp_mask_customers WHERE id = i); END $$;",
@@ -535,6 +538,32 @@ async fn masked_columns_hold_against_a_real_postgres() {
         assert!(err.starts_with("Refused"), "{sql}: {err}");
         assert!(!err.contains("mara@"), "{sql}: {err}");
     }
+    // Postgres names a table read in parts by its alias, numbered when
+    // something with no node of its own (another partitioned table, a
+    // union's subquery) took it first, and cuts a long one to fit: never
+    // the real values.
+    let long = "a".repeat(63);
+    for sql in [
+        "SELECT o.id, x.email FROM mcp_mask_upart o JOIN (SELECT id, email FROM mcp_mask_events o) x ON x.id = o.id".to_string(),
+        "SELECT x.email FROM (SELECT 1 AS k UNION ALL SELECT 2) e, (SELECT email FROM mcp_mask_events e) x".to_string(),
+        "SELECT x.email FROM (SELECT 1 AS k UNION ALL SELECT 2) p, (SELECT email FROM mcp_mask_people p) x".to_string(),
+        format!("SELECT {long}.email FROM mcp_mask_events {long}"),
+        format!("SELECT {long}.email FROM mcp_mask_people {long}"),
+        format!("SELECT {long}.id FROM mcp_mask_events {long} ORDER BY {long}.email"),
+    ] {
+        match query(&mcp, &sql).await {
+            Ok(out) => assert!(!out["rows"].to_string().contains('@'), "{sql} leaked: {out}"),
+            Err(err) => assert!(err.starts_with("Refused"), "{sql}: {err}"),
+        }
+    }
+    // A reused alias with no marked column read is fine.
+    for sql in [
+        "SELECT t.id FROM mcp_mask_orders t UNION ALL SELECT t.id FROM mcp_mask_customers t",
+        "SELECT c.id FROM mcp_mask_orders c WHERE c.customer_id IN (SELECT c.id FROM mcp_mask_people c)",
+    ] {
+        query(&mcp, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+
     // The union cases above are refused for the union, not by chance.
     for sql in [
         "SELECT 'x' UNION ALL SELECT email FROM mcp_mask_customers",
@@ -589,6 +618,30 @@ async fn masked_columns_hold_against_a_real_postgres() {
     .await
     .expect_err("explain");
     assert!(err.contains("is masked"), "{err}");
+
+    // Nor an index on a partition in another schema, walked here because
+    // the planner is told to avoid plain scans.
+    session_execute(
+        &setup,
+        "CREATE INDEX mcp_mask_events_b_email ON mcp_mask_s.events_b (email);
+         ALTER ROLE CURRENT_USER SET enable_seqscan = off;
+         ALTER ROLE CURRENT_USER SET enable_bitmapscan = off;",
+    )
+    .await
+    .expect("partition index");
+    let forced = RowkeryMcp::default();
+    let walked = query(&forced, "SELECT email FROM mcp_mask_s.events_b").await;
+    let walked_parent = query(&forced, "SELECT email FROM mcp_mask_events").await;
+    session_execute(
+        &setup,
+        "ALTER ROLE CURRENT_USER RESET enable_seqscan; ALTER ROLE CURRENT_USER RESET enable_bitmapscan;",
+    )
+    .await
+    .expect("reset planner");
+    for walked in [walked, walked_parent] {
+        let err = walked.expect_err("an index on a partition elsewhere");
+        assert!(err.contains("mcp_mask_events_b_email"), "{err}");
+    }
 
     // An index on the column (here an expression index) can't be walked for
     // its order. Forced with the planner settings so the plan really uses it.

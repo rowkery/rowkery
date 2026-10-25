@@ -1117,28 +1117,10 @@ async fn pg_masked(
     alias: &str,
     written_calls: &[String],
 ) -> Result<Vec<usize>, String> {
-    const INDEXES: &str = "SELECT ci.relname, n.nspname || '.' || coalesce(pt.relname, t.relname), pg_get_indexdef(i.indexrelid) \
-        FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
-        JOIN pg_namespace n ON n.oid = t.relnamespace \
-        LEFT JOIN pg_inherits inh ON inh.inhrelid = t.oid LEFT JOIN pg_class pt ON pt.oid = inh.inhparent \
-        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')";
-    let facts = store.read(target, INDEXES).await?;
     let text = |v: Option<&rowkery_core::Value>| match v {
         Some(rowkery_core::Value::Text(t)) => t.clone(),
         _ => String::new(),
     };
-    let mut indexes = std::collections::HashSet::new();
-    for row in &facts.rows {
-        let table = text(row.get(1));
-        let definition = text(row.get(2));
-        if marks.iter().any(|m| {
-            table == format!("{}.{}", m.schema, m.table)
-                && mask::index_covers(&definition, &m.column)
-        }) {
-            indexes.insert(text(row.first()));
-        }
-    }
-
     // The tables each relation the plan reads is a partition or child table
     // of, from the server: the catalog links only partitions in their
     // parent's schema, and no child tables.
@@ -1188,6 +1170,27 @@ async fn pg_masked(
         }
         all
     };
+
+    const INDEXES: &str = "SELECT ci.relname, n.nspname, t.relname, pg_get_indexdef(i.indexrelid) \
+        FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid \
+        JOIN pg_namespace n ON n.oid = t.relnamespace \
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')";
+    // An index covering a marked column, on the marked table or any of its
+    // partitions and child tables, wherever they live.
+    let mut indexes = std::collections::HashSet::new();
+    for row in store.read(target, INDEXES).await?.rows {
+        let definition = text(row.get(3));
+        let marked = lineage(&text(row.get(1)), &text(row.get(2)))
+            .iter()
+            .any(|(s, t)| {
+                marks.iter().any(|m| {
+                    m.schema == *s && m.table == *t && mask::index_covers(&definition, &m.column)
+                })
+            });
+        if marked {
+            indexes.insert(text(row.first()));
+        }
+    }
 
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;

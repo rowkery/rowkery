@@ -69,13 +69,13 @@ pub const SUBQUERY_REFUSAL: &str = "Refused: a masked column can only be returne
 
 pub fn union_refusal(label: &str, column: usize) -> String {
     format!(
-        "Refused: {label} is masked, so every part of this UNION ALL must return a masked column as column {column}, not a value or another column. Select {label} without the UNION ALL."
+        "Refused: {label} is masked, so every part of this UNION ALL, and every partition or child table read with it, must return a masked column as column {column}, not a value or another column. Select {label} without the UNION ALL, or ask the user to mark the column on the other tables too."
     )
 }
 
-pub fn alias_refusal(alias: &str) -> String {
+pub fn parent_refusal(table: &str) -> String {
     format!(
-        "Refused: {alias} names something else in this query too, and Postgres names a table with masked columns that way when it reads its partitions or child tables. Give it another alias."
+        "Refused: {table} has masked columns and is read through its partitions or child tables here, and Rowkery can't tell which name Postgres gave it in this query. Give each table in the query its own short alias."
     )
 }
 
@@ -381,6 +381,93 @@ fn aliases<'a>(node: &'a Json, out: &mut Vec<(&'a str, &'a Json)>) {
     }
 }
 
+/// `alias` as Postgres's `name_N`, the way it tells repeated names apart.
+fn numbered(alias: &str) -> Option<(&str, u64)> {
+    let (base, n) = alias.rsplit_once('_')?;
+    if base.is_empty() || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((base, n.parse().ok()?))
+}
+
+/// Reading a table's partitions or child tables, Postgres names the table
+/// itself before its parts, by its alias, and each part after it by the
+/// same alias numbered: `e` above the Append, `e_1` and `e_2` in it (or
+/// `e_1`, then `e_2` and `e_3`, when something else took `e` first). The
+/// table's own name belongs to no node, so it is worked out from the marked
+/// scans: the bare name, or a lower number, that no node holds. Exactly one
+/// such name is marked. With none, the Append is a union, named after its
+/// first part. With more than one, or a name long enough that Postgres cut
+/// it to fit the number, it is refused rather than guessed: a wrong guess
+/// would leave the real name unmarked.
+fn appended_parent(node: &Json, taint: &mut Taint, named: &[(&str, &Json)]) -> Result<(), String> {
+    let mut under = Vec::new();
+    scans(node, &mut under);
+    // Base name, the lowest number under it, and its marked scans.
+    let mut groups: Vec<(String, u64, Vec<String>)> = Vec::new();
+    for scan in under {
+        let Some(alias) = text(scan, "Alias") else {
+            continue;
+        };
+        let Some((base, n)) = numbered(alias) else {
+            continue;
+        };
+        let at = match groups.iter().position(|(b, _, _)| b == base) {
+            Some(at) => at,
+            None => {
+                groups.push((base.to_string(), n, Vec::new()));
+                groups.len() - 1
+            }
+        };
+        groups[at].1 = groups[at].1.min(n);
+        if taint.rows.contains_key(alias) {
+            groups[at].2.push(alias.to_string());
+        }
+    }
+    let held = |name: &str| named.iter().any(|(a, _)| *a == name);
+    for (base, lowest, marked) in groups {
+        let Some(table) = marked.first().and_then(|a| taint.rows.get(a)).cloned() else {
+            continue;
+        };
+        // NAMEDATALEN is 64: a longer name is cut to make room for `_N`.
+        if marked.iter().any(|a| a.len() >= 60) {
+            return Err(parent_refusal(&table));
+        }
+        let candidates: Vec<String> = std::iter::once(base.clone())
+            .chain((1..lowest).map(|k| format!("{base}_{k}")))
+            .filter(|name| !held(name))
+            .collect();
+        let parent = match candidates.as_slice() {
+            [] => continue,
+            [one] => one.clone(),
+            _ => return Err(parent_refusal(&table)),
+        };
+        // Another table read in parts under the same name would have its
+        // known values masked beside the marked ones, to compare.
+        let unmarked = named.iter().any(|(a, n)| {
+            text(n, "Relation Name").is_some()
+                && !taint.rows.contains_key(*a)
+                && numbered(a).is_some_and(|(b, _)| b == base)
+        });
+        if unmarked {
+            return Err(parent_refusal(&table));
+        }
+        let mut found = Vec::new();
+        for (chain, label) in &taint.names {
+            if let [a, column] = chain.as_slice() {
+                if marked.contains(a) {
+                    found.push((vec![parent.clone(), column.clone()], label.clone()));
+                }
+            }
+        }
+        for (chain, label) in found {
+            taint.names.entry(chain).or_insert(label);
+        }
+        taint.rows.insert(parent, table);
+    }
+    Ok(())
+}
+
 /// Names that stand for a marked column higher up: union parts checked
 /// place by place, the names of a table read through its partitions or
 /// child tables, and the row-cap wrapper's own names.
@@ -396,52 +483,8 @@ fn propagate(
     if is_union(node) {
         labels(node, taint)?;
     }
-    // Reading a table's partitions or child tables, Postgres gives each
-    // scan the table's alias with `_1`, `_2`, and names the columns above
-    // the Append by the bare alias, which no node carries.
     if matches!(text(node, "Node Type"), Some("Append" | "Merge Append")) {
-        let mut under = Vec::new();
-        scans(node, &mut under);
-        let mut found: Vec<(String, Vec<String>, String)> = Vec::new();
-        for scan in under {
-            let Some(alias) = text(scan, "Alias") else {
-                continue;
-            };
-            let Some((base, n)) = alias.rsplit_once('_') else {
-                continue;
-            };
-            if base.is_empty() || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                continue;
-            }
-            for (chain, label) in &taint.names {
-                if let [a, column] = chain.as_slice() {
-                    if a == alias {
-                        found.push((
-                            base.to_string(),
-                            vec![base.to_string(), column.clone()],
-                            label.clone(),
-                        ));
-                    }
-                }
-            }
-        }
-        for (base, chain, label) in found {
-            if taint.hit(&chain).is_some() {
-                continue;
-            }
-            // The bare alias may be the agent's own name for something it
-            // chose the values of; masking those would hand out a guess's
-            // stand-in to compare.
-            if named.iter().any(|(a, _)| *a == base) {
-                return Err(alias_refusal(&base));
-            }
-            let table = label
-                .rsplit_once('.')
-                .map_or(label.as_str(), |(t, _)| t)
-                .to_string();
-            taint.rows.insert(base, table);
-            taint.names.insert(chain, label);
-        }
+        appended_parent(node, taint, named)?;
     }
     if text(node, "Node Type") == Some("Subquery Scan")
         && text(node, "Alias") == Some(facts.wrapper)
@@ -845,7 +888,33 @@ mod tests {
             { "Node Type": "Function Scan", "Alias": "f", "Output": ["f.email"] },
             { "Node Type": "Append", "Plans": [
                 scan("f_1", "ev_a", &["f_1.id"]), scan("f_2", "ev_b", &["f_2.id"])] }] });
-        assert_eq!(run(guess), Err(alias_refusal("f")));
+        assert_eq!(run(guess), Ok(vec![]));
+        // `e` taken first by something with no node (another partitioned
+        // table, a union's subquery): the parts are `e_2`, `e_3`, and the
+        // table is `e` or `e_1`. Refused, not guessed.
+        let shifted = json!({ "Node Type": "Limit", "Output": ["e_1.email"], "Plans": [
+            { "Node Type": "Append", "Plans": [
+                scan("e_2", "ev_a", &["e_2.email"]), scan("e_3", "ev_b", &["e_3.email"])] }] });
+        assert_eq!(run(shifted), Err(parent_refusal("events")));
+        // A name cut to fit its number can't be followed back.
+        let long = "a".repeat(61);
+        let cut = json!({ "Node Type": "Limit", "Output": [format!("{long}xx.email")], "Plans": [
+            { "Node Type": "Append", "Plans": [
+                scan(&format!("{long}_1"), "ev_a", &[&format!("{long}_1.email")]),
+                scan(&format!("{long}_2"), "ev_b", &[&format!("{long}_2.email")])] }] });
+        assert_eq!(run(cut), Err(parent_refusal("events")));
+        // Another table read in parts under the same name.
+        let beside = json!({ "Node Type": "Hash Join", "Output": ["e.email"], "Plans": [
+            { "Node Type": "Append", "Plans": [
+                scan("e_1", "ev_a", &["e_1.email"]), scan("e_2", "ev_b", &["e_2.email"])] },
+            { "Node Type": "Append", "Plans": [scan("e_3", "orders", &["e_3.email"])] }] });
+        assert_eq!(run(beside), Err(parent_refusal("events")));
+        // A union reusing an alias: Postgres numbers the second, and the
+        // first, which a node holds, names the column above.
+        let reused = json!({ "Node Type": "Limit", "Output": ["t.id"], "Plans": [
+            { "Node Type": "Append", "Plans": [
+                scan("t", "orders", &["t.id"]), scan("t_1", "customers", &["t_1.id"])] }] });
+        assert_eq!(run(reused), Ok(vec![]));
         // A lone partition under the agent's `f_1` is just `f_1`.
         let lone = json!({ "Node Type": "Nested Loop", "Output": ["f.email"], "Plans": [
             { "Node Type": "Function Scan", "Alias": "f", "Output": ["f.email"] },
