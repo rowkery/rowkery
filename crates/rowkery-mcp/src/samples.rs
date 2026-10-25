@@ -75,47 +75,96 @@ fn read_all(now: u64) -> (Vec<Sample>, bool) {
     (list, expired)
 }
 
+/// Replaces the file whole, through a temp file of this process's own, so
+/// a reader never sees half of it.
 fn rewrite(list: &[Sample]) {
     let text: String = list
         .iter()
         .filter_map(|s| serde_json::to_string(s).ok())
         .map(|l| l + "\n")
         .collect();
-    let tmp = path().with_extension("jsonl.tmp");
-    if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(tmp, path());
+    let tmp = path().with_extension(format!("jsonl.{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, path()).is_err() {
+        let _ = std::fs::remove_file(tmp);
     }
 }
 
-/// Best effort, like the audit log: a sample that can't be written never
-/// fails the call. Expired samples are dropped on the way.
-pub fn save(sample: &Sample, now: u64) {
-    if std::fs::create_dir_all(config_dir()).is_err() {
-        return;
-    }
-    let size = std::fs::metadata(path()).map(|m| m.len()).unwrap_or(0);
-    let (mut list, expired) = read_all(now);
-    if expired || size > MAX_BYTES {
-        if size > MAX_BYTES {
-            list.drain(..list.len() / 2);
+/// How long a write waits for another process's ([`locked`]).
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Runs `change` holding `mcp-files.lock` beside the config, which the app
+/// and every agent's MCP server take around a change to the samples or the
+/// log's files, so one's rewrite never drops another's append. `None` when
+/// it can't be had within [`LOCK_WAIT`]: these files are best effort, and
+/// a call never waits longer for them.
+pub(crate) fn locked<T>(change: impl FnOnce() -> T) -> Option<T> {
+    std::fs::create_dir_all(config_dir()).ok()?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(config_dir().join("mcp-files.lock"))
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return None,
         }
-        list.push(sample.clone());
-        rewrite(&list);
-        return;
     }
+    let done = change();
+    let _ = file.unlock();
+    Some(done)
+}
+
+/// The time of the file's first sample, the oldest: read without the rest.
+fn oldest() -> Option<u64> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path()).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first).ok()?;
+    serde_json::from_str::<Sample>(&first).ok().map(|s| s.ts)
+}
+
+/// Best effort, like the audit log: a sample that can't be written never
+/// fails the call. Expired samples are dropped on the way. Only the first
+/// line is read, unless one has expired or the file is too big.
+pub fn save(sample: &Sample, now: u64) {
     let Ok(line) = serde_json::to_string(sample) else {
         return;
     };
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path()) {
-        let _ = file.write_all(format!("{line}\n").as_bytes());
-    }
+    locked(|| {
+        let size = std::fs::metadata(path()).map(|m| m.len()).unwrap_or(0);
+        let expired = oldest().is_some_and(|ts| now.saturating_sub(ts) >= KEEP_MS);
+        if expired || size > MAX_BYTES {
+            let (mut list, _) = read_all(now);
+            if size > MAX_BYTES {
+                list.drain(..list.len() / 2);
+            }
+            list.push(sample.clone());
+            rewrite(&list);
+            return;
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path()) {
+            let _ = file.write_all(format!("{line}\n").as_bytes());
+        }
+    });
 }
 
 /// The sample kept for the audit entry `session` / `ts`, if it hasn't expired.
 pub fn find(session: u64, ts: u64, now: u64) -> Option<Sample> {
     let (list, expired) = read_all(now);
     if expired {
-        rewrite(&list);
+        // Read again under the lock: another process may have added since.
+        locked(|| {
+            let (list, expired) = read_all(now);
+            if expired {
+                rewrite(&list);
+            }
+        });
     }
     list.into_iter()
         .find(|s| s.session == session && s.ts == ts)
@@ -123,7 +172,12 @@ pub fn find(session: u64, ts: u64, now: u64) -> Option<Sample> {
 
 /// Deletes every sample (Clear log).
 pub fn clear() -> std::io::Result<()> {
-    match std::fs::remove_file(path()) {
+    let removed = locked(|| std::fs::remove_file(path())).unwrap_or_else(|| {
+        Err(std::io::Error::other(
+            "an agent is writing to the log; try again",
+        ))
+    });
+    match removed {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -166,6 +220,21 @@ mod tests {
         clear().unwrap();
         assert!(find(1, 2_000, 2_000).is_none());
         clear().unwrap();
+
+        // Writers at once, one of them dropping an expired sample: none
+        // loses another's.
+        save(&shape(9, 1, "[old]"), 1);
+        let now = 1 + day;
+        let writers: Vec<_> = (0..8u64)
+            .map(|i| std::thread::spawn(move || save(&shape(i, now + i, "[x]"), now + i)))
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        for i in 0..8u64 {
+            assert!(find(i, now + i, now + 8).is_some(), "sample {i}");
+        }
+        assert!(find(9, 1, now + 8).is_none());
         let _ = std::fs::remove_dir_all(dir);
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }

@@ -137,7 +137,13 @@ pub fn append(entry: &Entry) {
     line.push('\n');
     let path = dir.join(LOG_FILE);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
-        let _ = std::fs::rename(&path, dir.join("mcp-log.1.jsonl"));
+        // Checked again under the lock: two processes moving it at once
+        // would put a nearly empty log over the old one.
+        crate::samples::locked(|| {
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
+                let _ = std::fs::rename(&path, dir.join("mcp-log.1.jsonl"));
+            }
+        });
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
