@@ -200,34 +200,45 @@ fn keyring_delete(account: &str) -> Result<(), SecretError> {
     }
 }
 
+/// The fallback file's entries. A file that can't be decrypted or parsed
+/// (its key lost) holds nothing anyone can read, so it counts as empty; one
+/// that can't be read at all may hold the newer copy of a secret
+/// (`change_secrets`), so that is an error.
+fn file_store() -> Result<FallbackStore, SecretError> {
+    if !fallback_path().exists() {
+        return Ok(FallbackStore::default());
+    }
+    match decrypt_store() {
+        Err(SecretError::Io(e)) => Err(SecretError::Io(e)),
+        read => Ok(read.unwrap_or_default()),
+    }
+}
+
 fn fallback_set(account: &str, secret: &str) -> Result<(), SecretError> {
-    let mut store = decrypt_store()?;
+    let mut store = file_store()?;
     store
         .entries
         .insert(account.to_string(), secret.to_string());
     encrypt_store(&store)
 }
 
-fn fallback_get(account: &str) -> Result<Option<String>, SecretError> {
-    let store = decrypt_store()?;
-    Ok(store.entries.get(account).cloned())
+/// `account`'s copy in the fallback file.
+fn file_copy(account: &str) -> Result<Option<String>, SecretError> {
+    Ok(file_store()?.entries.get(account).cloned())
 }
 
-/// `account`'s copy in the fallback file. An unreadable file has none.
-fn file_copy(account: &str) -> Option<String> {
-    fallback_get(account).ok().flatten()
-}
-
-/// Removes `account`'s copy from the fallback file, which reads find before
-/// the keychain's. An unreadable file has none to remove.
-fn drop_file_copy(account: &str) -> Result<(), SecretError> {
+/// Removes `accounts`' copies from the fallback file, which reads find
+/// before the keychain's.
+fn drop_file_copies(accounts: &[String]) -> Result<(), SecretError> {
     if !fallback_path().exists() {
         return Ok(());
     }
-    let Ok(mut store) = decrypt_store() else {
-        return Ok(());
-    };
-    if store.entries.remove(account).is_some() {
+    let mut store = file_store()?;
+    let before = store.entries.len();
+    store
+        .entries
+        .retain(|account, _| !accounts.contains(account));
+    if store.entries.len() != before {
         encrypt_store(&store)?;
     }
     Ok(())
@@ -304,11 +315,23 @@ fn keychain_item(connection_id: &str) -> Result<Item, ()> {
     if let Some(hit) = item_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
         return hit;
     }
+    let saves = SAVES.load(std::sync::atomic::Ordering::SeqCst);
     let read = read_item(connection_id);
-    if let Ok(mut c) = item_cache().lock() {
-        c.insert(key, read.clone());
+    if unsaved_since(saves) {
+        if let Ok(mut c) = item_cache().lock() {
+            c.insert(key, read.clone());
+        }
     }
     read
+}
+
+/// Item saves this run. A read made without the lock is remembered only if
+/// none happened while it was out, or it could stand in front of a newer
+/// save.
+static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn unsaved_since(saves: u64) -> bool {
+    SAVES.load(std::sync::atomic::Ordering::SeqCst) == saves
 }
 
 /// Connections whose older per-secret items were looked for this run and
@@ -320,18 +343,40 @@ fn folded() -> &'static std::sync::Mutex<std::collections::HashSet<(PathBuf, Str
     FOLDED.get_or_init(Default::default)
 }
 
+fn mark_folded(key: &(PathBuf, String)) {
+    if let Ok(mut f) = folded().lock() {
+        f.insert(key.clone());
+    }
+}
+
+/// Removes the older per-secret items a fold couldn't (its save failed),
+/// once a save of the item, made from the fold's, holds them.
+fn finish_fold(connection_id: &str) {
+    let key = cache_key(connection_id);
+    if folded().lock().is_ok_and(|f| f.contains(&key)) {
+        return;
+    }
+    for kind in KINDS {
+        let _ = keyring_delete(&entry_account(connection_id, kind));
+    }
+    mark_folded(&key);
+}
+
 /// The connection's item as the keychain holds it now. Older builds kept
 /// one item per secret (`<id>:<kind>`); those are folded into the
 /// connection's item and deleted (macOS asks once for each, one last time).
 fn read_item(connection_id: &str) -> Result<Item, ()> {
     // A value that isn't our JSON is left alone rather than overwritten.
     let parse = |json: String| serde_json::from_str::<Item>(&json).map_err(|_| ());
+    let key = cache_key(connection_id);
     match keyring_get(connection_id) {
-        Ok(Some(json)) => return parse(json),
+        Ok(Some(json)) => {
+            mark_folded(&key);
+            return parse(json);
+        }
         Ok(None) => {}
         Err(_) => return Err(()),
     }
-    let key = cache_key(connection_id);
     if folded().lock().is_ok_and(|f| f.contains(&key)) {
         return Ok(Item::new());
     }
@@ -364,9 +409,7 @@ fn read_item(connection_id: &str) -> Result<Item, ()> {
             for account in legacy {
                 let _ = keyring_delete(&account);
             }
-            if let Ok(mut f) = folded().lock() {
-                f.insert(key);
-            }
+            mark_folded(&key);
         }
         Ok(Ok(item))
     })
@@ -468,6 +511,7 @@ fn fresh_item(connection_id: &str) -> Result<Item, ()> {
 fn item_save(connection_id: &str, item: &Item) -> Result<(), SecretError> {
     let json = serde_json::to_string(item).map_err(|e| SecretError::Message(e.to_string()))?;
     keyring_set(connection_id, &json)?;
+    SAVES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut c) = item_cache().lock() {
         c.insert(cache_key(connection_id), Ok(item.clone()));
     }
@@ -542,19 +586,24 @@ fn change_secrets(
             for kind in remove {
                 item.remove(kind.label());
             }
+            // The file's copies go first: left behind a save, they would
+            // stand in front of it. A save that then fails puts the new
+            // values in the file below.
+            drop_file_copies(&accounts)?;
             saved = item == *read || item_save(connection_id, &item).is_ok();
-        }
-        if saved {
-            for account in &accounts {
-                drop_file_copy(account)?;
+            if saved && item != *read {
+                finish_fold(connection_id);
             }
-        } else {
+        }
+        if !saved {
             for (kind, secret) in set {
                 fallback_set(&entry_account(connection_id, *kind), secret)?;
             }
-            for kind in remove {
-                drop_file_copy(&entry_account(connection_id, *kind))?;
-            }
+            let removed: Vec<String> = remove
+                .iter()
+                .map(|kind| entry_account(connection_id, *kind))
+                .collect();
+            drop_file_copies(&removed)?;
             // Too big for the keychain (Windows' Credential Manager holds
             // about 1,250 characters, less than a service account key): the
             // item drops what it held of them. The small ones move back into
@@ -604,31 +653,86 @@ pub fn get_secret(connection_id: &str, kind: SecretKind) -> Result<Option<String
     if let Some(hit) = cached(&account) {
         return Ok(hit);
     }
-    if let Some(value) = file_copy(&account) {
-        if keychain_enabled() {
-            let _ = locked(|| {
-                let Ok(mut item) = fresh_item(connection_id) else {
-                    return Ok(());
-                };
-                if item.get(kind.label()) != Some(&value) {
-                    item.insert(kind.label().to_string(), value.clone());
-                    item_save(connection_id, &item)?;
-                }
-                drop_file_copy(&account)
-            });
-        }
-        cache_put(&account, Some(value.clone()));
-        return Ok(Some(value));
+    let saves = SAVES.load(std::sync::atomic::Ordering::SeqCst);
+    let mut value = file_copy(&account)?;
+    if value.is_some() && keychain_enabled() {
+        // Again under the lock: another process may have moved it in, or
+        // saved a newer one, since.
+        value = locked(|| match file_copy(&account)? {
+            Some(filed) => {
+                move_in(connection_id)?;
+                Ok(Some(filed))
+            }
+            None => Ok(fresh_item(connection_id)
+                .ok()
+                .and_then(|item| item.get(kind.label()).cloned())),
+        })?;
+        cache_put(&account, value.clone());
+        return Ok(value);
     }
-    let value = if keychain_enabled() {
-        keychain_item(connection_id)
+    if value.is_none() && keychain_enabled() {
+        value = keychain_item(connection_id)
             .ok()
-            .and_then(|item| item.get(kind.label()).cloned())
-    } else {
-        None
-    };
-    cache_put(&account, value.clone());
+            .and_then(|item| item.get(kind.label()).cloned());
+    }
+    if unsaved_since(saves) {
+        cache_put(&account, value.clone());
+    }
     Ok(value)
+}
+
+/// Connections whose file copies wouldn't all fit in their item this run,
+/// so reads don't try again.
+fn stuck() -> &'static std::sync::Mutex<std::collections::HashSet<(PathBuf, String)>> {
+    static STUCK: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(PathBuf, String)>>,
+    > = std::sync::OnceLock::new();
+    STUCK.get_or_init(Default::default)
+}
+
+/// Moves every secret of the connection the file holds into its item, with
+/// one read and one write; if the item can't take them all (too big), one
+/// at a time, and the rest stay in the file. Under the lock.
+fn move_in(connection_id: &str) -> Result<(), SecretError> {
+    let key = cache_key(connection_id);
+    if stuck().lock().is_ok_and(|s| s.contains(&key)) {
+        return Ok(());
+    }
+    let Ok(mut item) = fresh_item(connection_id) else {
+        return Ok(());
+    };
+    let mut filed = Vec::new();
+    for kind in KINDS.into_iter().chain(NEWER_KINDS) {
+        let account = entry_account(connection_id, kind);
+        if let Some(value) = file_copy(&account)? {
+            filed.push((kind, account, value));
+        }
+    }
+    let mut all = item.clone();
+    for (kind, _, value) in &filed {
+        all.insert(kind.label().to_string(), value.clone());
+    }
+    let moved: Vec<String> = if item_save(connection_id, &all).is_ok() {
+        filed.into_iter().map(|(_, account, _)| account).collect()
+    } else {
+        let mut moved = Vec::new();
+        for (kind, account, value) in filed {
+            let mut next = item.clone();
+            next.insert(kind.label().to_string(), value);
+            if item_save(connection_id, &next).is_ok() {
+                item = next;
+                moved.push(account);
+            }
+        }
+        if let Ok(mut s) = stuck().lock() {
+            s.insert(key);
+        }
+        moved
+    };
+    if !moved.is_empty() {
+        finish_fold(connection_id);
+    }
+    drop_file_copies(&moved)
 }
 
 /// Drops what this run remembers of a connection's secrets, so the next read
@@ -676,13 +780,11 @@ pub fn mask_key(connection_id: &str) -> Result<String, SecretError> {
     let label = SecretKind::MaskKey.label();
     let key = locked(|| {
         // One in the file is the newer, as for any secret (`get_secret`),
-        // and moves into the item if it can.
-        if let Some(key) = file_copy(&account).filter(|k| !k.is_empty()) {
-            if let Some(Ok(mut item)) = keychain_enabled().then(|| fresh_item(connection_id)) {
-                item.insert(label.to_string(), key.clone());
-                if item_save(connection_id, &item).is_ok() {
-                    let _ = drop_file_copy(&account);
-                }
+        // and moves into the item if it can. A file that can't be read
+        // may hold it: refused, never a second key.
+        if let Some(key) = file_copy(&account)?.filter(|k| !k.is_empty()) {
+            if keychain_enabled() {
+                move_in(connection_id)?;
             }
             return Ok(key);
         }
@@ -723,19 +825,16 @@ pub fn delete_secrets_for_connection(connection_id: &str) -> Result<(), SecretEr
         if keychain_enabled() {
             let _ = keyring_delete(connection_id);
         }
-        for kind in KINDS {
+        let mut accounts = Vec::new();
+        for kind in KINDS.into_iter().chain(NEWER_KINDS) {
             let account = entry_account(connection_id, kind);
             cache_put(&account, None);
-            if keychain_enabled() {
+            if keychain_enabled() && KINDS.contains(&kind) {
                 let _ = keyring_delete(&account);
             }
-            let _ = drop_file_copy(&account);
+            accounts.push(account);
         }
-        for kind in NEWER_KINDS {
-            let account = entry_account(connection_id, kind);
-            cache_put(&account, None);
-            let _ = drop_file_copy(&account);
-        }
+        let _ = drop_file_copies(&accounts);
         Ok(())
     })
 }
@@ -1191,7 +1290,7 @@ mod tests {
         assert_eq!(item["db-password"], "new");
         assert_eq!(item["mask-key"], "K");
         assert_eq!(
-            fallback_get(&entry_account("k10", SecretKind::DbPassword)).unwrap(),
+            file_copy(&entry_account("k10", SecretKind::DbPassword)).unwrap(),
             None
         );
         delete_secret("k10", SecretKind::GcpKey).unwrap();
@@ -1287,13 +1386,55 @@ mod tests {
         let account = entry_account("k17", SecretKind::SshPassword);
         fallback_set(&account, "old-file").unwrap();
         store_secret("k17", SecretKind::SshPassword, "new").unwrap();
-        assert_eq!(fallback_get(&account).unwrap(), None);
+        assert_eq!(file_copy(&account).unwrap(), None);
         forget_cached("k17");
         assert_eq!(
             get_secret("k17", SecretKind::SshPassword)
                 .unwrap()
                 .as_deref(),
             Some("new")
+        );
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_file_copy_moved_in_elsewhere_meanwhile_gives_way() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        put_item("k19", r#"{"db-password":"old"}"#);
+        let account = entry_account("k19", SecretKind::DbPassword);
+        fallback_set(&account, "V1").unwrap();
+        // Another process holds the lock while this one reads the file.
+        let other = fs::OpenOptions::new()
+            .write(true)
+            .open(config_dir().join(LOCK_FILE))
+            .unwrap();
+        other.lock().unwrap();
+        let reader = std::thread::spawn(|| get_secret("k19", SecretKind::DbPassword).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // It saves a newer one into the item, dropping the file's copy.
+        put_item("k19", r#"{"db-password":"V2"}"#);
+        drop_file_copies(std::slice::from_ref(&account)).unwrap();
+        other.unlock().unwrap();
+        assert_eq!(reader.join().unwrap().as_deref(), Some("V2"));
+        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k19"]).unwrap());
+        assert_eq!(item["db-password"], "V2");
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn an_unreadable_file_counts_as_empty() {
+        let _guard = test_guard();
+        fs::create_dir_all(config_dir()).unwrap();
+        fs::write(fallback_path(), b"not a secrets file at all").unwrap();
+        assert_eq!(get_secret("k20", SecretKind::DbPassword).unwrap(), None);
+        store_secret("k20", SecretKind::DbPassword, "pw").unwrap();
+        forget_cached("k20");
+        assert_eq!(
+            get_secret("k20", SecretKind::DbPassword)
+                .unwrap()
+                .as_deref(),
+            Some("pw")
         );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
@@ -1372,7 +1513,7 @@ mod tests {
             get_secret("k4", SecretKind::DbPassword).unwrap().as_deref(),
             Some("filed")
         );
-        assert_eq!(fallback_get(&account).unwrap(), None);
+        assert_eq!(file_copy(&account).unwrap(), None);
         mock_state(|k| {
             let item: Item = serde_json::from_str(&k.items["k4"]).unwrap();
             assert_eq!(item["db-password"], "filed");
