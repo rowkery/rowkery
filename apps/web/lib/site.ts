@@ -22,10 +22,3 @@ export const MAKER_URL = "https://lucascodes.dev";
 
 /** The app's own binary, which an MCP client runs with --mcp (what Connect an agent sets up). */
 export const APP_EXE = "/Applications/Rowkery.app/Contents/MacOS/Rowkery";
-
-/**
- * The Kit form behind the email signup under the close (its id is the number in the form's
- * share link). Kit sends the confirm-your-email message. Empty, the signup card isn't shown.
- */
-export const KIT_FORM_ID = "10071822";
-export const KIT_FORM_URL = `https://app.kit.com/forms/${KIT_FORM_ID}/subscriptions`;
