@@ -293,6 +293,14 @@ fn keychain_item(connection_id: &str) -> Result<Item, ()> {
     read
 }
 
+/// The connection's keychain item as it is now, for a change to it: another
+/// process (the app, or an MCP server) may have saved it since this one
+/// read it, and a write from the older copy would undo that save.
+fn fresh_item(connection_id: &str) -> Result<Item, ()> {
+    forget_cached(connection_id);
+    keychain_item(connection_id)
+}
+
 fn item_save(connection_id: &str, item: &Item) -> Result<(), SecretError> {
     let json = serde_json::to_string(item).map_err(|e| SecretError::Message(e.to_string()))?;
     keyring_set(connection_id, &json)?;
@@ -315,37 +323,36 @@ pub fn store_secret(
 
 /// Stores several of a connection's secrets with one keychain write.
 fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<(), SecretError> {
+    let fresh = keychain_enabled().then(|| fresh_item(connection_id));
     for (kind, secret) in secrets {
         cache_put(
             &entry_account(connection_id, *kind),
             Some(secret.to_string()),
         );
     }
-    if keychain_enabled() {
+    if let Some(Ok(mut item)) = fresh {
+        for (kind, secret) in secrets {
+            item.insert(kind.label().to_string(), secret.to_string());
+        }
+        if item_save(connection_id, &item).is_ok() {
+            // Drop any copy an older build left in the file.
+            for (kind, _) in secrets {
+                let _ = fallback_remove_if_present(&entry_account(connection_id, *kind));
+            }
+            return Ok(());
+        }
+        // Too big for the keychain (Windows' Credential Manager holds
+        // about 1,250 characters, less than a service account key): the
+        // file takes them, and the item drops its older copies, which
+        // reads would otherwise find first. The small ones move back
+        // into the item on their next read.
         if let Ok(mut item) = keychain_item(connection_id) {
-            for (kind, secret) in secrets {
-                item.insert(kind.label().to_string(), secret.to_string());
+            let before = item.len();
+            for (kind, _) in secrets {
+                item.remove(kind.label());
             }
-            if item_save(connection_id, &item).is_ok() {
-                // Drop any copy an older build left in the file.
-                for (kind, _) in secrets {
-                    let _ = fallback_remove_if_present(&entry_account(connection_id, *kind));
-                }
-                return Ok(());
-            }
-            // Too big for the keychain (Windows' Credential Manager holds
-            // about 1,250 characters, less than a service account key): the
-            // file takes them, and the item drops its older copies, which
-            // reads would otherwise find first. The small ones move back
-            // into the item on their next read.
-            if let Ok(mut item) = keychain_item(connection_id) {
-                let before = item.len();
-                for (kind, _) in secrets {
-                    item.remove(kind.label());
-                }
-                if item.len() != before {
-                    let _ = item_save(connection_id, &item);
-                }
+            if item.len() != before {
+                let _ = item_save(connection_id, &item);
             }
         }
     }
@@ -359,12 +366,11 @@ fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<
 /// connection no longer signs in with).
 pub fn delete_secret(connection_id: &str, kind: SecretKind) -> Result<(), SecretError> {
     let account = entry_account(connection_id, kind);
+    let fresh = keychain_enabled().then(|| fresh_item(connection_id));
     cache_put(&account, None);
-    if keychain_enabled() {
-        if let Ok(mut item) = keychain_item(connection_id) {
-            if item.remove(kind.label()).is_some() {
-                item_save(connection_id, &item)?;
-            }
+    if let Some(Ok(mut item)) = fresh {
+        if item.remove(kind.label()).is_some() {
+            item_save(connection_id, &item)?;
         }
     }
     fallback_remove_if_present(&account)
@@ -435,6 +441,14 @@ pub fn keychain_refused(connection_id: &str) -> bool {
 /// MCP server reading it asks the keychain nothing more. An error (a denied
 /// keychain) means no stand-ins can be made, so marked columns are refused.
 pub fn mask_key(connection_id: &str) -> Result<String, SecretError> {
+    if let Some(key) = get_secret(connection_id, SecretKind::MaskKey)? {
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+    // Another process (the app, or another agent's server) may have made
+    // one since this one looked: two keys would give one value two stand-ins.
+    forget_cached(connection_id);
     if let Some(key) = get_secret(connection_id, SecretKind::MaskKey)? {
         if !key.is_empty() {
             return Ok(key);
@@ -789,6 +803,67 @@ mod tests {
             None
         );
         mock_state(|k| assert_eq!(k.reads, 1));
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_write_starts_from_the_item_as_it_is_now() {
+        let _guard = test_guard();
+        let _mock = mock_on(&[], false);
+        // The app reads the item; an MCP server then adds the mask key.
+        store_secret("k9", SecretKind::DbPassword, "old").unwrap();
+        mock::KEYCHAIN
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .items
+            .insert(
+                "k9".into(),
+                r#"{"db-password":"old","mask-key":"from-mcp"}"#.into(),
+            );
+        // The app's password edit keeps the key it never read.
+        store_secret("k9", SecretKind::DbPassword, "new").unwrap();
+        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k9"]).unwrap());
+        assert_eq!(item["db-password"], "new");
+        assert_eq!(item["mask-key"], "from-mcp");
+        // A process that read the item before any key was made finds the
+        // one another made since, rather than making a second.
+        mock::KEYCHAIN
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .items
+            .insert("k9".into(), r#"{"db-password":"new"}"#.into());
+        forget_cached("k9");
+        assert_eq!(get_secret("k9", SecretKind::MaskKey).unwrap(), None);
+        mock::KEYCHAIN
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .items
+            .insert(
+                "k9".into(),
+                r#"{"db-password":"new","mask-key":"other"}"#.into(),
+            );
+        assert_eq!(mask_key("k9").unwrap(), "other");
+        // A delete keeps what another process saved meanwhile.
+        mock::KEYCHAIN
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .items
+            .insert(
+                "k9".into(),
+                r#"{"db-password":"newer","mask-key":"other","gcp-key":"g"}"#.into(),
+            );
+        delete_secret("k9", SecretKind::GcpKey).unwrap();
+        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k9"]).unwrap());
+        assert_eq!(item["db-password"], "newer");
+        assert!(!item.contains_key("gcp-key"));
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
