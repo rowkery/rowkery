@@ -30,6 +30,7 @@ use rowkery_core::db::{SchemaCatalog, TableIndexes};
 use rowkery_core::edits::{
     build_row_changes, transaction_sql, ApplyCounts, ApplyFailure, Change, EditTable, RowStatement,
 };
+use rowkery_core::health::HealthReport;
 use rowkery_core::import::{ImportCounts, ImportError, ImportSpec};
 use rowkery_core::plan::{self, Plan, PlanFacts};
 use rowkery_core::query_util::apply_browse_limit;
@@ -233,6 +234,10 @@ enum Command {
     Sessions {
         window_id: String,
         respond_to: oneshot::Sender<Result<Vec<SessionRow>, String>>,
+    },
+    Health {
+        window_id: String,
+        respond_to: oneshot::Sender<Result<HealthReport, String>>,
     },
     SessionLocks {
         window_id: String,
@@ -3859,6 +3864,23 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             window_id,
             respond_to,
         } => with_postgres(state, window_id, respond_to, sessions::list),
+        Command::Health {
+            window_id,
+            respond_to,
+        } => match state.windows.get(&window_id).cloned() {
+            Some(WindowTarget::Sqlite { path, .. }) => {
+                thread::spawn(move || {
+                    let read = with_catch(|| {
+                        let mut driver = SqliteDriver::new(path).read_only(true);
+                        driver.connect()?;
+                        driver.health()
+                    })
+                    .and_then(|r| r.map_err(driver_error_message));
+                    let _ = respond_to.send(read);
+                });
+            }
+            _ => with_postgres(state, window_id, respond_to, sessions::health),
+        },
         Command::SessionLocks {
             window_id,
             pid,
@@ -4642,6 +4664,16 @@ impl CoreBridge {
             respond_to,
         })
         .ok_or_else(|| "Reading sessions was interrupted".to_string())?
+    }
+
+    /// The window's database health, read on a session of the window's own
+    /// (Postgres) or a read-only open of the file (SQLite).
+    pub fn health(&self, window_id: &str) -> Result<HealthReport, String> {
+        self.send_command(|respond_to| Command::Health {
+            window_id: window_id.to_string(),
+            respond_to,
+        })
+        .ok_or_else(|| "Reading health was interrupted".to_string())?
     }
 
     /// The table locks session `pid` holds.

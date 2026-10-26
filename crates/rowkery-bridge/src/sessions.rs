@@ -1,13 +1,14 @@
 //! The Sessions tab: the server's sessions read on a session of the window's
 //! own (never a tab's, so a tab's transaction is never touched), and
-//! stopping one through safe mode.
+//! stopping one through safe mode. The Health tab reads on the same session.
 
 use rowkery_core::connections::PostgresConnection;
 use rowkery_core::db::postgres::{
-    session_activity, session_cancel_tagged, session_locks_held, session_stop, HeldLock,
-    PostgresSession, ServerSession, StopKind,
+    session_activity, session_cancel_tagged, session_health, session_locks_held, session_stop,
+    HeldLock, PostgresSession, ServerSession, StopKind,
 };
 use rowkery_core::db::DriverError;
+use rowkery_core::health::HealthReport;
 use rowkery_core::safety::SafeMode;
 use serde::{Deserialize, Serialize};
 
@@ -118,6 +119,11 @@ pub(crate) async fn list(target: Target) -> Result<Vec<SessionRow>, DriverError>
             SessionRow { session, tab }
         })
         .collect())
+}
+
+/// The database's health, for the Health tab.
+pub(crate) async fn health(target: Target) -> Result<HealthReport, DriverError> {
+    target.on_session(async |s| session_health(s).await).await
 }
 
 pub(crate) async fn locks(target: Target, pid: i32) -> Result<Vec<HeldLock>, DriverError> {

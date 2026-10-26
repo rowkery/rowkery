@@ -13,6 +13,7 @@ use rowkery_core::db::{
     TableIndexes, Value,
 };
 use rowkery_core::edits::{Change, EditTable};
+use rowkery_core::health::HealthReport;
 use rowkery_core::safety::SafetyHold;
 use rowkery_core::secrets::ConnectionSecrets;
 use rowkery_core::CoreEvent;
@@ -478,6 +479,12 @@ async fn table_indexes(
 #[tauri::command]
 async fn list_sessions(app: AppHandle, window_id: String) -> Result<Vec<SessionRow>, String> {
     on_blocking_pool(app, move |bridge| bridge.sessions(&window_id)).await?
+}
+
+/// The Health tab: what will hurt soon on the window's database.
+#[tauri::command]
+async fn database_health(app: AppHandle, window_id: String) -> Result<HealthReport, String> {
+    on_blocking_pool(app, move |bridge| bridge.health(&window_id)).await?
 }
 
 /// The table locks one session holds.
@@ -2268,6 +2275,7 @@ pub fn run(mut timings: Timings) {
             list_databases,
             table_indexes,
             list_sessions,
+            database_health,
             session_locks,
             stop_session,
             reload_window_schema,
