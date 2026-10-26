@@ -12,6 +12,11 @@
 
 .health-error-word {
   color: var(--del);
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .health-scroll {
@@ -273,4 +278,13 @@
 .health-step-how {
   font: 12.5px/1.5 var(--sans);
   color: var(--text2);
+}
+
+.health-scroll:focus {
+  outline: none;
+}
+
+.health-queries tr:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }

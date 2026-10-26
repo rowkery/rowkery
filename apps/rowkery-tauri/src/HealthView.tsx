@@ -5,6 +5,8 @@ import {
   CHECK_NAME,
   CHECK_WHY,
   FIX_NOTE,
+  FIX_TITLE,
+  SEVERITY_HINT,
   SEVERITY_LABEL,
   findingText,
   fineLabel,
@@ -18,7 +20,7 @@ import {
   pgssSteps,
   soonToast,
 } from "./healthText";
-import { showOfferToast } from "./notify";
+import { hasPendingUndo, liveOffer, showOfferToast } from "./notify";
 import { readKey, writeKey } from "./persist";
 import { oneLine } from "./sessionRows";
 import { highlightSqlLines } from "./sqlHighlight";
@@ -34,10 +36,10 @@ import "./HealthView.css";
  * applies.
  */
 
-/** What the inspector shows. */
+/** What the inspector shows. A slow query is picked by its text and login, so a Refresh that reorders them keeps it. */
 export type HealthPick =
   | { kind: "check"; check: HealthCheck["check"] }
-  | { kind: "query"; index: number }
+  | { kind: "query"; query: string; user: string | null }
   | { kind: "pgss" };
 
 export interface HealthModel {
@@ -47,8 +49,27 @@ export interface HealthModel {
   /** When the report was read (local time). */
   readAt: Date | null;
   refresh: () => void;
+  /** The pick, only while the report still has it (a Refresh can clear a finding). */
   picked: HealthPick | null;
   pick: (p: HealthPick | null) => void;
+}
+
+/** The picked slow query in `report`, if it is still listed. */
+export function pickedQuery(report: HealthReport, p: HealthPick): SlowQuery | undefined {
+  if (p.kind !== "query" || report.slow_queries.state !== "ranked") return undefined;
+  return report.slow_queries.queries.find((q) => q.query === p.query && q.user === p.user);
+}
+
+/** Whether the report still has what `p` points at. */
+function stillThere(report: HealthReport, p: HealthPick): boolean {
+  switch (p.kind) {
+    case "check":
+      return report.checks.some((c) => c.check === p.check && c.state === "found" && c.items.length > 0);
+    case "query":
+      return !!pickedQuery(report, p);
+    case "pgss":
+      return report.slow_queries.state === "off";
+  }
 }
 
 /**
@@ -75,6 +96,7 @@ export function useHealth(windowId: string, live: boolean, source: string): Heal
         setReport(next);
         setError(null);
         setReadAt(new Date());
+        setPicked((p) => (p && stillThere(next, p) ? p : null));
       })
       .catch((e) => sourceRef.current === asked && setError(String(e)))
       .finally(() => sourceRef.current === asked && setReading(false));
@@ -92,49 +114,84 @@ export function useHealth(windowId: string, live: boolean, source: string): Heal
     if (live) read();
   }, [live, source, read]);
 
-  return { report, error, reading, readAt, refresh: read, picked, pick: setPicked };
+  const shown = report && picked && stillThere(report, picked) ? picked : null;
+  return { report, error, reading, readAt, refresh: read, picked: shown, pick: setPicked };
 }
 
 /** Connection id → the day (YYYY-MM-DD, local) Health last looked for "Soon". */
 const SOON_KEY = "rowkery.healthSoonDay";
 /** Lets the window's own reads (the schema, a restored tab) go first. */
 const SOON_DELAY_MS = 4000;
+/** While an Undo or another offer is on screen, look again this often. */
+const SOON_WAIT_MS = 2000;
+/** …for a minute at most; the finding is still in the tab after that. */
+const SOON_WAITS = 30;
 
 function today(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function soonDays(): Record<string, string> {
+  const v = readKey(SOON_KEY);
+  return v && typeof v === "object" ? (v as Record<string, string>) : {};
+}
+
 /**
  * Decision 2: without opening the tab, Health speaks up only for a "Soon"
  * finding (ids running out, transaction age, a slot filling the disk), and
  * looks at most once a day per connection, a few seconds after the window
- * connects. The toast's button opens the tab; it never takes ↵.
+ * connects. The day counts only once a read came back. The toast waits for
+ * an Undo or another offer to leave, and stays quiet while the Health tab
+ * shows. Its button opens the tab; it never takes ↵.
  */
-export function useSoonToast(windowId: string, connectionId: string | null, ready: boolean, onShow: () => void) {
+export function useSoonToast(
+  windowId: string,
+  connectionId: string | null,
+  ready: boolean,
+  onHealthTab: boolean,
+  onShow: () => void,
+) {
   const showRef = useRef(onShow);
   showRef.current = onShow;
+  const onTabRef = useRef(onHealthTab);
+  onTabRef.current = onHealthTab;
+  const connRef = useRef(connectionId);
+  connRef.current = connectionId;
+  const inFlight = useRef<string | null>(null);
   useEffect(() => {
-    if (!ready || !connectionId) return;
-    const days = (readKey(SOON_KEY) ?? {}) as Record<string, string>;
-    if (days[connectionId] === today()) return;
-    let alive = true;
+    if (!ready || !connectionId || inFlight.current === connectionId) return;
+    if (soonDays()[connectionId] === today()) return;
     const timer = window.setTimeout(() => {
-      const now = (readKey(SOON_KEY) ?? {}) as Record<string, string>;
-      if (now[connectionId] === today()) return;
-      writeKey(SOON_KEY, { ...now, [connectionId]: today() });
+      if (soonDays()[connectionId] === today() || inFlight.current === connectionId) return;
+      // Started, it runs to the end: going busy or inactive meanwhile doesn't drop it.
+      inFlight.current = connectionId;
       databaseHealth(windowId).then(
         (report) => {
-          const message = alive && report ? soonToast(report) : null;
-          if (message) showOfferToast(message, "Show health", undefined, { run: () => showRef.current(), mouseOnly: true });
+          inFlight.current = null;
+          const day = today();
+          // Only today's entries are worth keeping.
+          const kept = Object.fromEntries(Object.entries(soonDays()).filter(([, d]) => d === day));
+          writeKey(SOON_KEY, { ...kept, [connectionId]: day });
+          const message = report ? soonToast(report) : null;
+          if (!message) return;
+          let waits = SOON_WAITS;
+          const show = () => {
+            if (connRef.current !== connectionId || onTabRef.current) return;
+            if (hasPendingUndo() || liveOffer()) {
+              if (waits-- > 0) window.setTimeout(show, SOON_WAIT_MS);
+              return;
+            }
+            showOfferToast(message, "Show health", undefined, { run: () => showRef.current(), mouseOnly: true });
+          };
+          show();
         },
-        () => {},
+        () => {
+          inFlight.current = null;
+        },
       );
     }, SOON_DELAY_MS);
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-    };
+    return () => window.clearTimeout(timer);
   }, [windowId, connectionId, ready]);
 }
 
@@ -152,7 +209,11 @@ export function HealthBar({ model }: { model: HealthModel }) {
         </span>
       )}
       <span className="sessions-gap" />
-      {error && <span className="health-error-word">Couldn't read health</span>}
+      {error && (
+        <span className="health-error-word" data-health-error title={error}>
+          {error}
+        </span>
+      )}
       <button
         type="button"
         className="sessions-addchip"
@@ -236,6 +297,7 @@ export function HealthBody({ model }: { model: HealthModel }) {
     <div
       className="health-scroll"
       data-health-body
+      tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === "Escape" && picked) {
           e.preventDefault();
@@ -261,9 +323,12 @@ export function HealthBody({ model }: { model: HealthModel }) {
                 className="health-card"
                 data-health-check={c.check}
                 data-health-picked={on ? "" : undefined}
+                aria-pressed={on}
                 onClick={() => pick(on ? null : { kind: "check", check: c.check })}
               >
-                <span className={`health-sev ${c.severity}`}>{SEVERITY_LABEL[c.severity]}</span>
+                <span className={`health-sev ${c.severity}`} title={SEVERITY_HINT[c.severity]}>
+                  {SEVERITY_LABEL[c.severity]}
+                </span>
                 <span className="health-card-text">
                   <span className="health-card-title">{text.title}</span>
                   <span className="health-card-line">{text.line}</span>
@@ -297,13 +362,22 @@ export function HealthBody({ model }: { model: HealthModel }) {
                 </thead>
                 <tbody>
                   {slow.queries.map((q, i) => {
-                    const on = picked?.kind === "query" && picked.index === i;
+                    const on = picked?.kind === "query" && picked.query === q.query && picked.user === q.user;
+                    const toggle = () => pick(on ? null : { kind: "query", query: q.query, user: q.user });
                     return (
                       <tr
                         key={i}
                         data-health-query={i}
                         data-session-picked={on ? "" : undefined}
-                        onClick={() => pick(on ? null : { kind: "query", index: i })}
+                        tabIndex={0}
+                        aria-selected={on}
+                        onClick={toggle}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            toggle();
+                          }
+                        }}
                       >
                         <td className="wide query" title={q.query}>
                           {oneLine(q.query)}
@@ -311,7 +385,7 @@ export function HealthBody({ model }: { model: HealthModel }) {
                         <td className="num">{formatQueryMs(q.mean_ms)}</td>
                         <td className="num">{formatRowCount(q.calls)}</td>
                         <td>
-                          <span className="health-bar" aria-label={percent(q.share)} title={percent(q.share)}>
+                          <span className="health-bar" role="img" aria-label={percent(q.share)} title={percent(q.share)}>
                             <i style={{ width: `${Math.max(2, Math.round(q.share * 100))}%` }} />
                           </span>
                         </td>
@@ -336,7 +410,7 @@ export function HealthBody({ model }: { model: HealthModel }) {
             </p>
           )}
           {slow.state === "ranked" && slow.partial && (
-            <p className="health-quiet">Only your login's queries: other logins' need pg_monitor.</p>
+            <p className="health-quiet">These are only your login's queries. Seeing every login's needs pg_monitor.</p>
           )}
         </>
       )}
@@ -360,7 +434,7 @@ export function HealthBody({ model }: { model: HealthModel }) {
             {unchecked.map((c) => (
               <li key={c.check} data-health-unchecked-check={c.check}>
                 {CHECK_NAME[c.check]}:{" "}
-                {c.state === "needs_role" ? `needs ${c.role}` : c.state === "unavailable" ? c.message : ""}
+                {c.state === "needs_role" ? `your login needs ${c.role}` : c.state === "unavailable" ? c.message : ""}
               </li>
             ))}
           </ul>
@@ -405,7 +479,7 @@ export function HealthDetail({
           {steps.map((s) => (
             <div key={s.where} className="health-step">
               <span className="health-step-where">{s.where}</span>
-              {s.how.endsWith(";") ? <Sql sql={s.how} /> : <span className="health-step-how">{s.how}</span>}
+              {s.sql ? <Sql sql={s.how} /> : <span className="health-step-how">{s.how}</span>}
             </div>
           ))}
         </div>
@@ -425,8 +499,7 @@ export function HealthDetail({
   }
 
   if (picked.kind === "query") {
-    const q: SlowQuery | undefined =
-      report.slow_queries.state === "ranked" ? report.slow_queries.queries[picked.index] : undefined;
+    const q = pickedQuery(report, picked);
     if (!q) return null;
     return (
       <>
@@ -512,7 +585,7 @@ export function HealthDetail({
             type="button"
             className="insp-btn"
             data-health-open
-            onClick={() => onOpenSql(sql, `Fix ${CHECK_NAME[check.check].toLowerCase()}`)}
+            onClick={() => onOpenSql(sql, FIX_TITLE[check.check])}
           >
             Open in query tab
           </button>

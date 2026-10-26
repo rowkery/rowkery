@@ -3651,8 +3651,12 @@ export function Workspace({
     `${activeId ?? ""}\u0000${session.database ?? ""}`,
   );
   // Only Postgres has "Soon" checks; SQLite would walk its pages for nothing.
-  useSoonToast(windowId, activeId, active && connected && !busy && activeConnection?.kind === "postgres", () =>
-    showHealthRef.current(),
+  useSoonToast(
+    windowId,
+    activeId,
+    active && connected && !busy && activeConnection?.kind === "postgres",
+    active && isHealthTab,
+    () => showHealthRef.current(),
   );
   const tabLabels = useMemo(() => tabs.map((t) => ({ id: t.id, title: t.title })), [tabs]);
   const running = runStartedAt !== null;
