@@ -19,6 +19,9 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip via tauri-plugin-updater, Windows only: unpacks an update only after its signature checks; no updater release uses zip >= 9 yet" },
     { id = "RUSTSEC-2026-0368", reason = "zip via tauri-plugin-updater, as RUSTSEC-2026-0367" },
     { id = "RUSTSEC-2026-0369", reason = "zip via tauri-plugin-updater, as RUSTSEC-2026-0367" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained (merged into zbus 6): D-Bus under tauri-plugin-notification, Linux only; no notify-rust release uses zbus 6 yet" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, as RUSTSEC-2026-0370" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained: a build-time macro under Tauri's Linux GTK stack" },
 ]
 
