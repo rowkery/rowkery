@@ -54,6 +54,30 @@ fn in_front(window: &WebviewWindow) -> bool {
     window.is_focused().unwrap_or(true)
 }
 
+/// TEMP diagnostics for the Mac test (removed before merge): one line per
+/// step in `done-notify.log` beside config.json.
+fn trace(line: &str) {
+    use std::io::Write;
+    let path = rowkery_core::config::config_dir().join("done-notify.log");
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{at} {line}");
+    }
+}
+
+/// TEMP: the page's side of the trace.
+#[tauri::command]
+pub fn notify_trace(line: String) {
+    trace(&format!("page: {line}"));
+}
+
 /// Shows the banner unless Rowkery is in front. A sync command: it runs on
 /// the main thread, as AppKit wants.
 #[tauri::command]
@@ -64,7 +88,13 @@ pub fn notify_done(
     body: String,
     target: Target,
 ) {
-    if in_front(&window) {
+    let front = in_front(&window);
+    trace(&format!(
+        "notify_done: in_front={front} focused={:?} main_thread={} title={title:?}",
+        window.is_focused(),
+        std::thread::current().name() == Some("main"),
+    ));
+    if front {
         return;
     }
     let shown = window
@@ -74,6 +104,7 @@ pub fn notify_done(
         .title(title)
         .body(body)
         .show();
+    trace(&format!("show: {:?}", shown.as_ref().map(|_| ())));
     if let Err(e) = shown {
         eprintln!("notification: {e}");
         return;
@@ -98,6 +129,7 @@ pub fn came_back<R: Runtime>(app: &AppHandle<R>) {
 pub fn listen<R: Runtime>(app: &AppHandle<R>) {
     let handle = app.clone();
     let _ = app.notification().on_action(move |performed| {
+        trace(&format!("action: {}", performed.action_id()));
         if performed.action_id() != "tap" {
             return;
         }

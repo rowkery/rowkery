@@ -2336,6 +2336,7 @@ pub fn run(mut timings: Timings) {
             updates::restart_to_update,
             open_link::take_open_link,
             done_notify::notify_done,
+            done_notify::notify_trace,
         ])
         .build(context)
         .expect("error while building tauri application")

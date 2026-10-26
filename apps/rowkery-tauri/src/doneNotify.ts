@@ -138,6 +138,11 @@ export function proposalBanner(
  * The shell drops it while Rowkery is in front.
  */
 export function notifyDone(banner: DoneBanner, ms: number | null) {
+  // TEMP diagnostics for the Mac test (removed before merge).
+  if ("__TAURI_INTERNALS__" in window)
+    void invoke("notify_trace", {
+      line: `${banner.title} ms=${ms === null ? "-" : Math.round(ms)} visible=${document.visibilityState} focus=${document.hasFocus()}`,
+    }).catch(() => {});
   if (ms !== null && ms < NOTIFY_AFTER_MS) return;
   if (!("__TAURI_INTERNALS__" in window)) return;
   void invoke("notify_done", { ...banner }).catch(() => {});
