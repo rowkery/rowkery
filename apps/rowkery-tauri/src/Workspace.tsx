@@ -1556,12 +1556,13 @@ export function Workspace({
     const place = placeRef.current;
     closeWhenDoneRef.current = false;
     // A long import's banner, when Rowkery isn't in front: back to the import tab.
+    // A failure keeps its import tab; a finished import's tab closes (the table's opens).
     const connectionName = activeConnection?.name ?? "";
     const importTabId = tabsRef.current.find((t) => t.kind === "import")?.id;
     const notifyImport = (rows: number, failed: boolean) => {
       const ms = Date.now() - startedAt;
       const job = { connection: connectionName, ms, rows, table: cur.table, failed };
-      notifyDone(importBanner(job, { windowId, tabId: importTabId }), ms);
+      notifyDone(importBanner(job, failed ? { windowId, tabId: importTabId } : { windowId }), ms);
     };
     setCsvImport({ ...cur, run: { rows: 0, startedAt }, error: null });
     const onRun = (patch: (c: NonNullable<typeof cur>) => Partial<NonNullable<typeof cur>>) =>
@@ -2399,8 +2400,10 @@ export function Workspace({
       patchRun(tabId, { error: e instanceof Error ? e.message : String(e) });
     } finally {
       // A statement of a run of several reports with its run (`runStatements`);
-      // table browses and Load more never do.
-      if (ended && end !== "cancelled" && !part && !browse && !paging && !tableRun) {
+      // table browses and Load more never do, nor a run the user stopped
+      // (a Force stop ends it as an error).
+      const stopped = runsRef.current[tabId]?.cancelling;
+      if (ended && end !== "cancelled" && !stopped && !part && !browse && !paging && !tableRun) {
         const ms = performance.now() - started;
         notifyRun(tabId, connectionName, ms, { rows: ended.rows, failed: end === "error" });
       }
@@ -2450,7 +2453,7 @@ export function Workspace({
       // onRun refuses while the tab shows a run: wait for the render that ends this one.
       while (runsRef.current[tabId]?.startedAt != null) await new Promise((r) => setTimeout(r, 16));
     }
-    if (end === "done" || end === "error") {
+    if (end === "done" || (end === "error" && !runsRef.current[tabId]?.cancelling)) {
       const ms = performance.now() - started;
       notifyRun(tabId, connectionName, ms, { rows: null, statements: ran, failed: end === "error" });
     }

@@ -33,6 +33,9 @@ describe("done banners", () => {
     expect(sqlFileBanner({ connection: "c", file: "seed.sql", ms: 30_000, statements: 1, failed: true, line: 1204 }, at).body).toBe(
       "seed.sql · stopped at line 1,204 after 30.0 s",
     );
+    expect(sqlFileBanner({ connection: "c", file: "seed.sql", ms: 30_000, statements: 9, errors: 2, failed: false }, at).body).toBe(
+      "seed.sql · 9 statements, 2 failed in 30.0 s",
+    );
     expect(exportBanner({ connection: "c", tab: "Q", ms: 12_000, rows: 1, copy: false, file: "r.csv", failed: false }, at).body).toBe(
       "Q · 1 row to r.csv in 12.0 s",
     );

@@ -106,7 +106,15 @@ export function SqlFilePanel({
     const notifyEnded = (report: SqlFileReport) => {
       const ms = Date.now() - started;
       const failed = !!report.failed || !!report.unknown;
-      const job = { connection: connectionName, file: fileName(path), ms, statements: report.done, failed, line: report.failed?.line };
+      const job = {
+        connection: connectionName,
+        file: fileName(path),
+        ms,
+        statements: report.done,
+        errors: report.errors,
+        failed,
+        line: report.failed?.line,
+      };
       notifyDone(sqlFileBanner(job, { windowId }), ms);
     };
     setNow(started);

@@ -828,15 +828,22 @@ function App() {
   useEffect(() => {
     if (!anyShared && !agentsOn) return;
     let stopped = false;
+    // Proposals read while hidden: their toast shows once the window does.
+    let unseen: Proposal[] = [];
     const tick = async () => {
       // Hidden, only proposals are read: one may be worth a banner.
       if (document.visibilityState !== "visible") {
-        notifyProposals(await pollProposals());
+        const arrived = await pollProposals();
+        if (stopped) return;
+        notifyProposals(arrived);
+        unseen = [...unseen, ...arrived];
         return;
       }
-      const [fresh, proposed] = await Promise.all([pollMcp(), pollProposals()]);
+      const [fresh, arrived] = await Promise.all([pollMcp(), pollProposals()]);
       if (stopped) return;
-      notifyProposals(proposed);
+      notifyProposals(arrived);
+      const proposed = [...unseen, ...arrived];
+      unseen = [];
       // A proposed change: a toast whose Review opens it, unless it's open.
       const latest = proposed[proposed.length - 1];
       if (latest && !agentsRef.current && !hasPendingUndo() && !liveOffer()) {
@@ -992,12 +999,14 @@ function App() {
     if (target.proposal) {
       setPopover(null);
       setPaletteOpen(false);
+      setShortcutsOpen(false);
       setSettings(null);
       return setAgents({ initial: "proposals", proposal: target.proposal });
     }
     if (!target.windowId || !windowsRef.current.some((w) => w.id === target.windowId)) return;
     setPopover(null);
     setPaletteOpen(false);
+    setShortcutsOpen(false);
     setSettings(null);
     setAgents(null);
     switchWindow(target.windowId);

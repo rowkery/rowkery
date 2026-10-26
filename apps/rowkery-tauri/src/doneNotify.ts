@@ -66,24 +66,29 @@ export function queryBanner(job: QueryJob, target: DoneTarget): DoneBanner {
 
 /** "Import finished · shop-stg" / "120,000 rows into orders in 2:41". */
 export function importBanner(
-  job: { connection: string; ms: number; rows: number; table: string | null; failed: boolean; line?: number | null },
+  job: { connection: string; ms: number; rows: number; table: string | null; failed: boolean },
   target: DoneTarget,
 ): DoneBanner {
   const into = job.table ? ` into ${job.table}` : "";
   return {
     title: `Import ${job.failed ? "failed" : "finished"} · ${job.connection}`,
-    body: job.failed
-      ? job.line != null
-        ? `Stopped at line ${job.line.toLocaleString("en-US")} after ${bannerTime(job.ms)}`
-        : `Stopped after ${bannerTime(job.ms)}`
-      : `${rows(job.rows)}${into} in ${bannerTime(job.ms)}`,
+    body: job.failed ? `Stopped after ${bannerTime(job.ms)}` : `${rows(job.rows)}${into} in ${bannerTime(job.ms)}`,
     target,
   };
 }
 
 /** "SQL file finished · shop-stg" / "seed.sql · 1,204 statements in 3:07". */
 export function sqlFileBanner(
-  job: { connection: string; file: string; ms: number; statements: number; failed: boolean; line?: number | null },
+  job: {
+    connection: string;
+    file: string;
+    ms: number;
+    statements: number;
+    /** Keep going: the statements that failed along the way (a count, never their text). */
+    errors?: number;
+    failed: boolean;
+    line?: number | null;
+  },
   target: DoneTarget,
 ): DoneBanner {
   const time = bannerTime(job.ms);
@@ -94,7 +99,9 @@ export function sqlFileBanner(
       ? job.line != null
         ? `${job.file} · stopped at line ${job.line.toLocaleString("en-US")} after ${time}`
         : `${job.file} · stopped after ${time}`
-      : `${job.file} · ${n.toLocaleString("en-US")} ${n === 1 ? "statement" : "statements"} in ${time}`,
+      : `${job.file} · ${n.toLocaleString("en-US")} ${n === 1 ? "statement" : "statements"}${
+          job.errors ? `, ${job.errors.toLocaleString("en-US")} failed` : ""
+        } in ${time}`,
     target,
   };
 }

@@ -4680,6 +4680,8 @@ name = "rowkery-tauri"
 version = "0.3.0"
 dependencies = [
  "indexmap 2.14.2",
+ "objc2",
+ "objc2-app-kit",
  "rowkery-bridge",
  "rowkery-core",
  "rowkery-mcp",

@@ -2188,7 +2188,7 @@ pub fn run(mut timings: Timings) {
         .manage(done_notify::Away::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
-                done_notify::came_back(window);
+                done_notify::came_back(window.app_handle());
             }
             // The one window closing quits the app: ask first when that
             // would lose work.
@@ -2346,6 +2346,11 @@ pub fn run(mut timings: Timings) {
                 for url in urls {
                     open_link::opened(app, url.as_str());
                 }
+            }
+            // A click on the Dock icon brings back a minimized window unfocused.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                done_notify::came_back(app);
             }
             // UI state written in the last 500 ms is still in the writer.
             if let tauri::RunEvent::Exit = event {
