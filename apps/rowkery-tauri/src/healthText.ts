@@ -19,9 +19,18 @@ export const SEVERITY_LABEL: Record<HealthSeverity, string> = {
   tidy: "Tidy",
 };
 
+/** The tag's tooltip: what the word means. */
+export const SEVERITY_HINT: Record<HealthSeverity, string> = {
+  soon: "Will break if nothing changes",
+  waste: "Costs disk and writes",
+  slow: "Makes queries slower",
+  upkeep: "Maintenance is behind",
+  tidy: "Worth cleaning up",
+};
+
 /** What a check is called where it couldn't run ("Slowest queries need pg_monitor"). */
 export const CHECK_NAME: Record<HealthCheckKind, string> = {
-  ids_running_out: "Ids running out",
+  ids_running_out: "IDs running out",
   transaction_age: "Transaction age",
   replication_slots: "Replication slots",
   unused_indexes: "Unused indexes",
@@ -51,6 +60,20 @@ export const CHECK_WHY: Record<HealthCheckKind, string> = {
   free_pages: "The file keeps the space of deleted rows until it is vacuumed.",
 };
 
+/** The query tab a fix opens in. */
+export const FIX_TITLE: Record<HealthCheckKind, string> = {
+  ids_running_out: "Widen IDs",
+  transaction_age: "Freeze old tables",
+  replication_slots: "Drop replication slot",
+  unused_indexes: "Drop unused indexes",
+  duplicate_indexes: "Drop repeated indexes",
+  foreign_keys_without_index: "Index foreign keys",
+  dead_rows: "Vacuum tables",
+  never_analyzed: "Analyze tables",
+  long_transactions: "End idle transactions",
+  free_pages: "Vacuum the file",
+};
+
 /** What the fix does that isn't obvious from the SQL. */
 export const FIX_NOTE: Partial<Record<HealthCheckKind, string>> = {
   ids_running_out:
@@ -65,7 +88,7 @@ export const FIX_NOTE: Partial<Record<HealthCheckKind, string>> = {
 export function fineLabel(check: HealthCheckKind, report: HealthReport): string {
   switch (check) {
     case "ids_running_out":
-      return "No id is close to running out";
+      return "No ID is close to running out";
     case "transaction_age":
       return report.transaction_age === null
         ? "Transaction age is fine"
@@ -83,7 +106,7 @@ export function fineLabel(check: HealthCheckKind, report: HealthReport): string 
     case "never_analyzed":
       return "Every large table is analyzed";
     case "long_transactions":
-      return "No idle transactions over 5 min";
+      return "No idle transactions over 5 minutes";
     case "free_pages":
       return "Little free space in the file";
   }
@@ -95,9 +118,9 @@ export function percent(share: number): string {
   return p > 0 && p < 1 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`;
 }
 
-/** 2_147_483_647 → "2.1 B"; 84_000 → "84k". */
+/** 1_700_000_000 → "1.7 billion"; 84_000 → "84k". */
 export function formatCount(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(n >= 10_000_000_000 ? 0 : 2)} B`;
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(n >= 10_000_000_000 ? 0 : 1)} billion`;
   return formatRowCount(n);
 }
 
@@ -187,6 +210,7 @@ export interface FindingText {
 export function findingText(check: HealthCheck & { state: "found" }, report: HealthReport): FindingText {
   const items = check.items;
   const n = items.length;
+  if (!n) return { title: CHECK_NAME[check.check], line: "", weight: "" };
   const one = n === 1 ? items[0] : null;
   const since = report.stats_since === null ? "since the statistics began" : `since ${formatDate(report.stats_since)}`;
   switch (check.check) {
@@ -199,7 +223,7 @@ export function findingText(check: HealthCheck & { state: "found" }, report: Hea
           ? when
             ? `${itemLabel(one)} runs out of numbers in ${when}`
             : `${itemLabel(one)} has used ${percent(d.used / d.max)} of its numbers`
-          : `${n} ids are running out of numbers`,
+          : `${n} IDs are running out of numbers`,
         line: `${d.type_name} column · ${percent(d.used / d.max)} of ${d.max.toLocaleString("en-US")} used`,
         weight: formatCount(d.used),
       };
@@ -337,14 +361,15 @@ export function formatQueryMs(ms: number): string {
  * Amazon RDS and Google Cloud SQL, which load it already; a server of your
  * own may need it loaded first. `loaded` says the server loads it for sure.
  */
-export function pgssSteps(loaded: boolean): { where: string; how: string }[] {
-  const create = { where: "In this database", how: "CREATE EXTENSION pg_stat_statements;" };
+export function pgssSteps(loaded: boolean): { where: string; how: string; sql: boolean }[] {
+  const create = { where: "In this database", how: "CREATE EXTENSION pg_stat_statements;", sql: true };
   if (loaded) return [create];
   return [
     create,
     {
       where: "If Postgres says it isn't loaded",
       how: "Add pg_stat_statements to shared_preload_libraries (postgresql.conf, or the RDS parameter group) and restart the server.",
+      sql: false,
     },
   ];
 }

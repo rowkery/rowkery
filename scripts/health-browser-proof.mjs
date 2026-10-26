@@ -176,7 +176,7 @@ const unusedText = await page.textContent(`${ws} [data-health-check="unused_inde
 check(/3 indexes nobody has used since/.test(unusedText) && /4\.1 GB/.test(unusedText), "the unused card counts them and weighs them");
 check((await page.$$(`${ws} [data-health-query]`)).length === 3, "three slow queries");
 check(/Transaction age 12% of the limit/.test(await page.textContent(`${ws} [data-health-fine]`)), "Fine lists transaction age");
-check(/Idle transactions: needs pg_monitor/.test(await page.textContent(`${ws} [data-health-unchecked]`)), "a check the login can't see says needs pg_monitor");
+check(/Idle transactions: your login needs pg_monitor/.test(await page.textContent(`${ws} [data-health-unchecked]`)), "a check the login can't see says it needs pg_monitor");
 check(!(await page.$(`${ws} [data-testid="run-btn"]`)), "no Run on the Health tab");
 await away();
 await page.screenshot({ path: `${OUT}/2-health-light.png` });
@@ -190,7 +190,7 @@ check(/Usage counts come from this server only/.test(await page.textContent(`${w
 check((await page.$$eval(`${ws} [data-health-sql]`, (els) => els[0].textContent)).split("\n").length === 3, "the fix has one line per index");
 await page.screenshot({ path: `${OUT}/3-finding.png` });
 await page.click(`${ws} [data-health-open]`);
-await page.waitForSelector(`${ws} [data-testid="query-tab"][data-title="Fix unused indexes"][data-on]`);
+await page.waitForSelector(`${ws} [data-testid="query-tab"][data-title="Drop unused indexes"][data-on]`);
 const sql = await page.inputValue(`${ws} textarea[data-testid="sql-editor"]`).catch(() => page.textContent(`${ws} [data-testid="sql-editor"]`));
 check(/DROP INDEX CONCURRENTLY public\.orders_status_idx;/.test(sql), "Open in query tab puts the fix in a new query tab");
 const ran = await page.evaluate(() => window.__CALLS__.some(([c]) => /run|query/.test(c) && c !== "database_health"));
@@ -203,16 +203,30 @@ await page.waitForSelector(`${ws} [data-health-check]`);
 await page.waitForTimeout(1500);
 check((await reads()) === before, "coming back to the tab doesn't read again");
 await page.click(`${ws} [data-health-refresh]`);
-await page.waitForFunction((n) => window.__CALLS__.filter(([c]) => c === "database_health").length === n + 1, before);
-check(true, "Refresh reads once more");
+await page.waitForSelector(`${ws} [data-health-refresh]:not([disabled])`);
+await page.waitForTimeout(300);
+check((await reads()) === before + 1, "Refresh reads once more, and only once");
 
-// 5. A slow query, then pg_stat_statements off.
-await page.click(`${ws} [data-health-query="0"]`);
+// 5. A slow query from the keyboard, kept across a Refresh; gone with pg_stat_statements off.
+await page.focus(`${ws} [data-health-query="0"]`);
+await page.keyboard.press("Enter");
 await page.waitForSelector(`${ws} [data-health-detail="query"]`);
-check(/62% of query time/.test(await page.textContent(`${ws} [data-inspector="health"]`)), "a slow query shows its share");
+check(/62% of query time/.test(await page.textContent(`${ws} [data-inspector="health"]`)), "↵ on a slow query shows its share");
+await page.click(`${ws} [data-health-refresh]`);
+await page.waitForSelector(`${ws} [data-health-refresh]:not([disabled])`);
+check(/62% of query time/.test(await page.textContent(`${ws} [data-inspector="health"]`)), "Refresh keeps the picked query");
+await page.focus(`${ws} [data-health-body]`);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
+check(!(await page.$(`${ws} [data-inspector="health"]`)), "Esc closes the inspector");
+await page.focus(`${ws} [data-health-query="0"]`);
+await page.keyboard.press(" ");
+await page.waitForSelector(`${ws} [data-health-detail="query"]`);
 await page.evaluate(() => (window.__PGSS__ = "off"));
 await page.click(`${ws} [data-health-refresh]`);
 await page.waitForSelector(`${ws} [data-health-pgss-off]`);
+await page.waitForTimeout(200);
+check(!(await page.$(`${ws} [data-inspector="health"]`)), "a query gone after Refresh closes the inspector instead of leaving it empty");
 await page.click(`${ws} [data-health-pgss-how]`);
 await page.waitForSelector(`${ws} [data-health-detail="pgss"]`);
 const steps = await page.textContent(`${ws} [data-health-detail="pgss"]`);

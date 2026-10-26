@@ -69,7 +69,7 @@ describe("findings", () => {
     const t = findingText(ids as HealthCheck & { state: "found" }, report([ids]));
     expect(t.title).toBe("orders.id runs out of numbers in about 5 weeks");
     expect(t.line).toBe("integer column · 81% of 2,147,483,647 used");
-    expect(t.weight).toBe("1.74 B");
+    expect(t.weight).toBe("1.7 billion");
   });
 
   test("without a pace an id says how much is used", () => {
@@ -128,7 +128,7 @@ describe("the once-a-day toast", () => {
 describe("words", () => {
   test("fine lines", () => {
     expect(fineLabel("transaction_age", report([]))).toBe("Transaction age 12% of the limit");
-    expect(fineLabel("long_transactions", report([]))).toBe("No idle transactions over 5 min");
+    expect(fineLabel("long_transactions", report([]))).toBe("No idle transactions over 5 minutes");
   });
 
   test("percent and days", () => {
