@@ -1110,3 +1110,88 @@ export function cancelSqlFile(windowId: string): Promise<void> {
 export function forgetSqlFile(windowId: string): Promise<void> {
   return invoke("forget_sql_file", { windowId });
 }
+
+/** Database health (`rowkery_core::health`), for the Health tab. */
+export type HealthCheckKind =
+  | "ids_running_out"
+  | "transaction_age"
+  | "replication_slots"
+  | "unused_indexes"
+  | "duplicate_indexes"
+  | "foreign_keys_without_index"
+  | "dead_rows"
+  | "never_analyzed"
+  | "long_transactions"
+  | "free_pages";
+
+export type HealthSeverity = "soon" | "waste" | "slow" | "upkeep" | "tidy";
+
+export type HealthDetail =
+  | { kind: "ids_running_out"; type_name: string; used: number; max: number; days_left: number | null }
+  | { kind: "transaction_age"; age: number; limit: number }
+  | { kind: "replication_slot"; slot_type: string; wal_bytes: number }
+  | { kind: "unused_index" }
+  | { kind: "duplicate_index"; covered_by: string }
+  | { kind: "foreign_key_without_index"; constraint: string; columns: string[]; references: string; rows: number | null }
+  | { kind: "dead_rows"; dead: number; live: number; vacuumed_secs_ago: number | null }
+  | { kind: "never_analyzed"; rows: number | null }
+  | { kind: "long_transaction"; pid: number; user: string | null; idle_secs: number; xact_secs: number | null }
+  | { kind: "free_pages"; free_bytes: number; file_bytes: number };
+
+export interface HealthItem {
+  schema: string | null;
+  table: string | null;
+  name: string | null;
+  bytes: number | null;
+  detail: HealthDetail;
+  /** SQL that fixes it; Health never runs it. */
+  fix: string | null;
+}
+
+export type HealthCheck = {
+  check: HealthCheckKind;
+  severity: HealthSeverity;
+  /** How far to trust what it found. */
+  trust: string;
+} & (
+  | { state: "fine" }
+  | { state: "found"; items: HealthItem[] }
+  | { state: "needs_role"; role: string }
+  | { state: "unavailable"; message: string }
+);
+
+export interface SlowQuery {
+  query: string;
+  user: string | null;
+  calls: number;
+  total_ms: number;
+  mean_ms: number;
+  rows: number;
+  /** Share of the database's query time, 0 to 1. */
+  share: number;
+}
+
+export type SlowQueries =
+  | { state: "ranked"; queries: SlowQuery[]; partial: boolean }
+  | { state: "off"; loaded: boolean }
+  | { state: "needs_role"; role: string }
+  | { state: "unavailable"; message: string }
+  | { state: "none" };
+
+export interface HealthReport {
+  database: string;
+  server: string;
+  size: { total_bytes: number; table_bytes: number | null; index_bytes: number | null } | null;
+  cache_hit: number | null;
+  connections: { used: number; max: number; active: number } | null;
+  /** Unix seconds. */
+  stats_since: number | null;
+  transaction_age: number | null;
+  checks: HealthCheck[];
+  slow_queries: SlowQueries;
+}
+
+/** One read of the window's database health (catalog and statistics only). */
+export async function databaseHealth(windowId: string): Promise<HealthReport> {
+  return invoke("database_health", { windowId });
+}

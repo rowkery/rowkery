@@ -2,7 +2,7 @@ import { readKey, writeKey } from "./persist";
 
 /** A query or table tab as saved: everything but its results. */
 export interface SavedTab {
-  kind: "query" | "table" | "sessions";
+  kind: "query" | "table" | "sessions" | "health";
   title: string;
   sql: string;
   view?: "data" | "structure" | "map";
@@ -40,7 +40,7 @@ function savedTabs(raw: unknown): SavedTab[] | undefined {
     (t): t is SavedTab =>
       !!t &&
       typeof t === "object" &&
-      (t.kind === "query" || t.kind === "table" || t.kind === "sessions") &&
+      (t.kind === "query" || t.kind === "table" || t.kind === "sessions" || t.kind === "health") &&
       typeof t.title === "string" &&
       typeof t.sql === "string",
   );

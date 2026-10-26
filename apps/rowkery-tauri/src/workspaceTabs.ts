@@ -25,9 +25,10 @@ export interface QueryTab {
   id: number;
   /**
    * "sessions": the server's sessions (SessionsView.tsx), Postgres only.
+   * "health": the database's health (HealthView.tsx).
    * "import": Import CSV's preview, beside its panel; never saved.
    */
-  kind: "query" | "table" | "sessions" | "import";
+  kind: "query" | "table" | "sessions" | "health" | "import";
   title: string;
   sql: string;
   view?: ResultsView;
