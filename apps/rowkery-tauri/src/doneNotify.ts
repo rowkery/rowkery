@@ -81,15 +81,32 @@ export function importBanner(
   };
 }
 
-/** "Export finished · shop-prd" / "Monthly revenue · 37 rows to revenue.csv in 12.0 s". */
-export function exportBanner(
-  job: { connection: string; tab: string; ms: number; rows: number; file: string | null; failed: boolean },
+/** "SQL file finished · shop-stg" / "seed.sql · 1,204 statements in 3:07". */
+export function sqlFileBanner(
+  job: { connection: string; file: string; ms: number; statements: number; failed: boolean; line?: number | null },
   target: DoneTarget,
 ): DoneBanner {
-  const verb = job.file === null ? "Copy" : "Export";
-  const where = job.file === null ? " on the clipboard" : ` to ${job.file}`;
+  const time = bannerTime(job.ms);
+  const n = job.statements;
   return {
-    title: `${verb} ${job.failed ? "failed" : "finished"} · ${job.connection}`,
+    title: `SQL file ${job.failed ? "failed" : "finished"} · ${job.connection}`,
+    body: job.failed
+      ? job.line != null
+        ? `${job.file} · stopped at line ${job.line.toLocaleString("en-US")} after ${time}`
+        : `${job.file} · stopped after ${time}`
+      : `${job.file} · ${n.toLocaleString("en-US")} ${n === 1 ? "statement" : "statements"} in ${time}`,
+    target,
+  };
+}
+
+/** "Export finished · shop-prd" / "Monthly revenue · 37 rows to revenue.csv in 12.0 s". */
+export function exportBanner(
+  job: { connection: string; tab: string; ms: number; rows: number; copy: boolean; file?: string; failed: boolean },
+  target: DoneTarget,
+): DoneBanner {
+  const where = job.copy ? " on the clipboard" : job.file ? ` to ${job.file}` : "";
+  return {
+    title: `${job.copy ? "Copy" : "Export"} ${job.failed ? "failed" : "finished"} · ${job.connection}`,
     body: job.failed
       ? `${job.tab} · stopped after ${bannerTime(job.ms)}`
       : `${job.tab} · ${rows(job.rows)}${where} in ${bannerTime(job.ms)}`,
@@ -97,14 +114,16 @@ export function exportBanner(
   };
 }
 
-/** "Change to review · shop-prd" / "Claude Code wants to change orders". */
-export function proposalBanner(job: { connection: string; client: string; table: string | null; count: number }, id: string): DoneBanner {
-  const what = job.count > 1 ? `${job.count} changes` : job.table ? `to change ${job.table}` : "a change";
-  return {
-    title: `${job.count > 1 ? "Changes" : "Change"} to review · ${job.connection}`,
-    body: job.count > 1 ? `${job.client} proposed ${what}` : `${job.client} wants ${what}`,
-    target: { proposal: id },
-  };
+/** "Change to review · shop-prd" / "Claude Code wants to change 29 rows in orders". */
+export function proposalBanner(
+  job: { connection: string; client: string; table: string | null; rows?: number; count: number },
+  id: string,
+): DoneBanner {
+  let body: string;
+  if (job.count > 1) body = `${job.client} proposed ${job.count} changes`;
+  else if (job.table) body = `${job.client} wants to change ${job.rows != null ? `${rows(job.rows)} in ` : ""}${job.table}`;
+  else body = `${job.client} wants to make a change`;
+  return { title: `${job.count > 1 ? "Changes" : "Change"} to review · ${job.connection}`, body, target: { proposal: id } };
 }
 
 /**

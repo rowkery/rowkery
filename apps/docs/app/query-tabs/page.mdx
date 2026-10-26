@@ -53,6 +53,10 @@ After you cancel, the header reads **Cancelling** and the button becomes **Force
 
 **Stop all queries** (in the **Query** menu, the editor's **…** menu and <kbd>⌘K</kbd>) stops every running query in every window without waiting for the servers. Use it when a query is stuck and Cancel doesn't help.
 
+## When a long job is done
+
+If a query, Run all, Explain with timings, Import CSV, Run SQL file, Export or Copy all takes 10 seconds or more and finishes while you're in another app, macOS shows a banner such as **Query finished · shop-prd** with the tab, the rows and the time. A change your agent proposes gets one too, at any time. Click the banner to go back to that window and tab. Rowkery's dock icon counts what finished while you were away, and clears when you come back. Banners never show the SQL, values or error text, since they can appear on the lock screen. A query you cancel yourself stays quiet. To turn them off, or change their style and sound, go to System Settings › Notifications › Rowkery.
+
 ## Each tab has its own session
 
 On Postgres, each query tab runs on its own server session and keeps it between runs. That means:

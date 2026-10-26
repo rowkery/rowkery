@@ -29,8 +29,8 @@ import { ShortcutsSheet } from "./ShortcutsSheet";
 import { NoticesSheet } from "./NoticesSheet";
 import { AgentSharing } from "./AgentSharing";
 import { AgentsInbox } from "./AgentsInbox";
-import { pollProposals, proposalTable, useProposals } from "./proposals";
-import type { DoneTarget } from "./doneNotify";
+import { pollProposals, proposalTable, useProposals, type Proposal } from "./proposals";
+import { notifyDone, proposalBanner, type DoneTarget } from "./doneNotify";
 import { McpConnectSheet } from "./McpConnectSheet";
 import { clientLabel, mcpShared, mcpStats, mcpTagLive, pollMcp, recentConnections, useMcpEntries, verdictOf } from "./mcpActivity";
 import { useKeymap } from "./keymaps";
@@ -811,13 +811,32 @@ function App() {
   mcpOpenRef.current = agentsOn;
   const agentsRef = useRef(false);
   agentsRef.current = agentsOn;
+  /** New proposals' banner, at any time, when Rowkery isn't in front (the shell checks). */
+  const notifyProposals = (proposed: Proposal[]) => {
+    const latest = proposed[proposed.length - 1];
+    if (!latest) return;
+    const connection = connectionsRef.current.find((c) => c.id === latest.connection)?.name ?? latest.database;
+    const job = {
+      connection,
+      client: clientLabel(latest.client),
+      table: proposalTable(latest.sql),
+      rows: latest.expect_rows,
+      count: proposed.length,
+    };
+    notifyDone(proposalBanner(job, latest.id), null);
+  };
   useEffect(() => {
     if (!anyShared && !agentsOn) return;
     let stopped = false;
     const tick = async () => {
-      if (document.visibilityState !== "visible") return;
+      // Hidden, only proposals are read: one may be worth a banner.
+      if (document.visibilityState !== "visible") {
+        notifyProposals(await pollProposals());
+        return;
+      }
       const [fresh, proposed] = await Promise.all([pollMcp(), pollProposals()]);
       if (stopped) return;
+      notifyProposals(proposed);
       // A proposed change: a toast whose Review opens it, unless it's open.
       const latest = proposed[proposed.length - 1];
       if (latest && !agentsRef.current && !hasPendingUndo() && !liveOffer()) {

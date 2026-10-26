@@ -92,7 +92,7 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
-import { notifyDone, queryBanner, type QueryJob } from "./doneNotify";
+import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } from "./doneNotify";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { forgetTabTitles, noteTabTitles } from "./openTransactions";
@@ -1555,12 +1555,21 @@ export function Workspace({
     const startedAt = Date.now();
     const place = placeRef.current;
     closeWhenDoneRef.current = false;
+    // A long import's banner, when Rowkery isn't in front: back to the import tab.
+    const connectionName = activeConnection?.name ?? "";
+    const importTabId = tabsRef.current.find((t) => t.kind === "import")?.id;
+    const notifyImport = (rows: number, failed: boolean) => {
+      const ms = Date.now() - startedAt;
+      const job = { connection: connectionName, ms, rows, table: cur.table, failed };
+      notifyDone(importBanner(job, { windowId, tabId: importTabId }), ms);
+    };
     setCsvImport({ ...cur, run: { rows: 0, startedAt }, error: null });
     const onRun = (patch: (c: NonNullable<typeof cur>) => Partial<NonNullable<typeof cur>>) =>
       setCsvImport((c) => (c && c.tableKey === cur.tableKey ? { ...c, ...patch(c) } : c));
     const onImportTab = () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.kind === "import";
     /** A failure keeps the panel with the message; off its tab, a toast says so too. */
     const failed = (message: string, toast = "Import failed · nothing was written", detail = message) => {
+      notifyImport(0, true);
       if (closeWhenDoneRef.current) setCsvImport(null);
       else onRun(() => ({ run: null, error: message }));
       if (!onImportTab() || closeWhenDoneRef.current) showToast(toast, detail, "error");
@@ -1586,6 +1595,7 @@ export function Workspace({
     const fromTab = onImportTab();
     setCsvImport((c) => (c && c.tableKey === cur.tableKey ? null : c));
     if (out.status === "refused") return showToast("Read-only connection · Change safe mode…", undefined, "error");
+    notifyImport(out.inserted + out.updated, false);
     showToast(importedText(out), `${cur.table} · ${formatMs(out.elapsed_ms)}`);
     if (placeRef.current !== place) return;
     // The rows as the table has them now, in its tab.
@@ -3883,8 +3893,20 @@ export function Workspace({
     const tabId = tab.id;
     const verb = kind === "file" ? "Exporting" : "Copying";
     const progress = (rows: number) => patchRun(tabId, { exporting: { verb, rows } });
-    const start = () =>
+    // From the first row written: the save dialog's wait doesn't count.
+    let startedAt = 0;
+    const start = () => {
+      startedAt = performance.now();
       patchRun(tabId, { startedAt: Date.now(), cancelling: false, exporting: { verb, rows: 0 } });
+    };
+    const connectionName = activeConnection.name;
+    /** A long export's banner, when Rowkery isn't in front; a cancel you made stays quiet. */
+    const notifyExport = (rows: number, failed: boolean, file?: string) => {
+      if (!startedAt) return;
+      const ms = performance.now() - startedAt;
+      const job = { connection: connectionName, tab: tab.title, ms, rows, copy: kind !== "file", file, failed };
+      notifyDone(exportBanner(job, { windowId, tabId }), ms);
+    };
     try {
       let done;
       if (kind === "file") {
@@ -3908,12 +3930,14 @@ export function Workspace({
         start();
         done = await copyAllResults(windowId, tabId, sql, kind, progress);
       }
+      if (!done.cancelled) notifyExport(done.rows, !!done.error, done.path?.split(/[\\/]/).pop());
       if (done.cancelled) showToast(kind === "file" ? "Export cancelled" : "Copy cancelled");
       else if (done.error) showToast(kind === "file" ? "Couldn't export" : "Couldn't copy", done.error, "error");
       else if (kind === "file")
         showToast(`Exported ${done.rows.toLocaleString()} ${done.rows === 1 ? "row" : "rows"}`, done.path?.split(/[\\/]/).pop());
       else showToast(`Copied ${done.rows.toLocaleString()} ${done.rows === 1 ? "row" : "rows"}`, kind.toUpperCase());
     } catch (e) {
+      notifyExport(0, true);
       showToast(kind === "file" ? "Couldn't export" : "Couldn't copy", String(e), "error");
     } finally {
       patchRun(tabId, { startedAt: null, cancelling: false, exporting: null });
