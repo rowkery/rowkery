@@ -230,7 +230,7 @@ The reasons a function is refused by name:
 | --- | --- |
 | `Stopped after 10 s (statement timeout). Filter on an indexed column or aggregate less.` | The query ran past the time limit and was stopped |
 | `Timed out connecting.` | The database didn't accept a connection within 20 seconds |
-| `Timed out reading the schema.`, `Timed out reading indexes.`, `Timed out.` | The database didn't answer a schema read, an index read or a `list_databases` / `sessions` call within 20 seconds |
+| `Timed out reading the schema.`, `Timed out reading indexes.`, `Timed out.` | The database didn't answer a schema read, an index read or a `list_databases` / `sessions` / `health` call within 20 seconds |
 | `Timed out waiting for the server.` | The server stopped answering mid-query; Rowkery cancelled it and drops that session |
 
 Any other error from the database, such as a syntax error or a missing column, comes back as the database's own message.
@@ -242,6 +242,10 @@ Any other error from the database, such as a syntax error or a missing column, c
 | `SQLite has no other sessions to show; sessions is for Postgres connections.` | `sessions` was called on a SQLite connection |
 
 In a `sessions` answer, a query that reads a table you haven't shared shows as `(reads a table not shared with agents)`, and one the login can't see as `(not visible to this login)`. A query with a backslash in a string that could read two ways, depending on that session's `standard_conforming_strings`, shows as `(its literals can't be told apart without the session's settings)`, so a value never shows as SQL.
+
+### Health
+
+A `health` answer covers only the tables you shared: a finding on another table is left out, and a foreign key whose parent you didn't share names it as `(a table not shared with agents)`. Its slowest queries read as in `sessions`. A check the login can't run says `needs_role` with the role (`pg_monitor`), and one that waited too long on a locked table says so under `unavailable`. See [Health](/health/) for what each check means.
 
 ### Proposed changes
 

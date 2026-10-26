@@ -252,7 +252,7 @@ pub fn hidden_names(catalog: &SchemaCatalog, rule: &Tables) -> HashSet<String> {
 /// A name as compared with [`hidden_names`]: in lower case, accented
 /// letters too (a database in a single-byte encoding folds them, and
 /// blanking more is safe), and cut to the 63 bytes Postgres keeps.
-fn folded(name: &str) -> String {
+pub(crate) fn folded(name: &str) -> String {
     let mut name = name.to_lowercase();
     let mut end = name.len().min(63);
     while !name.is_char_boundary(end) {

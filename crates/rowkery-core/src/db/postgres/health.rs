@@ -204,7 +204,7 @@ fn fk_sql() -> String {
                    FROM unnest(k.conkey) WITH ORDINALITY u(attnum, ord)
                    JOIN pg_catalog.pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.attnum
                   ORDER BY u.ord),
-           format('%I.%I', pn.nspname, p.relname),
+           pn.nspname || '.' || p.relname,
            x.rows,
            -- A partitioned table's index can't be built concurrently.
            format(CASE WHEN t.relkind = 'p' THEN 'CREATE INDEX ON %I.%I (%s);'

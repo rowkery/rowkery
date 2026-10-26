@@ -17,6 +17,7 @@ mod change;
 mod e2e_tests;
 mod functions;
 mod guard;
+pub mod health;
 mod lineage;
 pub mod mask;
 pub mod picker;
@@ -59,7 +60,8 @@ results are capped (200 rows by default, 1000 at most) and a plan that reads a t
 without running the query. Columns the user marked sensitive come back masked (masked: and ten hex \
 digits; the same value always gives the same stand-in). You can return or count a masked column (on SQLite \
 only return it) but not filter, sort, group or join on it; describe_table lists them. For a slow or stuck database, sessions shows \
-what's running, what each session waits on and who blocks whom. Queries never change data: the session is \
+what's running, what each session waits on and who blocks whom, and health shows what will hurt soon \
+(unused or missing indexes, dead rows, ids running out, the slowest queries). Queries never change data: the session is \
 read-only. To change data, call propose_change with the INSERT, UPDATE or DELETE statements and why: \
 the user reviews a dry run in Rowkery and commits or rejects it, and check_proposal tells you which. \
 Don't send a rejected change again. Before a change, describe_table shows the columns, defaults, keys \
@@ -235,6 +237,12 @@ fn tools() -> Vec<Tool> {
             "What's running on a Postgres database: each session's user, application, state, how long it has been at it, what it waits on and which sessions block it. Blockers come first; idle sessions are left out unless include_idle. Query text has its values replaced by ?, and a query on a table not shared with you is blanked.",
             json!({ "connection": connection, "database": database,
                     "include_idle": { "type": "boolean", "description": "Also list idle sessions" } }),
+            &["connection"],
+        ),
+        tool(
+            "health",
+            "What will hurt soon on the database, from its catalog and statistics (no table is read): ids running out, transaction age, inactive replication slots, unused and repeated indexes, foreign keys with no index, dead rows, never-analyzed tables, long idle transactions, and on Postgres the slowest queries from pg_stat_statements. Each finding has its numbers, how far to trust it and the SQL that would fix it, which you can't run: tell the user. Only shared tables are covered; query text has its values replaced by ?.",
+            json!({ "connection": connection, "database": database }),
             &["connection"],
         ),
         Tool::new(
@@ -506,6 +514,7 @@ impl RowkeryMcp {
                     .unwrap_or(false);
                 list_sessions(&mut store, &target, include_idle, &mut entry).await
             }
+            "health" => database_health(&mut store, &target).await,
             "propose_change" => {
                 let client = self.client.lock().ok().and_then(|c| c.clone());
                 propose(&mut store, &target, args, client).await
@@ -922,6 +931,17 @@ async fn list_sessions(
     let out = sessions::shape(&found, &hidden, include_idle);
     entry.rows = out["sessions"].as_array().map(|r| r.len() as u64);
     Ok(out)
+}
+
+async fn database_health(store: &mut Store, target: &Target) -> Outcome {
+    let report = store.health(target).await?;
+    let rule = rule(target);
+    let hidden = if rule.restricts() {
+        sessions::hidden_names(&store.catalog(target, false).await?.catalog, &rule)
+    } else {
+        Default::default()
+    };
+    Ok(health::shape(report, &hidden))
 }
 
 /// Refused when a Postgres plan uses a credentials catalog's secret column

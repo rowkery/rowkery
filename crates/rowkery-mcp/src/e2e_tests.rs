@@ -384,6 +384,29 @@ async fn guards_hold_against_a_real_postgres() {
         .await
         .expect("end read");
 
+    // health: the report, with nothing about the hidden table (pg_stat_statements,
+    // when the server loads it, has the queries above).
+    let health = call(&mcp, "health", json!({ "connection": ID }))
+        .await
+        .expect("health");
+    let text = health.to_string();
+    assert!(
+        health["server"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Postgres ")),
+        "{text}"
+    );
+    assert!(
+        matches!(
+            health["slow_queries"]["state"].as_str(),
+            Some("off" | "ranked")
+        ),
+        "{text}"
+    );
+    for leak in ["123-45-6789", "mcp_e2e_secret", "tok-visible"] {
+        assert!(!text.contains(leak), "{leak} in {text}");
+    }
+
     // Only ticked: the picked tables and nothing else, not even the
     // catalogs, a view over an unticked table, or another database.
     pg.mcp_access = Some(

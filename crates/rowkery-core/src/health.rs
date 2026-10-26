@@ -200,6 +200,8 @@ pub enum Detail {
     ForeignKeyWithoutIndex {
         constraint: String,
         columns: Vec<String>,
+        /// The parent table, `schema.table` unquoted (the table alone on
+        /// SQLite).
         references: String,
         /// `None` when only "over the limit" is known (a large SQLite file).
         rows: Option<i64>,

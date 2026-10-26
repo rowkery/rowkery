@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 use rowkery_core::config::AppConfig;
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{
-    cancel_with_token, open_session, session_activity, session_execute, session_introspect,
-    session_list_databases, session_ping, session_query_stream, session_table_indexes,
-    PostgresSession, ServerSession,
+    cancel_with_token, open_session, session_activity, session_execute, session_health,
+    session_introspect, session_list_databases, session_ping, session_query_stream,
+    session_table_indexes, PostgresSession, ServerSession,
 };
 use rowkery_core::db::sqlite::SqliteDriver;
 use rowkery_core::db::{Column, Driver, DriverError, SchemaCatalog, Value};
+use rowkery_core::health::HealthReport;
 use rowkery_core::safety::SafeMode;
 
 use crate::guard::STATEMENT_TIMEOUT;
@@ -447,6 +448,20 @@ impl Store {
         }
         self.guarded(target, "Timed out.", async |s| session_activity(s).await)
             .await
+    }
+
+    /// The database's health (the Health tab's report, before
+    /// [`crate::health::shape`] leaves out what isn't shared).
+    pub async fn health(&mut self, target: &Target) -> Result<HealthReport, String> {
+        match &target.record {
+            ConnectionRecord::Sqlite(sqlite) => {
+                open_sqlite(&sqlite.path)?.health().map_err(message)
+            }
+            ConnectionRecord::Postgres(_) => {
+                self.guarded(target, "Timed out.", async |s| session_health(s).await)
+                    .await
+            }
+        }
     }
 
     /// Fills in a Postgres table's indexes, which the catalog load leaves out.
