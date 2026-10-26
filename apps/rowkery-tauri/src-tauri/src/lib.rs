@@ -20,6 +20,7 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 
+mod done_notify;
 #[cfg(feature = "e2e")]
 mod e2e;
 mod mcp_connect;
@@ -2161,6 +2162,7 @@ pub fn run(mut timings: Timings) {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "macos")]
     let builder = builder.menu(app_menu).on_menu_event(|app, event| {
@@ -2183,7 +2185,11 @@ pub fn run(mut timings: Timings) {
         .manage(Imports::default())
         .manage(rowkery_mcp::picker::Picker::default())
         .manage(open_link::PendingLink::default())
+        .manage(done_notify::Away::default())
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                done_notify::came_back(window);
+            }
             // The one window closing quits the app: ask first when that
             // would lose work.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -2211,6 +2217,7 @@ pub fn run(mut timings: Timings) {
             }
             #[cfg(feature = "e2e")]
             e2e::start(app.handle());
+            done_notify::listen(app.handle());
             // Proof runs end themselves, whatever the page is doing.
             if let Some(ms) = std::env::var("ROWKERY_AUTO_QUIT_AFTER_MS")
                 .ok()
@@ -2328,6 +2335,7 @@ pub fn run(mut timings: Timings) {
             updates::download_update,
             updates::restart_to_update,
             open_link::take_open_link,
+            done_notify::notify_done,
         ])
         .build(context)
         .expect("error while building tauri application")

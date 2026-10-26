@@ -30,4 +30,5 @@ indexmap = { version = "2", features = ["serde"] }
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2.7"
 tauri-plugin-updater = "2"

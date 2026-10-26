@@ -76,6 +76,14 @@ if ("__TAURI_INTERNALS__" in window) {
   }).catch(() => {});
 }
 
+// A click on a "done" banner (doneNotify.ts): the shell brought the window
+// forward; App shows the window and tab it was about.
+if ("__TAURI_INTERNALS__" in window) {
+  void listen("notification-open", (e) => {
+    window.dispatchEvent(new CustomEvent("rowkery:notification-open", { detail: e.payload }));
+  }).catch(() => {});
+}
+
 // Files dragged onto the window (Tauri gives paths; an HTML drop doesn't)
 // arrive as `rowkery:file-drag` with `{ type, paths, x, y }` (CSS pixels in
 // the page, where the drop landed); stubbed proofs dispatch it directly.

@@ -30,6 +30,7 @@ import { NoticesSheet } from "./NoticesSheet";
 import { AgentSharing } from "./AgentSharing";
 import { AgentsInbox } from "./AgentsInbox";
 import { pollProposals, proposalTable, useProposals } from "./proposals";
+import type { DoneTarget } from "./doneNotify";
 import { McpConnectSheet } from "./McpConnectSheet";
 import { clientLabel, mcpShared, mcpStats, mcpTagLive, pollMcp, recentConnections, useMcpEntries, verdictOf } from "./mcpActivity";
 import { useKeymap } from "./keymaps";
@@ -964,6 +965,31 @@ function App() {
     window.addEventListener("rowkery:open-link", take);
     return () => window.removeEventListener("rowkery:open-link", take);
   }, [loaded]);
+
+  // A click on a "done" banner: the window and tab it was about, or the
+  // proposal's review. A window or tab closed since then leaves things as they are.
+  const notificationOpenRef = useRef<(target: DoneTarget) => void>(() => {});
+  notificationOpenRef.current = (target) => {
+    if (target.proposal) {
+      setPopover(null);
+      setPaletteOpen(false);
+      setSettings(null);
+      return setAgents({ initial: "proposals", proposal: target.proposal });
+    }
+    if (!target.windowId || !windowsRef.current.some((w) => w.id === target.windowId)) return;
+    setPopover(null);
+    setPaletteOpen(false);
+    setSettings(null);
+    setAgents(null);
+    switchWindow(target.windowId);
+    if (target.tabId !== undefined)
+      window.dispatchEvent(new CustomEvent("rowkery:show-tab", { detail: { windowId: target.windowId, tabId: target.tabId } }));
+  };
+  useEffect(() => {
+    const open = (e: Event) => notificationOpenRef.current((e as CustomEvent<DoneTarget>).detail ?? {});
+    window.addEventListener("rowkery:notification-open", open);
+    return () => window.removeEventListener("rowkery:notification-open", open);
+  }, []);
 
   /** Import CSV moved to a connection (the panel's picker): the window it opens in, and the file. */
   const [pendingImport, setPendingImport] = useState<{ windowId: string; path: string } | null>(null);
