@@ -364,7 +364,8 @@ fn unindexed_foreign_keys(
                 detail: Detail::ForeignKeyWithoutIndex {
                     constraint: format!("foreign key {}", id + 1),
                     columns: cols.clone(),
-                    references: parent,
+                    parent_schema: None,
+                    parent_table: parent,
                     rows,
                 },
                 fix: Some(format!(

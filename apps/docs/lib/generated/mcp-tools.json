@@ -234,7 +234,7 @@
       "read_only": true
     },
     {
-      "description": "What will hurt soon on the database, from its catalog and statistics (no table is read): ids running out, transaction age, inactive replication slots, unused and repeated indexes, foreign keys with no index, dead rows, never-analyzed tables, long idle transactions, and on Postgres the slowest queries from pg_stat_statements. Each finding has its numbers, how far to trust it and the SQL that would fix it, which you can't run: tell the user. Only shared tables are covered; query text has its values replaced by ?.",
+      "description": "What will hurt soon on the database, from its catalog and statistics (on Postgres no table is read; on SQLite it walks the file's pages): IDs running out, transaction age, inactive replication slots, unused and repeated indexes, foreign keys with no index, dead rows, never-analyzed tables, long idle transactions, and on Postgres the slowest queries from pg_stat_statements. Each finding has its numbers, how far to trust it and the SQL that would fix it, which you can't run: tell the user. Only shared tables are covered: left_out counts a check's findings on tables not shared, and a foreign key's unshared parent is not named. Query text has its values replaced by ?.",
       "inputs": [
         {
           "description": "Connection id or name from list_connections",

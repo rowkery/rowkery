@@ -241,7 +241,7 @@ fn tools() -> Vec<Tool> {
         ),
         tool(
             "health",
-            "What will hurt soon on the database, from its catalog and statistics (no table is read): ids running out, transaction age, inactive replication slots, unused and repeated indexes, foreign keys with no index, dead rows, never-analyzed tables, long idle transactions, and on Postgres the slowest queries from pg_stat_statements. Each finding has its numbers, how far to trust it and the SQL that would fix it, which you can't run: tell the user. Only shared tables are covered; query text has its values replaced by ?.",
+            "What will hurt soon on the database, from its catalog and statistics (on Postgres no table is read; on SQLite it walks the file's pages): IDs running out, transaction age, inactive replication slots, unused and repeated indexes, foreign keys with no index, dead rows, never-analyzed tables, long idle transactions, and on Postgres the slowest queries from pg_stat_statements. Each finding has its numbers, how far to trust it and the SQL that would fix it, which you can't run: tell the user. Only shared tables are covered: left_out counts a check's findings on tables not shared, and a foreign key's unshared parent is not named. Query text has its values replaced by ?.",
             json!({ "connection": connection, "database": database }),
             &["connection"],
         ),
@@ -936,12 +936,29 @@ async fn list_sessions(
 async fn database_health(store: &mut Store, target: &Target) -> Outcome {
     let report = store.health(target).await?;
     let rule = rule(target);
-    let hidden = if rule.restricts() {
-        sessions::hidden_names(&store.catalog(target, false).await?.catalog, &rule)
-    } else {
-        Default::default()
+    if !rule.restricts() {
+        return Ok(health::shape(
+            report,
+            &|_, _| Some(true),
+            &Default::default(),
+        ));
+    }
+    // A table made since the catalog was read would otherwise slip through:
+    // read it again once, and leave out what it still doesn't know.
+    let stale = {
+        let catalog = &store.catalog(target, false).await?.catalog;
+        health::tables(&report)
+            .iter()
+            .any(|(s, t)| catalog.table(s, t).is_none())
     };
-    Ok(health::shape(report, &hidden))
+    let catalog = &store.catalog(target, stale).await?.catalog;
+    let hidden = sessions::hidden_names(catalog, &rule);
+    let shares = |schema: &str, table: &str| {
+        catalog
+            .table(schema, table)
+            .map(|t| rule.allows_node(catalog, schema, t))
+    };
+    Ok(health::shape(report, &shares, &hidden))
 }
 
 /// Refused when a Postgres plan uses a credentials catalog's secret column

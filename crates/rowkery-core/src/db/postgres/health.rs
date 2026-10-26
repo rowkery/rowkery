@@ -3,6 +3,8 @@
 //! session, and each fails on its own: a view the login may not read marks
 //! that check "needs pg_monitor", the rest still report.
 
+use std::time::Duration;
+
 use tokio_postgres::error::SqlState;
 use tokio_postgres::Row;
 
@@ -16,8 +18,8 @@ use crate::health::{
 /// A size or a check waits this long for a table another session holds
 /// locked (a migration's ALTER TABLE, VACUUM FULL) before it gives up.
 const LOCK_TIMEOUT: &str = "1s";
-/// The longest any one read may take.
-const STATEMENT_TIMEOUT: &str = "15s";
+/// The longest any one read may take in the tab.
+const STATEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Schemas no check looks in.
 const USER_SCHEMA: &str = "n.nspname NOT IN ('pg_catalog', 'information_schema') \
@@ -204,7 +206,7 @@ fn fk_sql() -> String {
                    FROM unnest(k.conkey) WITH ORDINALITY u(attnum, ord)
                    JOIN pg_catalog.pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.attnum
                   ORDER BY u.ord),
-           pn.nspname || '.' || p.relname,
+           pn.nspname::text, p.relname::text,
            x.rows,
            -- A partitioned table's index can't be built concurrently.
            format(CASE WHEN t.relkind = 'p' THEN 'CREATE INDEX ON %I.%I (%s);'
@@ -359,11 +361,22 @@ fn check(
 /// The database's health, read on `session` (never a tab's: a check that
 /// fails mustn't abort the user's transaction).
 pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, DriverError> {
+    session_health_within(session, STATEMENT_TIMEOUT).await
+}
+
+/// [`session_health`] with each read cut off after `each`: a caller with its
+/// own deadline for the whole report (an agent's call) keeps the checks
+/// within it, so a slow one says "unavailable" instead of losing the lot.
+pub async fn session_health_within(
+    session: &PostgresSession,
+    each: Duration,
+) -> Result<HealthReport, DriverError> {
     let username = session.config.username.as_str();
     session
         .client
         .batch_execute(&format!(
-            "SET lock_timeout = '{LOCK_TIMEOUT}'; SET statement_timeout = '{STATEMENT_TIMEOUT}'"
+            "SET lock_timeout = '{LOCK_TIMEOUT}'; SET statement_timeout = {}",
+            each.as_millis().max(1)
         ))
         .await
         .map_err(|e| map_query_error(&e, username))?;
@@ -516,10 +529,11 @@ async fn read_health(session: &PostgresSession) -> Result<HealthReport, DriverEr
                 detail: Detail::ForeignKeyWithoutIndex {
                     constraint: r.get(2),
                     columns: r.get(3),
-                    references: r.get(4),
-                    rows: Some(r.get(5)),
+                    parent_schema: Some(r.get(4)),
+                    parent_table: r.get(5),
+                    rows: Some(r.get(6)),
                 },
-                fix: Some(r.get(6)),
+                fix: Some(r.get(7)),
             }
         }),
         check(CheckKind::DeadRows, dead, username, |r| HealthItem {
