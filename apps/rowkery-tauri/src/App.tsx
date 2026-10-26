@@ -29,7 +29,8 @@ import { ShortcutsSheet } from "./ShortcutsSheet";
 import { NoticesSheet } from "./NoticesSheet";
 import { AgentSharing } from "./AgentSharing";
 import { AgentsInbox } from "./AgentsInbox";
-import { pollProposals, proposalTable, useProposals } from "./proposals";
+import { pollProposals, proposalTable, useProposals, type Proposal } from "./proposals";
+import { notifyDone, proposalBanner, type DoneTarget } from "./doneNotify";
 import { McpConnectSheet } from "./McpConnectSheet";
 import { clientLabel, mcpShared, mcpStats, mcpTagLive, pollMcp, recentConnections, useMcpEntries, verdictOf } from "./mcpActivity";
 import { useKeymap } from "./keymaps";
@@ -810,13 +811,39 @@ function App() {
   mcpOpenRef.current = agentsOn;
   const agentsRef = useRef(false);
   agentsRef.current = agentsOn;
+  /** New proposals' banner, at any time, when Rowkery isn't in front (the shell checks). */
+  const notifyProposals = (proposed: Proposal[]) => {
+    const latest = proposed[proposed.length - 1];
+    if (!latest) return;
+    const connection = connectionsRef.current.find((c) => c.id === latest.connection)?.name ?? latest.database;
+    const job = {
+      connection,
+      client: clientLabel(latest.client),
+      table: proposalTable(latest.sql),
+      rows: latest.expect_rows,
+      count: proposed.length,
+    };
+    notifyDone(proposalBanner(job, latest.id), null);
+  };
   useEffect(() => {
     if (!anyShared && !agentsOn) return;
     let stopped = false;
+    // Proposals read while hidden: their toast shows once the window does.
+    let unseen: Proposal[] = [];
     const tick = async () => {
-      if (document.visibilityState !== "visible") return;
-      const [fresh, proposed] = await Promise.all([pollMcp(), pollProposals()]);
+      // Hidden, only proposals are read: one may be worth a banner.
+      if (document.visibilityState !== "visible") {
+        const arrived = await pollProposals();
+        if (stopped) return;
+        notifyProposals(arrived);
+        unseen = [...unseen, ...arrived];
+        return;
+      }
+      const [fresh, arrived] = await Promise.all([pollMcp(), pollProposals()]);
       if (stopped) return;
+      notifyProposals(arrived);
+      const proposed = [...unseen, ...arrived];
+      unseen = [];
       // A proposed change: a toast whose Review opens it, unless it's open.
       const latest = proposed[proposed.length - 1];
       if (latest && !agentsRef.current && !hasPendingUndo() && !liveOffer()) {
@@ -964,6 +991,33 @@ function App() {
     window.addEventListener("rowkery:open-link", take);
     return () => window.removeEventListener("rowkery:open-link", take);
   }, [loaded]);
+
+  // A click on a "done" banner: the window and tab it was about, or the
+  // proposal's review. A window or tab closed since then leaves things as they are.
+  const notificationOpenRef = useRef<(target: DoneTarget) => void>(() => {});
+  notificationOpenRef.current = (target) => {
+    if (target.proposal) {
+      setPopover(null);
+      setPaletteOpen(false);
+      setShortcutsOpen(false);
+      setSettings(null);
+      return setAgents({ initial: "proposals", proposal: target.proposal });
+    }
+    if (!target.windowId || !windowsRef.current.some((w) => w.id === target.windowId)) return;
+    setPopover(null);
+    setPaletteOpen(false);
+    setShortcutsOpen(false);
+    setSettings(null);
+    setAgents(null);
+    switchWindow(target.windowId);
+    if (target.tabId !== undefined)
+      window.dispatchEvent(new CustomEvent("rowkery:show-tab", { detail: { windowId: target.windowId, tabId: target.tabId } }));
+  };
+  useEffect(() => {
+    const open = (e: Event) => notificationOpenRef.current((e as CustomEvent<DoneTarget>).detail ?? {});
+    window.addEventListener("rowkery:notification-open", open);
+    return () => window.removeEventListener("rowkery:notification-open", open);
+  }, []);
 
   /** Import CSV moved to a connection (the panel's picker): the window it opens in, and the file. */
   const [pendingImport, setPendingImport] = useState<{ windowId: string; path: string } | null>(null);

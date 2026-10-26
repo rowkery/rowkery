@@ -92,6 +92,7 @@ import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEdi
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
 import type { CompletionResult } from "./sqlComplete";
+import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } from "./doneNotify";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { forgetTabTitles, noteTabTitles } from "./openTransactions";
@@ -512,6 +513,11 @@ export function Workspace({
   const [runs, setRuns] = useState<Record<number, TabRun>>({});
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  /** A long run's banner, when Rowkery isn't in front; none once its tab is closed. */
+  const notifyRun = (tabId: number, connection: string, ms: number, job: Omit<QueryJob, "connection" | "tab" | "ms">) => {
+    const tab = tabsRef.current.find((t) => t.id === tabId);
+    if (tab) notifyDone(queryBanner({ connection, tab: tab.title, ms, ...job }, { windowId, tabId }), ms);
+  };
   /** Merges into a tab's run; a tab closed while its query ran is left alone. */
   const patchRun = useCallback(
     (tabId: number, patch: Partial<TabRun> | ((prev: TabRun) => Partial<TabRun>)) => {
@@ -1549,12 +1555,22 @@ export function Workspace({
     const startedAt = Date.now();
     const place = placeRef.current;
     closeWhenDoneRef.current = false;
+    // A long import's banner, when Rowkery isn't in front: back to the import tab.
+    // A failure keeps its import tab; a finished import's tab closes (the table's opens).
+    const connectionName = activeConnection?.name ?? "";
+    const importTabId = tabsRef.current.find((t) => t.kind === "import")?.id;
+    const notifyImport = (rows: number, failed: boolean) => {
+      const ms = Date.now() - startedAt;
+      const job = { connection: connectionName, ms, rows, table: cur.table, failed };
+      notifyDone(importBanner(job, failed ? { windowId, tabId: importTabId } : { windowId }), ms);
+    };
     setCsvImport({ ...cur, run: { rows: 0, startedAt }, error: null });
     const onRun = (patch: (c: NonNullable<typeof cur>) => Partial<NonNullable<typeof cur>>) =>
       setCsvImport((c) => (c && c.tableKey === cur.tableKey ? { ...c, ...patch(c) } : c));
     const onImportTab = () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.kind === "import";
     /** A failure keeps the panel with the message; off its tab, a toast says so too. */
     const failed = (message: string, toast = "Import failed · nothing was written", detail = message) => {
+      notifyImport(0, true);
       if (closeWhenDoneRef.current) setCsvImport(null);
       else onRun(() => ({ run: null, error: message }));
       if (!onImportTab() || closeWhenDoneRef.current) showToast(toast, detail, "error");
@@ -1580,6 +1596,7 @@ export function Workspace({
     const fromTab = onImportTab();
     setCsvImport((c) => (c && c.tableKey === cur.tableKey ? null : c));
     if (out.status === "refused") return showToast("Read-only connection · Change safe mode…", undefined, "error");
+    notifyImport(out.inserted + out.updated, false);
     showToast(importedText(out), `${cur.table} · ${formatMs(out.elapsed_ms)}`);
     if (placeRef.current !== place) return;
     // The rows as the table has them now, in its tab.
@@ -2254,6 +2271,9 @@ export function Workspace({
     const started = performance.now();
     // The database's own timing when it answered, else what the wait took.
     let elapsedMs: number | null = null;
+    // A run of its own that ended (not held, not dropped): rows for its banner.
+    let ended: { rows: number | null } | null = null;
+    const connectionName = activeConnection?.name ?? "";
     const timing = startQuery(windowId, tabId, text);
     // Rows show as they stream; a result that lands whole gets the reveal.
     let streamed = false;
@@ -2311,6 +2331,7 @@ export function Workspace({
       else if (res.error) outcome = "error";
       if (res.forced) toastForcedStop();
       end = res.cancelled ? "cancelled" : res.error ? "error" : "done";
+      ended = { rows: res.affected_rows ?? res.row_count };
       elapsedMs = res.elapsed_ms;
       const answered = !res.error && !res.cancelled;
       // At the cap a tab stops loading: no Load more, and a toast says so.
@@ -2375,8 +2396,17 @@ export function Workspace({
     } catch (e) {
       outcome = "error";
       end = "error";
+      ended = { rows: null };
       patchRun(tabId, { error: e instanceof Error ? e.message : String(e) });
     } finally {
+      // A statement of a run of several reports with its run (`runStatements`);
+      // table browses and Load more never do, nor a run the user stopped
+      // (a Force stop ends it as an error).
+      const stopped = runsRef.current[tabId]?.cancelling;
+      if (ended && end !== "cancelled" && !stopped && !part && !browse && !paging && !tableRun) {
+        const ms = performance.now() - started;
+        notifyRun(tabId, connectionName, ms, { rows: ended.rows, failed: end === "error" });
+      }
       patchRun(tabId, {
         startedAt: null,
         appending: false,
@@ -2412,12 +2442,20 @@ export function Workspace({
     if (runsRef.current[tabId]?.startedAt != null) return "skipped";
     patchRun(tabId, { statements: [], statementAt: undefined });
     let end: RunEnd = "skipped";
+    const started = performance.now();
+    const connectionName = activeConnection?.name ?? "";
+    let ran = 0;
     for (const range of ranges) {
       nextStatement.current = { at: at === null ? null : at + range.start };
       end = await onRun(text.slice(range.start, range.end), true, undefined, tabId);
-      if (end !== "done") return end;
+      ran++;
+      if (end !== "done") break;
       // onRun refuses while the tab shows a run: wait for the render that ends this one.
       while (runsRef.current[tabId]?.startedAt != null) await new Promise((r) => setTimeout(r, 16));
+    }
+    if (end === "done" || (end === "error" && !runsRef.current[tabId]?.cancelling)) {
+      const ms = performance.now() - started;
+      notifyRun(tabId, connectionName, ms, { rows: null, statements: ran, failed: end === "error" });
     }
     return end;
   };
@@ -2436,6 +2474,7 @@ export function Workspace({
     setNotice(null);
     let outcome: TabRun["outcome"] = "done";
     const started = performance.now();
+    const connectionName = activeConnection?.name ?? "";
     try {
       const out = await explainStatement(windowId, tabId, text, timed, confirmed);
       if (out.kind === "held") {
@@ -2450,11 +2489,16 @@ export function Workspace({
       outcome = "error";
       patchRun(tabId, { error: String(e), plan: null });
     } finally {
+      const ms = performance.now() - started;
+      // An estimate is quick; a timed plan runs the query.
+      if (timed && outcome !== null) {
+        notifyRun(tabId, connectionName, ms, { rows: null, plan: true, failed: outcome === "error" });
+      }
       patchRun(tabId, {
         startedAt: null,
         cancelling: false,
         outcome,
-        elapsedMs: Math.round(performance.now() - started),
+        elapsedMs: Math.round(ms),
       });
     }
   };
@@ -3406,6 +3450,16 @@ export function Workspace({
     window.addEventListener("rowkery:open-sql", onOpenSql);
     return () => window.removeEventListener("rowkery:open-sql", onOpenSql);
   }, [windowId]);
+  // A click on a "done" banner about one of this window's tabs: that tab shows.
+  useEffect(() => {
+    const onShowTab = (e: Event) => {
+      const d = (e as CustomEvent<{ windowId: string; tabId: number }>).detail;
+      if (d?.windowId !== windowId || !tabsRef.current.some((t) => t.id === d.tabId)) return;
+      setActiveTabId(d.tabId);
+    };
+    window.addEventListener("rowkery:show-tab", onShowTab);
+    return () => window.removeEventListener("rowkery:show-tab", onShowTab);
+  }, [windowId]);
   const openInQueryTabRef = useRef(openInQueryTab);
   openInQueryTabRef.current = openInQueryTab;
 
@@ -3842,8 +3896,20 @@ export function Workspace({
     const tabId = tab.id;
     const verb = kind === "file" ? "Exporting" : "Copying";
     const progress = (rows: number) => patchRun(tabId, { exporting: { verb, rows } });
-    const start = () =>
+    // From the first row written: the save dialog's wait doesn't count.
+    let startedAt = 0;
+    const start = () => {
+      startedAt = performance.now();
       patchRun(tabId, { startedAt: Date.now(), cancelling: false, exporting: { verb, rows: 0 } });
+    };
+    const connectionName = activeConnection.name;
+    /** A long export's banner, when Rowkery isn't in front; a cancel you made stays quiet. */
+    const notifyExport = (rows: number, failed: boolean, file?: string) => {
+      if (!startedAt) return;
+      const ms = performance.now() - startedAt;
+      const job = { connection: connectionName, tab: tab.title, ms, rows, copy: kind !== "file", file, failed };
+      notifyDone(exportBanner(job, { windowId, tabId }), ms);
+    };
     try {
       let done;
       if (kind === "file") {
@@ -3867,12 +3933,14 @@ export function Workspace({
         start();
         done = await copyAllResults(windowId, tabId, sql, kind, progress);
       }
+      if (!done.cancelled) notifyExport(done.rows, !!done.error, done.path?.split(/[\\/]/).pop());
       if (done.cancelled) showToast(kind === "file" ? "Export cancelled" : "Copy cancelled");
       else if (done.error) showToast(kind === "file" ? "Couldn't export" : "Couldn't copy", done.error, "error");
       else if (kind === "file")
         showToast(`Exported ${done.rows.toLocaleString()} ${done.rows === 1 ? "row" : "rows"}`, done.path?.split(/[\\/]/).pop());
       else showToast(`Copied ${done.rows.toLocaleString()} ${done.rows === 1 ? "row" : "rows"}`, kind.toUpperCase());
     } catch (e) {
+      notifyExport(0, true);
       showToast(kind === "file" ? "Couldn't export" : "Couldn't copy", String(e), "error");
     } finally {
       patchRun(tabId, { startedAt: null, cancelling: false, exporting: null });

@@ -9,6 +9,7 @@ import {
   type SqlFileReport,
   type SqlFileScan,
 } from "./api";
+import { notifyDone, sqlFileBanner } from "./doneNotify";
 import { InspectorHead } from "./Inspector";
 import { isLostAnswer } from "./runOutcome";
 import { formatBytes } from "./types";
@@ -101,6 +102,21 @@ export function SqlFilePanel({
 
   const run = (scan: SqlFileScan) => {
     const started = Date.now();
+    // A long run's banner, when Rowkery isn't in front (a stop you made stays quiet).
+    const notifyEnded = (report: SqlFileReport) => {
+      const ms = Date.now() - started;
+      const failed = !!report.failed || !!report.unknown;
+      const job = {
+        connection: connectionName,
+        file: fileName(path),
+        ms,
+        statements: report.done,
+        errors: report.errors,
+        failed,
+        line: report.failed?.line,
+      };
+      notifyDone(sqlFileBanner(job, { windowId }), ms);
+    };
     setNow(started);
     setPhase({ at: "running", scan, progress: null, started });
     runSqlFile(windowId, { wholeFile, keepGoing }, (progress) =>
@@ -109,10 +125,12 @@ export function SqlFilePanel({
       (report) => {
         setPhase({ at: "ended", scan, report });
         if (report.done > 0 && !report.rolled_back) onRan();
+        if (!report.cancelled) notifyEnded(report);
       },
       (e) => {
         const report = failedRun(e, Date.now() - started);
         setPhase({ at: "ended", scan, report });
+        notifyEnded(report);
         // Lost, it may have changed the schema; refused, nothing ran.
         if (report.unknown) onRan();
       },
