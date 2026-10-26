@@ -4,7 +4,7 @@
 export const DOWNLOAD_URL = "https://github.com/rowkery/rowkery/releases/latest/download/Rowkery.dmg";
 
 /** The build the page describes. */
-export const RELEASE = { version: "0.3.0" };
+export const RELEASE = { version: "0.3.1" };
 
 /** The repository and the rowkery org's GitHub Sponsors page. */
 export const REPO_URL = "https://github.com/rowkery/rowkery";
