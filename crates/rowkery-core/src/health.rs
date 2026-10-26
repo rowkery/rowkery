@@ -2,8 +2,9 @@
 //! statistics (Postgres) or the file's own pages (SQLite), for the Health
 //! tab and the agents' `health` tool.
 //!
-//! Every check reads metadata only, never a table's rows, so a report costs
-//! milliseconds on any size of database. Nothing here changes the database:
+//! Postgres checks read the catalog and statistics only, never a table's
+//! rows, so a report costs milliseconds on any size of database. SQLite
+//! walks the file's pages for sizes, and only while the file is small. Nothing here changes the database:
 //! a finding carries the SQL that fixes it, for the user to open in a query
 //! tab, where safe mode applies.
 
@@ -31,8 +32,9 @@ pub struct HealthReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SizeTile {
     pub total_bytes: i64,
-    pub table_bytes: i64,
-    pub index_bytes: i64,
+    /// `None` when the split isn't known (a large SQLite file).
+    pub table_bytes: Option<i64>,
+    pub index_bytes: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +87,7 @@ impl CheckKind {
     /// How far to trust what the check finds.
     pub fn trust(self, sqlite: bool) -> &'static str {
         match self {
-            Self::IdsRunningOut => "The date assumes inserts keep the pace seen since the statistics began.",
+            Self::IdsRunningOut => "The date assumes inserts keep the pace seen since the statistics were last reset. Without a reset time (Postgres 15 and later keep none until a reset), there is no date.",
             Self::TransactionAge => "Exact, from the catalog.",
             Self::ReplicationSlots => "Exact. A slot is inactive while its replica or consumer is disconnected, so it may still come back.",
             Self::UnusedIndexes => "Usage counts come from this server only. An index used only on a read replica, or by a job that hasn't run since the statistics began, looks unused here.",
@@ -199,7 +201,8 @@ pub enum Detail {
         constraint: String,
         columns: Vec<String>,
         references: String,
-        rows: i64,
+        /// `None` when only "over the limit" is known (a large SQLite file).
+        rows: Option<i64>,
     },
     DeadRows {
         dead: i64,
@@ -208,7 +211,7 @@ pub enum Detail {
         vacuumed_secs_ago: Option<f64>,
     },
     NeverAnalyzed {
-        rows: i64,
+        rows: Option<i64>,
     },
     LongTransaction {
         pid: i32,
@@ -288,6 +291,8 @@ pub mod limits {
     /// [`FREE_BYTES`].
     pub const FREE_SHARE: f64 = 0.1;
     pub const FREE_BYTES: i64 = 1 << 20;
+    /// Largest SQLite file whose pages are walked for sizes.
+    pub const SQLITE_WALK_BYTES: i64 = 1 << 30;
     /// Slowest queries listed.
     pub const SLOW_QUERIES: i64 = 10;
 }

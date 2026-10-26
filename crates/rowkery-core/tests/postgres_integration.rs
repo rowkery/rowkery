@@ -789,6 +789,15 @@ async fn postgres_health_finds_each_problem_and_its_fix_clears_it() {
         INSERT INTO it_health.indexed_child (parent_id) SELECT 1 FROM generate_series(1, 20000);
         ANALYZE it_health.child;
         ANALYZE it_health.indexed_child;
+        CREATE TABLE it_health.brin_child (id serial PRIMARY KEY,
+            parent_id int REFERENCES it_health.parent (id));
+        CREATE INDEX ON it_health.brin_child USING brin (parent_id);
+        INSERT INTO it_health.brin_child (parent_id) SELECT 1 FROM generate_series(1, 20000);
+        ANALYZE it_health.brin_child;
+        CREATE TABLE it_health.part (id int, x int) PARTITION BY RANGE (id);
+        CREATE TABLE it_health.part_1 PARTITION OF it_health.part FOR VALUES FROM (0) TO (100);
+        CREATE INDEX part_x ON it_health.part (x);
+        CREATE INDEX part_x_id ON it_health.part (x, id);
         CREATE TABLE it_health.dead (id int) WITH (autovacuum_enabled = false);
         INSERT INTO it_health.dead SELECT generate_series(1, 20000);
         ANALYZE it_health.dead;
@@ -867,12 +876,13 @@ async fn postgres_health_finds_each_problem_and_its_fix_clears_it() {
         [
             ("dup_a".to_string(), "dup_a_unique".to_string()),
             ("dup_b2".to_string(), "dup_b1".to_string()),
+            ("part_x".to_string(), "part_x_id".to_string()),
         ]
     );
-    assert_eq!(
-        names(CheckKind::ForeignKeysWithoutIndex),
-        ["child_parent_id_fkey"]
-    );
+    let mut fks = names(CheckKind::ForeignKeysWithoutIndex);
+    fks.sort();
+    // A BRIN index doesn't serve the key's lookups.
+    assert_eq!(fks, ["brin_child_parent_id_fkey", "child_parent_id_fkey"]);
     assert_eq!(names(CheckKind::DeadRows), ["dead"]);
     assert!(names(CheckKind::NeverAnalyzed).contains(&"fresh".to_string()));
     assert!(!names(CheckKind::NeverAnalyzed).contains(&"child".to_string()));

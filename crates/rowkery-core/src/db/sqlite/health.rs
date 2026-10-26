@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use rusqlite::Connection;
 
-use super::{sqlite_ident_quote, SqliteDriver, NOT_INTERNAL};
+use super::{sqlite_ident_quote, SqliteDriver};
 use crate::db::DriverError;
 use crate::health::{
     limits, CheckKind, Detail, HealthCheck, HealthItem, HealthReport, SizeTile, SlowQueries,
@@ -69,19 +69,26 @@ fn health(conn: &Connection, path: &str) -> rusqlite::Result<HealthReport> {
             let kind: String = r.get(1)?;
             objects.insert(name, (kind, r.get(2)?));
         }
-        let mut stmt = conn.prepare(&format!(
-            "SELECT m.name FROM main.sqlite_master m WHERE m.type = 'table' AND {NOT_INTERNAL} \
-             AND m.sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY m.name"
-        ))?;
+        // `table`, not `virtual` or `shadow` (a full-text index's own tables).
+        let mut stmt = conn.prepare(
+            "SELECT t.name FROM pragma_table_list t \
+             WHERE t.schema = 'main' AND t.type = 'table' AND substr(t.name, 1, 7) <> 'sqlite_' \
+             ORDER BY t.name",
+        )?;
         for name in stmt.query_map([], |r| r.get(0))? {
             tables.push(name?);
         }
     }
 
-    // One walk of the pages; a build without dbstat leaves sizes out.
+    // One walk of the pages, which reads the whole file and holds a read
+    // lock meanwhile: only for a small file.
+    let walk = file_bytes <= limits::SQLITE_WALK_BYTES;
     let trees: HashMap<String, Tree> = conn
         .prepare("SELECT name, pgsize, ncell FROM dbstat('main', 1)")
         .and_then(|mut stmt| {
+            if !walk {
+                return Ok(HashMap::new());
+            }
             stmt.query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -94,26 +101,57 @@ fn health(conn: &Connection, path: &str) -> rusqlite::Result<HealthReport> {
             .collect()
         })
         .unwrap_or_default();
-    let size = (!trees.is_empty()).then(|| {
-        let of = |kind: &str| -> i64 {
+    let of = |kind: &str| -> Option<i64> {
+        (!trees.is_empty()).then(|| {
             trees
                 .iter()
                 .filter(|(name, _)| objects.get(*name).is_some_and(|o| o.0 == kind))
                 .map(|(_, t)| t.bytes)
                 .sum()
-        };
-        SizeTile {
-            total_bytes: file_bytes,
-            table_bytes: of("table"),
-            index_bytes: of("index"),
-        }
+        })
+    };
+    let size = Some(SizeTile {
+        total_bytes: file_bytes,
+        table_bytes: of("table"),
+        index_bytes: of("index"),
     });
-    let rows_of = |table: &str| trees.get(table).map_or(0, |t| t.cells);
 
-    let analyzed: Option<Vec<String>> = conn
-        .prepare("SELECT DISTINCT tbl FROM main.sqlite_stat1")
-        .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
-        .ok();
+    // table -> its row count in sqlite_stat1, when analyzed.
+    let analyzed: HashMap<String, i64> = conn
+        .prepare("SELECT tbl, stat FROM main.sqlite_stat1")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                let stat: Option<String> = r.get(1)?;
+                let rows = stat
+                    .as_deref()
+                    .and_then(|s| s.split(' ').next()?.parse().ok())
+                    .unwrap_or(0);
+                Ok((r.get::<_, String>(0)?.to_lowercase(), rows))
+            })?
+            .collect()
+        })
+        .unwrap_or_default();
+    // `Some(rows)` for a table over the size limit (`Some(None)` when only
+    // that much is known): the page walk's count, else the analyzed count,
+    // else a count that stops just past the limit.
+    let over = |table: &str| -> rusqlite::Result<Option<Option<i64>>> {
+        if let Some(t) = trees.get(table) {
+            return Ok((t.cells > limits::ROWS).then_some(Some(t.cells)));
+        }
+        if let Some(&rows) = analyzed.get(&table.to_lowercase()) {
+            return Ok((rows > limits::ROWS).then_some(Some(rows)));
+        }
+        let counted: i64 = conn.query_row(
+            &format!(
+                "SELECT count(*) FROM (SELECT 1 FROM main.{} LIMIT {})",
+                sqlite_ident_quote(table),
+                limits::ROWS + 1
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((counted > limits::ROWS).then_some(None))
+    };
 
     let mut duplicates = Vec::new();
     let mut fks = Vec::new();
@@ -121,12 +159,11 @@ fn health(conn: &Connection, path: &str) -> rusqlite::Result<HealthReport> {
     for table in &tables {
         let indexes = indexes(conn, table, &objects)?;
         duplicates.extend(duplicate_indexes(table, &indexes, &trees));
-        let rows = rows_of(table);
-        if rows > limits::ROWS {
-            fks.extend(unindexed_foreign_keys(conn, table, &indexes, rows)?);
-            let has_stats = analyzed
-                .as_ref()
-                .is_some_and(|tbls| tbls.iter().any(|t| t.eq_ignore_ascii_case(table)));
+        if let Some(rows) = over(table)? {
+            fks.extend(unindexed_foreign_keys(
+                conn, table, &indexes, rows, &objects,
+            )?);
+            let has_stats = analyzed.contains_key(&table.to_lowercase());
             if !indexes.is_empty() && !has_stats {
                 never_analyzed.push(HealthItem {
                     schema: None,
@@ -134,7 +171,7 @@ fn health(conn: &Connection, path: &str) -> rusqlite::Result<HealthReport> {
                     name: None,
                     bytes: None,
                     detail: Detail::NeverAnalyzed { rows },
-                    fix: Some(format!("ANALYZE {};", sqlite_ident_quote(table))),
+                    fix: Some(format!("ANALYZE main.{};", sqlite_ident_quote(table))),
                 });
             }
         }
@@ -248,7 +285,7 @@ fn duplicate_indexes(
                 detail: Detail::DuplicateIndex {
                     covered_by: by.name.clone(),
                 },
-                fix: Some(format!("DROP INDEX {};", sqlite_ident_quote(&a.name))),
+                fix: Some(format!("DROP INDEX main.{};", sqlite_ident_quote(&a.name))),
             })
         })
         .collect()
@@ -258,7 +295,8 @@ fn unindexed_foreign_keys(
     conn: &Connection,
     table: &str,
     indexes: &[Index],
-    rows: i64,
+    rows: Option<i64>,
+    objects: &HashMap<String, (String, i64)>,
 ) -> rusqlite::Result<Vec<HealthItem>> {
     // An INTEGER PRIMARY KEY is the rowid: already the table's own index.
     let rowid: Option<String> = {
@@ -295,7 +333,8 @@ fn unindexed_foreign_keys(
         .filter(|(_, _, cols)| {
             let by_rowid = matches!((cols.as_slice(), &rowid), ([c], Some(r)) if same(c, r));
             let by_index = indexes.iter().any(|i| {
-                i.keys.len() >= cols.len()
+                !i.partial
+                    && i.keys.len() >= cols.len()
                     && i.keys[..cols.len()].iter().all(|k| {
                         k.0.as_deref()
                             .is_some_and(|name| cols.iter().any(|c| same(c, name)))
@@ -305,7 +344,18 @@ fn unindexed_foreign_keys(
         })
         .map(|(id, parent, cols)| {
             let quoted: Vec<String> = cols.iter().map(|c| sqlite_ident_quote(c)).collect();
-            let index = format!("{table}_{}_idx", cols.join("_"));
+            let base = format!("{table}_{}_idx", cols.join("_"));
+            let taken = |name: &str| objects.keys().any(|k| k.eq_ignore_ascii_case(name));
+            let index = (1..)
+                .map(|n| {
+                    if n == 1 {
+                        base.clone()
+                    } else {
+                        format!("{base}_{n}")
+                    }
+                })
+                .find(|name| !taken(name))
+                .unwrap_or(base);
             HealthItem {
                 schema: None,
                 table: Some(table.to_string()),
@@ -318,7 +368,7 @@ fn unindexed_foreign_keys(
                     rows,
                 },
                 fix: Some(format!(
-                    "CREATE INDEX {} ON {} ({});",
+                    "CREATE INDEX main.{} ON {} ({});",
                     sqlite_ident_quote(&index),
                     sqlite_ident_quote(table),
                     quoted.join(", ")
@@ -368,6 +418,9 @@ mod tests {
             INSERT INTO covered (parent_id) SELECT 1 FROM n;
             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000)
             INSERT INTO by_rowid (id) SELECT i FROM n;
+            CREATE VIRTUAL TABLE notes USING fts5(body);
+            WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000)
+            INSERT INTO notes SELECT 'note ' || i FROM n;
             CREATE TABLE junk (blob BLOB);
             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 600)
             INSERT INTO junk SELECT randomblob(8000) FROM n;
@@ -386,7 +439,7 @@ mod tests {
             .size
             .as_ref()
             .expect("dbstat is in the bundled build");
-        assert!(size.table_bytes > 0 && size.index_bytes > 0);
+        assert!(size.table_bytes > Some(0) && size.index_bytes > Some(0));
         assert!(matches!(report.slow_queries, SlowQueries::None));
 
         let free = found(&report, CheckKind::FreePages);

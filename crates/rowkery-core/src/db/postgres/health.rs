@@ -13,22 +13,36 @@ use crate::health::{
     HealthReport, SizeTile, SlowQueries, SlowQuery, MONITOR_ROLE,
 };
 
+/// A size or a check waits this long for a table another session holds
+/// locked (a migration's ALTER TABLE, VACUUM FULL) before it gives up.
+const LOCK_TIMEOUT: &str = "1s";
+/// The longest any one read may take.
+const STATEMENT_TIMEOUT: &str = "15s";
+
 /// Schemas no check looks in.
 const USER_SCHEMA: &str = "n.nspname NOT IN ('pg_catalog', 'information_schema') \
      AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'";
 
-fn tiles_sql() -> String {
+/// Sizes take a lock on each relation, so a table locked by a migration
+/// makes this wait (up to [`LOCK_TIMEOUT`]): kept apart, so only the size
+/// tile goes missing then.
+fn size_sql() -> String {
     format!(
         r"
-    SELECT current_database()::text,
-           current_setting('server_version'),
-           pg_database_size(current_database())::int8,
+    SELECT pg_database_size(current_database())::int8,
            (SELECT coalesce(sum(pg_table_size(c.oid)), 0)::int8
               FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
              WHERE c.relkind IN ('r', 'm') AND {USER_SCHEMA}),
            (SELECT coalesce(sum(pg_relation_size(c.oid)), 0)::int8
               FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relkind = 'i' AND {USER_SCHEMA}),
+             WHERE c.relkind = 'i' AND {USER_SCHEMA})
+    "
+    )
+}
+
+const TILES_SQL: &str = r"
+    SELECT current_database()::text,
+           current_setting('server_version'),
            (SELECT d.blks_hit::float8 / nullif(d.blks_hit + d.blks_read, 0)
               FROM pg_catalog.pg_stat_database d WHERE d.datname = current_database()),
            (SELECT extract(epoch FROM d.stats_reset)::int8
@@ -41,9 +55,7 @@ fn tiles_sql() -> String {
              WHERE d.datname = current_database()),
            coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false)
              OR pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
-    "
-    )
-}
+";
 
 /// Integer ids whose sequence is past [`limits::IDS_USED`] of the column's
 /// range (or the sequence's own, when smaller).
@@ -54,10 +66,11 @@ fn ids_sql() -> String {
            s.last_value, x.cap,
            coalesce(st.n_tup_ins, 0)::int8,
            extract(epoch FROM clock_timestamp() - sd.stats_reset)::float8,
-           format('ALTER TABLE %I.%I ALTER COLUMN %I TYPE bigint;', n.nspname, c.relname, a.attname)
-             || CASE WHEN d.deptype = 'a' AND s.data_type <> 'bigint'::regtype
-                     THEN format(E'\nALTER SEQUENCE %I.%I AS bigint;', sn.nspname, sc.relname)
-                     ELSE '' END
+           concat_ws(E'\n',
+               CASE WHEN a.atttypid <> 'int8'::regtype
+                    THEN format('ALTER TABLE %I.%I ALTER COLUMN %I TYPE bigint;', n.nspname, c.relname, a.attname) END,
+               CASE WHEN d.deptype = 'a' AND s.data_type <> 'bigint'::regtype
+                    THEN format('ALTER SEQUENCE %I.%I AS bigint;', sn.nspname, sc.relname) END)
     FROM pg_catalog.pg_depend d
     JOIN pg_catalog.pg_class sc ON sc.oid = d.objid AND sc.relkind = 'S'
     JOIN pg_catalog.pg_namespace sn ON sn.oid = sc.relnamespace
@@ -86,7 +99,7 @@ fn ids_sql() -> String {
 
 /// The tables holding the database's transaction age back.
 const OLDEST_TABLES_SQL: &str = "
-    SELECT n.nspname::text, c.relname::text, age(c.relfrozenxid)::int8, pg_table_size(c.oid)::int8,
+    SELECT n.nspname::text, c.relname::text, age(c.relfrozenxid)::int8, coalesce(pg_table_size(c.oid), 0)::int8,
            format('VACUUM (FREEZE, VERBOSE) %I.%I;', n.nspname, c.relname)
     FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r', 'm') AND n.nspname <> 'information_schema'
@@ -122,7 +135,7 @@ fn unused_sql() -> String {
     format!(
         r"
     SELECT s.schemaname::text, s.relname::text, s.indexrelname::text,
-           pg_relation_size(s.indexrelid)::int8,
+           coalesce(pg_relation_size(s.indexrelid), 0)::int8,
            format('DROP INDEX CONCURRENTLY %I.%I;', s.schemaname, s.indexrelname)
     FROM pg_catalog.pg_stat_user_indexes s
     JOIN pg_catalog.pg_index i ON i.indexrelid = s.indexrelid
@@ -149,7 +162,7 @@ fn duplicates_sql() -> String {
                (string_to_array(i.indcollation::text, ' ')::oid[])[1:i.indnkeyatts] AS colls,
                i.indoption, i.indnatts = i.indnkeyatts AS no_include,
                i.indexprs IS NULL AND i.indpred IS NULL AS plain,
-               n.nspname, t.relname AS tbl, c.relname AS idx
+               n.nspname, t.relname AS tbl, c.relname AS idx, c.relkind = 'I' AS partitioned
         FROM pg_catalog.pg_index i
         JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
         JOIN pg_catalog.pg_am am ON am.oid = c.relam AND am.amname = 'btree'
@@ -159,8 +172,10 @@ fn duplicates_sql() -> String {
     )
     SELECT DISTINCT ON (a.indexrelid)
            a.nspname::text, a.tbl::text, a.idx::text, b.idx::text,
-           pg_relation_size(a.indexrelid)::int8,
-           format('DROP INDEX CONCURRENTLY %I.%I;', a.nspname, a.idx)
+           coalesce(pg_relation_size(a.indexrelid), 0)::int8,
+           -- A partitioned table's index can't be dropped concurrently.
+           format(CASE WHEN a.partitioned THEN 'DROP INDEX %I.%I;' ELSE 'DROP INDEX CONCURRENTLY %I.%I;' END,
+                  a.nspname, a.idx)
     FROM ix a
     JOIN ix b ON b.indrelid = a.indrelid AND b.indexrelid <> a.indexrelid AND b.plain
     JOIN pg_catalog.pg_index i ON i.indexrelid = a.indexrelid
@@ -178,8 +193,9 @@ fn duplicates_sql() -> String {
     )
 }
 
-/// Foreign keys on tables over [`limits::ROWS`] whose columns lead no index
-/// (in any order).
+/// Foreign keys on tables over [`limits::ROWS`] whose columns lead no valid
+/// btree index (in any order). A partitioned table's key is reported once,
+/// on the parent, with its rows summed over the partitions.
 fn fk_sql() -> String {
     format!(
         r"
@@ -188,22 +204,35 @@ fn fk_sql() -> String {
                    FROM unnest(k.conkey) WITH ORDINALITY u(attnum, ord)
                    JOIN pg_catalog.pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.attnum
                   ORDER BY u.ord),
-           k.confrelid::regclass::text,
-           t.reltuples::int8,
-           format('CREATE INDEX CONCURRENTLY ON %I.%I (%s);', n.nspname, t.relname,
+           format('%I.%I', pn.nspname, p.relname),
+           x.rows,
+           -- A partitioned table's index can't be built concurrently.
+           format(CASE WHEN t.relkind = 'p' THEN 'CREATE INDEX ON %I.%I (%s);'
+                       ELSE 'CREATE INDEX CONCURRENTLY ON %I.%I (%s);' END,
+                  n.nspname, t.relname,
                   (SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY u.ord)
                      FROM unnest(k.conkey) WITH ORDINALITY u(attnum, ord)
                      JOIN pg_catalog.pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.attnum))
     FROM pg_catalog.pg_constraint k
-    JOIN pg_catalog.pg_class t ON t.oid = k.conrelid AND t.relkind = 'r'
+    JOIN pg_catalog.pg_class t ON t.oid = k.conrelid AND t.relkind IN ('r', 'p')
     JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
-    WHERE k.contype = 'f' AND t.reltuples > {rows} AND {USER_SCHEMA}
+    JOIN pg_catalog.pg_class p ON p.oid = k.confrelid
+    JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace
+    CROSS JOIN LATERAL (SELECT CASE WHEN t.relkind = 'p'
+             THEN (SELECT coalesce(sum(greatest(c.reltuples, 0)), 0)
+                     FROM pg_catalog.pg_partition_tree(t.oid) pt
+                     JOIN pg_catalog.pg_class c ON c.oid = pt.relid WHERE pt.isleaf)
+             ELSE t.reltuples END::int8 AS rows) x
+    WHERE k.contype = 'f' AND k.conparentid = 0 AND x.rows > {rows} AND {USER_SCHEMA}
       AND NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_index i
-          WHERE i.indrelid = k.conrelid AND i.indpred IS NULL
+          JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+          JOIN pg_catalog.pg_am am ON am.oid = ic.relam AND am.amname = 'btree'
+          WHERE i.indrelid = k.conrelid AND i.indpred IS NULL AND i.indisvalid
+            AND cardinality(k.conkey) <= i.indnkeyatts
             AND (string_to_array(i.indkey::text, ' ')::int2[])[1:cardinality(k.conkey)] @> k.conkey
             AND (string_to_array(i.indkey::text, ' ')::int2[])[1:cardinality(k.conkey)] <@ k.conkey)
-    ORDER BY t.reltuples DESC
+    ORDER BY x.rows DESC
     ",
         rows = limits::ROWS,
     )
@@ -214,7 +243,7 @@ fn dead_rows_sql() -> String {
         r"
     SELECT s.schemaname::text, s.relname::text, s.n_dead_tup::int8, s.n_live_tup::int8,
            extract(epoch FROM clock_timestamp() - greatest(s.last_vacuum, s.last_autovacuum))::float8,
-           pg_table_size(s.relid)::int8,
+           coalesce(pg_table_size(s.relid), 0)::int8,
            format('VACUUM (ANALYZE) %I.%I;', s.schemaname, s.relname)
     FROM pg_catalog.pg_stat_user_tables s
     WHERE s.n_live_tup + s.n_dead_tup > {rows}
@@ -258,13 +287,16 @@ fn long_xact_sql() -> String {
     )
 }
 
-const PGSS_SCHEMA_SQL: &str = "SELECT format('%I', e.extnamespace::regnamespace::text), \
-     current_setting('server_version_num')::int \
-     FROM pg_catalog.pg_extension e WHERE e.extname = 'pg_stat_statements'";
+/// Where the extension lives, and whether its view has the Postgres 13
+/// column names: those come with extension version 1.8, which a server
+/// upgraded without `ALTER EXTENSION … UPDATE` may not have.
+const PGSS_SCHEMA_SQL: &str = "SELECT quote_ident(n.nspname), \
+     string_to_array(e.extversion, '.')::int[] >= '{1,8}' \
+     FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+     WHERE e.extname = 'pg_stat_statements'";
 
-fn pgss_sql(schema: &str, version: i32) -> String {
-    // Postgres 13 renamed total_time to total_exec_time.
-    let (total, mean) = if version >= 130_000 {
+fn pgss_sql(schema: &str, exec_names: bool) -> String {
+    let (total, mean) = if exec_names {
         ("total_exec_time", "mean_exec_time")
     } else {
         ("total_time", "mean_time")
@@ -281,6 +313,8 @@ fn pgss_sql(schema: &str, version: i32) -> String {
            s.query = '<insufficient privilege>'
     FROM s CROSS JOIN sum
     LEFT JOIN pg_catalog.pg_roles r ON r.oid = s.userid
+    -- NULL when the extension couldn't read its query text file.
+    WHERE s.query IS NOT NULL
     ORDER BY s.total DESC
     LIMIT {n}
     ",
@@ -293,6 +327,16 @@ fn failed(error: &tokio_postgres::Error, username: &str) -> CheckState {
     if error.code() == Some(&SqlState::INSUFFICIENT_PRIVILEGE) {
         return CheckState::NeedsRole {
             role: MONITOR_ROLE.into(),
+        };
+    }
+    if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) {
+        return CheckState::Unavailable {
+            message: "A table it reads is locked by another session. Try Refresh later.".into(),
+        };
+    }
+    if error.code() == Some(&SqlState::QUERY_CANCELED) {
+        return CheckState::Unavailable {
+            message: "It took too long and was stopped.".into(),
         };
     }
     CheckState::Unavailable {
@@ -315,10 +359,32 @@ fn check(
 /// The database's health, read on `session` (never a tab's: a check that
 /// fails mustn't abort the user's transaction).
 pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, DriverError> {
+    let username = session.config.username.as_str();
+    session
+        .client
+        .batch_execute(&format!(
+            "SET lock_timeout = '{LOCK_TIMEOUT}'; SET statement_timeout = '{STATEMENT_TIMEOUT}'"
+        ))
+        .await
+        .map_err(|e| map_query_error(&e, username))?;
+    let read = read_health(session).await;
+    // The session is the window's own, shared with the Sessions tab.
+    let reset = session
+        .client
+        .batch_execute("RESET lock_timeout; RESET statement_timeout")
+        .await
+        .map_err(|e| map_query_error(&e, username));
+    let report = read?;
+    reset?;
+    Ok(report)
+}
+
+async fn read_health(session: &PostgresSession) -> Result<HealthReport, DriverError> {
     let client = &session.client;
     let username = session.config.username.as_str();
     let sql = [
-        tiles_sql(),
+        TILES_SQL.to_string(),
+        size_sql(),
         ids_sql(),
         slots_sql(),
         unused_sql(),
@@ -328,9 +394,9 @@ pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, D
         never_analyzed_sql(),
         long_xact_sql(),
     ];
-    let (tiles, ids, slots, unused, duplicates, fks, dead, analyzed, idle, pgss) = tokio::join!(
+    let (tiles, size, ids, slots, unused, duplicates, fks, dead, analyzed, idle, pgss) = tokio::join!(
         client.query_one(&sql[0], &[]),
-        client.query(&sql[1], &[]),
+        client.query_one(&sql[1], &[]),
         client.query(&sql[2], &[]),
         client.query(&sql[3], &[]),
         client.query(&sql[4], &[]),
@@ -338,11 +404,12 @@ pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, D
         client.query(&sql[6], &[]),
         client.query(&sql[7], &[]),
         client.query(&sql[8], &[]),
+        client.query(&sql[9], &[]),
         client.query_opt(PGSS_SCHEMA_SQL, &[]),
     );
     let tiles = tiles.map_err(|e| map_query_error(&e, username))?;
-    let sees_all: bool = tiles.get(11);
-    let xact_age: Option<i64> = tiles.get(10);
+    let sees_all: bool = tiles.get(8);
+    let xact_age: Option<i64> = tiles.get(7);
 
     let transaction_age = match xact_age {
         Some(age) if age as f64 > limits::XACT_LIMIT as f64 * limits::XACT_AGE => check(
@@ -450,7 +517,7 @@ pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, D
                     constraint: r.get(2),
                     columns: r.get(3),
                     references: r.get(4),
-                    rows: r.get(5),
+                    rows: Some(r.get(5)),
                 },
                 fix: Some(r.get(6)),
             }
@@ -473,7 +540,9 @@ pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, D
                 table: Some(r.get(1)),
                 name: None,
                 bytes: None,
-                detail: Detail::NeverAnalyzed { rows: r.get(2) },
+                detail: Detail::NeverAnalyzed {
+                    rows: Some(r.get(2)),
+                },
                 fix: Some(r.get(3)),
             }
         }),
@@ -481,11 +550,11 @@ pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, D
     ];
 
     let slow_queries = slow_queries(session, pgss, sees_all).await;
-    let size = SizeTile {
-        total_bytes: tiles.get(2),
-        table_bytes: tiles.get(3),
-        index_bytes: tiles.get(4),
-    };
+    let size = size.ok().map(|r| SizeTile {
+        total_bytes: r.get(0),
+        table_bytes: Some(r.get(1)),
+        index_bytes: Some(r.get(2)),
+    });
     Ok(HealthReport {
         database: tiles.get(0),
         // `16.4 (Ubuntu 16.4-1)` reads as `16.4`.
@@ -497,14 +566,14 @@ pub async fn session_health(session: &PostgresSession) -> Result<HealthReport, D
                 .next()
                 .unwrap_or("")
         ),
-        size: Some(size),
-        cache_hit: tiles.get(5),
+        size,
+        cache_hit: tiles.get(2),
         connections: Some(ConnectionsTile {
-            used: tiles.get(7),
-            max: tiles.get(9),
-            active: tiles.get(8),
+            used: tiles.get(4),
+            max: tiles.get(6),
+            active: tiles.get(5),
         }),
-        stats_since: tiles.get(6),
+        stats_since: tiles.get(3),
         transaction_age: xact_age.map(|a| a as f64 / limits::XACT_LIMIT as f64),
         checks,
         slow_queries,
@@ -528,8 +597,12 @@ async fn slow_queries(
         }
         Err(e) => return unavailable(&e),
     };
-    let (schema, version): (String, i32) = (row.get(0), row.get(1));
-    match session.client.query(&pgss_sql(&schema, version), &[]).await {
+    let (schema, exec_names): (String, bool) = (row.get(0), row.get(1));
+    match session
+        .client
+        .query(&pgss_sql(&schema, exec_names), &[])
+        .await
+    {
         Ok(rows) => {
             let hidden = rows.iter().any(|r| r.get::<_, bool>(7));
             SlowQueries::Ranked {
