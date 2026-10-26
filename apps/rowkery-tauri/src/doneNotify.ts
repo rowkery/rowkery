@@ -11,8 +11,11 @@ import { invoke } from "@tauri-apps/api/core";
  * or error text.
  */
 
-/** A job shorter than this never gets a banner: the user was likely still watching. */
-export const NOTIFY_AFTER_MS = 10_000;
+/**
+ * A job shorter than this gets no banner. None: every job that ends while
+ * Rowkery isn't in front gets one, however short.
+ */
+export const NOTIFY_AFTER_MS = 0;
 
 /** What a banner's click opens. */
 export interface DoneTarget {
