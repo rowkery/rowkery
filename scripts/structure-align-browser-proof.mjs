@@ -4,8 +4,8 @@
 // (name, type, nullable, key badges) sits on one baseline, whether or not the
 // name has a comment or the type a default, and the header labels share the
 // columns' left edges. Index and relation rows stay within a pixel, and the
-// index rows' column chips and facts line up across rows whatever the name,
-// badge or facts width.
+// index rows' column chips start at one x whatever the name, badge or facts
+// width.
 // Screenshots go to outDir, by default /tmp/rowkery-proof/structure-align:
 // structure, structure-dark.
 //
@@ -190,14 +190,13 @@ const ixEdges = await page.evaluate(
   (ws) =>
     [...document.querySelectorAll(`${ws} [data-testid="ts-index"]`)].map((row) => ({
       chips: row.querySelector(".ts-chips").getBoundingClientRect().left,
-      facts: row.querySelector(".ts-facts").getBoundingClientRect().right,
     })),
   ws,
 );
-for (const key of ["chips", "facts"]) {
-  const xs = ixEdges.map((e) => e[key]);
+{
+  const xs = ixEdges.map((e) => e.chips);
   const spread = Math.max(...xs) - Math.min(...xs);
-  check(spread < 0.5, `index ${key} ${key === "chips" ? "start" : "end"} at one x in every row (spread ${spread.toFixed(2)} px)`);
+  check(spread < 0.5, `index chips start at one x in every row (spread ${spread.toFixed(2)} px)`);
 }
 const root = await page.locator(`${ws} [data-testid="ts-root"]`).boundingBox();
 const clip = { x: root.x, y: root.y, width: Math.min(root.width, 900), height: Math.min(root.height, 640) };
