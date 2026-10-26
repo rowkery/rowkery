@@ -266,8 +266,18 @@ button.ts-badge.fk:hover {
   white-space: nowrap;
 }
 
+/* One grid for the whole list, so the column chips and facts line up across
+   rows; each row's own template is the fallback where subgrid is missing. */
+.ts-index-list {
+  --ts-index-cols: minmax(160px, 1.3fr) minmax(0, 1fr) minmax(120px, auto);
+  display: grid;
+  grid-template-columns: var(--ts-index-cols);
+}
+
 .ts-index {
-  grid-template-columns: minmax(160px, 1.3fr) minmax(0, 1fr) minmax(120px, auto);
+  grid-column: 1 / -1;
+  grid-template-columns: var(--ts-index-cols);
+  grid-template-columns: subgrid;
 }
 
 .ts-chips {

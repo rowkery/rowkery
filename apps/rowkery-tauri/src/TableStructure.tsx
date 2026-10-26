@@ -284,7 +284,7 @@ export function TableStructure({
             ) : indexes.length === 0 ? (
               <div className="ts-empty">No indexes</div>
             ) : (
-              <div className="ts-list">
+              <div className="ts-list ts-index-list">
                 {indexes.map((ix) => {
                   // Unique and primary indexes enforce constraints even when never scanned.
                   const unused = ix.scans === 0 && !ix.primary && !ix.unique;
