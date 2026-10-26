@@ -3,7 +3,9 @@
 // Proves: in every row of the Columns table, the first line of each cell
 // (name, type, nullable, key badges) sits on one baseline, whether or not the
 // name has a comment or the type a default, and the header labels share the
-// columns' left edges. Index and relation rows stay within a pixel.
+// columns' left edges. Index and relation rows stay within a pixel, and the
+// index rows' column chips and facts line up across rows whatever the name,
+// badge or facts width.
 // Screenshots go to outDir, by default /tmp/rowkery-proof/structure-align:
 // structure, structure-dark.
 //
@@ -45,8 +47,9 @@ function stubTauri() {
     ],
     primary_key: ["id"],
     indexes: [
-      ix("orders_pkey", ["id"], { unique: true, primary: true }),
-      ix("orders_email_key", ["email"], { unique: true }),
+      ix("orders_pkey", ["id"], { unique: true, primary: true, size_bytes: 40960, scans: 139574 }),
+      ix("orders_email_key", ["email"], { unique: true, scans: 31434 }),
+      ix("orders_created_at_idx", ["created_at"], { scans: 0 }),
       ix("orders_status_created_idx", ["status", "created_at DESC"], { scans: 0 }),
     ],
     foreign_keys: [{ name: "orders_customer_id_fkey", columns: ["customer_id"], ref_schema: "public", ref_table: "customers", ref_columns: ["id"], on_delete: "CASCADE" }],
@@ -182,6 +185,19 @@ for (const r of rows) {
   const spread = Math.max(...b) - Math.min(...b);
   check(spread < 0.75, `${r.name}: first lines share a baseline (spread ${spread.toFixed(2)} px: ${b.map((x) => x.toFixed(1)).join(" / ")})`);
   check(r.lefts.every((l, i) => Math.abs(l - head.lefts[i]) < 0.5), `${r.name}: cells start under their headers`);
+}
+const ixEdges = await page.evaluate(
+  (ws) =>
+    [...document.querySelectorAll(`${ws} [data-testid="ts-index"]`)].map((row) => ({
+      chips: row.querySelector(".ts-chips").getBoundingClientRect().left,
+      facts: row.querySelector(".ts-facts").getBoundingClientRect().right,
+    })),
+  ws,
+);
+for (const key of ["chips", "facts"]) {
+  const xs = ixEdges.map((e) => e[key]);
+  const spread = Math.max(...xs) - Math.min(...xs);
+  check(spread < 0.5, `index ${key} ${key === "chips" ? "start" : "end"} at one x in every row (spread ${spread.toFixed(2)} px)`);
 }
 const root = await page.locator(`${ws} [data-testid="ts-root"]`).boundingBox();
 const clip = { x: root.x, y: root.y, width: Math.min(root.width, 900), height: Math.min(root.height, 640) };
