@@ -3,7 +3,7 @@ import { CopyButton } from "./CopyButton";
 import { DownloadButton } from "./Download";
 import { Pg } from "./Pg";
 
-/** Get Rowkery: the plain logo, Download, and the one line the unsigned alpha needs before its first launch. */
+/** Get Rowkery: the plain logo, Download, and the one line the unsigned beta needs before its first launch. */
 export function Close() {
   return (
     <div className="wrap" id="get">

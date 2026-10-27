@@ -14,7 +14,7 @@
 
 # Rowkery
 
-Rowkery is a Mac app for Postgres and SQLite. You browse and edit your data from the keyboard, and you can share the tables you pick with an AI agent, which reads them through a server built into the app. An agent can read what you share, and only you can change anything.
+Rowkery is a Mac app for Postgres and SQLite. You browse and edit your data from the keyboard, and you can share the tables you pick with an AI agent, which reads them through a server built into the app. Only you can change anything.
 
 It's free and open source, there's no account, and it connects straight from your Mac to your database.
 
@@ -60,10 +60,10 @@ The agent can list what you shared, describe tables, search the schema, explain 
 
 What keeps it in bounds:
 
-- **Reads only.** Each query is one SELECT on a read-only session, with a row cap and a time limit you set per connection. Writes, schema changes and a second statement are refused before anything reaches the database.
+- **Reads only.** Each query is one SELECT on a read-only session, with at most 1,000 rows an answer and a time limit you set per connection. Writes, schema changes and a second statement are refused before anything reaches the database.
 - **Only what you shared.** A query that reads a table you didn't share is refused, through views and joins too. A query that reads a big table end to end is refused as well, so an agent can't load a production server.
 - **Sensitive columns.** Mark a column sensitive and the agent only ever gets a stand-in for its values. Presenting hides the same columns on your own screen.
-- **Changes wait for you.** A proposed change lands on the Agents page with a dry run. Nothing runs until you press Commit, and the commit runs only if the rows are still the ones the dry run showed.
+- **Changes wait for you.** A proposed change lands on the Agents page with a dry run. Nothing runs until you press Commit, and the commit runs only if each statement still changes as many rows as the dry run showed.
 - **Every call is logged.** The Agents page shows each call with what was shared at the time, the request as sent and the start of the response.
 
 In clients that draw MCP Apps views, the agent's rows show as a grid in the chat and a proposal as a live card, each with a button that opens it in Rowkery. The [docs](https://docs.rowkery.com/connecting-to-agents/) cover every tool, limit and check.
