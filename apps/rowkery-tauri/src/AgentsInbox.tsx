@@ -4,7 +4,7 @@ import { CallDetail, clock, copyText } from "./AgentSharing";
 import { AgentIcon, PlayIcon, SettingsIcon, WarningIcon } from "./icons";
 import { PageBack, usePageFocus } from "./Inspector";
 import { Keys } from "./Keys";
-import { bytesLabel, clientLabel, sinceLabel, tookLabel, useMcpEntries, verdictOf, type McpEntry } from "./mcpActivity";
+import { bytesLabel, clientLabel, dayLabel, dayStart, sinceLabel, tookLabel, useMcpEntries, verdictOf, type McpEntry } from "./mcpActivity";
 import { useGlideHover } from "./motion";
 import { showToast } from "./notify";
 import { readKey, writeKey } from "./persist";
@@ -124,6 +124,17 @@ export function AgentsInbox({
     }
     return out;
   }, [entries, filter, placeOn]);
+  // The calls under a header per local day, newest day first (rowkery/reports#20).
+  const days = useMemo(() => {
+    const byDay = new Map<number, Call[]>();
+    for (const c of calls) {
+      const day = dayStart(c.e.ts);
+      const list = byDay.get(day);
+      if (list) list.push(c);
+      else byDay.set(day, [c]);
+    }
+    return [...byDay].map(([day, list]) => ({ day, calls: list }));
+  }, [calls]);
   const refusedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "refused").length, [inPlace]);
   const failedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "error").length, [inPlace]);
 
@@ -442,23 +453,33 @@ export function AgentsInbox({
               </select>
             </label>
           )}
-          <div className="ag-calls" role="list" aria-label="Agent calls">
+          <div className="ag-calls">
             {calls.length === 0 && (
               <p className="mcp-muted ag-calls-none">{!entries.length ? "No calls yet." : filter === "error" ? "Nothing failed." : "Nothing refused."}</p>
             )}
-            {calls.map((c) => (
-              <CallRow
-                key={c.key}
-                c={c}
-                conn={c.e.connection ? byId.get(c.e.connection) : undefined}
-                current={c === call}
-                onPick={() => {
-                  setSel({ kind: "call", key: c.key });
-                  rootRef.current?.focus({ preventScroll: true });
-                }}
-                onOpen={() => openCall(c)}
-              />
-            ))}
+            {days.map(({ day, calls: dayCalls }) => {
+              const label = dayLabel(day, now);
+              return (
+                <section key={day} className="ag-day" data-testid="ag-day" aria-label={label}>
+                  <h3 className="ag-day-head">{label}</h3>
+                  <div className="ag-day-calls" role="list" aria-label={`Agent calls, ${label}`}>
+                    {dayCalls.map((c) => (
+                      <CallRow
+                        key={c.key}
+                        c={c}
+                        conn={c.e.connection ? byId.get(c.e.connection) : undefined}
+                        current={c === call}
+                        onPick={() => {
+                          setSel({ kind: "call", key: c.key });
+                          rootRef.current?.focus({ preventScroll: true });
+                        }}
+                        onOpen={() => openCall(c)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
           </div>
         </div>
         <footer className="ag-inbox-foot">
