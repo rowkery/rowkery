@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { databaseHealth, type HealthCheck, type HealthReport, type SlowQuery } from "./api";
+import { RefreshIcon } from "./icons";
 import { InspectorHead } from "./Inspector";
 import {
   CHECK_NAME,
@@ -216,11 +217,12 @@ export function HealthBar({ model }: { model: HealthModel }) {
       )}
       <button
         type="button"
-        className="sessions-addchip"
+        className="insp-btn health-refresh"
         data-health-refresh
         disabled={reading}
         onClick={refresh}
       >
+        <RefreshIcon size={13} />
         {reading ? "Reading…" : "Refresh"}
       </button>
     </div>
