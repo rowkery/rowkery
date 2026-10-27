@@ -1036,6 +1036,19 @@ mod tests {
     }
 
     #[test]
+    fn a_trigger_runs_whole_from_a_query_tab() {
+        // The editor sends a trigger's `BEGIN …; END;` as one statement.
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut run = |sql: &str| driver.query_stream(sql, |_, _| Ok(())).expect(sql);
+        run("CREATE TABLE audit (note TEXT)");
+        run("CREATE TRIGGER items_gone AFTER DELETE ON items BEGIN INSERT INTO audit VALUES ('deleted ' || old.id); END;");
+        run("DELETE FROM items WHERE id = 1");
+        assert_eq!(run("SELECT note FROM audit"), 1);
+    }
+
+    #[test]
     fn big_cells_send_a_batch_before_its_row_count() {
         let (_file, path) = temp_db();
         let mut driver = SqliteDriver::new(path);
