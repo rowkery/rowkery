@@ -14,6 +14,12 @@ export type TrayState =
    * it isn't `message`.
    */
   | { kind: "failed"; message: string; title?: string; unknown?: boolean }
+  /**
+   * Stopped before COMMIT: cascades and triggers also write `reach`.
+   * "Not saved yet · deleting this row also deletes 14 kiosk_sessions",
+   * and Commit becomes "Commit all N".
+   */
+  | { kind: "reach"; text: string; total: number }
   /** "Updated 1 · Inserted 1 · Deleted 1 · 24 ms", for 1.6 s after a commit. */
   | { kind: "done"; text: string }
   /** ↵ where nothing can be edited, for 4 s. */
@@ -83,6 +89,7 @@ export function EditTray({
   }
   const n = `${count} ${count === 1 ? "change" : "changes"}${held ? " · waiting for confirmation" : ""}`;
   const failed = state.kind === "failed";
+  const reach = state.kind === "reach";
   const dot = (kind: keyof TrayCounts, label: string) =>
     counts && counts[kind] > 0 ? (
       <span className="edit-tray-dot" data-tray-count={kind} data-n={counts[kind]}>
@@ -102,6 +109,10 @@ export function EditTray({
       {failed ? (
         <span className="edit-tray-error" data-tray-error title={state.title ?? state.message}>
           {state.unknown ? "Outcome unknown" : "Nothing changed"} · {state.message}
+        </span>
+      ) : reach ? (
+        <span className="edit-tray-reach" data-tray-reach title={state.text}>
+          <b>Not saved yet</b> · {state.text}
         </span>
       ) : (
         <span className="edit-tray-dots">
@@ -125,7 +136,14 @@ export function EditTray({
         title={held ? "Confirm the write in the strip above" : undefined}
         onClick={onCommit}
       >
-        {failed ? "Retry" : state.kind === "committing" ? "Committing…" : "Commit"} <kbd><Keys text={commit} /></kbd>
+        {failed
+          ? "Retry"
+          : state.kind === "committing"
+            ? "Committing…"
+            : reach
+              ? `Commit all ${state.total.toLocaleString()}`
+              : "Commit"}{" "}
+        <kbd><Keys text={commit} /></kbd>
       </button>
     </div>
   );
