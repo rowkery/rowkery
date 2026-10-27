@@ -1784,6 +1784,34 @@ async fn a_longer_query_limit_lets_a_read_run_past_the_default() {
     assert!(err.contains("10 s"), "{err}");
     session_execute(&setup, "ROLLBACK").await.expect("unlock");
 
+    // Sharing turned off while a read waits: its answer isn't sent.
+    share(Some(30));
+    session_execute(&setup, "BEGIN; LOCK TABLE mcp_limit_locked")
+        .await
+        .expect("lock");
+    let held = tokio::spawn({
+        let mcp = mcp.clone();
+        async move { query(&mcp, locked).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    save(pg_config());
+    session_execute(&setup, "ROLLBACK").await.expect("unlock");
+    let err = held.await.expect("join").expect_err("dropped");
+    assert!(err.contains("dropped"), "{err}");
+
+    // One session, its limit lowered: the next statement runs under it.
+    let mut store = crate::target::Store::default();
+    let setting = "SELECT current_setting('statement_timeout')";
+    for (limit, want) in [(Some(300), "5min"), (None, "10s")] {
+        share(limit);
+        let target = crate::target::resolve(&AppConfig::load().unwrap(), ID, None).unwrap();
+        let read = store.read(&target, setting).await.expect("read");
+        assert_eq!(
+            read.rows,
+            vec![vec![rowkery_core::Value::Text(want.into())]]
+        );
+    }
+
     session_execute(&setup, "DROP TABLE mcp_limit_locked")
         .await
         .expect("cleanup");

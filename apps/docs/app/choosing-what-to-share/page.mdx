@@ -71,7 +71,7 @@ Choosing **1 hour** again starts a fresh hour. When the time is up, Rowkery show
 
 ## Query limit
 
-Each agent query stops after 10 seconds unless you give the connection longer. Pick **30 s**, **1 min** or **5 min** on its card for a report that needs it, such as a replica you keep for slow queries. The agent's next call runs under the new limit, `list_connections` tells the agent a limit longer than 10 s, and the activity log shows the limit each call ran under. The other limits, a plan that reads a table of over 100,000 rows end to end included, stay the same.
+Each agent query stops after 10 seconds unless you give the connection longer. Pick **30 s**, **1 min** or **5 min** on its card for a report that needs it, such as a replica you keep for slow queries. The agent's next call runs under the new limit, `list_connections` tells the agent a limit longer than 10 s, and the activity log shows the limit each call ran under. The limit covers every call on the connection, reading the schema included. While a long query runs, the agent's other calls on the same connection wait for it, and a call that waited checks what is shared again before it runs. When you stop sharing or change what's shared while a call runs, its answer is dropped. The other limits, a plan that reads a table of over 100,000 rows end to end included, stay the same.
 
 ## Edit access
 

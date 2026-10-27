@@ -660,8 +660,9 @@ function AccessCard({
               </button>
             ))}
           </div>
-          <span className="mcp-cn-label">Query limit</span>
-          <div className="mcp-mini-seg" role="radiogroup" aria-label={`Longest agent query on ${c.name}`}>
+          <span className="mcp-cn-limit">
+            <span className="mcp-cn-label">Query limit</span>
+            <div className="mcp-mini-seg" role="radiogroup" aria-label={`Longest agent query on ${c.name}`}>
             {MCP_TIMEOUTS.map((s) => (
               <button
                 key={s}
@@ -674,7 +675,8 @@ function AccessCard({
                 {secondsLabel(s)}
               </button>
             ))}
-          </div>
+            </div>
+          </span>
         </div>
       )}
     </div>
@@ -1347,8 +1349,8 @@ function CanDoSheet({ host, onClose }: { host: string | null; onClose: () => voi
               <li>
                 <Icon name="clock" />
                 <span>
-                  <b>Run for {L.timeoutSeconds} seconds</b> per query, or up to {secondsLabel(MCP_TIMEOUTS[MCP_TIMEOUTS.length - 1])} on a
-                  connection given a longer query limit
+                  <b>Run for {L.timeoutSeconds} seconds</b> per query (up to {MCP_TIMEOUTS[MCP_TIMEOUTS.length - 1] / 60} minutes where
+                  you allow it)
                 </span>
               </li>
               <li>

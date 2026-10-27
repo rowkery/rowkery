@@ -457,9 +457,7 @@ impl Store {
             let catalog = match &target.record {
                 ConnectionRecord::Sqlite(sqlite) => {
                     let mut driver = open_sqlite(&sqlite.path)?;
-                    driver
-                        .introspect_catalog()
-                        .map_err(|e| message(e, target.timeout()))?
+                    driver.introspect_catalog().map_err(|e| e.to_string())?
                 }
                 ConnectionRecord::Postgres(_) => {
                     self.guarded(target, "Timed out reading the schema.", async |s| {

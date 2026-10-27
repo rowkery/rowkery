@@ -155,7 +155,7 @@ export function McpLimits() {
       <tr>
         <td>Time limit per statement</td>
         <td>
-          {l.timeout_s} s, or {l.timeout_choices_s.slice(1).map((s) => (s < 60 ? `${s} s` : `${s / 60} min`)).join(", ")} set per connection
+          {l.timeout_s} s ({l.timeout_choices_s.slice(1).map((s) => (s < 60 ? `${s} s` : `${s / 60} min`)).join(", ").replace(/, ([^,]*)$/, " or $1")} per connection)
         </td>
       </tr>
       <tr>

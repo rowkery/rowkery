@@ -743,8 +743,12 @@ function App() {
   const setMcpTimeout = async (id: string, seconds: number) => {
     const conn = connections.find((c) => c.id === id);
     if (!conn) return;
-    await saveConnection({ ...conn, mcp_timeout_s: seconds }, {});
-    await refreshConnections();
+    try {
+      await saveConnection({ ...conn, mcp_timeout_s: seconds }, {});
+      await refreshConnections();
+    } catch (err) {
+      showToast("Couldn't save the query limit", String(err), "error");
+    }
   };
 
   /** The page's Stop all sharing: every shared connection, one save each, one toast. */

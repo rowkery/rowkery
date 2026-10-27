@@ -6,8 +6,9 @@
 //! turning sharing on or off in Rowkery takes effect at once.
 //! Only connections with `allow_mcp` set are visible. Every query is one
 //! SELECT (safe mode's classifier), runs in a read-only session with a 10 s
-//! statement timeout (longer where the user gave the connection more), is capped by wrapping it in `LIMIT`, and is refused
-//! when its plan reads a big table end to end. Each call is appended to
+//! statement timeout (longer where the user gave the connection more), is
+//! capped by wrapping it in `LIMIT`, and is refused when its plan reads a
+//! big table end to end. Each call is appended to
 //! `mcp-log.jsonl` beside the config.
 
 pub mod access;
@@ -462,6 +463,11 @@ impl RowkeryMcp {
         entry.database = Some(target.database.clone());
         let shared = self.stores().entry(target.key()).or_default().clone();
         let mut store = shared.lock().await;
+        // A call that waited behind a long one runs as the config is now.
+        let target = match current(&target) {
+            Ok(t) => t,
+            Err(e) => return (Err(e), entry, false),
+        };
         store.settle();
         let cap =
             (name == "query").then(|| guard::row_cap(args.get("max_rows").and_then(Json::as_u64)));
@@ -521,11 +527,27 @@ impl RowkeryMcp {
             }
             other => Err(format!("Unknown tool \"{other}\".")),
         };
+        // Sharing turned off or changed while it ran: the answer isn't sent.
+        // A queued change is the user's to review either way.
+        let outcome = match current(&target) {
+            Ok(now) if now.record == target.record || name == "propose_change" => outcome,
+            _ => Err("The connection's sharing changed during the call, so its answer was dropped. Call again.".into()),
+        };
         drop(store);
         drop(shared);
         self.forget_idle(&target.key());
         (outcome, entry, target.record.mcp_samples())
     }
+}
+
+/// The target as the config has it now.
+fn current(target: &Target) -> Result<Target, String> {
+    let config = AppConfig::load().map_err(|e| format!("Couldn't read Rowkery's config: {e}"))?;
+    let now = resolve(&config, target.id(), Some(&target.database))?;
+    if now.key() != target.key() {
+        return Err("The connection's sharing changed during the call. Call again.".into());
+    }
+    Ok(now)
 }
 
 /// Checks a change and queues it for the user; nothing runs.

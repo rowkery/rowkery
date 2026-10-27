@@ -42,8 +42,8 @@ pub struct SqliteConnection {
     #[serde(default, skip_serializing_if = "is_false")]
     pub mcp_samples_off: bool,
     /// Longest one agent query may run, in seconds; none is the MCP
-    /// server's default. The server only takes the choices it offers
-    /// (`rowkery_mcp::guard::statement_timeout`).
+    /// server's default, as is any value outside
+    /// `rowkery_mcp::guard::STATEMENT_TIMEOUTS_S`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_timeout_s: Option<u64>,
     /// Which databases agents may reach and, in each, which tables. None is a
@@ -218,8 +218,8 @@ pub struct PostgresConnection {
     #[serde(default, skip_serializing_if = "is_false")]
     pub mcp_samples_off: bool,
     /// Longest one agent query may run, in seconds; none is the MCP
-    /// server's default. The server only takes the choices it offers
-    /// (`rowkery_mcp::guard::statement_timeout`).
+    /// server's default, as is any value outside
+    /// `rowkery_mcp::guard::STATEMENT_TIMEOUTS_S`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_timeout_s: Option<u64>,
     /// Which databases agents may reach and, in each, which tables. None is a
