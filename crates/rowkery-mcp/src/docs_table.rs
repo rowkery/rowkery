@@ -46,6 +46,7 @@ fn docs_json() -> Json {
             "default_rows": guard::DEFAULT_ROWS,
             "max_rows": guard::MAX_ROWS,
             "timeout_s": guard::STATEMENT_TIMEOUT.as_secs(),
+            "timeout_choices_s": guard::STATEMENT_TIMEOUTS_S,
             "big_table_rows": guard::BIG_TABLE_ROWS,
             "cell_chars": guard::CELL_CHARS,
             "payload_bytes": guard::PAYLOAD_BYTES,

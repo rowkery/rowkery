@@ -41,6 +41,11 @@ pub struct SqliteConnection {
     /// Don't keep the 24 h result samples (`rowkery_mcp::samples`) for this connection.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mcp_samples_off: bool,
+    /// Longest one agent query may run, in seconds; none is the MCP
+    /// server's default. The server only takes the choices it offers
+    /// (`rowkery_mcp::guard::statement_timeout`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_timeout_s: Option<u64>,
     /// Which databases agents may reach and, in each, which tables. None is a
     /// connection set up before this map existed: every database, minus
     /// `mcp_hidden_tables` (`rowkery_mcp::access`).
@@ -212,6 +217,11 @@ pub struct PostgresConnection {
     /// Don't keep the 24 h result samples (`rowkery_mcp::samples`) for this connection.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mcp_samples_off: bool,
+    /// Longest one agent query may run, in seconds; none is the MCP
+    /// server's default. The server only takes the choices it offers
+    /// (`rowkery_mcp::guard::statement_timeout`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_timeout_s: Option<u64>,
     /// Which databases agents may reach and, in each, which tables. None is a
     /// connection set up before this map existed: every database, minus
     /// `mcp_hidden_tables` (`rowkery_mcp::access`).
@@ -275,6 +285,14 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => !c.mcp_samples_off,
             ConnectionRecord::Postgres(c) => !c.mcp_samples_off,
+        }
+    }
+
+    /// The agent query limit saved on the connection, in seconds, if any.
+    pub fn mcp_timeout_s(&self) -> Option<u64> {
+        match self {
+            ConnectionRecord::Sqlite(c) => c.mcp_timeout_s,
+            ConnectionRecord::Postgres(c) => c.mcp_timeout_s,
         }
     }
 
@@ -475,6 +493,7 @@ mod validate_tests {
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
+            mcp_timeout_s: None,
             mcp_access: None,
             masked_columns: Default::default(),
             id: "p".into(),
@@ -560,6 +579,7 @@ mod validate_tests {
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
+            mcp_timeout_s: None,
             mcp_access: None,
             masked_columns: Default::default(),
             id: "p1".into(),
@@ -587,6 +607,7 @@ mod validate_tests {
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
+            mcp_timeout_s: None,
             mcp_access: None,
             masked_columns: Default::default(),
             id: "p1".into(),

@@ -739,6 +739,14 @@ function App() {
     showToast(allow ? `Shared with agents${end}` : "Not shared with agents", conn.name);
   };
 
+  /** The longest one agent query may run on a connection; the server reads it on the next call. */
+  const setMcpTimeout = async (id: string, seconds: number) => {
+    const conn = connections.find((c) => c.id === id);
+    if (!conn) return;
+    await saveConnection({ ...conn, mcp_timeout_s: seconds }, {});
+    await refreshConnections();
+  };
+
   /** The page's Stop all sharing: every shared connection, one save each, one toast. */
   const stopAllMcp = async () => {
     const shared = connections.filter((c) => mcpShared(c));
@@ -1695,6 +1703,7 @@ function App() {
                 fillEditing={sharing.fill}
                 onEdit={(edit) => setSharing((cur) => ({ ...cur, edit, fill: false }))}
                 onSetAllow={(id, allow, until) => void setAllowMcp(allow, id, until ?? null)}
+                onSetTimeout={(id, seconds) => void setMcpTimeout(id, seconds)}
                 onStopAll={() => void stopAllMcp()}
                 onSetAccess={setMcpAccess}
                 onSetMasked={setMaskedColumns}

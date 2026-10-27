@@ -154,7 +154,9 @@ export function McpLimits() {
       </tr>
       <tr>
         <td>Time limit per statement</td>
-        <td>{l.timeout_s} s</td>
+        <td>
+          {l.timeout_s} s, or {l.timeout_choices_s.slice(1).map((s) => (s < 60 ? `${s} s` : `${s / 60} min`)).join(", ")} set per connection
+        </td>
       </tr>
       <tr>
         <td>Biggest table a plan may read end to end</td>

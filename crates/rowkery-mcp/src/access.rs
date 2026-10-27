@@ -118,7 +118,7 @@ impl Tables<'_> {
             "databases": databases(record).map_or(json!("all"), |d| json!(d.len())),
             "mode": mode,
             "tables": list.len(),
-            "timeout_s": crate::guard::STATEMENT_TIMEOUT.as_secs(),
+            "timeout_s": crate::guard::statement_timeout(record).as_secs(),
         });
         if let Some(n) = max_rows {
             out["max_rows"] = json!(n);
@@ -255,6 +255,7 @@ mod tests {
             mcp_hidden_tables: hidden.iter().map(|s| s.to_string()).collect(),
             mcp_until: None,
             mcp_samples_off: false,
+            mcp_timeout_s: None,
             mcp_access: access.map(|list| {
                 list.into_iter()
                     .map(|(db, mode, tables)| {
@@ -270,6 +271,26 @@ mod tests {
             }),
             masked_columns: Default::default(),
         })
+    }
+
+    #[test]
+    fn the_query_limit_is_one_the_app_offers() {
+        let with = |s: Option<u64>| {
+            let mut c = sqlite(None, &[]);
+            if let ConnectionRecord::Sqlite(c) = &mut c {
+                c.mcp_timeout_s = s;
+            }
+            c
+        };
+        let secs = |s| crate::guard::statement_timeout(&with(s)).as_secs();
+        assert_eq!(secs(None), 10);
+        assert_eq!(secs(Some(30)), 30);
+        assert_eq!(secs(Some(300)), 300);
+        // A hand-edited config gets the default, not what it asks for.
+        assert_eq!(secs(Some(3600)), 10);
+        assert_eq!(secs(Some(0)), 10);
+        let c = with(Some(60));
+        assert_eq!(Tables::AllBut(&[]).scope(&c, None)["timeout_s"], 60);
     }
 
     /// `(schema, table, parents, partition)`.

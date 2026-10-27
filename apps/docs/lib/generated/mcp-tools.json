@@ -7,6 +7,12 @@
     "max_rows": 1000,
     "payload_bytes": 65536,
     "plan_bytes": 8388608,
+    "timeout_choices_s": [
+      10,
+      30,
+      60,
+      300
+    ],
     "timeout_s": 10
   },
   "tools": [
@@ -164,7 +170,7 @@
       "read_only": true
     },
     {
-      "description": "Run one read-only SELECT. Returns column names once, rows as arrays, and more: true when the row cap cut the result. Capped at max_rows (default 200, max 1000); refused if the plan reads a table of over 100,000 rows end to end; 10 s timeout.",
+      "description": "Run one read-only SELECT. Returns column names once, rows as arrays, and more: true when the row cap cut the result. Capped at max_rows (default 200, max 1000); refused if the plan reads a table of over 100,000 rows end to end; 10 s timeout unless list_connections gives the connection a longer timeout_s.",
       "inputs": [
         {
           "description": "Connection id or name from list_connections",

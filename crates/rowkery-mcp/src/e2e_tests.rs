@@ -40,6 +40,7 @@ fn pg_config() -> PostgresConnection {
         mcp_hidden_tables: Vec::new(),
         mcp_until: None,
         mcp_samples_off: false,
+        mcp_timeout_s: None,
         mcp_access: None,
         masked_columns: Default::default(),
     }
@@ -1725,4 +1726,67 @@ async fn guards_go_ahead_of_every_call() {
         .await
         .expect("rollback");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_longer_query_limit_lets_a_read_run_past_the_default() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-limit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_limit_locked; CREATE TABLE mcp_limit_locked (id int)",
+    )
+    .await
+    .expect("fixtures");
+    let share = |limit: Option<u64>| {
+        let mut pg = pg_config();
+        pg.allow_mcp = true;
+        pg.mcp_timeout_s = limit;
+        save(pg);
+    };
+    let mcp = RowkeryMcp::default();
+    let locked = "SELECT count(*) FROM mcp_limit_locked";
+
+    // 30 s: a read held up past the default 10 s and the old 20 s call
+    // limit still answers once the lock goes.
+    share(Some(30));
+    session_execute(&setup, "BEGIN; LOCK TABLE mcp_limit_locked")
+        .await
+        .expect("lock");
+    let held = tokio::spawn({
+        let mcp = mcp.clone();
+        async move { query(&mcp, locked).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_secs(22)).await;
+    assert!(
+        !held.is_finished(),
+        "the read should still wait for the lock"
+    );
+    session_execute(&setup, "ROLLBACK").await.expect("unlock");
+    let read = held.await.expect("join").expect("read");
+    assert_eq!(read["rows"], json!([[0]]));
+
+    // Unset: stopped at 10 s, and the message says so.
+    share(None);
+    session_execute(&setup, "BEGIN; LOCK TABLE mcp_limit_locked")
+        .await
+        .expect("lock");
+    let started = std::time::Instant::now();
+    let err = query(&mcp, locked).await.expect_err("timed out");
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    assert!(err.contains("10 s"), "{err}");
+    session_execute(&setup, "ROLLBACK").await.expect("unlock");
+
+    session_execute(&setup, "DROP TABLE mcp_limit_locked")
+        .await
+        .expect("cleanup");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
 }

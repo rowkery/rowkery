@@ -6,7 +6,7 @@
 //! turning sharing on or off in Rowkery takes effect at once.
 //! Only connections with `allow_mcp` set are visible. Every query is one
 //! SELECT (safe mode's classifier), runs in a read-only session with a 10 s
-//! statement timeout, is capped by wrapping it in `LIMIT`, and is refused
+//! statement timeout (longer where the user gave the connection more), is capped by wrapping it in `LIMIT`, and is refused
 //! when its plan reads a big table end to end. Each call is appended to
 //! `mcp-log.jsonl` beside the config.
 
@@ -226,7 +226,7 @@ fn tools() -> Vec<Tool> {
         ),
         tool(
             "query",
-            "Run one read-only SELECT. Returns column names once, rows as arrays, and more: true when the row cap cut the result. Capped at max_rows (default 200, max 1000); refused if the plan reads a table of over 100,000 rows end to end; 10 s timeout.",
+            "Run one read-only SELECT. Returns column names once, rows as arrays, and more: true when the row cap cut the result. Capped at max_rows (default 200, max 1000); refused if the plan reads a table of over 100,000 rows end to end; 10 s timeout unless list_connections gives the connection a longer timeout_s.",
             json!({ "connection": connection, "database": database,
                     "sql": { "type": "string", "description": "One SELECT statement" },
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": guard::MAX_ROWS } }),
@@ -572,6 +572,10 @@ fn list_connections(config: &AppConfig) -> Json {
                 item["host"] = json!(guard::mask_host(&pg.host));
             }
             item["database"] = json!(access::default_database(c));
+            let timeout = guard::statement_timeout(c);
+            if timeout != guard::STATEMENT_TIMEOUT {
+                item["timeout_s"] = json!(timeout.as_secs());
+            }
             if let Some(list) = access::databases(c) {
                 if list.len() > 1 {
                     item["databases"] = json!(list);
@@ -1686,6 +1690,7 @@ mod tests {
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
+            mcp_timeout_s: None,
             mcp_access: Some(
                 [(
                     "main".to_string(),
@@ -1804,6 +1809,7 @@ mod tests {
                 mcp_hidden_tables: Vec::new(),
                 mcp_until: None,
                 mcp_samples_off: false,
+                mcp_timeout_s: None,
                 mcp_access: Some(
                     [(
                         "main".to_string(),
@@ -1875,6 +1881,7 @@ mod tests {
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
+            mcp_timeout_s: None,
             mcp_access: None,
             masked_columns: Default::default(),
         }));
