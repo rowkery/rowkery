@@ -1491,7 +1491,10 @@ fn reads_only(engine: String, sql: String) -> bool {
 /// Commits staged edits as one transaction on the tab's session; held by
 /// Confirm writes until `confirmed` carries the SQL the user saw; refused
 /// when the window is no longer on `connection_id`, the edits' connection.
+/// Stops before COMMIT when it writes other tables too, until `reach`
+/// carries the counts the user saw.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn apply_changes(
     app: AppHandle,
     window_id: String,
@@ -1500,6 +1503,7 @@ async fn apply_changes(
     table: EditTable,
     changes: Vec<Change>,
     confirmed: Option<String>,
+    reach: Option<rowkery_core::reach::Reach>,
 ) -> Result<rowkery_bridge::ApplyOutcome, String> {
     on_blocking_pool(app, move |bridge| {
         bridge.apply_changes(
@@ -1509,6 +1513,7 @@ async fn apply_changes(
             table,
             changes,
             confirmed,
+            reach,
         )
     })
     .await
@@ -1769,16 +1774,16 @@ async fn proposal_dry_run(id: String) -> Result<rowkery_mcp::proposals::DryRun, 
 }
 
 /// Commits a proposed change if it still passes every check and changes
-/// the row counts the user saw (`rows`, per statement).
+/// the rows the user saw (`seen`: per statement, in every table).
 #[tauri::command]
 async fn proposal_commit(
     bridge: State<'_, CoreBridge>,
     id: String,
-    rows: Vec<u64>,
+    seen: rowkery_mcp::proposals::Seen,
 ) -> Result<rowkery_mcp::proposals::CommitOutcome, String> {
     // A quit while it commits asks first.
     let _running = bridge.hold_commit();
-    rowkery_mcp::proposals::commit(&id, &rows).await
+    rowkery_mcp::proposals::commit(&id, &seen).await
 }
 
 /// The user said no; `note` goes back to the agent.

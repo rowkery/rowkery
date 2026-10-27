@@ -7,6 +7,8 @@ use rusqlite::{Connection, InterruptHandle, OpenFlags};
 
 use crate::connections::expand_home;
 use crate::edits::{ApplyCounts, ApplyFailure, RowStatement};
+use crate::reach::{beyond, Reach, SqliteCounter};
+use rusqlite::hooks::Action;
 
 use super::introspect::{
     ColumnNode, DatabaseNode, ForeignKeyNode, IndexNode, RowEstimate, SchemaCatalog, SchemaNode,
@@ -161,8 +163,13 @@ impl SqliteDriver {
 
     /// Runs staged row edits as one transaction: every statement must change
     /// exactly one row, or the whole batch rolls back and the failure names
-    /// the statement.
-    pub fn apply_changes(&self, statements: &[RowStatement]) -> Result<ApplyCounts, ApplyFailure> {
+    /// the statement. What it writes beyond its own rows (cascades,
+    /// triggers) stops it before COMMIT unless it is exactly `approved`.
+    pub fn apply_changes(
+        &self,
+        statements: &[RowStatement],
+        approved: Option<&Reach>,
+    ) -> Result<ApplyCounts, ApplyFailure> {
         let conn = self
             .connection()
             .map_err(|e| ApplyFailure::other(e.into_message()))?;
@@ -177,10 +184,17 @@ impl SqliteDriver {
         // IMMEDIATE takes the write lock now, so no other writer slips in between.
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ApplyFailure::other(e.to_string()))?;
+        // The hook goes with the batch: nothing else on the tab counts.
+        let mut counter = SqliteCounter::install(&conn);
         let rollback = || {
             let _ = conn.execute_batch("ROLLBACK");
+            conn.update_hook(None::<fn(Action, &str, &str, i64)>);
         };
         let mut counts = ApplyCounts::default();
+        if let Err(err) = counter.mark(&conn) {
+            rollback();
+            return Err(ApplyFailure::other(err.to_string()));
+        }
         for (index, statement) in statements.iter().enumerate() {
             match conn.execute(&statement.sql, []) {
                 Ok(1) => counts.add(statement.verb, 1),
@@ -194,6 +208,37 @@ impl SqliteDriver {
                 }
             }
         }
+        let table = statements
+            .first()
+            .map(|s| unquote(&s.target))
+            .unwrap_or_default();
+        let reach = match counter.reach(&conn) {
+            Ok(all) => {
+                // An unqualified name resolves temp first, then main, then
+                // attached databases: own rows count under the first one hit.
+                let rank = |s: &str| match s {
+                    "temp" => 0,
+                    "main" => 1,
+                    _ => 2,
+                };
+                let schema = all
+                    .tables
+                    .iter()
+                    .filter(|t| t.table == table)
+                    .min_by_key(|t| rank(&t.schema))
+                    .map_or_else(|| "main".to_string(), |t| t.schema.clone());
+                beyond(all, &schema, &table, counts.rows())
+            }
+            Err(err) => {
+                rollback();
+                return Err(ApplyFailure::other(err.to_string()));
+            }
+        };
+        if !reach.is_empty() && approved != Some(&reach) {
+            rollback();
+            return Err(ApplyFailure::reaches(reach));
+        }
+        conn.update_hook(None::<fn(Action, &str, &str, i64)>);
         if let Err(err) = conn.execute_batch("COMMIT") {
             rollback();
             return Err(ApplyFailure::other(err.to_string()));
@@ -946,6 +991,14 @@ pub fn sqlite_value_to_core(value: ValueRef) -> Value {
     }
 }
 
+/// `"Kiosk ""A"""` → `Kiosk "A"`: a table name as `quote_ident` wrote it.
+fn unquote(target: &str) -> String {
+    match target.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => target.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,6 +1033,19 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].rows.len(), 2);
         assert_eq!(batches[0].rows[0][1], Value::Text("alpha".into()));
+    }
+
+    #[test]
+    fn a_trigger_runs_whole_from_a_query_tab() {
+        // The editor sends a trigger's `BEGIN …; END;` as one statement.
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut run = |sql: &str| driver.query_stream(sql, |_, _| Ok(())).expect(sql);
+        run("CREATE TABLE audit (note TEXT)");
+        run("CREATE TRIGGER items_gone AFTER DELETE ON items BEGIN INSERT INTO audit VALUES ('deleted ' || old.id); END;");
+        run("DELETE FROM items WHERE id = 1");
+        assert_eq!(run("SELECT note FROM audit"), 1);
     }
 
     #[test]

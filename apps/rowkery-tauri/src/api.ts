@@ -13,6 +13,7 @@ import type {
   TableIndexes,
   Value,
 } from "./types";
+import type { Reach } from "./proposals";
 
 export async function listConnections(): Promise<ConnectionListDto> {
   return invoke("list_connections");
@@ -747,6 +748,12 @@ export type ApplyOutcome =
       rows: number | null;
       message: string;
       unknown?: boolean;
+      /**
+       * Every statement ran as it should, but cascades and triggers also
+       * wrote these rows, so it stopped before COMMIT. Sent back as `reach`,
+       * it commits if the counts are the same.
+       */
+      reach?: Reach;
       elapsed_ms: number;
     };
 
@@ -774,13 +781,15 @@ export async function applyChanges(
   table: EditTable,
   changes: RowChange[],
   confirmed?: string,
+  /** The other tables' rows the user chose to commit too. */
+  reach?: Reach,
 ): Promise<ApplyOutcome> {
   // One commit per tab at a time: a second would run the same INSERTs again.
   const key = `${windowId}:${tabId}`;
   if (applying.has(key)) throw new Error("A commit is already running in this tab");
   applying.add(key);
   try {
-    return await invoke("apply_changes", { windowId, connectionId, tabId, table, changes, confirmed: confirmed ?? null });
+    return await invoke("apply_changes", { windowId, connectionId, tabId, table, changes, confirmed: confirmed ?? null, reach: reach ?? null });
   } finally {
     applying.delete(key);
   }

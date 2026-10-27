@@ -2402,6 +2402,7 @@ fn sqlite_tabs_keep_their_connection_between_runs() {
             orders.clone(),
             vec![update(1, "item", Value::Text("y".into()))],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::RolledBack { failure, .. } = out else {
@@ -2443,6 +2444,7 @@ fn sqlite_tabs_keep_their_connection_between_runs() {
             1,
             orders,
             vec![update(1, "item", Value::Text("y".into()))],
+            None,
             None,
         )
         .expect("apply");
@@ -3962,6 +3964,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
                 },
             ],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::Committed { counts, .. } = out else {
@@ -3982,6 +3985,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
                 update(2, "name", Value::Text("kept?".into())),
                 update(99, "name", Value::Text("nobody".into())),
             ],
+            None,
             None,
         )
         .expect("apply");
@@ -4011,6 +4015,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
                 update(2, "name", Value::Text("two".into())),
             ],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::RolledBack { failure, .. } = out else {
@@ -4035,6 +4040,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
                 set: vec![cell("id", Value::Int(5))],
             }],
             None,
+            None,
         )
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
@@ -4043,7 +4049,15 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     // Confirm writes: held with the exact text; only that text runs.
     let change = vec![update(2, "name", Value::Text("confirmed".into()))];
     let out = bridge
-        .apply_changes("confirm", "confirm", 1, k.clone(), change.clone(), None)
+        .apply_changes(
+            "confirm",
+            "confirm",
+            1,
+            k.clone(),
+            change.clone(),
+            None,
+            None,
+        )
         .expect("apply");
     let ApplyOutcome::Held { hold, sql } = out else {
         panic!("{out:?}")
@@ -4061,7 +4075,8 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
             1,
             k.clone(),
             change.clone(),
-            Some("BEGIN;".into())
+            Some("BEGIN;".into()),
+            None
         )
         .is_err());
     let out = bridge
@@ -4072,6 +4087,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
             k.clone(),
             change.clone(),
             Some(sql),
+            None,
         )
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
@@ -4081,7 +4097,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
     let change = vec![update(2, "name", Value::Text("refused".into()))];
     let sql = review_changes(EngineKind::Sqlite, &k, &change).unwrap().sql;
     let out = bridge
-        .apply_changes("ro", "ro", 1, k.clone(), change, Some(sql))
+        .apply_changes("ro", "ro", 1, k.clone(), change, Some(sql), None)
         .expect("apply");
     let ApplyOutcome::Held { hold, .. } = out else {
         panic!("{out:?}")
@@ -4099,6 +4115,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
             k.clone(),
             vec![update(2, "name", Value::Text("elsewhere".into()))],
             None,
+            None,
         )
         .expect_err("another connection's edits");
     assert!(err.contains("another connection"), "{err}");
@@ -4106,7 +4123,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
 
     // Nothing to commit, or no key: refused before anything runs.
     assert!(bridge
-        .apply_changes("off", "off", 1, k.clone(), vec![], None)
+        .apply_changes("off", "off", 1, k.clone(), vec![], None, None)
         .is_err());
     let keyless = edit_table("main", "k", &[("id", "INTEGER")], &[]);
     assert!(bridge
@@ -4116,6 +4133,7 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
             1,
             keyless,
             vec![update(1, "id", Value::Int(1))],
+            None,
             None
         )
         .is_err());
@@ -4217,6 +4235,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
                 update(2, "name", text("both?")),
             ],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::RolledBack { failure, .. } = out else {
@@ -4262,6 +4281,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
                 },
             ],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::Committed { counts, .. } = out else {
@@ -4298,6 +4318,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
             table.clone(),
             vec![update(1, "meta", Value::Null)],
             None,
+            None,
         )
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
@@ -4319,6 +4340,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
                     values: vec![cell("name", text("no id"))],
                 },
             ],
+            None,
             None,
         )
         .expect("apply");
@@ -4346,6 +4368,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
             table.clone(),
             vec![update(10, "name", text("x"))],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::RolledBack { failure, .. } = out else {
@@ -4361,6 +4384,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
             table.clone(),
             vec![update(10, "name", text("x"))],
             None,
+            None,
         )
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
@@ -4368,7 +4392,15 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
     // Confirm writes: held with the statements, then exactly those run.
     let change = vec![update(10, "name", text("confirmed"))];
     let out = bridge
-        .apply_changes("confirm", "confirm", 1, table.clone(), change.clone(), None)
+        .apply_changes(
+            "confirm",
+            "confirm",
+            1,
+            table.clone(),
+            change.clone(),
+            None,
+            None,
+        )
         .expect("apply");
     let ApplyOutcome::Held { hold, sql } = out else {
         panic!("{out:?}")
@@ -4381,7 +4413,15 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
         Some(text("x"))
     );
     let out = bridge
-        .apply_changes("confirm", "confirm", 1, table.clone(), change, Some(sql))
+        .apply_changes(
+            "confirm",
+            "confirm",
+            1,
+            table.clone(),
+            change,
+            Some(sql),
+            None,
+        )
         .expect("apply");
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
     assert_eq!(
@@ -4395,7 +4435,7 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
         .unwrap()
         .sql;
     let out = bridge
-        .apply_changes("ro", "ro", 1, table.clone(), change, Some(sql))
+        .apply_changes("ro", "ro", 1, table.clone(), change, Some(sql), None)
         .expect("apply");
     let ApplyOutcome::Held { hold, .. } = out else {
         panic!("{out:?}")
@@ -4870,6 +4910,7 @@ fn postgres_apply_changes_times_out_before_commit() {
             table.clone(),
             vec![update(1, "name", Value::Text("edited".into()))],
             None,
+            None,
         )
         .expect("apply");
     let ApplyOutcome::RolledBack { failure, .. } = out else {
@@ -4893,6 +4934,7 @@ fn postgres_apply_changes_times_out_before_commit() {
             1,
             table,
             vec![update(1, "name", Value::Text("edited".into()))],
+            None,
             None,
         )
         .expect("apply");
@@ -6338,6 +6380,7 @@ fn postgres_work_that_ends_early_stops_counting() {
         ),
         vec![update(1, "name", Value::Text("x".into()))],
         None,
+        None,
     );
     assert!(
         !matches!(commit, Ok(ApplyOutcome::Committed { .. })),
@@ -6508,4 +6551,264 @@ fn postgres_a_run_behind_the_tabs_busy_session_says_it_waits() {
     });
     assert_eq!(error, Some(None));
     std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A deleted row's cascades and trigger writes stop the commit before
+/// COMMIT with their counts; committing again with those counts saves it
+/// all, and different counts stop it again.
+#[test]
+fn sqlite_apply_changes_stops_when_a_cascade_reaches_other_tables() {
+    let (_guard, _file, path) = test_guard();
+    Connection::open(&path)
+        .expect("open")
+        .execute_batch(
+            "CREATE TABLE kiosks (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE kiosk_sessions (id INTEGER PRIMARY KEY,
+               kiosk INTEGER REFERENCES kiosks ON DELETE CASCADE);
+             CREATE TABLE audit_log (what TEXT);
+             CREATE TRIGGER kiosk_gone AFTER DELETE ON kiosks BEGIN INSERT INTO audit_log VALUES ('kiosk'); END;
+             INSERT INTO kiosks VALUES (1, 'a'), (2, 'b');
+             INSERT INTO kiosk_sessions VALUES (1, 2), (2, 2), (3, 1);",
+        )
+        .expect("seed");
+    let bridge = super::CoreBridge::spawn();
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Sqlite(SqliteConnection {
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            environment: None,
+            safe_mode: SafeMode::Off,
+            id: "off".into(),
+            name: "off".into(),
+            path: path.clone(),
+            sample: false,
+        }),
+        ConnectionSecrets::default(),
+    )
+    .expect("save");
+    bridge.open_window("off", "off", None).expect("open");
+    let kiosks = edit_table(
+        "main",
+        "kiosks",
+        &[("id", "INTEGER"), ("name", "TEXT")],
+        &["id"],
+    );
+    let count =
+        |table: &str| window_query(&bridge, "off", 1, &format!("SELECT count(*) FROM {table}")).0;
+    let apply = |changes: Vec<Change>, reach: Option<Reach>| {
+        bridge
+            .apply_changes("off", "off", 1, kiosks.clone(), changes, None, reach)
+            .expect("apply")
+    };
+
+    // An edit to a name reaches nothing: it commits as before.
+    let out = apply(vec![update(1, "name", Value::Text("A".into()))], None);
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+
+    let delete = || {
+        vec![Change::Delete {
+            key: vec![cell("id", Value::Int(2))],
+        }]
+    };
+    let ApplyOutcome::RolledBack { failure, .. } = apply(delete(), None) else {
+        panic!("a cascade stops the commit")
+    };
+    let reach = failure.reach.expect("the other tables' counts");
+    let seen: Vec<(&str, u64, u64)> = reach
+        .tables
+        .iter()
+        .map(|t| (t.table.as_str(), t.inserted, t.deleted))
+        .collect();
+    assert_eq!(seen, [("audit_log", 1, 0), ("kiosk_sessions", 0, 2)]);
+    assert_eq!(
+        count("kiosk_sessions"),
+        Some(Value::Int(3)),
+        "nothing saved"
+    );
+
+    // Another session joins the kiosk: the counts the user saw are stale.
+    window_query(
+        &bridge,
+        "off",
+        1,
+        "INSERT INTO kiosk_sessions VALUES (4, 2)",
+    );
+    let ApplyOutcome::RolledBack { failure, .. } = apply(delete(), Some(reach)) else {
+        panic!("different counts stop it again")
+    };
+    let reach = failure.reach.expect("the new counts");
+    assert_eq!(reach.tables[1].deleted, 3);
+
+    let out = apply(delete(), Some(reach));
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+    assert_eq!(count("kiosk_sessions"), Some(Value::Int(1)));
+    assert_eq!(count("audit_log"), Some(Value::Int(1)));
+}
+
+#[test]
+fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
+    let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+        eprintln!("skip postgres_apply_changes_stops_when_a_cascade_reaches_other_tables (set ROWKERY_PG_HOST)");
+        return;
+    };
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Postgres(PostgresConnection {
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            environment: None,
+            safe_mode: SafeMode::Off,
+            id: "off".into(),
+            name: "off".into(),
+            host,
+            port: std::env::var("ROWKERY_PG_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(54329),
+            database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+            username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+            ssl_mode: PostgresSslMode::Disable,
+            ssl_root_cert: None,
+            ssh: None,
+            cloud_sql: None,
+        }),
+        ConnectionSecrets {
+            db_password: Some(
+                std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("save");
+    bridge.open_window("off", "off", None).expect("open");
+    let run = |sql: &str| window_query(&bridge, "off", 1, sql);
+    for sql in [
+        "DROP TABLE IF EXISTS public.it_kiosks, public.it_sessions, public.it_payouts, public.it_audit, public.it_plain, public.it_parent CASCADE",
+        "DROP FUNCTION IF EXISTS public.it_note() CASCADE",
+        "CREATE TABLE public.it_kiosks (id int PRIMARY KEY, name text)",
+        "CREATE TABLE public.it_sessions (id int PRIMARY KEY, kiosk int REFERENCES public.it_kiosks ON DELETE CASCADE)",
+        "CREATE TABLE public.it_payouts (id int, kiosk int REFERENCES public.it_kiosks ON DELETE CASCADE) PARTITION BY RANGE (id)",
+        "CREATE TABLE public.it_payouts_a PARTITION OF public.it_payouts FOR VALUES FROM (0) TO (100)",
+        "CREATE TABLE public.it_payouts_b PARTITION OF public.it_payouts FOR VALUES FROM (100) TO (200)",
+        "CREATE TABLE public.it_audit (what text)",
+        "CREATE TABLE public.it_plain (id int PRIMARY KEY, name text)",
+        "CREATE FUNCTION public.it_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.it_audit VALUES (TG_OP); RETURN NULL; END $$",
+        "CREATE CONSTRAINT TRIGGER it_late AFTER DELETE ON public.it_kiosks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.it_note()",
+        "INSERT INTO public.it_kiosks VALUES (1, 'a'), (2, 'b')",
+        "INSERT INTO public.it_sessions SELECT g, 1 + g % 2 FROM generate_series(1, 6) g",
+        "INSERT INTO public.it_payouts VALUES (5, 2), (150, 2), (6, 1)",
+        "INSERT INTO public.it_plain VALUES (1, 'p')",
+        "CREATE TABLE public.it_parent (id int PRIMARY KEY, name text)",
+        "CREATE TABLE public.it_child () INHERITS (public.it_parent)",
+        "CREATE TRIGGER it_child_note AFTER UPDATE ON public.it_child FOR EACH ROW EXECUTE FUNCTION public.it_note()",
+        "INSERT INTO public.it_child VALUES (9, 'c')",
+    ] {
+        assert_eq!(run(sql).1, None, "{sql}");
+    }
+    let kiosks = edit_table(
+        "public",
+        "it_kiosks",
+        &[("id", "integer"), ("name", "text")],
+        &["id"],
+    );
+    let apply = |table: &EditTable, changes: Vec<Change>, reach: Option<Reach>| {
+        bridge
+            .apply_changes("off", "off", 1, table.clone(), changes, None, reach)
+            .expect("apply")
+    };
+    // A table nothing cascades into, with no trigger, isn't counted at all.
+    let plain = edit_table(
+        "public",
+        "it_plain",
+        &[("id", "integer"), ("name", "text")],
+        &["id"],
+    );
+    let out = apply(
+        &plain,
+        vec![update(1, "name", Value::Text("q".into()))],
+        None,
+    );
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+    // A row of an inheritance child, edited through the parent, fires the
+    // child's trigger: counted, though the parent has none of its own.
+    let parent = edit_table(
+        "public",
+        "it_parent",
+        &[("id", "integer"), ("name", "text")],
+        &["id"],
+    );
+    let ApplyOutcome::RolledBack { failure, .. } = apply(
+        &parent,
+        vec![update(9, "name", Value::Text("d".into()))],
+        None,
+    ) else {
+        panic!("the child's trigger stops the commit")
+    };
+    let reach = failure.reach.expect("the child's trigger counted");
+    assert!(
+        reach
+            .tables
+            .iter()
+            .any(|t| t.table == "it_audit" && t.inserted == 1),
+        "{reach:?}"
+    );
+    // Renaming a kiosk writes nothing else.
+    let out = apply(
+        &kiosks,
+        vec![update(1, "name", Value::Text("A".into()))],
+        None,
+    );
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+
+    let delete = || {
+        vec![Change::Delete {
+            key: vec![cell("id", Value::Int(2))],
+        }]
+    };
+    let ApplyOutcome::RolledBack { failure, .. } = apply(&kiosks, delete(), None) else {
+        panic!("a cascade stops the commit")
+    };
+    let reach = failure.reach.expect("the other tables' counts");
+    let seen: Vec<(&str, u64, u64)> = reach
+        .tables
+        .iter()
+        .map(|t| (t.table.as_str(), t.inserted, t.deleted))
+        .collect();
+    // Partitions count under their table; the deferred trigger fired first.
+    assert_eq!(
+        seen,
+        [
+            ("it_audit", 1, 0),
+            ("it_payouts", 0, 2),
+            ("it_sessions", 0, 3)
+        ]
+    );
+    assert_eq!(
+        run("SELECT count(*)::int FROM public.it_sessions").0,
+        Some(Value::Int(6)),
+        "nothing saved"
+    );
+    let out = apply(&kiosks, delete(), Some(reach));
+    assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+    assert_eq!(
+        run("SELECT count(*)::int FROM public.it_sessions").0,
+        Some(Value::Int(3))
+    );
+    for sql in [
+        "DROP TABLE public.it_sessions, public.it_payouts, public.it_audit, public.it_plain, public.it_kiosks, public.it_parent CASCADE",
+        "DROP FUNCTION public.it_note()",
+    ] {
+        run(sql);
+    }
 }

@@ -123,6 +123,12 @@ The note under the cards says what Commit will do on this connection: write at o
 
 While it runs, the bar reads **Committing…**. When it's done it says what changed, such as **Updated 1 · Inserted 1 · Deleted 1 · 24 ms**, and the table reloads. If it failed, the bar says **Nothing changed** and why (for example `UPDATE public.orders WHERE id = 99 changed 0 rows`), your changes stay staged, and **Commit** becomes **Retry**.
 
+### When a change reaches other tables
+
+Deleting one row can delete rows in other tables through foreign keys with `ON DELETE CASCADE`, and a trigger can write rows of its own. When a commit would change rows in another table, Rowkery stops before COMMIT, so nothing is saved, and the bar says what else would change: **Not saved yet · deleting this row also deletes 14 kiosk_sessions and 37 payouts**. **Commit** becomes **Commit all 53** (your changes plus the other rows). It commits only if those counts are still the same. If they changed in the meantime, the bar shows the new counts and nothing is saved. Under Confirm writes, the SQL you confirmed carries over, so you aren't asked again.
+
+Rowkery counts only when the table can reach another one: it has a trigger or a rule, a foreign key cascades into it (or sets NULL or the default), or it's partitioned or has inheritance children. Other commits run as before. On Postgres, triggers that wait for COMMIT fire before the counts are read, and a partition's rows count under its table. A row of an inheritance child edited from the parent's tab counts under the child, so it shows as another table. On SQLite, rows in a `WITHOUT ROWID` table, and rows a trigger deletes with no `WHERE`, show as rows "in tables Rowkery can't name". SQLite doesn't report a row that `ON CONFLICT REPLACE` (or `INSERT OR REPLACE` in a trigger) removes, so that one isn't counted. With several changes at once, the bar says "these changes", because which change caused which rows isn't known.
+
 Edits you make while a commit runs stay staged afterwards for the next one.
 
 ### With Confirm writes on

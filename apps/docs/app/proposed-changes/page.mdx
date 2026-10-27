@@ -60,10 +60,20 @@ Click **Dry run**. Rowkery runs the statements in a transaction and rolls it bac
 
 - Under each statement, the rows it changed: for an UPDATE, the old value struck through above the new one in each changed cell; new rows for an INSERT; the rows a DELETE would remove. Up to 200 rows show per statement, with "First 200 of 1,240 rows" beyond that.
 - A statement that matches nothing says "No rows match, so this statement changes nothing."
-- Beside Dry run, the total and "rolled back", such as "2 rows · rolled back".
+- Beside Dry run, the total and "rolled back", such as "2 rows · rolled back", or "67 rows in 5 tables · rolled back" when the change reaches other tables.
 - On the right, "2 rows would change" beside "Agent expected 2" when the agent gave a number, and the columns whose values change.
 
-Triggers really run during the dry run, inside the same rolled-back transaction. What they write isn't counted or shown.
+### Everything a change touches
+
+Deleting one customer can delete their orders, their payments and every order item through foreign keys with `ON DELETE CASCADE`, and a trigger can write an audit row. The dry run counts all of it.
+
+- The statement's head adds what other tables change, such as "1 row + 66 in other tables". The rows shown under it are the statement's own.
+- On the right, the total counts every table, and each table gets a line with its count: "14 deleted", "1 added", "2 changed".
+- A table the agent wasn't given, reached through a cascade or a trigger, says "not shared", and a warning names it. The change is still allowed: you see the counts before you commit. The agent hears nothing about that table.
+- On Postgres, triggers that wait for COMMIT (deferred constraint triggers) fire at the end of the dry run, so their rows count too. A partition's rows count under its table.
+- On SQLite, rows in a `WITHOUT ROWID` table show as "N more rows in tables Rowkery can't name".
+
+Triggers run as the database defines them, so a trigger may read or write a table the agent wasn't given; that's the database's own logic, never the agent's SQL, and its writes show in the counts. It shows counts, not the rows themselves. Tables on another server (Postgres foreign tables) aren't counted, and anything a trigger does outside the database already happens during the dry run. A Postgres server with `track_counts` off keeps no counts, so only the statement's own rows show.
 
 If another session holds the rows, the dry run waits 2 seconds, then stops: "Another session is holding these rows, so the dry run stopped after 2 s. Nothing was changed." Click **Dry run again** to retry. Each change keeps its dry run while you look at another one, so you can come back and commit without running it again.
 
@@ -71,12 +81,12 @@ If another session holds the rows, the dry run waits 2 seconds, then stops: "Ano
 
 Click **Commit** <kbd>⇧⌘↵</kbd>. A single DELETE or UPDATE with no WHERE labels the button **Delete all rows** or **Update all rows**.
 
-Before anything runs, Rowkery checks the change again from the start: the connection must still be shared, its tables still shared, and the SQL must still pass every rule. Then it runs all the statements in one transaction and commits only if each statement changes the same number of rows the dry run showed.
+Before anything runs, Rowkery checks the change again from the start: the connection must still be shared, its tables still shared, and the SQL must still pass every rule. Then it runs all the statements in one transaction and commits only if each statement changes the same number of rows the dry run showed, in its own table and in every other table it reaches.
 
 | What happens | What you see |
 | --- | --- |
-| It commits | "Committed", with the rows and table, and the proposal leaves the queue |
-| The rows changed since the dry run | Nothing is saved. "Nothing was saved: the rows changed since the dry run. Check the new one." A fresh dry run takes its place, ready to commit |
+| It commits | "Committed", with the rows and table (and "+ 66 in other tables" when it reached them), and the proposal leaves the queue |
+| The rows changed since the dry run, in any table | Nothing is saved. "Nothing was saved: the rows changed since the dry run. Check the new one." A fresh dry run takes its place, ready to commit |
 | An error before COMMIT | "Couldn't commit" with the server's message. Nothing was saved, so you can try again |
 | The connection dropped during COMMIT | Rowkery can't know whether it was saved, so it never retries. The agent is told it failed, and you should reload the table to check |
 

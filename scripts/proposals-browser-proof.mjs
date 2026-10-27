@@ -15,7 +15,7 @@
 // WHERE". SQL the lexer can't read shows whole
 // with "Couldn't read the target table". The review is the Agents page's
 // "Waiting for you" (2026-10-17), so deciding the last one leaves the page up.
-// Commit ⇧⌘↵ sends the dry run's counts; a "moved" answer swaps in the fresh
+// Commit ⇧⌘↵ sends the dry run's counts (rows and each table's); a "moved" answer swaps in the fresh
 // dry run and saves nothing; Discard sends the note; the page shows the log when
 // nothing waits. The plan, checks, dry run and commit themselves are proved
 // by `cargo test -p rowkery-mcp` (`--features postgres-integration` for
@@ -112,17 +112,21 @@ function stubTauri() {
       after: [id, name, "pro", 10, cc],
     })),
     triggers: [],
+    reach: { tables: [{ schema: "public", table: "customers", inserted: 0, updated: rows.length, deleted: 0 }], unnamed: 0 },
+    table: ["public", "customers"],
   });
-  const dry1 = { proposal: P1, connection_name: "Platform API", statements: [upd([[12, "Ada Park", 1, "SG"], [31, "Ravi Iyer", 3, "IN"], [47, "Mia Chen", 2, "NZ"]])] };
-  const moved1 = { proposal: P1, connection_name: "Platform API", statements: [upd([[12, "Ada Park", 1, "SG"], [47, "Mia Chen", 2, "NZ"]])] };
+  const dry1 = { proposal: P1, connection_name: "Platform API", statements: [upd([[12, "Ada Park", 1, "SG"], [31, "Ravi Iyer", 3, "IN"], [47, "Mia Chen", 2, "NZ"]])], at_commit: null, unshared: [] };
+  const moved1 = { proposal: P1, connection_name: "Platform API", statements: [upd([[12, "Ada Park", 1, "SG"], [47, "Mia Chen", 2, "NZ"]])], at_commit: null, unshared: [] };
   const ocols = ["id", "customer_id", "total"];
   const dry2 = {
     proposal: P2,
     connection_name: "Platform API",
     statements: [
-      { verb: "INSERT", target: "orders", sql: "INSERT INTO orders (id, customer_id, total) VALUES (9001, 12, 49.00)", destructive: false, rows: 1, columns: ocols, key: ["id"], changed: [], shown: [{ before: null, after: [9001, 12, "49.00"] }], triggers: ["orders_audit"] },
-      { verb: "DELETE", target: "orders", sql: "DELETE FROM orders", destructive: true, rows: 412, columns: ocols, key: ["id"], changed: [], shown: [{ before: [1, 12, "18.00"], after: null }, { before: [2, 31, "240.50"], after: null }, { before: [3, 47, "9.99"], after: null }], triggers: ["orders_audit"] },
+      { verb: "INSERT", target: "orders", sql: "INSERT INTO orders (id, customer_id, total) VALUES (9001, 12, 49.00)", destructive: false, rows: 1, columns: ocols, key: ["id"], changed: [], shown: [{ before: null, after: [9001, 12, "49.00"] }], triggers: ["orders_audit"], reach: null, table: null },
+      { verb: "DELETE", target: "orders", sql: "DELETE FROM orders", destructive: true, rows: 412, columns: ocols, key: ["id"], changed: [], shown: [{ before: [1, 12, "18.00"], after: null }, { before: [2, 31, "240.50"], after: null }, { before: [3, 47, "9.99"], after: null }], triggers: ["orders_audit"], reach: null, table: null },
     ],
+    at_commit: null,
+    unshared: [],
   };
   // SQL the lexer can't read: the plan has no verb or table for it.
   const P3 = {
@@ -179,7 +183,7 @@ function stubTauri() {
           // The first commit finds a row moved; the second goes through.
           if (commits++ === 0) return { outcome: "moved", dry_run: structuredClone(moved1) };
           queue = queue.filter((p) => p.id !== args.id);
-          return { outcome: "committed", rows: args.rows };
+          return { outcome: "committed", rows: args.seen.rows };
         case "proposal_reject":
           queue = queue.filter((p) => p.id !== args.id);
           return null;
@@ -286,6 +290,7 @@ check(await page.$eval('[data-testid="pp-commit"]', (b) => !b.disabled), "Commit
 check(await page.$eval('[data-testid="pp-commit"]', (b) => b.classList.contains("ink")), "Commit is the ink button");
 check((await page.textContent('[data-testid="pp-reject"]')) === "Discard", "Reject is labelled Discard");
 check(!(await page.$('[data-testid="pp-destructive"]')), "no warning for an UPDATE with a WHERE");
+check(!(await page.$('[data-testid="pp-reach"]')) && !(await page.$('[data-testid="pp-stmt-other"]')), "one table only: no table list, no + in other tables");
 await shot("3-after-dry-run");
 await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
 await shot("4-after-dry-run-dark");
@@ -343,7 +348,8 @@ await page.click('[data-testid="pp-dry-run"]');
 await page.waitForSelector('[data-testid="pp-dry"][data-state="done"]');
 await page.keyboard.press("Control+Shift+Enter"); // straight after the click: focus stayed on the page
 await page.waitForFunction(() => document.querySelectorAll('[data-row="update"]').length === 2);
-check(JSON.stringify((await calls("proposal_commit"))[0]?.rows) === "[3]", "Commit sends the dry run's counts [3]");
+check(JSON.stringify((await calls("proposal_commit"))[0]?.seen.rows) === "[3]", "Commit sends the dry run's counts [3]");
+check((await calls("proposal_commit"))[0]?.seen.reach[0]?.tables[0]?.updated === 3, "and each table's");
 check(!(await page.$('[data-testid="pp-count"] [data-match]')), "2 rows no longer match the agent's 3");
 check((await page.textContent('[data-testid="pp-dry-line"]')) === "2 rows · rolled back", "the fresh dry run's count");
 await shot("7-moved");
@@ -352,7 +358,7 @@ await shot("7-moved");
 // stays (it is the Agents page, 2026-10-17) and shows the log, empty here.
 await page.click('[data-testid="pp-commit"]');
 await page.waitForSelector('[data-proposal="p_000000000003"]');
-check(JSON.stringify((await calls("proposal_commit"))[1]?.rows) === "[2]", "the second commit sends [2]");
+check(JSON.stringify((await calls("proposal_commit"))[1]?.seen.rows) === "[2]", "the second commit sends [2]");
 await page.click('[data-testid="pp-reject"]');
 await page.click('[data-testid="pp-reject-send"]');
 await page.waitForSelector('[data-testid="agents-page"] [data-testid="mcp-empty"]');

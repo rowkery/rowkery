@@ -95,6 +95,36 @@ describe("sqlStatementRanges", () => {
   test("empty text has no statements", () => {
     expect(texts("   \n ")).toEqual([]);
   });
+  test("a trigger's BEGIN … END body stays whole", () => {
+    const trigger = "CREATE TRIGGER rt_note AFTER DELETE ON t BEGIN INSERT INTO a VALUES ('deleted ' || old.id); END;";
+    expect(texts(`${trigger}\nselect 1;`)).toEqual([trigger, "select 1;"]);
+    expect(sqlToRun(trigger, 60, 60)).toBe(trigger);
+    const temp = "create temp trigger g before insert on t begin select case when 1 then 2 end; delete from b; end;";
+    expect(texts(`${temp} select 2`)).toEqual([temp, "select 2"]);
+  });
+  test("Postgres BEGIN ATOMIC bodies stay whole; begin alone is a name or a transaction", () => {
+    const fn = "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END;";
+    expect(texts(`${fn} BEGIN; SELECT 1; COMMIT;`)).toEqual([fn, "BEGIN;", "SELECT 1;", "COMMIT;"]);
+    expect(texts("create function begin() returns int as 'select 1'; select 2;")).toEqual([
+      "create function begin() returns int as 'select 1';",
+      "select 2;",
+    ]);
+    expect(texts("create trigger g after insert on t execute function f(); select 2;")).toEqual([
+      "create trigger g after insert on t execute function f();",
+      "select 2;",
+    ]);
+  });
+  test("a word after . or [ is a name, not BEGIN or END", () => {
+    const trigger = "CREATE TRIGGER main.begin AFTER INSERT ON t BEGIN SELECT [end], x.end FROM x; END;";
+    expect(texts(`${trigger} select 2;`)).toEqual([trigger, "select 2;"]);
+  });
+  test("BEGIN inside an ordinary statement or parens doesn't open a body", () => {
+    expect(texts("select begin from t; select 2;")).toEqual(["select begin from t;", "select 2;"]);
+    expect(texts("create trigger g after insert on t when (select begin from x) begin select 1; end; select 2")).toEqual([
+      "create trigger g after insert on t when (select begin from x) begin select 1; end;",
+      "select 2",
+    ]);
+  });
 });
 
 describe("statement at the caret", () => {
