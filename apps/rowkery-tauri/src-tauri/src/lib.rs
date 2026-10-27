@@ -14,7 +14,7 @@ use rowkery_core::db::{
 };
 use rowkery_core::edits::{Change, EditTable};
 use rowkery_core::health::HealthReport;
-use rowkery_core::safety::{plain_read, Dialect, SafetyHold};
+use rowkery_core::safety::{check_sql, plain_read, Dialect, SafetyHold};
 use rowkery_core::secrets::ConnectionSecrets;
 use rowkery_core::CoreEvent;
 use serde::Serialize;
@@ -1478,14 +1478,21 @@ fn review_changes(
 }
 
 /// ⌘R on a query tab: whether its last statement only reads, so running it
-/// again changes nothing (core's `plain_read`).
+/// again shows the same thing as it is now (core's `plain_read`). A cursor
+/// statement reads but moves on (`FETCH`) or fails the second time
+/// (`DECLARE`), so it never runs again either.
 #[tauri::command]
 fn reads_only(engine: String, sql: String) -> bool {
     let dialect = match engine.as_str() {
         "postgres" => Dialect::Postgres,
-        _ => Dialect::Sqlite,
+        "sqlite" => Dialect::Sqlite,
+        _ => return false,
     };
+    const CURSOR: [&str; 6] = ["FETCH", "MOVE", "DECLARE", "CLOSE", "LISTEN", "UNLISTEN"];
     plain_read(&sql, dialect)
+        && check_sql(&sql, dialect)
+            .iter()
+            .all(|s| !CURSOR.contains(&s.verb.as_str()))
 }
 
 /// Commits staged edits as one transaction on the tab's session; held by
@@ -2620,6 +2627,19 @@ mod frame_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_runs_again_only_what_reads_and_stays_put() {
+        let pg = |sql: &str| reads_only("postgres".into(), sql.into());
+        assert!(pg("SELECT * FROM kiosks"));
+        assert!(reads_only("sqlite".into(), "SELECT 1".into()));
+        assert!(!pg("INSERT INTO kiosks VALUES (1)"));
+        assert!(!pg("SELECT write_fn()"));
+        assert!(!pg("FETCH 50 FROM c"));
+        assert!(!pg("DECLARE c CURSOR FOR SELECT 1"));
+        assert!(!pg("SELECT 1; DELETE FROM kiosks"));
+        assert!(!reads_only("mysql".into(), "SELECT 1".into()));
+    }
 
     #[test]
     fn menu_json_parses_and_keeps_close_tab_on_cmd_w() {

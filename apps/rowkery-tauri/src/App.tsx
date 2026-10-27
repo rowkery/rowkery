@@ -466,12 +466,13 @@ function App() {
    * query tabs' sessions and any transaction open in them.
    */
   const refreshing = useRef(new Map<string, boolean>()); // window → asked again
-  const announce = useRef(new Set<string>()); // windows whose reload was asked for by hand
+  // Windows whose reload was asked for by hand, and what its toast says once done (the latest ask's).
+  const announce = useRef(new Map<string, string>());
   const refreshSchema = useCallback(
-    async (windowId: string, manual = false) => {
+    async (windowId: string, manual = false, done = "Schema refreshed") => {
       const w = windowsRef.current.find((x) => x.id === windowId);
       if (!w?.connectionId || w.state !== "connected") return;
-      if (manual) announce.current.add(windowId);
+      if (manual) announce.current.set(windowId, done);
       // DDL that lands mid-reload may miss its snapshot: go again after.
       if (refreshing.current.has(windowId)) {
         refreshing.current.set(windowId, true);
@@ -492,7 +493,8 @@ function App() {
           patchWindow(windowId, { schema: catalog, schemaAt: Date.now() });
           void fillCountsRef.current(windowId, w.connectionId, seq);
         } while (refreshing.current.get(windowId));
-        if (announce.current.has(windowId)) showToast("Schema refreshed");
+        const said = announce.current.get(windowId);
+        if (said) showToast(said);
       } catch (e) {
         // Keep the schema we have; the next reload may work.
         if (announce.current.has(windowId))
@@ -1275,7 +1277,7 @@ function App() {
     openMcp: (tab) => openAgents(tab),
     reviewProposals: () => openAgents("page"),
     toggleSidebar,
-    refreshSchema: (id, manual) => void refreshSchema(id, manual),
+    refreshSchema: (id, manual, done) => void refreshSchema(id, manual, done),
     reportIssue: (context) => {
       setPopover(null);
       setPaletteOpen(false);

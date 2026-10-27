@@ -1000,7 +1000,9 @@ export function Workspace({
   const seenCountsRef = useRef(seenCounts);
   seenCountsRef.current = seenCounts;
   const sidebarTree = useMemo(() => withSeenCounts(schemaTree, seenCounts), [schemaTree, seenCounts]);
-  const seeCount = (key: string, rows: number) => {
+  /** A count seen on `connectionId`: dropped when the window has moved on, and on SQLite, whose catalog counts exactly. */
+  const seeCount = (key: string, rows: number, connectionId: string | null) => {
+    if (!connectionId || activeIdRef.current !== connectionId || !countsSeenRef.current) return;
     const over = findTable(schemaTreeRef.current, key)?.rows ?? null;
     setSeenCounts((prev) => (prev[key]?.rows === rows && prev[key]?.over === over ? prev : { ...prev, [key]: { rows, over } }));
   };
@@ -1024,6 +1026,9 @@ export function Workspace({
   }, [schemaTree]);
 
   const activeConnection = connections.find((c) => c.id === activeId) ?? null;
+  // Postgres's estimate lags writes; SQLite's catalog counts exactly (`table_counts`).
+  const countsSeenRef = useRef(false);
+  countsSeenRef.current = !!activeConnection && engineForConnection(activeConnection) === "postgres";
 
   // A failed connection, explained by core: the cause sentence and the field
   // Edit… marks.
@@ -1353,12 +1358,13 @@ export function Workspace({
       formatMs(out.elapsed_ms),
     ].filter(Boolean);
     setTray(tab.id, { kind: "done", text: done.join(" · ") }, 1600);
-    // The sidebar's count moves with the commit; a reload that brings every row counts it exactly.
+    // A count the window saw moves with the commit (an estimate stays one); a
+    // reload that brings every row counts it exactly.
     if (tab.tableKey && (out.inserted || out.deleted)) {
       const key = tab.tableKey;
       const was = seenCountsRef.current[key];
-      const before = was && was.over === (findTable(schemaTreeRef.current, key)?.rows ?? null) ? was.rows : findTable(schemaTreeRef.current, key)?.rows;
-      if (before != null) seeCount(key, Math.max(0, before + (out.inserted ?? 0) - (out.deleted ?? 0)));
+      if (was && was.over === (findTable(schemaTreeRef.current, key)?.rows ?? null))
+        seeCount(key, Math.max(0, was.rows + (out.inserted ?? 0) - (out.deleted ?? 0)), buffer.connectionId);
     }
     // The rows as the database has them now (new rows get their keys), when
     // the window is still on the connection they went to.
@@ -3548,6 +3554,7 @@ export function Workspace({
     if (!activeConnection || !activeTab || activeTab.kind !== "table" || !activeTab.table) return;
     const tab = activeTab;
     const key = lineKey(tab);
+    const connectionId = activeId;
     setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value: null, counting: true } }));
     try {
       const value = await countRows(
@@ -3558,7 +3565,7 @@ export function Workspace({
         tab.filter?.trim() ? tab.filter : null,
       );
       setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value, counting: false } }));
-      if (!tab.filter?.trim() && tab.tableKey && value !== null) seeCount(tab.tableKey, value);
+      if (!tab.filter?.trim() && tab.tableKey && value !== null) seeCount(tab.tableKey, value, connectionId);
     } catch (e) {
       setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value: null, counting: false } }));
       flash(String(e));
@@ -3592,15 +3599,16 @@ export function Workspace({
     if (connState !== "connected") return;
     const tab = activeTab;
     const run = tab ? runsRef.current[tab.id] : undefined;
-    const sql = tab?.kind === "query" && run?.startedAt == null ? run?.ranSql : undefined;
     if (isTableTab) refreshRows();
+    const sql = tab?.kind === "query" ? run?.ranSql : undefined;
     if (!sql || !tab || !activeConnection) return actions.refreshSchema(windowId, true);
+    // The reload's own toast says why the query wasn't run again.
+    const again = commandKeys("run");
+    if (run?.startedAt != null) return actions.refreshSchema(windowId, true, "Schema refreshed · the query is still running");
+    if ((run?.statements?.length ?? 0) > 1)
+      return actions.refreshSchema(windowId, true, `Schema refreshed · ${again} runs the statements again`);
     const reads = await readsOnly(engineForConnection(activeConnection), sql).catch(() => false);
-    if (!reads) {
-      // Its own toast, not "Schema refreshed" over it.
-      actions.refreshSchema(windowId);
-      return showToast(`Schema refreshed · this query changes data, so ${commandKeys("run")} runs it again`);
-    }
+    if (!reads) return actions.refreshSchema(windowId, true, `Schema refreshed · this query changes data, so ${again} runs it again`);
     actions.refreshSchema(windowId, true);
     void onRun(sql, false, undefined, tab.id);
   };
@@ -3617,11 +3625,13 @@ export function Workspace({
     !activeRun.hasMore &&
     !!result &&
     !result.error &&
+    !result.cancelled &&
+    !activeRun.error &&
     !result.capped &&
     !atCap(result.rows.length);
   const wholeRows = wholeTable ? result!.rows.length : null;
   useEffect(() => {
-    if (wholeRows !== null && activeTab?.tableKey) seeCount(activeTab.tableKey, wholeRows);
+    if (wholeRows !== null && activeTab?.tableKey) seeCount(activeTab.tableKey, wholeRows, activeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wholeRows, activeTab?.tableKey, schemaTree]);
 
