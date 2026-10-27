@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Agents › Activity groups calls under a header per local day
 // (rowkery/reports#20): "Today", "Yesterday", then "Mon 26 Oct"; rows keep
-// just the time. The header sticks to the list's top while its calls scroll
+// just the time, and the picked call's head says its day ("Yesterday
+// 17:06:00"). The header sticks to the list's top while its calls scroll
 // past. Screenshots in light and dark.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -200,6 +201,12 @@ check(JSON.stringify(days) === JSON.stringify([{ head: "Today", n: 4 }, { head: 
 const times = await page.$$eval(`${pageSel} .ag-call-time`, (els) => els.map((el) => el.textContent));
 check(times.every((t) => /^\d\d:\d\d$/.test(t)), "rows keep just the time");
 await shot("1-days-light");
+
+// The picked call's head says its day as well as its time.
+await page.click(`${pageSel} [data-testid="ag-day"]:nth-of-type(2) [data-testid="ag-call"]`);
+const sub = await page.textContent(`${pageSel} [data-testid="ag-call-view"] .pp-sub`);
+check(/Yesterday \d\d:\d\d:\d\d/.test(sub), `the right panel says the call's day (${sub})`);
+await shot("1b-picked-yesterday-light");
 
 // Scrolled into yesterday (in a shorter window, so the list scrolls): its
 // header sits at the list's top.

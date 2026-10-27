@@ -959,7 +959,7 @@ function CallView({
     clientLabel(e.client),
     e.connection ? (conn?.name ?? e.connection) : null,
     e.database && conn?.kind === "postgres" ? e.database : null,
-    clock(e.ts),
+    `${dayLabel(e.ts)} ${clock(e.ts)}`,
     took && verdict !== "refused" && verdict !== "error" ? `took ${took}` : null,
   ]
     .filter(Boolean)
