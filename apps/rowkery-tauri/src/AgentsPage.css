@@ -724,9 +724,9 @@
   align-items: center;
   gap: 8px 16px;
   margin-top: 4px;
-  /* The first button's label lines up with the lines above: the track's
-     2px padding and the button's 8px. */
-  margin-left: -10px;
+  /* The first button's edge lines up with the lines above, past the
+     track's 2px padding. */
+  margin-left: -2px;
 }
 
 .mcp-cn-limit {
