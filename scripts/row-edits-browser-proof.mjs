@@ -15,7 +15,10 @@
 // once, and a 2-row match (a duplicate the stub says a dropped unique index
 // let in) rolls everything back with the tray naming the row; Confirm writes
 // shows the statements in the SafetyBar and sends back exactly that SQL on
-// ⇧⌘↵; Discard has Undo.
+// ⇧⌘↵; Discard has Undo. A delete whose cascades and triggers write other
+// tables stops before COMMIT: "Not saved yet · deleting this row also
+// deletes 14 kiosk_sessions…" and "Commit all 53", which sends the counts
+// back (`cargo test -p rowkery-bridge apply_changes_stops` proves the core).
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/row-edits-browser-proof.mjs [outDir]
@@ -151,6 +154,17 @@ function stubTauri() {
               hold: { action: "confirm", mode, statements: [{ kind: "write", verb: "UPDATE", target: "public.kiosks", destructive: false, unlocks_writes: false }] },
               sql,
             };
+          // Deleting kiosk 7 cascades: it stops before COMMIT with the other
+          // tables' counts until they come back as `reach`. The first Commit
+          // all finds one more payout (the counts moved), the next commits.
+          if (args.changes.some((c) => c.op === "delete" && c.key[0].value.Int === 7)) {
+            const t = (table, deleted, inserted = 0) => ({ schema: "public", table, inserted, updated: 0, deleted });
+            const reach = (payouts) => ({ tables: [t("audit_log", 0, 1), t("kiosk_sessions", 14), t("payouts", payouts)], unnamed: 0 });
+            const stop = (payouts) => ({ status: "rolled_back", index: null, statement: null, rows: null, message: "It also changes rows in other tables. Commit again to save them all.", reach: reach(payouts), elapsed_ms: 6 });
+            if (!args.reach) return stop(37);
+            const paid = args.reach.tables.find((x) => x.table === "payouts")?.deleted;
+            if (paid === 37) return stop(38);
+          }
           // Two rows have id 2 (the unique index was dropped): its UPDATE changes 2.
           const bad = args.changes.findIndex((c) => c.op !== "insert" && c.key[0].value.Int === 2);
           if (bad >= 0)
@@ -501,7 +515,45 @@ await page.keyboard.press("Control+Shift+Enter");
 await page.waitForSelector(`${ws} [data-edit-tray="done"]`);
 check((await applied()).at(-1).confirmed.includes("SET city = 'Ipoh' WHERE id = 4"), "Review SQL's Commit sends its SQL");
 
-// 15. Confirm writes: the SafetyBar shows the statements; ⇧⌘↵ commits exactly them.
+// 15. A delete whose cascades reach other tables (2026-10-27): it stops before
+// COMMIT and the bar says so; Commit all sends those counts back. Counts that
+// moved since stop it again with the new ones.
+await page.locator(`${ws} [data-testid="rg-body"] [data-row="6"] [data-testid="rg-gutter"]`).click();
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(`${ws} [data-edit-tray="reach"]`);
+const reachText = async () => (await page.locator(`${ws} [data-tray-reach]`).textContent()).replace(/\s+/g, " ").trim();
+check(
+  (await reachText()) === "Not saved yet · deleting this row also deletes 14 kiosk_sessions, 37 payouts and adds 1 row to audit_log",
+  `the bar: ${await reachText()}`,
+);
+check((await page.locator(`${ws} [data-commit]`).textContent()).startsWith("Commit all 53"), "Commit reads Commit all 53");
+check((await rowMark(6)) === "delete", "the delete stays staged");
+// Discard and Undo bring the same delete back: the counts shown before
+// don't carry over to a plain Commit.
+await page.locator(`${ws} [data-discard]`).click();
+await page.click("[data-toast-undo]");
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-row="6"]`)?.getAttribute("data-mark") === "delete", ws);
+check(!(await page.locator(`${ws} [data-commit]`).textContent()).includes("Commit all"), "after Undo: a plain Commit");
+const before = (await applied()).length;
+await page.keyboard.press("Control+s");
+await page.waitForSelector(`${ws} [data-edit-tray="reach"]`);
+check((await applied()).length === before + 1 && !(await applied()).at(-1).reach, "that Commit sends no counts: it stops again");
+await shot("12-reach");
+await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+await page.waitForTimeout(400); // the theme's colour transitions
+await shot("12b-reach-dark");
+await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+await page.locator(`${ws} [data-commit]`).click();
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-commit]`)?.textContent.startsWith("Commit all 54"), ws);
+check((await applied()).at(-1).reach?.tables.find((t) => t.table === "payouts")?.deleted === 37, "Commit all sends the counts it showed");
+check((await reachText()).includes("38 payouts"), "one more payout since: the new counts show");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(`${ws} [data-edit-tray="done"]`);
+check((await applied()).at(-1).reach?.tables.find((t) => t.table === "payouts")?.deleted === 38, "⌘S on Commit all sends the new counts");
+check((await rowMark(6)) === null, "committed: the mark is gone");
+
+// 16. Confirm writes: the SafetyBar shows the statements; ⇧⌘↵ commits exactly them.
 page = await launch("cw");
 await openTable("kiosks");
 await stageText(4, "city", "Seremban");
@@ -520,4 +572,22 @@ await page.keyboard.press("Control+Shift+Enter");
 await page.waitForSelector(`${ws} [data-edit-tray="done"]`);
 check((await applied()).at(-1).confirmed === held, "⇧⌘↵ sends back exactly the SQL shown");
 check((await page.locator(`${ws} [data-held-edits]`).count()) === 0 && (await rowMark(4)) === null, "committed: bar and marks gone");
+
+// A cascade under Confirm writes: confirmed once, then Commit all commits
+// without asking again (the same SQL, the counts shown).
+await page.locator(`${ws} [data-testid="rg-body"] [data-row="6"] [data-testid="rg-gutter"]`).click();
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(`${ws} [data-held-edits]`);
+await page.keyboard.press("Control+Shift+Enter");
+await page.waitForSelector(`${ws} [data-edit-tray="reach"]`);
+const sentHeld = (await applied()).at(-1).confirmed;
+await page.locator(`${ws} [data-commit]`).click();
+await page.waitForSelector(`${ws} [data-edit-tray="reach"] [data-commit]:not([disabled])`);
+await page.locator(`${ws} [data-commit]`).click();
+await page.waitForSelector(`${ws} [data-edit-tray="done"]`);
+check(
+  (await applied()).slice(-2).every((a) => a.confirmed === sentHeld && a.reach) && (await page.locator(`${ws} [data-held-edits]`).count()) === 0,
+  "Commit all reuses the confirmed SQL: no second hold",
+);
 await browser.close();

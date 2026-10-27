@@ -1480,7 +1480,10 @@ fn review_changes(
 /// Commits staged edits as one transaction on the tab's session; held by
 /// Confirm writes until `confirmed` carries the SQL the user saw; refused
 /// when the window is no longer on `connection_id`, the edits' connection.
+/// Stops before COMMIT when it writes other tables too, until `reach`
+/// carries the counts the user saw.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn apply_changes(
     app: AppHandle,
     window_id: String,
@@ -1489,6 +1492,7 @@ async fn apply_changes(
     table: EditTable,
     changes: Vec<Change>,
     confirmed: Option<String>,
+    reach: Option<rowkery_core::reach::Reach>,
 ) -> Result<rowkery_bridge::ApplyOutcome, String> {
     on_blocking_pool(app, move |bridge| {
         bridge.apply_changes(
@@ -1498,6 +1502,7 @@ async fn apply_changes(
             table,
             changes,
             confirmed,
+            reach,
         )
     })
     .await

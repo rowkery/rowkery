@@ -4,13 +4,16 @@
 //!
 //! The text built here is what Review SQL and the SafetyBar show, and what
 //! `apply_changes` runs inside one transaction that rolls back unless every
-//! statement changed exactly one row.
+//! statement changed exactly one row. When the batch also writes other rows
+//! (foreign-key cascades, triggers), it stops before COMMIT and says how
+//! many, per table (`crate::reach`), until the user commits those too.
 
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
 use crate::db::{qualified_table_sql, quote_ident, EngineKind, Value};
+use crate::reach::Reach;
 
 /// The table the edits go to, as the webview's catalog describes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,6 +104,11 @@ pub struct ApplyCounts {
 }
 
 impl ApplyCounts {
+    /// Inserted, updated, deleted.
+    pub fn rows(&self) -> [u64; 3] {
+        [self.inserted, self.updated, self.deleted]
+    }
+
     pub fn add(&mut self, verb: Verb, rows: u64) {
         match verb {
             Verb::Insert => self.inserted += rows,
@@ -125,6 +133,11 @@ pub struct ApplyFailure {
     /// The connection dropped during COMMIT: the server may have saved it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unknown: bool,
+    /// Every statement ran as it should, but cascades and triggers wrote
+    /// these rows too, so it stopped before COMMIT. Committing again with
+    /// this reach approved commits, if the counts are the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Reach>,
 }
 
 impl ApplyFailure {
@@ -138,6 +151,7 @@ impl ApplyFailure {
             statement: Some(named),
             rows: Some(rows),
             unknown: false,
+            reach: None,
         }
     }
 
@@ -150,6 +164,7 @@ impl ApplyFailure {
             statement: Some(named),
             rows: None,
             unknown: false,
+            reach: None,
         }
     }
 
@@ -161,6 +176,15 @@ impl ApplyFailure {
             rows: None,
             message: message.into(),
             unknown: false,
+            reach: None,
+        }
+    }
+
+    /// Stopped before COMMIT: the batch also writes `reach` in other rows.
+    pub fn reaches(reach: Reach) -> Self {
+        Self {
+            reach: Some(reach),
+            ..Self::other("It also changes rows in other tables. Commit again to save them all.")
         }
     }
 

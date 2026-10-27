@@ -11,6 +11,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
 use crate::edits::{ApplyCounts, ApplyFailure, RowStatement};
+use crate::reach::{self, Reach};
 use crate::safety::{locks_rows, SafeMode};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::error::{Severity, SqlState};
@@ -1273,24 +1274,19 @@ pub async fn session_close_cursor(session: &mut PostgresSession) {
 /// Runs staged row edits as one transaction on the session: every statement
 /// must change exactly one row, or the whole batch rolls back and the
 /// failure names the statement. Never inside the user's own transaction:
-/// that is refused untouched, since our COMMIT would end it.
-pub async fn session_apply_changes(
-    session: &mut PostgresSession,
-    statements: &[RowStatement],
-) -> Result<ApplyCounts, ApplyFailure> {
-    session_apply_changes_within(session, statements, None).await
-}
-
-/// `session_apply_changes` where `BEGIN` and each statement get `step` to
-/// answer (a lock wait, or a socket that died without saying). On a timeout
+/// that is refused untouched, since our COMMIT would end it. `BEGIN` and
+/// each statement get `step` to answer (a lock wait, or a socket that died without saying). On a timeout
 /// the statement is cancelled and the transaction rolled back, before any
 /// `COMMIT` was sent, so nothing was saved; `COMMIT` itself has no limit and
 /// is never retried. If even the rollback doesn't answer, the session is
 /// left `Unknown` for the caller to drop (the server rolls back when it goes).
+/// What the batch writes beyond its own rows stops it before COMMIT unless
+/// it is exactly `approved` (`crate::reach`).
 pub async fn session_apply_changes_within(
     session: &mut PostgresSession,
     statements: &[RowStatement],
     step: Option<Duration>,
+    approved: Option<&Reach>,
 ) -> Result<ApplyCounts, ApplyFailure> {
     let limit = step.unwrap_or(Duration::MAX);
     let late = |what: &str| {
@@ -1349,6 +1345,19 @@ pub async fn session_apply_changes_within(
             return Err(ApplyFailure::other(late("The database")));
         }
     }
+    // Counted only when the table can write elsewhere (a trigger, a rule, a
+    // cascading foreign key into it, partitions).
+    let start = match tokio::time::timeout(limit, reach_start(session, statements)).await {
+        Ok(Ok(start)) => start,
+        Ok(Err(err)) => {
+            rollback(&session.client).await;
+            return Err(ApplyFailure::other(err));
+        }
+        Err(_) => {
+            abandon_apply(session, limit).await;
+            return Err(ApplyFailure::other(late("The database")));
+        }
+    };
     let mut counts = ApplyCounts::default();
     for (index, statement) in statements.iter().enumerate() {
         let ran =
@@ -1362,6 +1371,7 @@ pub async fn session_apply_changes_within(
                 statement: Some(named),
                 rows: None,
                 unknown: false,
+                reach: None,
             });
         };
         match ran {
@@ -1376,6 +1386,25 @@ pub async fn session_apply_changes_within(
             }
         }
     }
+    if let Some((own, before)) = start {
+        let beyond =
+            tokio::time::timeout(limit, reach_beyond(session, own, &before, &counts)).await;
+        match beyond {
+            Ok(Ok(reach)) if reach.is_empty() || approved == Some(&reach) => {}
+            Ok(Ok(reach)) => {
+                rollback(&session.client).await;
+                return Err(ApplyFailure::reaches(reach));
+            }
+            Ok(Err(err)) => {
+                rollback(&session.client).await;
+                return Err(ApplyFailure::other(err));
+            }
+            Err(_) => {
+                abandon_apply(session, limit).await;
+                return Err(ApplyFailure::other(late("The database")));
+            }
+        }
+    }
     // A deferred constraint can still refuse the batch here.
     if let Err(err) = session.client.batch_execute("COMMIT").await {
         if session.client.is_closed() {
@@ -1386,6 +1415,49 @@ pub async fn session_apply_changes_within(
         return Err(ApplyFailure::other(message(&err)));
     }
     Ok(counts)
+}
+
+/// The table the batch's rows count under and every table's counters before
+/// it runs, when its table can write elsewhere.
+async fn reach_start(
+    session: &PostgresSession,
+    statements: &[RowStatement],
+) -> Result<Option<((String, String), reach::Counts)>, String> {
+    let Some(target) = statements.first().map(|s| s.target.as_str()) else {
+        return Ok(None);
+    };
+    let literal = crate::query_util::sql_literal(
+        crate::db::EngineKind::Postgres,
+        &Value::Text(target.to_string()),
+    )
+    .ok_or_else(|| "The table's name can't be read".to_string())?;
+    let Some(own) = reach::pg_reaches(session, &literal).await? else {
+        return Ok(None);
+    };
+    Ok(reach::pg_counts(session).await?.map(|before| (own, before)))
+}
+
+/// What the batch wrote beyond its own rows. Deferred triggers fire first,
+/// as COMMIT would fire them, so their rows count too.
+async fn reach_beyond(
+    session: &PostgresSession,
+    own: (String, String),
+    before: &reach::Counts,
+    counts: &ApplyCounts,
+) -> Result<Reach, String> {
+    session
+        .client
+        .batch_execute("SET CONSTRAINTS ALL IMMEDIATE")
+        .await
+        .map_err(|e| map_query_error(&e, &session.config.username).into_message())?;
+    let Some(after) = reach::pg_counts(session).await? else {
+        return Ok(Reach::default());
+    };
+    let all = Reach {
+        tables: reach::diff(before, &after),
+        unnamed: 0,
+    };
+    Ok(reach::beyond(all, &own.0, &own.1, counts.rows()))
 }
 
 async fn rollback(client: &Client) {
