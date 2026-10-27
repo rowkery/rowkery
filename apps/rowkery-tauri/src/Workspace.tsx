@@ -144,6 +144,8 @@ import {
   type EditBuffer,
 } from "./editBuffer";
 import { EditTray, type TrayState } from "./EditTray";
+import { reachLine } from "./reachLine";
+import type { Reach } from "./proposals";
 import { ReviewSql, reviewCards, type ReviewCard } from "./ReviewSql";
 import { SqlFilePanel } from "./SqlFilePanel";
 import { CsvImport, type ImportRun } from "./CsvImport";
@@ -1173,6 +1175,12 @@ export function Workspace({
     setTrays(({ [tabId]: _old, ...rest }) => (tray ? { ...rest, [tabId]: tray } : rest));
     if (tray && forMs) trayTimer.current = window.setTimeout(() => setTray(tabId, null), forMs);
   };
+  /**
+   * A commit stopped before COMMIT because cascades or triggers also write
+   * other tables: what it wrote, for exactly these changes (`for`) and the
+   * SQL Confirm writes was shown (if it was). Commit all sends both back.
+   */
+  const reached = useRef(new Map<number, { for: string; reach: Reach; confirmed?: string }>());
   /** Confirm writes held a commit: the SafetyBar shows its statements until ⇧⌘↵ or Esc. */
   const [heldEdits, setHeldEdits] = useState<Record<number, { sql: string; hold: SafetyHold; summary: string }>>({});
   const [review, setReview] = useState<{ tabId: number; sql: string | null; error: string | null; cards: ReviewCard[] | null } | null>(null);
@@ -1213,9 +1221,11 @@ export function Workspace({
         return { ...t, edits, preview: edits ? false : t.preview };
       }),
     );
-    // Edits moved: a held commit is no longer what they say, a failure no longer current.
+    // Edits moved: a held commit is no longer what they say, a failure or
+    // another table's counts no longer current.
     setHeldEdits(({ [tabId]: _gone, ...rest }) => rest);
-    setTrays(({ [tabId]: old, ...rest }) => (old && old.kind !== "failed" ? { ...rest, [tabId]: old } : rest));
+    reached.current.delete(tabId);
+    setTrays(({ [tabId]: old, ...rest }) => (old && old.kind !== "failed" && old.kind !== "reach" ? { ...rest, [tabId]: old } : rest));
   };
   /** ↵ where nothing can be edited: the tray says why for 4 s. */
   const refuseEdit = (reason: string) => setTray(activeTabId, { kind: "refused", reason }, 4000);
@@ -1245,8 +1255,9 @@ export function Workspace({
     const target = editTarget();
     if (!target || committing.current.has(target.tab.id)) return;
     // Many deletes, or every loaded row (⌘A ⌫): Review SQL first, even with
-    // safe mode off; its Commit sends back the SQL it showed.
-    if (confirmed === undefined && rowEdits.reviewFirst) {
+    // safe mode off; its Commit sends back the SQL it showed. Commit all
+    // after a reach stop has been through that already.
+    if (confirmed === undefined && rowEdits.reviewFirst && !approvalFor(target)) {
       const n = Object.keys(target.buffer.deletes).length;
       openReview();
       showToast(
@@ -1265,12 +1276,25 @@ export function Workspace({
       setCommitsSettled((n) => n + 1);
     }
   };
+  /** The edits a reach stop counted: same connection, table and changes. */
+  const reachKey = ({ buffer, table }: NonNullable<ReturnType<typeof editTarget>>) =>
+    JSON.stringify([buffer.connectionId, table, bufferChanges(buffer)]);
+  /** Commit all: the counts the bar showed, for these same edits only. */
+  const approvalFor = (target: NonNullable<ReturnType<typeof editTarget>>) => {
+    const seen = reached.current.get(target.tab.id);
+    return seen?.for === reachKey(target) ? seen : undefined;
+  };
   const commitBuffer = async (target: NonNullable<ReturnType<typeof editTarget>>, confirmed?: string) => {
     const { tab, buffer, table } = target;
+    const changes = bufferChanges(buffer);
+    const key = reachKey(target);
+    const approved = approvalFor(target);
+    reached.current.delete(tab.id);
+    confirmed ??= approved?.confirmed;
     setTray(tab.id, { kind: "committing" });
     let out;
     try {
-      out = await applyChanges(windowId, buffer.connectionId, tab.id, table, bufferChanges(buffer), confirmed);
+      out = await applyChanges(windowId, buffer.connectionId, tab.id, table, changes, confirmed, approved?.reach);
     } catch (e) {
       if (!isLostAnswer(e)) return setTray(tab.id, { kind: "failed", message: String(e) });
       // No answer: the COMMIT may have gone through.
@@ -1283,6 +1307,13 @@ export function Workspace({
       const where = `${tab.schema ?? table.schema}.${table.table}`;
       setHeldEdits((prev) => ({ ...prev, [tab.id]: { sql: out.sql, hold: out.hold, summary: editSummary(buffer, where) } }));
       return;
+    }
+    if (out.status === "rolled_back" && out.reach) {
+      const other = out.reach.tables.reduce((n, t) => n + t.inserted + t.updated + t.deleted, out.reach.unnamed);
+      reached.current.set(tab.id, { for: key, reach: out.reach, confirmed });
+      // The SQL was confirmed: Commit all on the bar is the one button now.
+      setHeldEdits(({ [tab.id]: _gone, ...rest }) => rest);
+      return setTray(tab.id, { kind: "reach", text: reachLine(changes, out.reach), total: changes.length + other });
     }
     if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message, unknown: out.unknown });
     // Only what was sent is done: an edit staged while it ran stays staged,

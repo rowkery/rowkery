@@ -13,9 +13,12 @@ import { HIDDEN_TEXT, markedNames, usePresenting } from "./presenting";
 import {
   commitProposal,
   dryRunProposal,
+  dryRunTotal,
   forgetProposal,
+  otherRows,
   planProposal,
   proposalTable,
+  reachByTable,
   rejectProposal,
   tableLabel,
   useProposals,
@@ -23,6 +26,7 @@ import {
   type Plan,
   type Proposal,
   type StatementPreview,
+  type TableRows,
 } from "./proposals";
 import { highlightSqlLines } from "./sqlHighlight";
 import type { ConnectionRecord } from "./types";
@@ -216,7 +220,9 @@ export function AgentsInbox({
     () => (presenting && conn && proposal ? markedNames(conn.masked_columns?.[proposal.database] ?? [], null) : new Set<string>()),
     [presenting, conn, proposal],
   );
-  const total = dry?.statements.reduce((n, s) => n + s.rows, 0) ?? 0;
+  // Every row the change writes, cascades and triggers in other tables included.
+  const total = dry ? dryRunTotal(dry) : 0;
+  const reach = useMemo(() => (dry ? reachByTable(dry) : null), [dry]);
 
   // The statements as shown: the dry run's once it has run, else the plan's.
   const statements = useMemo(() => {
@@ -293,10 +299,17 @@ export function AgentsInbox({
     if (!proposal || !dry || busy || rejecting) return;
     setBusy(true);
     try {
-      const out = await commitProposal(proposal.id, dry.statements.map((s) => s.rows));
+      const out = await commitProposal(proposal.id, dry);
       if (out.outcome === "committed") {
-        const rows = out.rows.reduce((a, b) => a + b, 0);
-        showToast("Committed", `${rows.toLocaleString()} ${rows === 1 ? "row" : "rows"} · ${tableLabel(dry.statements[0].target)}`);
+        // The commit held only if every table's count matched the dry run's.
+        const own = out.rows.reduce((a, b) => a + b, 0);
+        const more = total - own;
+        showToast(
+          "Committed",
+          `${own.toLocaleString()} ${own === 1 ? "row" : "rows"} · ${tableLabel(dry.statements[0].target)}${
+            more > 0 ? ` + ${more.toLocaleString()} in other tables` : ""
+          }`,
+        );
         done(proposal.id);
       } else if (out.outcome === "moved") {
         setRun(proposal.id, { state: "done", dry: out.dry_run, error: null });
@@ -541,7 +554,9 @@ export function AgentsInbox({
       state === "running"
         ? null
         : state === "done"
-          ? `${total.toLocaleString()} ${total === 1 ? "row" : "rows"} · rolled back`
+          ? `${total.toLocaleString()} ${total === 1 ? "row" : "rows"}${
+              reach && reach.tables.length > 1 ? ` in ${reach.tables.length} tables` : ""
+            } · rolled back`
           : state === "error"
             ? mine?.error
             : unread
@@ -573,6 +588,9 @@ export function AgentsInbox({
                         <span>
                           <b>{s.preview.rows.toLocaleString()}</b> {s.preview.rows === 1 ? "row" : "rows"}
                         </span>
+                      )}
+                      {s.preview && otherRows(s.preview) > 0 && (
+                        <span data-testid="pp-stmt-other">+ {otherRows(s.preview).toLocaleString()} in other tables</span>
                       )}
                     </h3>
                   )}
@@ -648,6 +666,26 @@ export function AgentsInbox({
                       </span>
                     )}
                   </div>
+                  {reach && (reach.tables.length > 1 || reach.unnamed > 0) && (
+                    <ul className="pp-reach" data-testid="pp-reach">
+                      {reach.tables.map((t) => (
+                        <li key={`${t.schema}\u0000${t.table}`} data-testid="pp-reach-table" data-table={t.table} data-unshared={t.shared ? undefined : ""}>
+                          <code title={`${t.schema}.${t.table}`}>{reachName(t, reach.tables)}</code>
+                          <span>
+                            {reachCounts(t)}
+                            {!t.shared && " · not shared"}
+                          </span>
+                        </li>
+                      ))}
+                      {reach.unnamed > 0 && (
+                        <li className="pp-reach-unnamed" data-testid="pp-reach-unnamed">
+                          <span>
+                            <b>{reach.unnamed.toLocaleString()}</b> more {reach.unnamed === 1 ? "row" : "rows"} in tables Rowkery can't name
+                          </span>
+                        </li>
+                      )}
+                    </ul>
+                  )}
                   {dry.statements.some((s) => s.changed.length > 0) && (
                     <div className="pp-cols" data-testid="pp-cols">
                       {[...new Set(dry.statements.flatMap((s) => s.changed))].map((c) => (
@@ -656,6 +694,17 @@ export function AgentsInbox({
                     </div>
                   )}
                 </>
+              )}
+              {reach?.tables.some((t) => !t.shared) && (
+                <p className="pp-warn" data-testid="pp-unshared">
+                  <WarningIcon size={12} />
+                  Also changes tables not shared with the agent:{" "}
+                  {reach.tables
+                    .filter((t) => !t.shared)
+                    .map((t) => reachName(t, reach.tables))
+                    .join(", ")}
+                  .
+                </p>
               )}
               {destructive.map((s, i) => (
                 <p key={`d${i}`} className="pp-warn" data-testid="pp-destructive">
@@ -755,7 +804,7 @@ function ProposalCard({
   const plan = planned?.plan ?? null;
   const count = plan?.statements.length ?? 0;
   const noWhere = plan?.statements.some((s) => s.destructive && s.target);
-  const rows = run?.state === "done" && run.dry ? run.dry.statements.reduce((n, s) => n + s.rows, 0) : null;
+  const rows = run?.state === "done" && run.dry ? dryRunTotal(run.dry) : null;
   return (
     <button
       type="button"
@@ -1000,6 +1049,29 @@ function CallView({
       </div>
     </div>
   );
+}
+
+/** A table's name, its schema too when another schema has a table of that name or it isn't the default one. */
+function reachName(t: TableRows, all: TableRows[]): string {
+  const plain = t.schema === "public" || t.schema === "main";
+  return plain && !all.some((o) => o !== t && o.table === t.table) ? t.table : `${t.schema}.${t.table}`;
+}
+
+/** "14 deleted", "1 added · 2 changed". */
+function reachCounts(t: TableRows) {
+  const parts = (
+    [
+      [t.inserted, "added"],
+      [t.updated, "changed"],
+      [t.deleted, "deleted"],
+    ] as const
+  ).filter(([n]) => n > 0);
+  return parts.map(([n, word], i) => (
+    <span key={word}>
+      {i > 0 && " · "}
+      <b>{n.toLocaleString()}</b> {word}
+    </span>
+  ));
 }
 
 /** A cell as text: NULL spelled out, objects as JSON. */

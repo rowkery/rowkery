@@ -352,7 +352,10 @@ fn words(text: &str) -> HashSet<String> {
 
 /// What one SQLite statement touches, from the authorizer while it is
 /// prepared (nothing runs): tables read or written, and the columns read or
-/// updated, as (table, column) lower-cased.
+/// updated, as (table, column) lower-cased. Only the statement's own: what
+/// the database's foreign-key actions and triggers do runs no SQL the agent
+/// wrote, and the review counts it (`rowkery_core::reach`), as Postgres's
+/// plan leaves it out too.
 pub struct SqliteFacts {
     pub tables: Vec<(String, String)>,
     pub columns: HashSet<(String, String)>,
@@ -368,12 +371,31 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")
+        .map_err(|e| e.to_string())?;
+    // Accesses inside a trigger name it as their accessor; inside a view,
+    // the view, which is the statement's own read and stays. Triggers and
+    // views have names of their own, so a name both carry is kept: it fails
+    // closed.
+    let triggers: HashSet<String> = conn
+        .prepare(
+            "SELECT lower(name) FROM sqlite_master WHERE type = 'trigger' \
+             EXCEPT SELECT lower(name) FROM sqlite_master WHERE type = 'view'",
+        )
+        .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
     let facts = Arc::new(Mutex::new(SqliteFacts {
         tables: Vec::new(),
         columns: HashSet::new(),
     }));
     let sink = Arc::clone(&facts);
     conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+        if ctx
+            .accessor
+            .is_some_and(|a| triggers.contains(&a.to_lowercase()))
+        {
+            return Authorization::Allow;
+        }
         let schema = ctx.database_name.unwrap_or("main").to_string();
         let (table, column) = match ctx.action {
             AuthAction::Read {
@@ -440,6 +462,47 @@ mod tests {
         assert_eq!(f.tables.len(), 2);
         let f = sqlite_facts(&p, "DELETE FROM o WHERE id = 3").unwrap();
         assert!(f.tables.contains(&("main".to_string(), "o".to_string())));
+    }
+
+    /// A cascade or a trigger is the database's doing, not the statement's;
+    /// a view the statement reads stays its own.
+    #[test]
+    fn sqlite_facts_leave_out_cascades_and_triggers_but_not_views() {
+        let dir = std::env::temp_dir().join(format!("rowkery-change-fk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.sqlite");
+        let _ = std::fs::remove_file(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE c (id INTEGER PRIMARY KEY, secret TEXT);
+             CREATE TABLE o (id INTEGER PRIMARY KEY, c_id INT REFERENCES c ON DELETE CASCADE);
+             CREATE TABLE audit (what TEXT);
+             CREATE TRIGGER c_gone AFTER DELETE ON c BEGIN INSERT INTO audit VALUES ('c'); END;
+             CREATE VIEW v AS SELECT id, secret FROM audit, c;",
+        )
+        .unwrap();
+        drop(conn);
+        let p = path.to_string_lossy();
+        let f = sqlite_facts(&p, "DELETE FROM c WHERE id = 1").unwrap();
+        assert_eq!(f.tables, vec![("main".to_string(), "c".to_string())]);
+        let f = sqlite_facts(&p, "DELETE FROM o WHERE c_id IN (SELECT id FROM v)").unwrap();
+        assert!(f.tables.contains(&("main".to_string(), "c".to_string())));
+        assert!(
+            f.columns.contains(&("c".into(), "secret".into())),
+            "{:?}",
+            f.columns
+        );
+        // A trigger named like a view doesn't hide the view's reads.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TRIGGER V INSTEAD OF INSERT ON v BEGIN SELECT 1; END;")
+            .unwrap();
+        let f = sqlite_facts(&p, "DELETE FROM o WHERE c_id IN (SELECT id FROM v)").unwrap();
+        assert!(
+            f.columns.contains(&("c".into(), "secret".into())),
+            "{:?}",
+            f.columns
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ use rowkery_core::health::HealthReport;
 use rowkery_core::import::{ImportCounts, ImportError, ImportSpec};
 use rowkery_core::plan::{self, Plan, PlanFacts};
 use rowkery_core::query_util::apply_browse_limit;
+use rowkery_core::reach::Reach;
 use rowkery_core::safety::{
     check_sql, hold_for, pages_by_cursor, plain_read, Dialect, SafeMode, SafetyHold, StatementKind,
 };
@@ -165,6 +166,8 @@ enum Command {
         table: EditTable,
         changes: Vec<Change>,
         confirmed: Option<String>,
+        /// The other tables' rows the user saw and chose to commit too.
+        reach: Option<Reach>,
         respond_to: oneshot::Sender<Result<ApplyOutcome, String>>,
     },
     /// CSV import into a table, on a session (or SQLite connection) of its own.
@@ -1944,6 +1947,7 @@ fn apply_changes_now(
     table: EditTable,
     changes: Vec<Change>,
     confirmed: Option<String>,
+    reach: Option<Reach>,
     respond_to: oneshot::Sender<Result<ApplyOutcome, String>>,
 ) {
     let Some(target) = state.windows.get(&window_id).cloned() else {
@@ -2023,7 +2027,7 @@ fn apply_changes_now(
                     };
                     let driver = ready_tab(&mut held, &path, safe_mode == SafeMode::ReadOnly)
                         .map_err(driver_error_message)?;
-                    Ok(driver.apply_changes(&statements).map_err(|mut failure| {
+                    Ok(driver.apply_changes(&statements, reach.as_ref()).map_err(|mut failure| {
                         tab.explain_locked(&path, &mut failure.message);
                         failure
                     }))
@@ -2083,8 +2087,13 @@ fn apply_changes_now(
                 // BEGIN and each statement are bounded; COMMIT is not (and
                 // is never retried).
                 let result =
-                    session_apply_changes_within(&mut session, &statements, Some(APPLY_STEP_TIMEOUT))
-                        .await;
+                    session_apply_changes_within(
+                        &mut session,
+                        &statements,
+                        Some(APPLY_STEP_TIMEOUT),
+                        reach.as_ref(),
+                    )
+                    .await;
                 // Committed (or not): a page prefetched meanwhile read the
                 // rows from before.
                 invalidate_prefetch(&pool, &window_id, &runtime);
@@ -3631,6 +3640,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             table,
             changes,
             confirmed,
+            reach,
             respond_to,
         } => apply_changes_now(
             state,
@@ -3640,6 +3650,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             table,
             changes,
             confirmed,
+            reach,
             respond_to,
         ),
         Command::ImportCsv {
@@ -4438,6 +4449,9 @@ impl CoreBridge {
     /// the batch until it comes back with `confirmed` set to the `sql` the
     /// hold returned; Read-only refuses it. `connection_id` is the connection
     /// the edits were staged on: refused when the window is on another.
+    /// A batch that also writes other rows (cascades, triggers) stops before
+    /// COMMIT with their counts; it commits once `reach` is those counts.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_changes(
         &self,
         window_id: &str,
@@ -4446,6 +4460,7 @@ impl CoreBridge {
         table: EditTable,
         changes: Vec<Change>,
         confirmed: Option<String>,
+        reach: Option<Reach>,
     ) -> Result<ApplyOutcome, String> {
         self.send_command(|respond_to| Command::ApplyChanges {
             window_id: window_id.to_string(),
@@ -4454,6 +4469,7 @@ impl CoreBridge {
             table,
             changes,
             confirmed,
+            reach,
             respond_to,
         })
         .ok_or_else(|| LOST_ANSWER.to_string())?

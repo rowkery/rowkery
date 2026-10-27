@@ -37,14 +37,37 @@ export interface StatementPreview {
   changed: string[];
   /** Up to 200 rows. */
   shown: { before: unknown[] | null; after: unknown[] | null }[];
-  /** Triggers on the table: they ran too, their own writes aren't shown. */
+  /** Triggers on the table: they ran too; their writes count in `reach`. */
   triggers: string[];
+  /** Every row the statement wrote, per table, cascades and triggers included. Null when the server keeps no counts. */
+  reach: Reach | null;
+  /** `[schema, table]` its own rows count under in `reach` (a partition's parent). */
+  table: [string, string] | null;
+}
+
+/** Rows written in one table (Rust `rowkery_core::reach`). */
+export interface TableRows {
+  schema: string;
+  table: string;
+  inserted: number;
+  updated: number;
+  deleted: number;
+}
+
+export interface Reach {
+  tables: TableRows[];
+  /** Rows in tables Rowkery can't name (SQLite WITHOUT ROWID). */
+  unnamed: number;
 }
 
 export interface DryRun {
   proposal: Proposal;
   connection_name: string;
   statements: StatementPreview[];
+  /** What deferred triggers wrote when the dry run fired them, as COMMIT would. */
+  at_commit: Reach | null;
+  /** `[schema, table]` of each table written that isn't shared with agents. */
+  unshared: [string, string][];
 }
 
 /** A user trigger one statement fires, and on which event. */
@@ -137,11 +160,56 @@ export const planProposal = (id: string) => invoke<Plan>("proposal_plan", { id }
 
 export const dryRunProposal = (id: string) => invoke<DryRun>("proposal_dry_run", { id });
 
-export const commitProposal = (id: string, rows: number[]) =>
-  invoke<CommitOutcome>("proposal_commit", { id, rows });
+/** Commits only if every count the dry run showed, in every table, holds. */
+export const commitProposal = (id: string, dry: DryRun) =>
+  invoke<CommitOutcome>("proposal_commit", {
+    id,
+    seen: { rows: dry.statements.map((s) => s.rows), reach: dry.statements.map((s) => s.reach), at_commit: dry.at_commit },
+  });
 
 export const rejectProposal = (id: string, note?: string) =>
   invoke<void>("proposal_reject", { id, note: note?.trim() || null });
+
+const reachTotal = (r: Reach) => r.tables.reduce((n, t) => n + t.inserted + t.updated + t.deleted, 0) + r.unnamed;
+
+/** Rows a statement changes in other tables than its own (cascades, triggers). */
+export function otherRows(s: StatementPreview): number {
+  if (!s.reach) return 0;
+  const own = s.table && s.reach.tables.find((t) => t.schema === s.table![0] && t.table === s.table![1]);
+  if (!own) return Math.max(0, reachTotal(s.reach) - s.rows);
+  return reachTotal(s.reach) - (own.inserted + own.updated + own.deleted);
+}
+
+/** Every row the change writes: each statement's, in every table, and its deferred triggers'. */
+export function dryRunTotal(dry: DryRun): number {
+  return dry.statements.reduce((n, s) => n + s.rows + otherRows(s), 0) + (dry.at_commit ? reachTotal(dry.at_commit) : 0);
+}
+
+/** One line per table across the whole change, summed, plus rows no table could be named for. */
+export function reachByTable(dry: DryRun): { tables: (TableRows & { shared: boolean })[]; unnamed: number } {
+  const by = new Map<string, TableRows & { shared: boolean }>();
+  let unnamed = 0;
+  for (const r of [...dry.statements.map((s) => s.reach), dry.at_commit]) {
+    if (!r) continue;
+    unnamed += r.unnamed;
+    for (const t of r.tables) {
+      const k = `${t.schema}\u0000${t.table}`;
+      const row = by.get(k) ?? {
+        schema: t.schema,
+        table: t.table,
+        inserted: 0,
+        updated: 0,
+        deleted: 0,
+        shared: !dry.unshared.some(([s, n]) => s === t.schema && n === t.table),
+      };
+      row.inserted += t.inserted;
+      row.updated += t.updated;
+      row.deleted += t.deleted;
+      by.set(k, row);
+    }
+  }
+  return { tables: [...by.values()], unnamed };
+}
 
 /** `orders` from `public.orders`, quotes dropped: what a toast names. */
 export function tableLabel(target: string): string {

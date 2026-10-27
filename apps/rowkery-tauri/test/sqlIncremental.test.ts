@@ -59,11 +59,21 @@ const FIXTURES: Record<string, string> = {
     "é$$ ;",
     "$$ ;",
   ].join("\n"),
+  routines: [
+    "CREATE TRIGGER rt_note AFTER DELETE ON t BEGIN",
+    "  INSERT INTO a VALUES (CASE WHEN old.id > 1 THEN 'x;' END); -- a; note",
+    "  UPDATE b SET n = n + 1;",
+    "END;",
+    "create or replace function f(a int) returns int language sql",
+    "begin atomic select 1; select (2); end; begin; select 1; commit;",
+    "CREATE TEMP TRIGGER g BEFORE INSERT ON t WHEN (1) BEGIN SELECT 1; END; select 3;",
+  ].join("\n"),
 };
 
 const TOKENS = [
   "'", "''", '"', "`", "--", "/*", "*/", "$$", "$a$", "$tag$", ";", ";", "\n", "\n", "\n\n",
   " ", "  ", "\t", "\r", "x", "select", "SELECT", "date", ".", "1", "1e", "e", "5", "(", "é", "_",
+  "BEGIN", "begin ", " END", "END;", "CASE", "ATOMIC", "CREATE ", "TRIGGER ", " t ", ")", "FUNCTION", "[", "x.",
 ];
 
 function check(text: string, hl: ReturnType<typeof createSqlHighlighter>, st: ReturnType<typeof createStatementScanner>) {
@@ -91,7 +101,7 @@ describe("incremental tokenizing matches a full re-scan", () => {
             text = text.slice(0, at) + text.slice(at + len);
           } else {
             // Paste a chunk of another fixture, or (rarely) replace everything.
-            const other = Object.values(FIXTURES)[Math.floor(rand() * 4)];
+            const other = Object.values(FIXTURES)[Math.floor(rand() * Object.keys(FIXTURES).length)];
             const a = Math.floor(rand() * other.length);
             const chunk = other.slice(a, a + Math.floor(rand() * 60));
             text = roll < 0.98 ? text.slice(0, at) + chunk + text.slice(at) : chunk;
