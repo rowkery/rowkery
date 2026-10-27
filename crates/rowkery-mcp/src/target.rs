@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 use rowkery_core::config::AppConfig;
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{
-    cancel_with_token, open_session, session_activity, session_execute, session_introspect,
-    session_list_databases, session_ping, session_query_stream, session_table_indexes,
-    PostgresSession, ServerSession,
+    cancel_with_token, open_session, session_activity, session_execute, session_health_within,
+    session_introspect, session_list_databases, session_ping, session_query_stream,
+    session_table_indexes, PostgresSession, ServerSession,
 };
 use rowkery_core::db::sqlite::SqliteDriver;
 use rowkery_core::db::{Column, Driver, DriverError, SchemaCatalog, Value};
+use rowkery_core::health::HealthReport;
 use rowkery_core::safety::SafeMode;
 
 use crate::guard::STATEMENT_TIMEOUT;
@@ -156,6 +157,29 @@ fn open_sqlite(path: &str) -> Result<SqliteDriver, String> {
     let mut driver = SqliteDriver::new(path).read_only(true);
     driver.connect().map_err(message)?;
     Ok(driver)
+}
+
+/// Each health check's own limit: the dozen of them run one after another
+/// within [`CALL_TIMEOUT`], so a slow one is "unavailable" on its own.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The file's health on a read-only connection, interrupted after the
+/// timeout like [`sqlite_read`]: sizing walks the file's pages.
+fn sqlite_health(path: &str) -> Result<HealthReport, String> {
+    let mut driver = open_sqlite(path)?;
+    let interrupt = driver.take_interrupt_handle();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if done_rx.recv_timeout(STATEMENT_TIMEOUT).is_err() {
+            if let Some(handle) = interrupt {
+                handle.interrupt();
+            }
+        }
+    });
+    let report = driver.health();
+    let _ = done_tx.send(());
+    let _ = watchdog.join();
+    report.map_err(message)
 }
 
 /// Runs `sql` on a read-only SQLite connection, interrupted after the timeout,
@@ -447,6 +471,25 @@ impl Store {
         }
         self.guarded(target, "Timed out.", async |s| session_activity(s).await)
             .await
+    }
+
+    /// The database's health (the Health tab's report, before
+    /// [`crate::health::shape`] leaves out what isn't shared).
+    pub async fn health(&mut self, target: &Target) -> Result<HealthReport, String> {
+        match &target.record {
+            ConnectionRecord::Sqlite(sqlite) => {
+                let path = sqlite.path.clone();
+                tokio::task::spawn_blocking(move || sqlite_health(&path))
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
+            ConnectionRecord::Postgres(_) => {
+                self.guarded(target, "Timed out.", async |s| {
+                    session_health_within(s, HEALTH_CHECK_TIMEOUT).await
+                })
+                .await
+            }
+        }
     }
 
     /// Fills in a Postgres table's indexes, which the catalog load leaves out.

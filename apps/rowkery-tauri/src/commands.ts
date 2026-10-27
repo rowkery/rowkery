@@ -534,6 +534,13 @@ export const COMMANDS: Command[] = [
     canRun: (s) => s.connected && !!s.connection?.postgres,
   },
   {
+    id: "show-health",
+    title: "Show health",
+    menuTitle: "Health",
+    synonyms: ["health", "bloat", "vacuum", "unused indexes", "duplicate indexes", "wraparound", "slow queries", "pg_stat_statements", "size", "doctor"],
+    canRun: (s) => s.connected,
+  },
+  {
     id: "presenting",
     title: (s) => (s.presenting ? "Stop presenting" : "Start presenting"),
     menuTitle: (s) => (s.presenting ? "Stop Presenting" : "Start Presenting"),
@@ -992,7 +999,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   },
   {
     submenu: "View",
-    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-map", "show-sessions", null, "theme:auto", "theme:light", "theme:dark"],
+    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-map", "show-sessions", "show-health", null, "theme:auto", "theme:light", "theme:dark"],
   },
   {
     submenu: "Go",

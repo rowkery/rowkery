@@ -498,6 +498,10 @@
           "keys": ""
         },
         {
+          "title": "Health",
+          "keys": ""
+        },
+        {
           "title": "Match System Appearance",
           "keys": ""
         },
@@ -654,6 +658,10 @@
     },
     {
       "title": "Show sessions",
+      "keys": ""
+    },
+    {
+      "title": "Show health",
       "keys": ""
     },
     {

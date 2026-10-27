@@ -190,6 +190,7 @@ import { Keys } from "./Keys";
 import { StatementList } from "./StatementList";
 import { instanceShortName } from "./CloudSqlFields";
 import { SessionDetail, SessionsBar, SessionsGrid, useSessions } from "./SessionsView";
+import { HealthBar, HealthBody, HealthDetail, useHealth, useSoonToast } from "./HealthView";
 import { Elapsed, RowsSoFar, TabStatus } from "./TabStatus";
 import type { WindowActions, WindowSession } from "./windowSession";
 import {
@@ -574,9 +575,10 @@ export function Workspace({
   const activeSql = activeTab?.sql ?? "";
   const isTableTab = activeTab?.kind === "table";
   const isSessionsTab = activeTab?.kind === "sessions";
+  const isHealthTab = activeTab?.kind === "health";
   const isImportTab = activeTab?.kind === "import";
   /** A tab with its own bar and grid instead of the editor or a table's line. */
-  const ownTab = isSessionsTab || isImportTab;
+  const ownTab = isSessionsTab || isHealthTab || isImportTab;
   const presenting = usePresenting();
   const runsRef = useRef(runs);
   runsRef.current = runs;
@@ -644,6 +646,17 @@ export function Workspace({
     setTabs((prev) => [...prev, { id, kind: "sessions", title: "Sessions", sql: "" }]);
     setActiveTabId(id);
   };
+
+  /** ⌘K Show health: the window's Health tab, opened once. */
+  const showHealth = () => {
+    const open = tabsRef.current.find((t) => t.kind === "health");
+    if (open) return setActiveTabId(open.id);
+    const id = nextTabId.current++;
+    setTabs((prev) => [...prev, { id, kind: "health", title: "Health", sql: "" }]);
+    setActiveTabId(id);
+  };
+  const showHealthRef = useRef(showHealth);
+  showHealthRef.current = showHealth;
 
   const { rows: tabRows, ref: tabRef } = useTabPresence(
     tabs,
@@ -3686,6 +3699,19 @@ export function Workspace({
     windowId,
     active && isSessionsTab && connected && activeConnection?.kind === "postgres",
   );
+  const health = useHealth(
+    windowId,
+    active && isHealthTab && connected,
+    `${activeId ?? ""}\u0000${session.database ?? ""}`,
+  );
+  // Only Postgres has "Soon" checks; SQLite would walk its pages for nothing.
+  useSoonToast(
+    windowId,
+    activeId,
+    active && connected && !busy && activeConnection?.kind === "postgres",
+    active && isHealthTab,
+    () => showHealthRef.current(),
+  );
   const tabLabels = useMemo(() => tabs.map((t) => ({ id: t.id, title: t.title })), [tabs]);
   const running = runStartedAt !== null;
   // No tip while the shown tab runs; one earned meanwhile waits for the rows.
@@ -4036,6 +4062,8 @@ export function Workspace({
         return setPresenting(!presentingOn());
       case "show-sessions":
         return showSessions();
+      case "show-health":
+        return showHealth();
       case "new-connection":
         return actions.newConnection();
       case "report-issue":
@@ -4225,6 +4253,8 @@ export function Workspace({
           ? "review"
           : isSessionsTab && sessions.picked
             ? "session"
+            : isHealthTab && health.picked
+              ? "health"
             : qlView
               ? "quicklook"
               : null;
@@ -4536,6 +4566,8 @@ export function Workspace({
             />
           ) : isSessionsTab ? (
             <SessionsBar model={sessions} />
+          ) : isHealthTab ? (
+            <HealthBar model={health} />
           ) : isImportTab ? (
             <div className="sessions-bar" data-import-bar>
               <span className="sessions-title">Import</span>
@@ -4612,6 +4644,8 @@ export function Workspace({
         >
           {isSessionsTab ? (
             <SessionsGrid model={sessions} tabs={tabLabels} windowId={windowId} />
+          ) : isHealthTab ? (
+            <HealthBody model={health} />
           ) : isImportTab ? (
             <RenderErrorBoundary
               resetKeys={[importResult]}
@@ -4913,6 +4947,8 @@ export function Workspace({
                   ? "Run SQL file"
                   : inspectorKind === "session"
                     ? "Session"
+                    : inspectorKind === "health"
+                      ? "Health"
                     : "Quick Look"
           }
           data-quicklook={inspectorKind === "quicklook" ? "" : undefined}
@@ -4975,6 +5011,15 @@ export function Workspace({
             />
           ) : inspectorKind === "session" ? (
             <SessionDetail model={sessions} tabs={tabLabels} windowId={windowId} onGoToTab={setActiveTabId} />
+          ) : inspectorKind === "health" ? (
+            <HealthDetail
+              model={health}
+              onOpenSql={(sql, title) => {
+                health.pick(null);
+                openSqlInTab(sql, title);
+              }}
+              onShowSessions={showSessions}
+            />
           ) : inspectorKind === "quicklook" && qlView ? (
             <QuickLook
               columns={qlView.columns}

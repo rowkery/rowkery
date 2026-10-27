@@ -217,6 +217,11 @@
         "accelerator": null
       },
       {
+        "id": "show-health",
+        "title": "Health",
+        "accelerator": null
+      },
+      {
         "separator": true
       },
       {

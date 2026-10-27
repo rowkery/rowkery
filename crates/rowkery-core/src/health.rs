@@ -200,7 +200,10 @@ pub enum Detail {
     ForeignKeyWithoutIndex {
         constraint: String,
         columns: Vec<String>,
-        references: String,
+        /// The parent table's schema (`None` on SQLite) and name, apart so
+        /// a name with a dot in it reads one way.
+        parent_schema: Option<String>,
+        parent_table: String,
         /// `None` when only "over the limit" is known (a large SQLite file).
         rows: Option<i64>,
     },

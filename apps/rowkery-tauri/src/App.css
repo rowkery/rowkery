@@ -300,6 +300,10 @@ body,
   --inspector-right: var(--insp-session, 320px);
 }
 
+.app-frame:has(> .workspace:not([hidden])[data-inspector="health"]) {
+  --inspector-right: var(--insp-health, 360px);
+}
+
 .app-frame[data-connect] {
   --inspector-right: var(--insp-connect, 380px);
 }

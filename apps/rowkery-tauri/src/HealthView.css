@@ -1,0 +1,295 @@
+/* ---------- The Health tab (2026-10-26) ----------
+   Sessions' shape: a line under the tab row, then the sheet. Tiles lead,
+   findings are clickable cards with a severity word on its own wash (Soon
+   red, the rest muted), the slowest queries reuse the Sessions table. No
+   orange here: nothing on this sheet is something you ask for. */
+
+.health-source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-error-word {
+  color: var(--del);
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 16px 24px;
+  font: 12.5px var(--sans);
+  color: var(--text2);
+}
+
+.health-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.health-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
+.health-tile-label,
+.health-tile-line {
+  font-size: 12px;
+  color: var(--mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-tile-value {
+  font: 600 20px var(--font-display);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.health-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 22px 0 8px;
+  font: 500 12px var(--sans);
+  color: var(--text);
+}
+
+.health-count,
+.health-sub {
+  font-weight: 400;
+  color: var(--mute);
+}
+
+.health-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.health-card:hover {
+  background: var(--hover);
+}
+
+.health-card[data-health-picked] {
+  background: var(--sel);
+  border-color: var(--dim);
+}
+
+.health-sev {
+  flex-shrink: 0;
+  min-width: 56px;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  background: var(--kbd);
+  font: 500 11.5px var(--sans);
+  color: var(--text2);
+  text-align: center;
+}
+
+.health-sev.soon {
+  background: var(--delbg);
+  color: var(--del);
+}
+
+.health-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.health-card-title {
+  font: 500 13px var(--sans);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-card-line {
+  font-size: 12px;
+  color: var(--mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-card-weight {
+  flex-shrink: 0;
+  font: 12px var(--mono);
+  color: var(--mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.health-queries tbody tr {
+  cursor: default;
+}
+
+.health-bar {
+  display: inline-block;
+  width: 64px;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--line);
+  vertical-align: middle;
+}
+
+.health-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text2);
+}
+
+.health-quiet {
+  margin: 0;
+  color: var(--mute);
+}
+
+.health-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.health-fine,
+.health-unchecked {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.health-fine li::before {
+  content: "✓";
+  margin-right: 6px;
+  color: var(--ok);
+}
+
+.health-unchecked li {
+  color: var(--mute);
+}
+
+/* The inspector's view of a finding. */
+.inspector[data-inspector="health"] {
+  width: var(--insp-health, 360px);
+}
+
+.health-why,
+.health-note,
+.health-trust {
+  margin: 0;
+  font: 12.5px/1.5 var(--sans);
+  color: var(--text2);
+}
+
+.health-trust {
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--mute);
+}
+
+.health-note {
+  color: var(--mute);
+}
+
+.health-items {
+  width: 100%;
+  border-collapse: collapse;
+  font: 12px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.health-items td {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--rowline);
+  vertical-align: top;
+}
+
+.health-items .num {
+  padding-left: 12px;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--mute);
+}
+
+.health-item-name {
+  max-width: 0;
+  width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.health-item-sub {
+  display: block;
+  color: var(--mute);
+}
+
+.health-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health-step-where {
+  font: 500 12px var(--sans);
+  color: var(--text);
+}
+
+.health-step-how {
+  font: 12.5px/1.5 var(--sans);
+  color: var(--text2);
+}
+
+.health-scroll:focus {
+  outline: none;
+}
+
+.health-queries tr:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The app's button, at the height of the bar's chips (Sessions' line stays the same height). */
+.health-refresh {
+  height: 26px;
+}

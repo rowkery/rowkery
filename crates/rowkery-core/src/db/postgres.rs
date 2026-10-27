@@ -37,7 +37,7 @@ pub use activity::{
     rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
     HeldLock, ServerSession, StopKind,
 };
-pub use health::session_health;
+pub use health::{session_health, session_health_within};
 
 const BATCH_SIZE: usize = 200;
 
