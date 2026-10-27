@@ -213,7 +213,22 @@ impl SqliteDriver {
             .map(|s| unquote(&s.target))
             .unwrap_or_default();
         let reach = match counter.reach(&conn) {
-            Ok(all) => beyond(all, "main", &table, counts.rows()),
+            Ok(all) => {
+                // An unqualified name resolves temp first, then main, then
+                // attached databases: own rows count under the first one hit.
+                let rank = |s: &str| match s {
+                    "temp" => 0,
+                    "main" => 1,
+                    _ => 2,
+                };
+                let schema = all
+                    .tables
+                    .iter()
+                    .filter(|t| t.table == table)
+                    .min_by_key(|t| rank(&t.schema))
+                    .map_or_else(|| "main".to_string(), |t| t.schema.clone());
+                beyond(all, &schema, &table, counts.rows())
+            }
             Err(err) => {
                 rollback();
                 return Err(ApplyFailure::other(err.to_string()));

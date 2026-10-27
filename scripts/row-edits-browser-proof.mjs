@@ -524,13 +524,24 @@ await page.keyboard.press("Control+s");
 await page.waitForSelector(`${ws} [data-edit-tray="reach"]`);
 const reachText = async () => (await page.locator(`${ws} [data-tray-reach]`).textContent()).replace(/\s+/g, " ").trim();
 check(
-  (await reachText()) === "Not saved yet · deleting this row also deletes 14 kiosk_sessions and 37 payouts and adds 1 row to audit_log",
+  (await reachText()) === "Not saved yet · deleting this row also deletes 14 kiosk_sessions, 37 payouts and adds 1 row to audit_log",
   `the bar: ${await reachText()}`,
 );
 check((await page.locator(`${ws} [data-commit]`).textContent()).startsWith("Commit all 53"), "Commit reads Commit all 53");
 check((await rowMark(6)) === "delete", "the delete stays staged");
+// Discard and Undo bring the same delete back: the counts shown before
+// don't carry over to a plain Commit.
+await page.locator(`${ws} [data-discard]`).click();
+await page.click("[data-toast-undo]");
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-row="6"]`)?.getAttribute("data-mark") === "delete", ws);
+check(!(await page.locator(`${ws} [data-commit]`).textContent()).includes("Commit all"), "after Undo: a plain Commit");
+const before = (await applied()).length;
+await page.keyboard.press("Control+s");
+await page.waitForSelector(`${ws} [data-edit-tray="reach"]`);
+check((await applied()).length === before + 1 && !(await applied()).at(-1).reach, "that Commit sends no counts: it stops again");
 await shot("12-reach");
 await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+await page.waitForTimeout(400); // the theme's colour transitions
 await shot("12b-reach-dark");
 await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
 await page.locator(`${ws} [data-commit]`).click();

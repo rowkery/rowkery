@@ -1274,16 +1274,8 @@ pub async fn session_close_cursor(session: &mut PostgresSession) {
 /// Runs staged row edits as one transaction on the session: every statement
 /// must change exactly one row, or the whole batch rolls back and the
 /// failure names the statement. Never inside the user's own transaction:
-/// that is refused untouched, since our COMMIT would end it.
-pub async fn session_apply_changes(
-    session: &mut PostgresSession,
-    statements: &[RowStatement],
-) -> Result<ApplyCounts, ApplyFailure> {
-    session_apply_changes_within(session, statements, None, None).await
-}
-
-/// `session_apply_changes` where `BEGIN` and each statement get `step` to
-/// answer (a lock wait, or a socket that died without saying). On a timeout
+/// that is refused untouched, since our COMMIT would end it. `BEGIN` and
+/// each statement get `step` to answer (a lock wait, or a socket that died without saying). On a timeout
 /// the statement is cancelled and the transaction rolled back, before any
 /// `COMMIT` was sent, so nothing was saved; `COMMIT` itself has no limit and
 /// is never retried. If even the rollback doesn't answer, the session is

@@ -6647,7 +6647,7 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
     bridge.open_window("off", "off", None).expect("open");
     let run = |sql: &str| window_query(&bridge, "off", 1, sql);
     for sql in [
-        "DROP TABLE IF EXISTS public.it_kiosks, public.it_sessions, public.it_payouts, public.it_audit, public.it_plain CASCADE",
+        "DROP TABLE IF EXISTS public.it_kiosks, public.it_sessions, public.it_payouts, public.it_audit, public.it_plain, public.it_parent CASCADE",
         "DROP FUNCTION IF EXISTS public.it_note() CASCADE",
         "CREATE TABLE public.it_kiosks (id int PRIMARY KEY, name text)",
         "CREATE TABLE public.it_sessions (id int PRIMARY KEY, kiosk int REFERENCES public.it_kiosks ON DELETE CASCADE)",
@@ -6662,6 +6662,10 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         "INSERT INTO public.it_sessions SELECT g, 1 + g % 2 FROM generate_series(1, 6) g",
         "INSERT INTO public.it_payouts VALUES (5, 2), (150, 2), (6, 1)",
         "INSERT INTO public.it_plain VALUES (1, 'p')",
+        "CREATE TABLE public.it_parent (id int PRIMARY KEY, name text)",
+        "CREATE TABLE public.it_child () INHERITS (public.it_parent)",
+        "CREATE TRIGGER it_child_note AFTER UPDATE ON public.it_child FOR EACH ROW EXECUTE FUNCTION public.it_note()",
+        "INSERT INTO public.it_child VALUES (9, 'c')",
     ] {
         assert_eq!(run(sql).1, None, "{sql}");
     }
@@ -6689,6 +6693,29 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         None,
     );
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
+    // A row of an inheritance child, edited through the parent, fires the
+    // child's trigger: counted, though the parent has none of its own.
+    let parent = edit_table(
+        "public",
+        "it_parent",
+        &[("id", "integer"), ("name", "text")],
+        &["id"],
+    );
+    let ApplyOutcome::RolledBack { failure, .. } = apply(
+        &parent,
+        vec![update(9, "name", Value::Text("d".into()))],
+        None,
+    ) else {
+        panic!("the child's trigger stops the commit")
+    };
+    let reach = failure.reach.expect("the child's trigger counted");
+    assert!(
+        reach
+            .tables
+            .iter()
+            .any(|t| t.table == "it_audit" && t.inserted == 1),
+        "{reach:?}"
+    );
     // Renaming a kiosk writes nothing else.
     let out = apply(
         &kiosks,
@@ -6732,7 +6759,7 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         Some(Value::Int(3))
     );
     for sql in [
-        "DROP TABLE public.it_sessions, public.it_payouts, public.it_audit, public.it_plain, public.it_kiosks",
+        "DROP TABLE public.it_sessions, public.it_payouts, public.it_audit, public.it_plain, public.it_kiosks, public.it_parent CASCADE",
         "DROP FUNCTION public.it_note()",
     ] {
         run(sql);

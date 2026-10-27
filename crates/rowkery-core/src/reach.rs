@@ -157,7 +157,8 @@ pub fn beyond(reach: Reach, schema: &str, table: &str, own: [u64; 3]) -> Reach {
 /// else, and if so the table its own rows count under (its top parent, for a
 /// partition). It can when it, or a table it's a partition of, has a user
 /// trigger or rule, or a foreign key cascades into it (or sets NULL or the
-/// default), or it is partitioned. A table with none of these is never
+/// default), or it is partitioned or has inheritance children (whose own
+/// triggers and keys a write through the parent reaches). A table with none of these is never
 /// counted, which spares the two reads of every table's counters.
 pub async fn pg_reaches(
     session: &PostgresSession,
@@ -170,7 +171,7 @@ pub async fn pg_reaches(
          SELECT n.nspname::text, c.relname::text FROM up JOIN pg_class c ON c.oid = up.oid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE NOT c.relispartition AND ( \
-           EXISTS (SELECT 1 FROM up u JOIN pg_class k ON k.oid = u.oid WHERE k.relkind = 'p') \
+           EXISTS (SELECT 1 FROM up u JOIN pg_class k ON k.oid = u.oid WHERE k.relkind = 'p' OR k.relhassubclass) \
            OR EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid IN (SELECT oid FROM up) AND NOT tgisinternal) \
            OR EXISTS (SELECT 1 FROM pg_rewrite WHERE ev_class IN (SELECT oid FROM up) AND rulename <> '_RETURN') \
            OR EXISTS (SELECT 1 FROM pg_constraint WHERE contype = 'f' AND confrelid IN (SELECT oid FROM up) \
@@ -198,8 +199,7 @@ pub struct SqliteCounter {
 }
 
 impl SqliteCounter {
-    /// Hooks `conn`; the hook stays until the connection closes or another
-    /// replaces it.
+    /// Hooks `conn`; the caller removes the hook when it's done counting.
     pub fn install(conn: &rusqlite::Connection) -> Self {
         use rusqlite::hooks::Action;
         let seen = Tally::default();

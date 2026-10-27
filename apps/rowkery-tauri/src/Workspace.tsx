@@ -1223,6 +1223,7 @@ export function Workspace({
     // Edits moved: a held commit is no longer what they say, a failure or
     // another table's counts no longer current.
     setHeldEdits(({ [tabId]: _gone, ...rest }) => rest);
+    reached.current.delete(tabId);
     setTrays(({ [tabId]: old, ...rest }) => (old && old.kind !== "failed" && old.kind !== "reach" ? { ...rest, [tabId]: old } : rest));
   };
   /** ↵ where nothing can be edited: the tray says why for 4 s. */
@@ -1253,8 +1254,9 @@ export function Workspace({
     const target = editTarget();
     if (!target || committing.current.has(target.tab.id)) return;
     // Many deletes, or every loaded row (⌘A ⌫): Review SQL first, even with
-    // safe mode off; its Commit sends back the SQL it showed.
-    if (confirmed === undefined && rowEdits.reviewFirst) {
+    // safe mode off; its Commit sends back the SQL it showed. Commit all
+    // after a reach stop has been through that already.
+    if (confirmed === undefined && rowEdits.reviewFirst && !approvalFor(target)) {
       const n = Object.keys(target.buffer.deletes).length;
       openReview();
       showToast(
@@ -1273,13 +1275,19 @@ export function Workspace({
       setCommitsSettled((n) => n + 1);
     }
   };
+  /** The edits a reach stop counted: same connection, table and changes. */
+  const reachKey = ({ buffer, table }: NonNullable<ReturnType<typeof editTarget>>) =>
+    JSON.stringify([buffer.connectionId, table, bufferChanges(buffer)]);
+  /** Commit all: the counts the bar showed, for these same edits only. */
+  const approvalFor = (target: NonNullable<ReturnType<typeof editTarget>>) => {
+    const seen = reached.current.get(target.tab.id);
+    return seen?.for === reachKey(target) ? seen : undefined;
+  };
   const commitBuffer = async (target: NonNullable<ReturnType<typeof editTarget>>, confirmed?: string) => {
     const { tab, buffer, table } = target;
     const changes = bufferChanges(buffer);
-    const key = JSON.stringify(changes);
-    // Commit all: the counts the bar showed, for these same changes only.
-    const seen = reached.current.get(tab.id);
-    const approved = seen?.for === key ? seen : undefined;
+    const key = reachKey(target);
+    const approved = approvalFor(target);
     reached.current.delete(tab.id);
     confirmed ??= approved?.confirmed;
     setTray(tab.id, { kind: "committing" });
