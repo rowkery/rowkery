@@ -22,7 +22,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 ring = "0.17"
 # The RSA key the connector's client certificate is signed for (russh already builds it).
 rsa = { version = "0.10.0-rc.18", default-features = false, features = ["std", "encoding"] }
-rusqlite = { version = "0.32", features = ["bundled", "column_decltype"] }
+rusqlite = { version = "0.32", features = ["bundled", "column_decltype", "hooks"] }
 russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }

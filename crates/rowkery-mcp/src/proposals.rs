@@ -5,7 +5,8 @@
 //! never gets a session that can write. The app lists what is waiting,
 //! previews each change in a transaction it rolls back (`dry_run`), and on
 //! the user's click checks it again and runs it for real (`commit`), only
-//! if every statement changes as many rows as the dry run showed. Decisions
+//! if every statement changes as many rows as the dry run showed, in its own
+//! table and in every other one its cascades and triggers reach. Decisions
 //! go to `proposal-outcomes.jsonl`, which `check_proposal` reads. A
 //! proposal nobody decides on expires after a day.
 //!
@@ -21,6 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rowkery_core::config::{config_dir, AppConfig};
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{open_session, session_execute, session_query_stream};
+use rowkery_core::reach::{self, Reach};
 use rowkery_core::safety::RowChange;
 use rowkery_core::Value;
 use serde::{Deserialize, Serialize};
@@ -284,9 +286,15 @@ pub struct StatementPreview {
     /// Up to `PREVIEW_ROWS` rows: before (UPDATE, DELETE, an upsert's old
     /// row) and after (INSERT, UPDATE), cells as compact JSON.
     pub shown: Vec<PreviewRow>,
-    /// Triggers on the table: they ran in the dry run too, but their own
-    /// writes aren't counted or shown.
+    /// Triggers on the table: they ran in the dry run too; their writes
+    /// are counted in `reach`, not shown.
     pub triggers: Vec<String>,
+    /// Every row the statement wrote, per table: its own and what cascades
+    /// and triggers wrote. None when the server keeps no counts.
+    pub reach: Option<Reach>,
+    /// `[schema, table]` the statement's own rows count under in `reach`
+    /// (a partition's top parent).
+    pub table: Option<[String; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -301,6 +309,24 @@ pub struct DryRun {
     pub proposal: Proposal,
     pub connection_name: String,
     pub statements: Vec<StatementPreview>,
+    /// What deferred triggers wrote when the dry run fired them at its end,
+    /// as COMMIT would (Postgres; None for SQLite or without counts).
+    pub at_commit: Option<Reach>,
+    /// `[schema, table]` of each table the change writes that isn't shared
+    /// with agents (reached through a cascade or trigger).
+    pub unshared: Vec<[String; 2]>,
+}
+
+/// What the user saw in the dry run, which the commit must match.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Seen {
+    /// Rows each statement changed.
+    pub rows: Vec<u64>,
+    /// Each statement's `reach`.
+    #[serde(default)]
+    pub reach: Vec<Option<Reach>>,
+    #[serde(default)]
+    pub at_commit: Option<Reach>,
 }
 
 /// What the commit did.
@@ -312,7 +338,7 @@ pub enum CommitOutcome {
     },
     /// The data changed since the dry run: nothing was saved; here is a new one.
     Moved {
-        dry_run: DryRun,
+        dry_run: Box<DryRun>,
     },
     Failed {
         error: String,
@@ -334,11 +360,35 @@ async fn checked(id: &str) -> Result<(Proposal, ConnectionRecord, String, Vec<Ro
 /// Runs the change in a transaction that is rolled back, and shows what it did.
 pub async fn dry_run(id: &str) -> Result<DryRun, String> {
     let (proposal, record, database, changes) = checked(id).await?;
-    let statements = preview(&record, &database, &changes).await?;
+    dry_run_of(proposal, &record, &database, &changes).await
+}
+
+async fn dry_run_of(
+    proposal: Proposal,
+    record: &ConnectionRecord,
+    database: &str,
+    changes: &[RowChange],
+) -> Result<DryRun, String> {
+    let (statements, at_commit) = preview(record, database, changes).await?;
+    // A cascade can reach a table the agent wasn't given: allowed, since the
+    // user sees it before Commit, and the agent never hears of it.
+    let rule = crate::access::tables(record, database);
+    let mut unshared: Vec<[String; 2]> = statements
+        .iter()
+        .filter_map(|s| s.reach.as_ref())
+        .chain(at_commit.as_ref())
+        .flat_map(|r| &r.tables)
+        .filter(|t| !rule.is_some_and(|rule| rule.allows(&t.schema, &t.table)))
+        .map(|t| [t.schema.clone(), t.table.clone()])
+        .collect();
+    unshared.sort();
+    unshared.dedup();
     Ok(DryRun {
         proposal,
         connection_name: record.display_name().to_string(),
         statements,
+        at_commit,
+        unshared,
     })
 }
 
@@ -540,7 +590,7 @@ async fn preview(
     record: &ConnectionRecord,
     database: &str,
     changes: &[RowChange],
-) -> Result<Vec<StatementPreview>, String> {
+) -> Result<(Vec<StatementPreview>, Option<Reach>), String> {
     match record {
         ConnectionRecord::Postgres(pg) => pg_preview(pg, database, changes).await,
         ConnectionRecord::Sqlite(c) => {
@@ -549,17 +599,17 @@ async fn preview(
             tokio::task::spawn_blocking(move || sqlite_run(&path, &changes, None))
                 .await
                 .map_err(|e| e.to_string())?
-                .map(|(previews, _)| previews)
+                .map(|(previews, _)| (previews, None))
         }
     }
     .map_err(dry_run_error)
 }
 
 /// Commits the change if it still passes every check and each statement
-/// changes the rows the user saw in the dry run (`rows`, per statement).
-pub async fn commit(id: &str, rows: &[u64]) -> Result<CommitOutcome, String> {
+/// changes the rows the user saw in the dry run (`seen`), in every table.
+pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
     let (proposal, record, database, changes) = checked(id).await?;
-    if rows.len() != changes.len() {
+    if seen.rows.len() != changes.len() {
         return Err("The change moved since you reviewed it. Review it again.".into());
     }
     let ran = match &record {
@@ -568,13 +618,13 @@ pub async fn commit(id: &str, rows: &[u64]) -> Result<CommitOutcome, String> {
                 record: record.clone(),
                 database: database.clone(),
             };
-            pg_commit(pg, &target, &proposal.sql, rows).await
+            pg_commit(pg, &target, &proposal.sql, seen).await
         }
         ConnectionRecord::Sqlite(c) => {
             let path = c.path.clone();
             let changes = changes.clone();
-            let rows = rows.to_vec();
-            tokio::task::spawn_blocking(move || sqlite_run(&path, &changes, Some(&rows)))
+            let seen = seen.clone();
+            tokio::task::spawn_blocking(move || sqlite_run(&path, &changes, Some(&seen)))
                 .await
                 .map_err(|e| e.to_string())?
                 .map(|(_, ran)| ran.unwrap_or(RunResult::Moved))
@@ -590,16 +640,9 @@ pub async fn commit(id: &str, rows: &[u64]) -> Result<CommitOutcome, String> {
             )?;
             Ok(CommitOutcome::Committed { rows: counts })
         }
-        Ok(RunResult::Moved) => {
-            let statements = preview(&record, &database, &changes).await?;
-            Ok(CommitOutcome::Moved {
-                dry_run: DryRun {
-                    proposal,
-                    connection_name: record.display_name().to_string(),
-                    statements,
-                },
-            })
-        }
+        Ok(RunResult::Moved) => Ok(CommitOutcome::Moved {
+            dry_run: Box::new(dry_run_of(proposal, &record, &database, &changes).await?),
+        }),
         Err(error) => {
             // Before COMMIT nothing was saved: the user can try again. A
             // dropped COMMIT is final either way, and the agent hears it.
@@ -679,7 +722,7 @@ async fn pg_preview(
     pg: &PostgresConnection,
     database: &str,
     changes: &[RowChange],
-) -> Result<Vec<StatementPreview>, String> {
+) -> Result<(Vec<StatementPreview>, Option<Reach>), String> {
     let session = open_session(pg.id.clone(), pg_config(pg, database))
         .await
         .map_err(|e| e.into_message())?;
@@ -689,22 +732,52 @@ async fn pg_preview(
     )
     .await
     .map_err(|e| e.into_message())?;
-    let mut out = Vec::new();
-    let mut failed = None;
-    for change in changes {
-        match pg_preview_one(&session, change).await {
-            Ok(p) => out.push(p),
-            Err(e) => {
-                failed = Some(e);
-                break;
-            }
-        }
-    }
+    let ran = pg_preview_all(&session, changes).await;
     let _ = session_execute(&session, "ROLLBACK").await;
-    match failed {
-        Some(e) => Err(e),
-        None => Ok(out),
+    ran
+}
+
+async fn pg_preview_all(
+    session: &rowkery_core::db::postgres::PostgresSession,
+    changes: &[RowChange],
+) -> Result<(Vec<StatementPreview>, Option<Reach>), String> {
+    let mut out = Vec::new();
+    let mut counts = reach::pg_counts(session).await?;
+    for change in changes {
+        let (preview, after) = pg_preview_one(session, change, counts.as_ref()).await?;
+        out.push(preview);
+        counts = after;
     }
+    let at_commit = pg_fire_deferred(session, counts.as_ref()).await?;
+    Ok((out, at_commit))
+}
+
+/// Fires the deferred triggers now, as COMMIT would, and counts what they
+/// wrote.
+async fn pg_fire_deferred(
+    session: &rowkery_core::db::postgres::PostgresSession,
+    before: Option<&reach::Counts>,
+) -> Result<Option<Reach>, String> {
+    session_execute(session, "SET CONSTRAINTS ALL IMMEDIATE")
+        .await
+        .map_err(|e| e.into_message())?;
+    pg_reach(session, before).await.map(|(r, _)| r)
+}
+
+/// What was written since `before`, and the counters now.
+async fn pg_reach(
+    session: &rowkery_core::db::postgres::PostgresSession,
+    before: Option<&reach::Counts>,
+) -> Result<(Option<Reach>, Option<reach::Counts>), String> {
+    let Some(before) = before else {
+        return Ok((None, None));
+    };
+    let after = reach::pg_counts(session).await?;
+    let reach = after.as_ref().map(|after| Reach {
+        tables: reach::diff(before, after),
+        unnamed: 0,
+    });
+    Ok((reach, after))
 }
 
 /// One statement inside the dry run's transaction. Wrapped in a CTE, the
@@ -714,16 +787,24 @@ async fn pg_preview(
 async fn pg_preview_one(
     session: &rowkery_core::db::postgres::PostgresSession,
     change: &RowChange,
-) -> Result<StatementPreview, String> {
+    counts: Option<&reach::Counts>,
+) -> Result<(StatementPreview, Option<reach::Counts>), String> {
     let rel = literal(&change.target);
     let facts = pg_rows(
         session,
         &format!(
-            "SELECT 'k', a.attname::text FROM pg_index i \
+            "WITH RECURSIVE up(oid) AS (SELECT {rel}::regclass::oid \
+               UNION ALL SELECT h.inhparent FROM up JOIN pg_class c ON c.oid = up.oid AND c.relispartition \
+               JOIN pg_inherits h ON h.inhrelid = up.oid), \
+             top AS (SELECT n.nspname::text AS s, c.relname::text AS r FROM up \
+               JOIN pg_class c ON c.oid = up.oid JOIN pg_namespace n ON n.oid = c.relnamespace \
+               WHERE NOT c.relispartition) \
+             SELECT 'k', a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = {rel}::regclass AND i.indisprimary \
              UNION ALL SELECT 't', tgname::text FROM pg_trigger \
-             WHERE tgrelid = {rel}::regclass AND NOT tgisinternal"
+             WHERE tgrelid = {rel}::regclass AND NOT tgisinternal \
+             UNION ALL SELECT 's', s FROM top UNION ALL SELECT 'r', r FROM top"
         ),
     )
     .await?
@@ -738,6 +819,13 @@ async fn pg_preview_one(
         .filter(|r| text(r.first()) == "t")
         .map(|r| text(r.get(1)))
         .collect();
+    let fact = |kind: &str| {
+        facts
+            .iter()
+            .find(|r| text(r.first()) == kind)
+            .map(|r| text(r.get(1)))
+    };
+    let table = fact("s").zip(fact("r")).map(|(s, r)| [s, r]);
     let quote = |c: &str| format!("\"{}\"", c.replace('"', "\"\""));
     let join_old = change.verb != "DELETE" && !key.is_empty();
     let sql = if join_old {
@@ -763,6 +851,7 @@ async fn pg_preview_one(
         )
     };
     let (columns, rows) = pg_rows(session, &sql).await?;
+    let (reach, after) = pg_reach(session, counts).await?;
     let width = if join_old {
         (columns.len() - 2) / 2
     } else {
@@ -785,14 +874,17 @@ async fn pg_preview_one(
             shape_row(&change.verb, new, old)
         })
         .collect();
-    Ok(finish(
+    let mut preview = finish(
         change,
         columns[..width].to_vec(),
         key,
         total,
         shown,
         triggers,
-    ))
+        reach,
+    );
+    preview.table = table;
+    Ok((preview, after))
 }
 
 /// Cells for the UI; which side is which depends on the verb: DELETE
@@ -823,6 +915,7 @@ fn finish(
     rows: u64,
     shown: Vec<PreviewRow>,
     triggers: Vec<String>,
+    reach: Option<Reach>,
 ) -> StatementPreview {
     let changed = columns
         .iter()
@@ -846,17 +939,19 @@ fn finish(
         changed,
         shown,
         triggers,
+        reach,
+        table: None,
     }
 }
 
 /// Runs every statement for real in one transaction; any count that differs
-/// from what the user saw rolls it all back. COMMIT is sent once, never
-/// retried.
+/// from what the user saw, in any table, rolls it all back. COMMIT is sent
+/// once, never retried.
 async fn pg_commit(
     pg: &PostgresConnection,
     target: &Target,
     sql: &str,
-    expected: &[u64],
+    seen: &Seen,
 ) -> Result<RunResult, String> {
     let session = open_session(pg.id.clone(), pg_config(pg, &target.database))
         .await
@@ -875,7 +970,7 @@ async fn pg_commit(
         }));
     };
     let changes = match checked {
-        Ok(changes) if changes.len() == expected.len() => changes,
+        Ok(changes) if changes.len() == seen.rows.len() => changes,
         Ok(_) => {
             let _ = session_execute(&session, "ROLLBACK").await;
             return Ok(RunResult::Moved);
@@ -885,21 +980,18 @@ async fn pg_commit(
             return Err(e);
         }
     };
-    let mut counts = Vec::new();
-    for (change, want) in changes.iter().zip(expected) {
-        let ran = session_query_stream(&session, &change.sql, |_, _| Ok(())).await;
-        match ran {
-            Ok(n) if n == *want => counts.push(n),
-            Ok(_) => {
-                let _ = session_execute(&session, "ROLLBACK").await;
-                return Ok(RunResult::Moved);
-            }
-            Err(e) => {
-                let _ = session_execute(&session, "ROLLBACK").await;
-                return Err(e.into_message());
-            }
+    let ran = pg_commit_run(&session, &changes, seen).await;
+    let counts = match ran {
+        Ok(Some(counts)) => counts,
+        Ok(None) => {
+            let _ = session_execute(&session, "ROLLBACK").await;
+            return Ok(RunResult::Moved);
         }
-    }
+        Err(e) => {
+            let _ = session_execute(&session, "ROLLBACK").await;
+            return Err(e);
+        }
+    };
     if let Err(e) = session_execute(&session, "COMMIT").await {
         if session.is_closed() {
             return Err(format!(
@@ -912,15 +1004,45 @@ async fn pg_commit(
     Ok(RunResult::Committed(counts))
 }
 
+/// Each statement's rows, or None as soon as one count, in any table,
+/// differs from the dry run's. Deferred triggers fire before COMMIT, so what
+/// they write is checked too.
+async fn pg_commit_run(
+    session: &rowkery_core::db::postgres::PostgresSession,
+    changes: &[RowChange],
+    seen: &Seen,
+) -> Result<Option<Vec<u64>>, String> {
+    let mut counts = Vec::new();
+    let mut tables = reach::pg_counts(session).await?;
+    for (i, (change, want)) in changes.iter().zip(&seen.rows).enumerate() {
+        let n = session_query_stream(session, &change.sql, |_, _| Ok(()))
+            .await
+            .map_err(|e| e.into_message())?;
+        let (reach, after) = pg_reach(session, tables.as_ref()).await?;
+        if n != *want || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach) {
+            return Ok(None);
+        }
+        counts.push(n);
+        tables = after;
+    }
+    let at_commit = pg_fire_deferred(session, tables.as_ref()).await?;
+    Ok(matches(seen.at_commit.as_ref(), &at_commit).then_some(counts))
+}
+
+/// A run's reach against the dry run's: equal, when the dry run counted.
+fn matches(seen: Option<&Reach>, now: &Option<Reach>) -> bool {
+    seen.is_none_or(|seen| now.as_ref() == Some(seen))
+}
+
 /// SQLite's dry run (`expected` none: always rolled back) and commit
-/// (`expected` the counts the user saw). Each statement runs once with
+/// (`expected` what the user saw). Each statement runs once with
 /// RETURNING inside a savepoint, for its rows; for an UPDATE the savepoint
 /// is rolled back to read the old rows by key, then the statement runs
 /// again so the next one sees it.
 fn sqlite_run(
     path: &str,
     changes: &[RowChange],
-    expected: Option<&[u64]>,
+    expected: Option<&Seen>,
 ) -> Result<(Vec<StatementPreview>, Option<RunResult>), String> {
     use rowkery_core::db::sqlite::sqlite_value_to_core;
     let err = |e: rusqlite::Error| e.to_string();
@@ -933,12 +1055,27 @@ fn sqlite_run(
     };
     conn.busy_timeout(wait).map_err(err)?;
     conn.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+    let mut counter = reach::SqliteCounter::install(&conn);
     let result = (|| -> Result<(Vec<StatementPreview>, Option<RunResult>), String> {
-        if let Some(expected) = expected {
+        if let Some(seen) = expected {
             let mut counts = Vec::new();
-            for (change, want) in changes.iter().zip(expected) {
-                let n = conn.execute(&change.sql, []).map_err(err)? as u64;
-                if n != *want {
+            for (i, (change, want)) in changes.iter().zip(&seen.rows).enumerate() {
+                counter.mark(&conn).map_err(err)?;
+                // With RETURNING as in the dry run: a bare `DELETE FROM t`
+                // would take SQLite's truncate path, which the hook never
+                // sees, and the counts would never match.
+                let n = (|| -> rusqlite::Result<u64> {
+                    let mut stmt = conn.prepare(&format!("{}\nRETURNING 1", change.sql))?;
+                    let mut rows = stmt.query([])?;
+                    let mut n = 0;
+                    while rows.next()?.is_some() {
+                        n += 1;
+                    }
+                    Ok(n)
+                })()
+                .map_err(err)?;
+                let reach = Some(counter.reach(&conn).map_err(err)?);
+                if n != *want || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach) {
                     return Ok((Vec::new(), Some(RunResult::Moved)));
                 }
                 counts.push(n);
@@ -957,6 +1094,7 @@ fn sqlite_run(
                 .and_then(|mut s| s.query_map([&table], |r| r.get(0))?.collect())
                 .map_err(err)?;
             conn.execute_batch("SAVEPOINT rk_preview").map_err(err)?;
+            counter.mark(&conn).map_err(err)?;
             let mut stmt = conn
                 .prepare(&format!("{}\nRETURNING *", change.sql))
                 .map_err(err)?;
@@ -1015,15 +1153,20 @@ fn sqlite_run(
                         .ok();
                 }
                 drop(select);
+                // Counted from the run that stays, not the one rolled back.
+                counter.mark(&conn).map_err(err)?;
                 conn.execute(&change.sql, []).map_err(err)?;
             }
+            let reach = counter.reach(&conn).map_err(err)?;
             conn.execute_batch("RELEASE rk_preview").map_err(err)?;
             let shown = returned
                 .iter()
                 .zip(&old)
                 .map(|(r, o)| shape_row(&change.verb, r, o.as_deref()))
                 .collect();
-            out.push(finish(change, columns, key, total, shown, triggers));
+            let mut preview = finish(change, columns, key, total, shown, triggers, Some(reach));
+            preview.table = Some(["main".to_string(), table]);
+            out.push(preview);
         }
         Ok((out, None))
     })();
@@ -1059,8 +1202,16 @@ fn to_sqlite(v: &Value) -> rusqlite::types::Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// What a dry run showed: these row counts, no table counts.
+    pub(crate) fn seen(rows: &[u64]) -> Seen {
+        Seen {
+            rows: rows.to_vec(),
+            ..Seen::default()
+        }
+    }
     use rowkery_core::connections::{McpDbAccess, McpTableMode, SqliteConnection};
 
     /// A target with `\'` (a quoted identifier can hold one) stays inside
@@ -1226,11 +1377,11 @@ mod tests {
         // Another pending order appears: the counts differ, nothing is saved.
         conn.execute("INSERT INTO orders VALUES (4, 'pending', 5)", [])
             .unwrap();
-        match commit(&p.id, &[2]).await.unwrap() {
+        match commit(&p.id, &seen(&[2])).await.unwrap() {
             CommitOutcome::Moved { dry_run } => assert_eq!(dry_run.statements[0].rows, 3),
             other => panic!("{other:?}"),
         }
-        match commit(&p.id, &[3]).await.unwrap() {
+        match commit(&p.id, &seen(&[3])).await.unwrap() {
             CommitOutcome::Committed { rows } => assert_eq!(rows, vec![3]),
             other => panic!("{other:?}"),
         }
@@ -1243,7 +1394,7 @@ mod tests {
             .unwrap();
         assert_eq!(refunded, 3);
         assert_eq!(status(&p.id).unwrap()["state"], "committed");
-        assert!(commit(&p.id, &[3]).await.is_err(), "decided once");
+        assert!(commit(&p.id, &seen(&[3])).await.is_err(), "decided once");
 
         // Rejected with a note; the cap of waiting proposals.
         let q = submit(
@@ -1282,6 +1433,164 @@ mod tests {
         )
         .is_err());
         assert_eq!(waiting().len(), MAX_WAITING);
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    /// A delete that cascades: the dry run counts every table it reaches,
+    /// names the ones the agent wasn't given, and the commit holds when any
+    /// of those counts moves.
+    // The env lock spans the whole test, awaits included.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_sqlite_cascade_is_counted_and_checked_again_at_commit() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-reach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let path = dir.join("shop.sqlite").to_string_lossy().into_owned();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE orders (id INTEGER PRIMARY KEY, customer INTEGER REFERENCES customers ON DELETE CASCADE);
+             CREATE TABLE payments (id INTEGER PRIMARY KEY, customer INTEGER REFERENCES customers ON DELETE CASCADE);
+             CREATE TABLE audit (what TEXT);
+             CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);
+             INSERT INTO notes VALUES (1, 'a'), (2, 'b');
+             CREATE TRIGGER orders_gone AFTER DELETE ON orders BEGIN INSERT INTO audit VALUES ('order'); END;
+             INSERT INTO customers VALUES (1, 'Ada'), (2, 'Bo');
+             INSERT INTO orders VALUES (1, 1), (2, 1), (3, 2);
+             INSERT INTO payments VALUES (1, 1);",
+        )
+        .unwrap();
+        let mut config = AppConfig::default();
+        config.upsert_connection(ConnectionRecord::Sqlite(SqliteConnection {
+            id: "shop".into(),
+            name: "Shop".into(),
+            path: path.clone(),
+            environment: None,
+            safe_mode: Default::default(),
+            sample: false,
+            allow_mcp: true,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_access: Some(
+                [(
+                    "main".to_string(),
+                    McpDbAccess {
+                        mode: McpTableMode::Picked,
+                        tables: vec![
+                            "main.customers".into(),
+                            "main.orders".into(),
+                            "main.notes".into(),
+                        ],
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            masked_columns: Default::default(),
+        }));
+        config.save().unwrap();
+        let p = submit(
+            "shop",
+            "main",
+            "DELETE FROM customers WHERE id = 1",
+            "closed",
+            Some(1),
+            None,
+        )
+        .unwrap();
+
+        let run = dry_run(&p.id).await.unwrap();
+        let s = &run.statements[0];
+        assert_eq!(s.rows, 1);
+        let reach = s.reach.clone().unwrap();
+        let counts: Vec<(&str, u64, u64)> = reach
+            .tables
+            .iter()
+            .map(|t| (t.table.as_str(), t.inserted, t.deleted))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("audit", 2, 0),
+                ("customers", 0, 1),
+                ("orders", 0, 2),
+                ("payments", 0, 1)
+            ]
+        );
+        assert_eq!(reach.unnamed, 0);
+        assert_eq!(
+            run.unshared,
+            [
+                ["main".to_string(), "audit".to_string()],
+                ["main".to_string(), "payments".to_string()]
+            ]
+        );
+        let saw = Seen {
+            rows: vec![1],
+            reach: vec![Some(reach)],
+            at_commit: run.at_commit.clone(),
+        };
+
+        // Another payment lands: the customer's own row count is the same,
+        // but the cascade now reaches two payments, so nothing is saved.
+        conn.execute("INSERT INTO payments VALUES (2, 1)", [])
+            .unwrap();
+        let again = match commit(&p.id, &saw).await.unwrap() {
+            CommitOutcome::Moved { dry_run } => *dry_run,
+            other => panic!("{other:?}"),
+        };
+        let payments = |r: &DryRun| {
+            r.statements[0]
+                .reach
+                .as_ref()
+                .unwrap()
+                .tables
+                .iter()
+                .find(|t| t.table == "payments")
+                .unwrap()
+                .deleted
+        };
+        assert_eq!(payments(&again), 2);
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM payments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 2, "nothing saved");
+
+        let saw = Seen {
+            rows: vec![1],
+            reach: vec![again.statements[0].reach.clone()],
+            at_commit: again.at_commit.clone(),
+        };
+        match commit(&p.id, &saw).await.unwrap() {
+            CommitOutcome::Committed { rows } => assert_eq!(rows, vec![1]),
+            other => panic!("{other:?}"),
+        }
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM orders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1);
+
+        // A DELETE with no WHERE commits too: it runs as the dry run did,
+        // not down SQLite's truncate path the hook doesn't see.
+        let all = submit("shop", "main", "DELETE FROM notes", "clear", None, None).unwrap();
+        let run = dry_run(&all.id).await.unwrap();
+        assert_eq!(
+            run.statements[0].table,
+            Some(["main".to_string(), "notes".to_string()])
+        );
+        let saw = Seen {
+            rows: vec![run.statements[0].rows],
+            reach: vec![run.statements[0].reach.clone()],
+            at_commit: None,
+        };
+        match commit(&all.id, &saw).await.unwrap() {
+            CommitOutcome::Committed { rows } => assert_eq!(rows, vec![2]),
+            other => panic!("{other:?}"),
+        }
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 

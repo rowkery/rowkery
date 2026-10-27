@@ -1758,16 +1758,16 @@ async fn proposal_dry_run(id: String) -> Result<rowkery_mcp::proposals::DryRun, 
 }
 
 /// Commits a proposed change if it still passes every check and changes
-/// the row counts the user saw (`rows`, per statement).
+/// the rows the user saw (`seen`: per statement, in every table).
 #[tauri::command]
 async fn proposal_commit(
     bridge: State<'_, CoreBridge>,
     id: String,
-    rows: Vec<u64>,
+    seen: rowkery_mcp::proposals::Seen,
 ) -> Result<rowkery_mcp::proposals::CommitOutcome, String> {
     // A quit while it commits asks first.
     let _running = bridge.hold_commit();
-    rowkery_mcp::proposals::commit(&id, &rows).await
+    rowkery_mcp::proposals::commit(&id, &seen).await
 }
 
 /// The user said no; `note` goes back to the agent.
