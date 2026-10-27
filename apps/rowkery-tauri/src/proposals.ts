@@ -41,6 +41,8 @@ export interface StatementPreview {
   triggers: string[];
   /** Every row the statement wrote, per table, cascades and triggers included. Null when the server keeps no counts. */
   reach: Reach | null;
+  /** `[schema, table]` its own rows count under in `reach` (a partition's parent). */
+  table: [string, string] | null;
 }
 
 /** Rows written in one table (Rust `rowkery_core::reach`). */
@@ -172,7 +174,10 @@ const reachTotal = (r: Reach) => r.tables.reduce((n, t) => n + t.inserted + t.up
 
 /** Rows a statement changes in other tables than its own (cascades, triggers). */
 export function otherRows(s: StatementPreview): number {
-  return s.reach ? Math.max(0, reachTotal(s.reach) - s.rows) : 0;
+  if (!s.reach) return 0;
+  const own = s.table && s.reach.tables.find((t) => t.schema === s.table![0] && t.table === s.table![1]);
+  if (!own) return Math.max(0, reachTotal(s.reach) - s.rows);
+  return reachTotal(s.reach) - (own.inserted + own.updated + own.deleted);
 }
 
 /** Every row the change writes: each statement's, in every table, and its deferred triggers'. */

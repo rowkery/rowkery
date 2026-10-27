@@ -1607,6 +1607,10 @@ async fn a_proposal_counts_what_its_cascades_and_triggers_write() {
     };
     let run = proposals::dry_run(&id).await.expect("dry run");
     assert_eq!(run.statements[0].rows, 1);
+    assert_eq!(
+        run.statements[0].table,
+        Some(["public".to_string(), "mcp_r_customers".to_string()])
+    );
     // Partitions count under their table; the trigger's inserts are counted.
     assert_eq!(
         counts(&run),

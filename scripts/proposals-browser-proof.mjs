@@ -113,6 +113,7 @@ function stubTauri() {
     })),
     triggers: [],
     reach: { tables: [{ schema: "public", table: "customers", inserted: 0, updated: rows.length, deleted: 0 }], unnamed: 0 },
+    table: ["public", "customers"],
   });
   const dry1 = { proposal: P1, connection_name: "Platform API", statements: [upd([[12, "Ada Park", 1, "SG"], [31, "Ravi Iyer", 3, "IN"], [47, "Mia Chen", 2, "NZ"]])], at_commit: null, unshared: [] };
   const moved1 = { proposal: P1, connection_name: "Platform API", statements: [upd([[12, "Ada Park", 1, "SG"], [47, "Mia Chen", 2, "NZ"]])], at_commit: null, unshared: [] };
@@ -121,8 +122,8 @@ function stubTauri() {
     proposal: P2,
     connection_name: "Platform API",
     statements: [
-      { verb: "INSERT", target: "orders", sql: "INSERT INTO orders (id, customer_id, total) VALUES (9001, 12, 49.00)", destructive: false, rows: 1, columns: ocols, key: ["id"], changed: [], shown: [{ before: null, after: [9001, 12, "49.00"] }], triggers: ["orders_audit"], reach: null },
-      { verb: "DELETE", target: "orders", sql: "DELETE FROM orders", destructive: true, rows: 412, columns: ocols, key: ["id"], changed: [], shown: [{ before: [1, 12, "18.00"], after: null }, { before: [2, 31, "240.50"], after: null }, { before: [3, 47, "9.99"], after: null }], triggers: ["orders_audit"], reach: null },
+      { verb: "INSERT", target: "orders", sql: "INSERT INTO orders (id, customer_id, total) VALUES (9001, 12, 49.00)", destructive: false, rows: 1, columns: ocols, key: ["id"], changed: [], shown: [{ before: null, after: [9001, 12, "49.00"] }], triggers: ["orders_audit"], reach: null, table: null },
+      { verb: "DELETE", target: "orders", sql: "DELETE FROM orders", destructive: true, rows: 412, columns: ocols, key: ["id"], changed: [], shown: [{ before: [1, 12, "18.00"], after: null }, { before: [2, 31, "240.50"], after: null }, { before: [3, 47, "9.99"], after: null }], triggers: ["orders_audit"], reach: null, table: null },
     ],
     at_commit: null,
     unshared: [],

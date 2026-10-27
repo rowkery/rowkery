@@ -292,6 +292,9 @@ pub struct StatementPreview {
     /// Every row the statement wrote, per table: its own and what cascades
     /// and triggers wrote. None when the server keeps no counts.
     pub reach: Option<Reach>,
+    /// `[schema, table]` the statement's own rows count under in `reach`
+    /// (a partition's top parent).
+    pub table: Option<[String; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -790,11 +793,18 @@ async fn pg_preview_one(
     let facts = pg_rows(
         session,
         &format!(
-            "SELECT 'k', a.attname::text FROM pg_index i \
+            "WITH RECURSIVE up(oid) AS (SELECT {rel}::regclass::oid \
+               UNION ALL SELECT h.inhparent FROM up JOIN pg_class c ON c.oid = up.oid AND c.relispartition \
+               JOIN pg_inherits h ON h.inhrelid = up.oid), \
+             top AS (SELECT n.nspname::text AS s, c.relname::text AS r FROM up \
+               JOIN pg_class c ON c.oid = up.oid JOIN pg_namespace n ON n.oid = c.relnamespace \
+               WHERE NOT c.relispartition) \
+             SELECT 'k', a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = {rel}::regclass AND i.indisprimary \
              UNION ALL SELECT 't', tgname::text FROM pg_trigger \
-             WHERE tgrelid = {rel}::regclass AND NOT tgisinternal"
+             WHERE tgrelid = {rel}::regclass AND NOT tgisinternal \
+             UNION ALL SELECT 's', s FROM top UNION ALL SELECT 'r', r FROM top"
         ),
     )
     .await?
@@ -809,6 +819,13 @@ async fn pg_preview_one(
         .filter(|r| text(r.first()) == "t")
         .map(|r| text(r.get(1)))
         .collect();
+    let fact = |kind: &str| {
+        facts
+            .iter()
+            .find(|r| text(r.first()) == kind)
+            .map(|r| text(r.get(1)))
+    };
+    let table = fact("s").zip(fact("r")).map(|(s, r)| [s, r]);
     let quote = |c: &str| format!("\"{}\"", c.replace('"', "\"\""));
     let join_old = change.verb != "DELETE" && !key.is_empty();
     let sql = if join_old {
@@ -857,18 +874,17 @@ async fn pg_preview_one(
             shape_row(&change.verb, new, old)
         })
         .collect();
-    Ok((
-        finish(
-            change,
-            columns[..width].to_vec(),
-            key,
-            total,
-            shown,
-            triggers,
-            reach,
-        ),
-        after,
-    ))
+    let mut preview = finish(
+        change,
+        columns[..width].to_vec(),
+        key,
+        total,
+        shown,
+        triggers,
+        reach,
+    );
+    preview.table = table;
+    Ok((preview, after))
 }
 
 /// Cells for the UI; which side is which depends on the verb: DELETE
@@ -924,6 +940,7 @@ fn finish(
         shown,
         triggers,
         reach,
+        table: None,
     }
 }
 
@@ -1044,7 +1061,19 @@ fn sqlite_run(
             let mut counts = Vec::new();
             for (i, (change, want)) in changes.iter().zip(&seen.rows).enumerate() {
                 counter.mark(&conn).map_err(err)?;
-                let n = conn.execute(&change.sql, []).map_err(err)? as u64;
+                // With RETURNING as in the dry run: a bare `DELETE FROM t`
+                // would take SQLite's truncate path, which the hook never
+                // sees, and the counts would never match.
+                let n = (|| -> rusqlite::Result<u64> {
+                    let mut stmt = conn.prepare(&format!("{}\nRETURNING 1", change.sql))?;
+                    let mut rows = stmt.query([])?;
+                    let mut n = 0;
+                    while rows.next()?.is_some() {
+                        n += 1;
+                    }
+                    Ok(n)
+                })()
+                .map_err(err)?;
                 let reach = Some(counter.reach(&conn).map_err(err)?);
                 if n != *want || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach) {
                     return Ok((Vec::new(), Some(RunResult::Moved)));
@@ -1135,15 +1164,9 @@ fn sqlite_run(
                 .zip(&old)
                 .map(|(r, o)| shape_row(&change.verb, r, o.as_deref()))
                 .collect();
-            out.push(finish(
-                change,
-                columns,
-                key,
-                total,
-                shown,
-                triggers,
-                Some(reach),
-            ));
+            let mut preview = finish(change, columns, key, total, shown, triggers, Some(reach));
+            preview.table = Some(["main".to_string(), table]);
+            out.push(preview);
         }
         Ok((out, None))
     })();
@@ -1431,6 +1454,8 @@ pub(crate) mod tests {
              CREATE TABLE orders (id INTEGER PRIMARY KEY, customer INTEGER REFERENCES customers ON DELETE CASCADE);
              CREATE TABLE payments (id INTEGER PRIMARY KEY, customer INTEGER REFERENCES customers ON DELETE CASCADE);
              CREATE TABLE audit (what TEXT);
+             CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);
+             INSERT INTO notes VALUES (1, 'a'), (2, 'b');
              CREATE TRIGGER orders_gone AFTER DELETE ON orders BEGIN INSERT INTO audit VALUES ('order'); END;
              INSERT INTO customers VALUES (1, 'Ada'), (2, 'Bo');
              INSERT INTO orders VALUES (1, 1), (2, 1), (3, 2);
@@ -1454,7 +1479,11 @@ pub(crate) mod tests {
                     "main".to_string(),
                     McpDbAccess {
                         mode: McpTableMode::Picked,
-                        tables: vec!["main.customers".into(), "main.orders".into()],
+                        tables: vec![
+                            "main.customers".into(),
+                            "main.orders".into(),
+                            "main.notes".into(),
+                        ],
                     },
                 )]
                 .into_iter()
@@ -1543,6 +1572,24 @@ pub(crate) mod tests {
             .query_row("SELECT count(*) FROM orders", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 1);
+
+        // A DELETE with no WHERE commits too: it runs as the dry run did,
+        // not down SQLite's truncate path the hook doesn't see.
+        let all = submit("shop", "main", "DELETE FROM notes", "clear", None, None).unwrap();
+        let run = dry_run(&all.id).await.unwrap();
+        assert_eq!(
+            run.statements[0].table,
+            Some(["main".to_string(), "notes".to_string()])
+        );
+        let saw = Seen {
+            rows: vec![run.statements[0].rows],
+            reach: vec![run.statements[0].reach.clone()],
+            at_commit: None,
+        };
+        match commit(&all.id, &saw).await.unwrap() {
+            CommitOutcome::Committed { rows } => assert_eq!(rows, vec![2]),
+            other => panic!("{other:?}"),
+        }
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 

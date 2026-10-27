@@ -106,6 +106,7 @@ function stubTauri() {
         changed: [],
         shown: [{ before: [12, "Ada Park", "pro", 10, "SG"], after: null }],
         triggers: [],
+        table: ["public", "customers"],
         reach: { tables: [t("audit_log", 0, 1), t("customers", 1), t("order_items", 37), t("orders", 14), t("payments", payments)], unnamed: 0 },
       },
     ],
@@ -128,6 +129,7 @@ function stubTauri() {
         changed: [],
         shown: [{ before: [7, 31], after: null }],
         triggers: [],
+        table: ["main", "carts"],
         reach: {
           tables: [
             { schema: "main", table: "carts", inserted: 0, updated: 0, deleted: 1 },
@@ -253,6 +255,8 @@ check((await text('[data-testid="pp-count"]')).startsWith("68 rows would change"
 await shot("3-moved");
 await page.click('[data-testid="pp-commit"]');
 await page.waitForSelector('[data-proposal="p_000000000002"] [data-testid="pp-dry-run"]');
+// Text on purpose: the toast's wording is under test.
+check((await text('.toast-detail')) === "1 row · customers + 67 in other tables", `the toast: "${await text('.toast-detail')}"`);
 check((await calls("proposal_commit"))[1]?.seen.reach[0]?.tables.find((t) => t.table === "payments")?.deleted === 15, "the second commit sends the fresh counts");
 
 // 4. SQLite: rows the update hook can't name, and a long table name.

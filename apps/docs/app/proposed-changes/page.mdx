@@ -73,7 +73,7 @@ Deleting one customer can delete their orders, their payments and every order it
 - On Postgres, triggers that wait for COMMIT (deferred constraint triggers) fire at the end of the dry run, so their rows count too. A partition's rows count under its table.
 - On SQLite, rows in a `WITHOUT ROWID` table show as "N more rows in tables Rowkery can't name".
 
-It shows counts, not the rows themselves. Tables on another server (Postgres foreign tables) aren't counted, and anything a trigger does outside the database already happens during the dry run. A Postgres server with `track_counts` off keeps no counts, so only the statement's own rows show.
+Triggers run as the database defines them, so a trigger may read or write a table the agent wasn't given; that's the database's own logic, never the agent's SQL, and its writes show in the counts. It shows counts, not the rows themselves. Tables on another server (Postgres foreign tables) aren't counted, and anything a trigger does outside the database already happens during the dry run. A Postgres server with `track_counts` off keeps no counts, so only the statement's own rows show.
 
 If another session holds the rows, the dry run waits 2 seconds, then stops: "Another session is holding these rows, so the dry run stopped after 2 s. Nothing was changed." Click **Dry run again** to retry. Each change keeps its dry run while you look at another one, so you can come back and commit without running it again.
 
@@ -85,7 +85,7 @@ Before anything runs, Rowkery checks the change again from the start: the connec
 
 | What happens | What you see |
 | --- | --- |
-| It commits | "Committed", with the rows and table, and the proposal leaves the queue |
+| It commits | "Committed", with the rows and table (and "+ 66 in other tables" when it reached them), and the proposal leaves the queue |
 | The rows changed since the dry run, in any table | Nothing is saved. "Nothing was saved: the rows changed since the dry run. Check the new one." A fresh dry run takes its place, ready to commit |
 | An error before COMMIT | "Couldn't commit" with the server's message. Nothing was saved, so you can try again |
 | The connection dropped during COMMIT | Rowkery can't know whether it was saved, so it never retries. The agent is told it failed, and you should reload the table to check |

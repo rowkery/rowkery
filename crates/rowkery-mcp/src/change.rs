@@ -374,9 +374,14 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
     conn.execute_batch("PRAGMA foreign_keys = OFF")
         .map_err(|e| e.to_string())?;
     // Accesses inside a trigger name it as their accessor; inside a view,
-    // the view, which is the statement's own read and stays.
+    // the view, which is the statement's own read and stays. Triggers and
+    // views have names of their own, so a name both carry is kept: it fails
+    // closed.
     let triggers: HashSet<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+        .prepare(
+            "SELECT lower(name) FROM sqlite_master WHERE type = 'trigger' \
+             EXCEPT SELECT lower(name) FROM sqlite_master WHERE type = 'view'",
+        )
         .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
         .map_err(|e| e.to_string())?;
     let facts = Arc::new(Mutex::new(SqliteFacts {
@@ -385,7 +390,10 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
     }));
     let sink = Arc::clone(&facts);
     conn.authorizer(Some(move |ctx: AuthContext<'_>| {
-        if ctx.accessor.is_some_and(|a| triggers.contains(a)) {
+        if ctx
+            .accessor
+            .is_some_and(|a| triggers.contains(&a.to_lowercase()))
+        {
             return Authorization::Allow;
         }
         let schema = ctx.database_name.unwrap_or("main").to_string();
@@ -479,6 +487,17 @@ mod tests {
         assert_eq!(f.tables, vec![("main".to_string(), "c".to_string())]);
         let f = sqlite_facts(&p, "DELETE FROM o WHERE c_id IN (SELECT id FROM v)").unwrap();
         assert!(f.tables.contains(&("main".to_string(), "c".to_string())));
+        assert!(
+            f.columns.contains(&("c".into(), "secret".into())),
+            "{:?}",
+            f.columns
+        );
+        // A trigger named like a view doesn't hide the view's reads.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TRIGGER V INSTEAD OF INSERT ON v BEGIN SELECT 1; END;")
+            .unwrap();
+        let f = sqlite_facts(&p, "DELETE FROM o WHERE c_id IN (SELECT id FROM v)").unwrap();
         assert!(
             f.columns.contains(&("c".into(), "secret".into())),
             "{:?}",

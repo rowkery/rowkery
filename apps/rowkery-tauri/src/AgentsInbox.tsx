@@ -289,7 +289,14 @@ export function AgentsInbox({
       const out = await commitProposal(proposal.id, dry);
       if (out.outcome === "committed") {
         // The commit held only if every table's count matched the dry run's.
-        showToast("Committed", `${total.toLocaleString()} ${total === 1 ? "row" : "rows"} · ${tableLabel(dry.statements[0].target)}`);
+        const own = out.rows.reduce((a, b) => a + b, 0);
+        const more = total - own;
+        showToast(
+          "Committed",
+          `${own.toLocaleString()} ${own === 1 ? "row" : "rows"} · ${tableLabel(dry.statements[0].target)}${
+            more > 0 ? ` + ${more.toLocaleString()} in other tables` : ""
+          }`,
+        );
         done(proposal.id);
       } else if (out.outcome === "moved") {
         setRun(proposal.id, { state: "done", dry: out.dry_run, error: null });
