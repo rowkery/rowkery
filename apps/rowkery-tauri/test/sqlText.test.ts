@@ -114,6 +114,10 @@ describe("sqlStatementRanges", () => {
       "select 2;",
     ]);
   });
+  test("a word after . or [ is a name, not BEGIN or END", () => {
+    const trigger = "CREATE TRIGGER main.begin AFTER INSERT ON t BEGIN SELECT [end], x.end FROM x; END;";
+    expect(texts(`${trigger} select 2;`)).toEqual([trigger, "select 2;"]);
+  });
   test("BEGIN inside an ordinary statement or parens doesn't open a body", () => {
     expect(texts("select begin from t; select 2;")).toEqual(["select begin from t;", "select 2;"]);
     expect(texts("create trigger g after insert on t when (select begin from x) begin select 1; end; select 2")).toEqual([

@@ -73,7 +73,7 @@ const FIXTURES: Record<string, string> = {
 const TOKENS = [
   "'", "''", '"', "`", "--", "/*", "*/", "$$", "$a$", "$tag$", ";", ";", "\n", "\n", "\n\n",
   " ", "  ", "\t", "\r", "x", "select", "SELECT", "date", ".", "1", "1e", "e", "5", "(", "é", "_",
-  "BEGIN", "begin ", " END", "END;", "CASE", "ATOMIC", "CREATE ", "TRIGGER ", " t ", ")", "FUNCTION",
+  "BEGIN", "begin ", " END", "END;", "CASE", "ATOMIC", "CREATE ", "TRIGGER ", " t ", ")", "FUNCTION", "[", "x.",
 ];
 
 function check(text: string, hl: ReturnType<typeof createSqlHighlighter>, st: ReturnType<typeof createStatementScanner>) {

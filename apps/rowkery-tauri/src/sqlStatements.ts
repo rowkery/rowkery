@@ -108,6 +108,12 @@ function wordEnd(text: string, i: number): number {
   return j;
 }
 
+/**
+ * A word after `.` or `[` is a name (`x.end`, `main.begin`, SQLite's
+ * `[end]`), never a keyword that opens or closes a body.
+ */
+const namePart = (prev: string | undefined) => prev === "." || prev === "[";
+
 const startsWord = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c > 127;
 
 /**
@@ -162,7 +168,7 @@ export function sqlStatementRanges(text: string): CharRange[] {
       i++;
     } else if (head.stage !== "x" && startsWord(text.charCodeAt(i))) {
       const end = wordEnd(text, i);
-      headWord(head, text.slice(i, end).toUpperCase());
+      if (!namePart(text[i - 1])) headWord(head, text.slice(i, end).toUpperCase());
       i = end;
     } else {
       if (c === "(" || c === ")") headParen(head, c);
@@ -287,7 +293,7 @@ function statementLine(line: string, base: number, entry: string, semis: number[
       i++;
     } else if (head.stage !== "x" && startsWord(line.charCodeAt(i))) {
       const end = wordEnd(line, i);
-      headWord(head, line.slice(i, end).toUpperCase());
+      if (!namePart(line[i - 1])) headWord(head, line.slice(i, end).toUpperCase());
       i = end;
     } else {
       if (c === "(" || c === ")") headParen(head, c);
