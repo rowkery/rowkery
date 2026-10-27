@@ -491,3 +491,45 @@
     transform: none;
   }
 }
+
+/* Every table the change writes, its own and what cascades and triggers reach. */
+.pp-reach {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.pp-reach li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.pp-reach code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 600 12px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-reach li > span {
+  flex-shrink: 0;
+  color: var(--mute);
+}
+
+.pp-reach-unnamed > span {
+  flex-shrink: 1;
+}
+
+.pp-reach b {
+  color: var(--text);
+  font-weight: 600;
+}

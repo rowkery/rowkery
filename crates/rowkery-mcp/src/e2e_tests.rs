@@ -1201,7 +1201,7 @@ async fn masked_columns_hold_against_a_real_postgres() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn proposed_changes_hold_against_a_real_postgres() {
-    use crate::proposals::{self, CommitOutcome};
+    use crate::proposals::{self, tests::seen, CommitOutcome};
     let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-propose-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1461,11 +1461,11 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     )
     .await
     .unwrap();
-    match proposals::commit(&id, &[2, 2]).await.unwrap() {
+    match proposals::commit(&id, &seen(&[2, 2])).await.unwrap() {
         CommitOutcome::Moved { dry_run } => assert_eq!(dry_run.statements[0].rows, 3),
         other => panic!("{other:?}"),
     }
-    match proposals::commit(&id, &[3, 2]).await.unwrap() {
+    match proposals::commit(&id, &seen(&[3, 2])).await.unwrap() {
         CommitOutcome::Committed { rows } => assert_eq!(rows, vec![3, 2]),
         other => panic!("{other:?}"),
     }
@@ -1499,7 +1499,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
                 continue;
             }
         };
-        match proposals::commit(&id, &[1]).await {
+        match proposals::commit(&id, &seen(&[1])).await {
             Ok(CommitOutcome::Committed { .. }) => committed += 1,
             Ok(CommitOutcome::Failed { error }) | Err(error) => {
                 assert_eq!(error, crate::guard::HIDDEN_REFUSAL);
@@ -1530,6 +1530,144 @@ async fn proposed_changes_hold_against_a_real_postgres() {
         .await
         .expect_err("read-only");
     assert!(err.contains("Read-only"), "{err}");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_proposal_counts_what_its_cascades_and_triggers_write() {
+    use crate::proposals::{self, CommitOutcome, DryRun, Seen};
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-reach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_r_customers, mcp_r_orders, mcp_r_payments, mcp_r_log CASCADE;
+         DROP FUNCTION IF EXISTS mcp_r_note() CASCADE;
+         CREATE TABLE mcp_r_customers (id int PRIMARY KEY);
+         CREATE TABLE mcp_r_orders (id int PRIMARY KEY,
+           customer int REFERENCES mcp_r_customers ON DELETE CASCADE);
+         CREATE TABLE mcp_r_payments (id int, customer int REFERENCES mcp_r_customers ON DELETE CASCADE)
+           PARTITION BY RANGE (id);
+         CREATE TABLE mcp_r_payments_a PARTITION OF mcp_r_payments FOR VALUES FROM (0) TO (100);
+         CREATE TABLE mcp_r_payments_b PARTITION OF mcp_r_payments FOR VALUES FROM (100) TO (200);
+         CREATE TABLE mcp_r_log (what text);
+         CREATE FUNCTION mcp_r_note() RETURNS trigger LANGUAGE plpgsql AS
+           $$ BEGIN INSERT INTO mcp_r_log VALUES (TG_TABLE_NAME); RETURN NULL; END $$;
+         CREATE TRIGGER mcp_r_gone AFTER DELETE ON mcp_r_orders FOR EACH ROW EXECUTE FUNCTION mcp_r_note();
+         CREATE CONSTRAINT TRIGGER mcp_r_late AFTER DELETE ON mcp_r_customers
+           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION mcp_r_note();
+         INSERT INTO mcp_r_customers VALUES (1), (2);
+         INSERT INTO mcp_r_orders SELECT g, 1 + g % 2 FROM generate_series(1, 20) g;
+         INSERT INTO mcp_r_payments VALUES (5, 1), (150, 1), (6, 2);",
+    )
+    .await
+    .expect("fixtures");
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::Picked,
+                tables: vec![
+                    "public.mcp_r_customers".into(),
+                    "public.mcp_r_orders".into(),
+                ],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    save(pg);
+    let mcp = RowkeryMcp::default();
+    let sent = call(
+        &mcp,
+        "propose_change",
+        json!({ "connection": ID, "sql": "DELETE FROM mcp_r_customers WHERE id = 1", "reason": "test" }),
+    )
+    .await
+    .expect("a cascade into tables not shared is allowed");
+    let id = sent["id"].as_str().unwrap().to_string();
+
+    let counts = |run: &DryRun| -> Vec<(String, u64, u64)> {
+        run.statements[0]
+            .reach
+            .as_ref()
+            .unwrap()
+            .tables
+            .iter()
+            .map(|t| (t.table.clone(), t.inserted, t.deleted))
+            .collect()
+    };
+    let run = proposals::dry_run(&id).await.expect("dry run");
+    assert_eq!(run.statements[0].rows, 1);
+    // Partitions count under their table; the trigger's inserts are counted.
+    assert_eq!(
+        counts(&run),
+        [
+            ("mcp_r_customers".to_string(), 0, 1),
+            ("mcp_r_log".to_string(), 10, 0),
+            ("mcp_r_orders".to_string(), 0, 10),
+            ("mcp_r_payments".to_string(), 0, 2),
+        ]
+    );
+    // The deferred trigger fired before the rollback, as COMMIT would.
+    let late = run.at_commit.clone().unwrap();
+    assert_eq!(
+        (
+            late.tables.len(),
+            late.tables[0].table.as_str(),
+            late.tables[0].inserted
+        ),
+        (1, "mcp_r_log", 1)
+    );
+    assert_eq!(
+        run.unshared,
+        [
+            ["public".to_string(), "mcp_r_log".to_string()],
+            ["public".to_string(), "mcp_r_payments".to_string()],
+        ]
+    );
+    let saw = |run: &DryRun| Seen {
+        rows: vec![run.statements[0].rows],
+        reach: vec![run.statements[0].reach.clone()],
+        at_commit: run.at_commit.clone(),
+    };
+
+    // A payment lands in another partition: one customer still, but the
+    // cascade now reaches three payments, so nothing is saved.
+    session_execute(&setup, "INSERT INTO mcp_r_payments VALUES (151, 1)")
+        .await
+        .unwrap();
+    let again = match proposals::commit(&id, &saw(&run)).await.unwrap() {
+        CommitOutcome::Moved { dry_run } => *dry_run,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(counts(&again)[3], ("mcp_r_payments".to_string(), 0, 3));
+    let left = query(&mcp, "SELECT count(*) FROM mcp_r_orders")
+        .await
+        .unwrap();
+    assert_eq!(left["rows"], json!([[20]]), "nothing saved");
+
+    match proposals::commit(&id, &saw(&again)).await.unwrap() {
+        CommitOutcome::Committed { rows } => assert_eq!(rows, vec![1]),
+        other => panic!("{other:?}"),
+    }
+    let left = query(&mcp, "SELECT count(*) FROM mcp_r_orders")
+        .await
+        .unwrap();
+    assert_eq!(left["rows"], json!([[10]]));
+    // The agent hears its own statement's rows, nothing about the others.
+    let done = call(&mcp, "check_proposal", json!({ "id": id }))
+        .await
+        .unwrap();
+    assert!(!done.to_string().contains("payments"), "{done}");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
