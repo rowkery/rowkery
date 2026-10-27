@@ -35,6 +35,15 @@ let nextInsertId = Date.now();
 
 const isNullValue = (v: Value | null | undefined) => !v || "Null" in v;
 
+/** How many staged changes ⌘Z can take back on one tab. */
+const UNDO_STEPS = 200;
+
+/** One staged change: the tab's buffer before and after it. */
+interface Step {
+  before: EditBuffer | undefined;
+  after: EditBuffer | undefined;
+}
+
 interface Options {
   windowId: string;
   /** The connection the window is on: only a buffer staged on it shows, and new edits stage on it. */
@@ -76,7 +85,13 @@ export function useRowEdits(o: Options) {
   const optsRef = useRef(o);
   optsRef.current = o;
   const [focusInsert, setFocusInsert] = useState<number>();
-  const [selection, setSelection] = useState<{ rows: number[]; whole: boolean; col: number }>({ rows: [], whole: false, col: -1 });
+  const [selection, setSelection] = useState<{ rows: number[]; col: number }>({ rows: [], col: -1 });
+  /**
+   * Each tab's ⌘Z and ⇧⌘Z steps, in memory only. A step applies only while
+   * the tab's buffer is still the one it left: a commit, a Discard or a
+   * connection switch changed it some other way, and the steps go.
+   */
+  const history = useRef(new Map<number, { past: Step[]; future: Step[] }>());
 
   const editors = useMemo((): (ColumnEditor | null)[] => {
     const byName = new Map((table?.columns ?? []).map((c) => [c.name, c]));
@@ -135,7 +150,30 @@ export function useRowEdits(o: Options) {
     if (t.edits && t.edits.connectionId !== connectionId) return;
     const cur = t.edits?.tableKey === t.tableKey ? t.edits : emptyBuffer(t.tableKey, connectionId);
     const b = next(cur);
-    setEdits(t.id, changeCount(b) ? b : undefined);
+    const after = changeCount(b) ? b : undefined;
+    // Nothing changed (Esc on a cell that wasn't edited): no step for ⌘Z to take back.
+    if (after === t.edits || JSON.stringify(after) === JSON.stringify(t.edits)) return;
+    const h = history.current.get(t.id) ?? { past: [], future: [] };
+    history.current.set(t.id, { past: [...h.past, { before: t.edits, after }].slice(-UNDO_STEPS), future: [] });
+    setEdits(t.id, after);
+  }, []);
+
+  /** ⌘Z (`back`) or ⇧⌘Z: the tab's last step taken back, or the last one taken back put back. */
+  const step = useCallback((back: boolean) => {
+    const { tab: t, setEdits } = optsRef.current;
+    if (!t) return;
+    const h = history.current.get(t.id);
+    const s = h && (back ? h.past[h.past.length - 1] : h.future[h.future.length - 1]);
+    if (!h || !s) return;
+    if (t.edits !== (back ? s.after : s.before)) {
+      history.current.delete(t.id);
+      return;
+    }
+    history.current.set(
+      t.id,
+      back ? { past: h.past.slice(0, -1), future: [...h.future, s] } : { past: [...h.past, s], future: h.future.slice(0, -1) },
+    );
+    setEdits(t.id, back ? s.before : s.after);
   }, []);
 
   const stage = useCallback(
@@ -280,13 +318,16 @@ export function useRowEdits(o: Options) {
       paste,
       searchKey,
       focusInsert,
-      onSelection: (picked, whole, col) => setSelection({ rows: picked, whole, col }),
+      onSelection: (picked, col) => setSelection({ rows: picked, col }),
     };
   }, [tableTab, o.shown, refusal, editors, buffer, version, names, states, stage, update, keyOf, insertRow, duplicate, toggleDelete, paste, searchKey, focusInsert]);
 
   const rowsEditable = !!editing && !refusal;
   const cellEditable = rowsEditable && selection.col >= 0 && !!editors[selection.col];
   const oneRow = selection.rows.length === 1 ? selection.rows[0] : undefined;
+  const steps = tab ? history.current.get(tab.id) : undefined;
+  const lastDone = steps?.past[steps.past.length - 1];
+  const lastUndone = steps?.future[steps.future.length - 1];
   let loadedDeleted = 0;
   for (const s of states.values()) if (s.mark === "delete") loadedDeleted++;
   return {
@@ -301,8 +342,20 @@ export function useRowEdits(o: Options) {
     /** Set NULL can run: the column takes NULL and the row isn't marked for delete (as the grid's ⌥⇧N checks). */
     cellNullable:
       cellEditable && !!editors[selection.col]?.nullable && (oneRow === undefined || states.get(oneRow)?.mark !== "delete"),
-    rowsSelected: rowsEditable && selection.whole && selection.rows.length > 0,
+    rowsSelected: rowsEditable && selection.rows.length > 0,
+    /** Every row under the selection is marked for delete: ⌫ and the menu restore them. */
+    rowsMarked: selection.rows.length > 0 && selection.rows.every((r) => states.get(r)?.mark === "delete"),
     insertRow,
     duplicateSelected: () => duplicate(selection.rows),
+    /** ⌘Z can take back the tab's last staged change (or Discard), ⇧⌘Z put one back. */
+    undoable: !!lastDone && lastDone.after === tab?.edits,
+    redoable: !!lastUndone && lastUndone.before === tab?.edits,
+    undo: () => step(true),
+    redo: () => step(false),
+    /** Discard as a step of the tab's: ⌘Z in the grid brings `before` back. */
+    noteDiscard: (tabId: number, before: EditBuffer) => {
+      const h = history.current.get(tabId) ?? { past: [], future: [] };
+      history.current.set(tabId, { past: [...h.past, { before, after: undefined }].slice(-UNDO_STEPS), future: [] });
+    },
   };
 }

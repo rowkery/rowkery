@@ -75,7 +75,7 @@ Space on a row opens it in the inspector column (`QuickLook.tsx`): titled by its
 
 ## Editing data
 
-Cells are editable on a table tab whose table has a primary key (or SQLite's rowid), on a connection that isn't Read-only. ↵, F2 or a double-click edits a cell with an editor for its type; ⌥⇧N sets NULL; ⌘I inserts a row (on a query tab ⌘I is Format SQL); ⌘D duplicates one; ⌫ on selected rows marks them for delete. A cell left by a click elsewhere keeps its value as a staged edit; Esc in the cell reverts it.
+Cells are editable on a table tab whose table has a primary key (or SQLite's rowid), on a connection that isn't Read-only. ↵, F2 or a double-click edits a cell with an editor for its type; ⌥⇧N sets NULL; ⌘I inserts a row (on a query tab ⌘I is Format SQL); ⌘D duplicates one; ⌫ (or the cell menu's Delete row) marks the rows under the selection for delete, and again restores them. ⌘Z takes back the last staged change (Discard included), ⇧⌘Z puts it back; a text field keeps its own ⌘Z, and a commit clears the steps. A cell left by a click elsewhere keeps its value as a staged edit; Esc in the cell reverts it.
 
 Staged edits are marked at the cell's edge and in the gutter, and counted in the **edits bar** at the grid's foot: "3 changes" with edited / deleted / new, Review SQL ⇧⌘P, Discard and Commit ⌘S in ink. Esc with nothing open discards them all, with Undo.
 

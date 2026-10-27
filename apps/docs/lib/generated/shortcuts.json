@@ -123,6 +123,14 @@
           "keys": "⌘D"
         },
         {
+          "title": "Undo the last change",
+          "keys": "⌘Z"
+        },
+        {
+          "title": "Redo the change",
+          "keys": "⇧⌘Z"
+        },
+        {
           "title": "Commit changes",
           "keys": "⌘S"
         },

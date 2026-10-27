@@ -42,10 +42,10 @@ describe("chords", () => {
       if (!c.chord) continue;
       const mac = formatChord(c.chord, true);
       if (PREDEFINED_MAC_CHORDS.includes(mac)) {
-        // A zone's own Copy keeps Edit > Copy: the zone's keydown sees ⌘C first.
+        // A zone's own Copy (a table tab's Undo) keeps the Edit item: the page's keydown sees the key first.
         if (c.sharesPredefined) {
           expect(c.palette, `${c.id} acts in its zone only`).toBe(false);
-          expect(["⌘C", "⌘A"], `${c.id} may share only an Edit item`).toContain(mac);
+          expect(["⌘C", "⌘A", "⌘Z", "⇧⌘Z"], `${c.id} may share only an Edit item`).toContain(mac);
           continue;
         }
         expect(c.replacesPredefined, `${c.id} uses ${mac}`).toBeTruthy();

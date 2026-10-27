@@ -62,7 +62,9 @@ export function cellMenu(o: {
   if (runnable("set-null", o.state)) rows.push({ id: "set-null", label: "Set NULL", command: "set-null" });
   if (runnable("insert-row", o.state)) rows.push({ id: "insert-row", label: "Insert row", command: "insert-row" });
   if (runnable("duplicate-row", o.state)) rows.push({ id: "duplicate-row", label: "Duplicate row", command: "duplicate-row" });
-  if (runnable("delete-row", o.state)) rows.push({ id: "delete-row", label: "Delete row", command: "delete-row" });
+  // ⌫ toggles: on rows already marked, the same row restores them.
+  if (runnable("delete-row", o.state))
+    rows.push({ id: "delete-row", label: o.state.rowsMarked ? "Restore row" : "Delete row", command: "delete-row" });
   if (o.followColumn && runnable("follow-key", o.state))
     rows.push({ id: "follow-key", label: `Follow ${o.followColumn}`, command: "follow-key" });
   const f = o.filter;

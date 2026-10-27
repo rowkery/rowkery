@@ -33,7 +33,7 @@ import type { SortKey } from "./tableSort";
 import { ProfileBar } from "./GridProfileBar";
 import { Row, type ColumnLooks } from "./GridRow";
 import { COL_DEFAULT, COL_MIN_WIDTH, ROW_HEIGHT, WIDTH_SAMPLE_ROWS, columnWindow, initialWidths } from "./gridLayout";
-import { selRect, single, wholeRowsOf, type CellPos, type Selection } from "./gridSelection";
+import { selRect, single, type CellPos, type Selection } from "./gridSelection";
 import type { EditTarget, GridEditing, GridFilterOp, KeyColumns, QuickLookView } from "./gridTypes";
 import "./ResultsGrid.css";
 
@@ -455,11 +455,11 @@ function ResultsGridView({
   const onSelection = editing?.onSelection;
   useEffect(() => {
     if (!onSelection) return;
-    if (!rect) return onSelection([], false, -1);
+    if (!rect) return onSelection([], -1);
     const last = Math.min(rect.r1, rows.length - 1);
     const picked = Array.from({ length: Math.max(0, last - rect.r0 + 1) }, (_, i) => rect.r0 + i);
-    onSelection(picked, wholeRowsOf(sel, rect, columns.length), multi ? -1 : (sel?.active.col ?? -1));
-  }, [onSelection, sel, rect, rows, columns.length, multi]);
+    onSelection(picked, multi ? -1 : (sel?.active.col ?? -1));
+  }, [onSelection, sel, rect, rows, multi]);
   // ⌘I: the new row's first column with an editor opens.
   const askedInsert = useRef(editing?.focusInsert);
   useEffect(() => {
@@ -929,8 +929,8 @@ function ResultsGridView({
           openEditor({ row }, col);
           return;
         }
-        // ⌫ on whole rows (picked by their numbers) marks them for delete; again unmarks.
-        if ((e.key === "Backspace" || e.key === "Delete") && rect && wholeRowsOf(sel, rect, columns.length)) {
+        // ⌫ marks the rows under the selection (a cell is its row) for delete; again unmarks.
+        if ((e.key === "Backspace" || e.key === "Delete") && rect && rect.r0 <= lastRow) {
           e.preventDefault();
           if (editing.refusal) editing.onRefused();
           else editing.toggleDelete(Array.from({ length: Math.min(rect.r1, lastRow) - rect.r0 + 1 }, (_, i) => rect.r0 + i));

@@ -73,7 +73,7 @@ Binary columns (`bytea`, `blob`) have no editor, and neither do cells shown only
 
 ## Deleting rows
 
-Select whole rows by clicking or dragging their row numbers, then press <kbd>⌫</kbd>. They're marked for deletion and struck through. Press <kbd>⌫</kbd> again on marked rows to unmark them. You can also delete the row in [Quick Look](/quick-look/#deleting-a-row).
+Select a cell, a block of cells or whole rows (click or drag their row numbers), then press <kbd>⌫</kbd>, or right-click and pick **Delete row**. Every row under the selection is marked for deletion and struck through. Press <kbd>⌫</kbd> again on marked rows, or pick **Restore row**, to unmark them. You can also delete the row in [Quick Look](/quick-look/#deleting-a-row).
 
 ## Pasting
 
@@ -87,6 +87,8 @@ Each change shows in the grid at once:
 
 - An edited cell carries a mark. Hover it to see the old value (**Was paid · Esc reverts**). Select it and press <kbd>Esc</kbd> to put the old value back.
 - A dot in the row's gutter marks the row: the text colour for an edited row, red for a row marked for deletion, green for a new row.
+
+<kbd>⌘Z</kbd> takes back your last change: an edited cell, a new or duplicated row, a delete mark, a paste, or a Discard. <kbd>⇧⌘Z</kbd> puts it back. Inside a cell's editor or another text field, <kbd>⌘Z</kbd> stays the field's own text undo. A commit clears what <kbd>⌘Z</kbd> can take back, since those changes are now in the database.
 
 Changes are tied to each row's primary key, so they stay with the right rows when you sort, filter or load more pages. They're saved with the tab: quit Rowkery with changes staged and they're still there when you come back, and reopening a closed tab with <kbd>⇧⌘T</kbd> brings its changes back too.
 
@@ -102,7 +104,7 @@ While you have changes staged, a bar at the foot of the grid counts them and hol
 | **Discard** | Drops every staged change in the tab |
 | **Commit** <kbd>⌘S</kbd> | Runs them in one transaction |
 
-**Discard** shows a toast, **Discarded 4 edits**, with **Undo** (<kbd>⌥⌘Z</kbd>) for 10 seconds. <kbd>Esc</kbd> in the grid also discards when there's nothing else for it to close or cancel. See [Undo and Esc](/undo-and-esc/).
+**Discard** shows a toast, **Discarded 4 edits**, with **Undo** (<kbd>⌥⌘Z</kbd>) for 10 seconds. <kbd>⌘Z</kbd> in the table tab brings them back too. <kbd>Esc</kbd> in the grid also discards when there's nothing else for it to close or cancel. See [Undo and Esc](/undo-and-esc/).
 
 ## Reviewing the SQL
 
