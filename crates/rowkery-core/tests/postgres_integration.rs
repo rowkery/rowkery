@@ -738,3 +738,183 @@ async fn postgres_rereads_a_password_saved_since() {
         .expect("no password saved");
     assert!(err.to_string().contains("none is saved"), "{err}");
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn postgres_health_finds_each_problem_and_its_fix_clears_it() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use rowkery_core::db::postgres::session_health;
+    use rowkery_core::health::{CheckKind, CheckState, Detail, SlowQueries};
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-health-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+    let run = async |sql: &str| {
+        for stmt in sql.split(';').filter(|s| !s.trim().is_empty()) {
+            session_query_stream(&session, stmt, |_b, _| Ok(()))
+                .await
+                .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+        }
+    };
+    run(r"
+        DROP SCHEMA IF EXISTS it_health CASCADE;
+        CREATE SCHEMA it_health;
+        CREATE TABLE it_health.ids (id serial PRIMARY KEY);
+        SELECT setval('it_health.ids_id_seq', 2000000000);
+        CREATE TABLE it_health.dup (a int, b int);
+        CREATE INDEX dup_a ON it_health.dup (a);
+        CREATE INDEX dup_ab ON it_health.dup (a, b);
+        CREATE UNIQUE INDEX dup_a_unique ON it_health.dup (a);
+        CREATE INDEX dup_b1 ON it_health.dup (b);
+        CREATE INDEX dup_b2 ON it_health.dup (b);
+        CREATE INDEX dup_b_desc ON it_health.dup (b DESC);
+        CREATE TABLE it_health.parent (id int PRIMARY KEY);
+        INSERT INTO it_health.parent VALUES (1);
+        CREATE TABLE it_health.child (id serial PRIMARY KEY,
+            parent_id int REFERENCES it_health.parent (id));
+        INSERT INTO it_health.child (parent_id) SELECT 1 FROM generate_series(1, 20000);
+        CREATE TABLE it_health.indexed_child (id serial PRIMARY KEY,
+            parent_id int REFERENCES it_health.parent (id));
+        CREATE INDEX ON it_health.indexed_child (parent_id, id);
+        INSERT INTO it_health.indexed_child (parent_id) SELECT 1 FROM generate_series(1, 20000);
+        ANALYZE it_health.child;
+        ANALYZE it_health.indexed_child;
+        CREATE TABLE it_health.brin_child (id serial PRIMARY KEY,
+            parent_id int REFERENCES it_health.parent (id));
+        CREATE INDEX ON it_health.brin_child USING brin (parent_id);
+        INSERT INTO it_health.brin_child (parent_id) SELECT 1 FROM generate_series(1, 20000);
+        ANALYZE it_health.brin_child;
+        CREATE TABLE it_health.part (id int, x int) PARTITION BY RANGE (id);
+        CREATE TABLE it_health.part_1 PARTITION OF it_health.part FOR VALUES FROM (0) TO (100);
+        CREATE INDEX part_x ON it_health.part (x);
+        CREATE INDEX part_x_id ON it_health.part (x, id);
+        CREATE TABLE it_health.dead (id int) WITH (autovacuum_enabled = false);
+        INSERT INTO it_health.dead SELECT generate_series(1, 20000);
+        ANALYZE it_health.dead;
+        DELETE FROM it_health.dead WHERE id % 2 = 0;
+        CREATE TABLE it_health.fresh (id int) WITH (autovacuum_enabled = false);
+        INSERT INTO it_health.fresh SELECT generate_series(1, 20000);
+        CREATE TABLE it_health.big (id int, n int) WITH (autovacuum_enabled = false);
+        INSERT INTO it_health.big SELECT g, g FROM generate_series(1, 700000) g;
+        CREATE INDEX big_n ON it_health.big (n);
+        ANALYZE it_health.big;
+        SELECT pg_stat_force_next_flush();
+        SELECT 1
+    ")
+    .await;
+
+    let report = session_health(&session).await.expect("health");
+    assert!(report.server.starts_with("Postgres "), "{}", report.server);
+    assert!(report.size.as_ref().is_some_and(|s| s.total_bytes > 0));
+    assert!(report.connections.as_ref().is_some_and(|c| c.max > 0));
+    assert!(report.transaction_age.is_some_and(|a| a < 0.5));
+    // The CI server doesn't load pg_stat_statements; a local one may.
+    assert!(
+        matches!(
+            report.slow_queries,
+            SlowQueries::Off { .. } | SlowQueries::Ranked { partial: false, .. }
+        ),
+        "{:?}",
+        report.slow_queries
+    );
+    let ours = |kind: CheckKind| -> Vec<rowkery_core::health::HealthItem> {
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.check == kind)
+            .unwrap_or_else(|| panic!("{kind:?} missing"));
+        assert!(
+            matches!(check.state, CheckState::Fine | CheckState::Found { .. }),
+            "{kind:?}: {:?}",
+            check.state
+        );
+        check
+            .items()
+            .iter()
+            .filter(|i| i.schema.as_deref() == Some("it_health"))
+            .cloned()
+            .collect()
+    };
+    let names = |kind: CheckKind| -> Vec<String> {
+        ours(kind)
+            .iter()
+            .map(|i| i.name.clone().or(i.table.clone()).unwrap_or_default())
+            .collect()
+    };
+
+    let ids = ours(CheckKind::IdsRunningOut);
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    assert!(matches!(
+        ids[0].detail,
+        Detail::IdsRunningOut {
+            used: 2_000_000_000,
+            max: 2_147_483_647,
+            ..
+        }
+    ));
+    let mut dups = ours(CheckKind::DuplicateIndexes);
+    dups.sort_by(|a, b| a.name.cmp(&b.name));
+    let dup_pairs: Vec<(String, String)> = dups
+        .iter()
+        .map(|i| match &i.detail {
+            Detail::DuplicateIndex { covered_by } => (i.name.clone().unwrap(), covered_by.clone()),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        dup_pairs,
+        [
+            ("dup_a".to_string(), "dup_a_unique".to_string()),
+            ("dup_b2".to_string(), "dup_b1".to_string()),
+            ("part_x".to_string(), "part_x_id".to_string()),
+        ]
+    );
+    let mut fks = names(CheckKind::ForeignKeysWithoutIndex);
+    fks.sort();
+    // A BRIN index doesn't serve the key's lookups.
+    assert_eq!(fks, ["brin_child_parent_id_fkey", "child_parent_id_fkey"]);
+    assert_eq!(names(CheckKind::DeadRows), ["dead"]);
+    assert!(names(CheckKind::NeverAnalyzed).contains(&"fresh".to_string()));
+    assert!(!names(CheckKind::NeverAnalyzed).contains(&"child".to_string()));
+    let unused = names(CheckKind::UnusedIndexes);
+    assert!(unused.contains(&"big_n".to_string()), "{unused:?}");
+    assert!(!unused.iter().any(|n| n.starts_with("dup")), "{unused:?}");
+
+    // Each fix is valid SQL that clears its finding.
+    let fixed = [
+        CheckKind::IdsRunningOut,
+        CheckKind::DuplicateIndexes,
+        CheckKind::ForeignKeysWithoutIndex,
+        CheckKind::DeadRows,
+        CheckKind::NeverAnalyzed,
+        CheckKind::UnusedIndexes,
+    ];
+    for kind in fixed {
+        for item in ours(kind) {
+            run(item.fix.as_deref().expect("fix")).await;
+        }
+    }
+    run("SELECT pg_stat_force_next_flush(); SELECT 1").await;
+    let report = session_health(&session).await.expect("health again");
+    for kind in fixed {
+        let left: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|c| c.check == kind)
+            .flat_map(|c| c.items())
+            .filter(|i| i.schema.as_deref() == Some("it_health"))
+            .collect();
+        assert!(left.is_empty(), "{kind:?} still finds {left:?}");
+    }
+    run("DROP SCHEMA it_health CASCADE").await;
+}

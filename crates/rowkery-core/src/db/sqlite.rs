@@ -14,6 +14,8 @@ use super::introspect::{
 };
 use super::{Column, Driver, DriverError, RowBatch, Value, BATCH_BYTES};
 
+mod health;
+
 const SQLITE_EXACT_COUNT_THRESHOLD: u64 = 10_000;
 
 pub use rusqlite::InterruptHandle as SqliteInterruptHandle;

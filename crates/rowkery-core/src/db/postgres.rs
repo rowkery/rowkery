@@ -31,11 +31,13 @@ use super::introspect::{
 use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 
 mod activity;
+mod health;
 mod text_types;
 pub use activity::{
     rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
     HeldLock, ServerSession, StopKind,
 };
+pub use health::session_health;
 
 const BATCH_SIZE: usize = 200;
 
