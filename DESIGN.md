@@ -304,7 +304,7 @@ The window itself keeps its 12 px corner. Rules are 1 px structure; controls are
 ### Named Rules
 **The Concentric Rule.** A rounded thing held snugly inside another rounded thing takes the outer radius minus the padding between them, so the two curves run parallel. The Data / Structure switch is 10px outside with 3px padding, so its thumb is 7px; ⌘K is 16px with 6px padding, so its rows are 10px; a grouped list on Connect to start is 14px with 4px padding, so its rows are 10px. The rule is for snug nesting (padding under 8px). Something set a full 8 px inset away takes its own step on the scale and reads as its own shape: a sheet in the window, the edits bar in the main sheet (2026-10-24).
 
-**The Fills Mean Controls Rule.** A soft --fill wash says something can be pressed or typed in (buttons, inputs, chips, cards on Connect to start, and the grouped lists there, every row of which connects). No grey border around a control: it read cheap (2026-10-27). Controls keep a transparent 1 px border so focus and drag states can colour it orange without moving anything. Regions inside a sheet are separated by rules, not boxed. A sheet's ring is not a border: it is depth, the sheet resting on the canvas.
+**The Fills Mean Controls Rule.** A soft --fill wash says something can be pressed or typed in (buttons, inputs, chips, cards on Connect to start, and the grouped lists there, every row of which connects). No grey border around a control: it read cheap (2026-10-27). Controls keep a transparent 1 px border so focus and drag states can colour it orange without moving anything. Two exceptions: a tick box keeps a --dim edge (an empty box on a fill would vanish), and pills floating over rows (the key strip, the tip line) keep their --line ring, which is depth like a sheet's. Regions inside a sheet are separated by rules, not boxed. A sheet's ring is not a border: it is depth, the sheet resting on the canvas.
 
 ## Components
 
@@ -321,7 +321,7 @@ The window itself keeps its 12 px corner. Rules are 1 px structure; controls are
 
 ### Cards / Containers
 - **Corner Style:** `--r-lg` (12px); on Connect to start, `--r-xl` (14px).
-- **Background:** --fill, no border; Agents connection cards the same, and a shared one is raised paper with the control shadow.
+- **Background:** --fill, no border; on the Agents page a shared connection is a raised --fill card with the control shadow, and one not shared is flat with no fill.
 - **Shadow Strategy:** none at rest.
 - **Connect to start** (2026-10-24): the four action cards are `--r-xl` on --fill and 16px 18px padding. Each list (Your connections, Found on this Mac) is grouped on one --fill card: `--r-xl`, 4px padding, 44px rows at 10px (the Concentric Rule), sharing one glide hover.
 
@@ -362,7 +362,7 @@ The posture penguin (Ready / Tilted, the original hand drawing) appears only at 
 - **Do** set the main and inspector columns as paper sheets on the canvas (`--r-xl`, the sheet ring, 8px insets and gap), and take every radius from the scale, nested ones by the Concentric Rule.
 - **Do** make the committing button ink.
 - **Do** check both themes: every colour is a token defined in light and dark; `scripts/paper-finish-browser-proof.mjs` fails on a light-only colour in dark.
-- **Do** keep small text (≤ 12.5px) at 4.5:1 on whatever it sits on; use --mute, not --dim, on --hover / --kbd / selected rows, and on --fill over the panel.
+- **Do** keep small text (≤ 12.5px) at 4.5:1 on whatever it sits on, hover included; use --mute, not --dim, on --hover / --kbd / selected rows and for keycaps, hints and placeholders on a --fill.
 - **Do** make exits shorter than entries; keyboard-opened overlays appear at once; honour prefers-reduced-motion.
 
 ### Don't:

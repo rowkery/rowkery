@@ -189,7 +189,7 @@
   font: 12.5px var(--mono);
 }
 
-/* + Filter ⌘F: a dashed pill. */
+/* + Filter ⌘F: a filled pill. */
 .sql-line-add {
   flex-shrink: 0;
   display: inline-flex;

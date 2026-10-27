@@ -198,7 +198,7 @@
 
 .insp-btn kbd {
   font: 10.5px var(--mono);
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .insp-btn.ghost {
@@ -667,7 +667,7 @@
 }
 
 .page-back:hover {
-  background: var(--hover);
+  background: var(--fill-h);
 }
 
 .page-back:active {

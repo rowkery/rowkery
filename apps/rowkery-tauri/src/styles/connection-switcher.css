@@ -200,7 +200,8 @@
 
 .conn-search input::placeholder,
 .sb-filter input::placeholder {
-  color: var(--dim);
+  /* --mute: --dim is under 4.5:1 on the fill over the canvas. */
+  color: var(--mute);
 }
 
 .conn-list {

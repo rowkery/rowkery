@@ -36,7 +36,7 @@
 .sessions-chip button,
 .sessions-addchip {
   border: 0;
-  background: var(--fill);
+  background: transparent;
   color: var(--mute);
   font: inherit;
   cursor: pointer;
@@ -63,6 +63,7 @@
 }
 
 .sessions-addchip:hover {
+  background: var(--fill-h);
   color: var(--text);
 }
 

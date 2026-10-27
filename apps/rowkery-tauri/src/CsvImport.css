@@ -122,7 +122,7 @@
   font: 12.5px var(--mono);
   text-align: left;
   cursor: pointer;
-  transition: box-shadow 0.18s ease, color 0.18s ease;
+  transition: background-color 0.18s ease, color 0.18s ease;
 }
 
 .ci-pick:hover:not(:disabled) {

@@ -87,7 +87,7 @@
 
 .safe-btn kbd {
   font: 10.5px var(--mono);
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .safe-btn.go {

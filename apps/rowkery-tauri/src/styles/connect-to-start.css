@@ -194,8 +194,8 @@
 
 /* Your connections, Found on this Mac (2026-10-24): each list grouped on
    one filled card, every row of which connects; its 44 px rows run
-   concentric with it (14 px less the 4 px padding). No fill of its own: the
-   glide paints under it. */
+   concentric with it (14 px less the 4 px padding). The glide paints over
+   its fill. */
 .ew-lists {
   display: flex;
   flex-direction: column;
@@ -390,7 +390,7 @@
 
 .ew-btn kbd {
   font: 11px var(--mono);
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .ew-btn-quiet {

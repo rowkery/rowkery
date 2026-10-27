@@ -30,7 +30,7 @@
   padding: 2px 8px;
   border-radius: var(--r-md);
   background: var(--bg);
-  box-shadow: var(--shadow);
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
   font: 500 12px/1.4 var(--sans);
   color: var(--mute);
   white-space: nowrap;

@@ -412,7 +412,7 @@
 
 .cancel-key {
   margin-left: 4px;
-  color: var(--dim);
+  color: var(--mute);
   font-family: var(--mono);
 }
 

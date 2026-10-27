@@ -1,5 +1,5 @@
 /* The edits bar at the grid's foot (Paper, 2026-10-10): a docked capsule
-   (2026-10-24), 48 px on the panel fill with a --line ring, 8 px in from the
+   (2026-10-24), 48 px on the panel fill, no ring, 8 px in from the
    sheet's sides and bottom and part of its layout, so it never covers a
    row. Left the count and a dot per kind, right Review SQL, Discard and
    Commit in ink (Run stays the only orange). It rises in and leaves faster.

@@ -131,7 +131,7 @@
 }
 
 .nc-input::placeholder {
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .nc-input:focus {
@@ -360,7 +360,7 @@ p.nc-hint[data-invalid] {
 .nc-toggle-sub,
 .nc-toggle-meta {
   font-size: 11px;
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .nc-toggle-meta {

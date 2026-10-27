@@ -234,7 +234,6 @@
 .sb-filter {
   height: 30px;
   margin-bottom: 8px;
-  background: var(--fill);
 }
 
 /* Under the name: a mono line (where the connection points, its latency,

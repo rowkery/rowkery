@@ -326,7 +326,7 @@
   background: var(--ink2);
 }
 
-/* A head action that isn't the view's own: no border until hovered. */
+/* A head action that isn't the view's own: no fill until hovered. */
 .mcp-btn.quiet {
   border-color: transparent;
   background: transparent;
@@ -339,7 +339,7 @@
 }
 
 .mcp-btn kbd {
-  color: var(--dim);
+  color: var(--mute);
   font: 11px var(--mono);
 }
 
@@ -428,7 +428,7 @@
   color: var(--mute);
 }
 
-/* One call: a card ruled in --line on the sheet. */
+/* One call: a filled card on the sheet. */
 .mcp-entry {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr) auto;
@@ -660,12 +660,13 @@
   padding: 10px 12px;
   border: 1px solid transparent;
   border-radius: var(--r-lg);
-  background: var(--fill);
-  transition: background-color 0.18s ease;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
+/* Shared: a raised filled card (not shared: flat, no fill); hover lifts it
+   further. */
 .mcp-cn[data-shared] {
-  background: var(--bg);
+  background: var(--fill);
   box-shadow: var(--shadow);
 }
 
@@ -675,7 +676,7 @@
 }
 
 .mcp-cn[data-mcp-edit]:not([data-editing]):hover {
-  background: var(--fill-h);
+  box-shadow: var(--shadow), 0 4px 12px -4px color-mix(in srgb, var(--shade) 40%, transparent);
 }
 
 /* The card whose Edit access is open beside it. */
@@ -1117,15 +1118,16 @@
   font-weight: 500;
 }
 
-/* The tick box: a control (a soft fill); orange when on. */
+/* The tick box: the one control that keeps an edge, since an empty box on a
+   fill would vanish (it needs 3:1 against its ground); orange when on. */
 .ag-cb {
   position: relative;
   display: block;
   width: 14px;
   height: 14px;
-  border: 1px solid transparent;
+  border: 1px solid var(--dim);
   border-radius: var(--r-xs);
-  background: var(--fill-h);
+  background: var(--bg);
 }
 
 .ag-cb[data-on] {
@@ -1549,11 +1551,12 @@
 }
 
 .ag-filter:hover {
+  background: var(--fill-h);
   color: var(--text);
 }
 
 .ag-filter[aria-pressed="true"] {
-  background: var(--line);
+  background: var(--line2);
   color: var(--text);
 }
 
