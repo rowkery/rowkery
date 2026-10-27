@@ -1,341 +1,212 @@
 #!/usr/bin/env node
-// Captures the app screens the README and the website show, from the running app (Vite, a
-// stubbed Tauri `invoke` with a demo storefront database), as a Mac would draw them:
+// Captures the app screens the README shows, from the running app (Vite, the docs' stubbed Tauri
+// `invoke` with its demo storefront database), as a Mac would draw them, in both schemes:
 //  - docs/readme/banner-{light,dark}.png: 1280x640 at 2x, the website's hero line on the left
 //    and the app window (orders filtered to paid) on the right, with an agent's SELECT answered
 //    and its DELETE refused over it;
 //  - docs/readme/k-palette-{light,dark}.webp: ⌘K finding the orders tables (760x540 at 2x);
-//  - docs/readme/log-{light,dark}.webp: the Agents inbox, its log with a refusal, a search and an
-//    opened query showing its access, request and response beside it.
-// The platform is pinned to macOS (⌘ labels, keys pressed with Meta). Writes PNGs to outDir
-// (default /tmp/rowkery-proof/readme-shots); with --write it also converts them (Python's Pillow)
-// into the repo paths above. Not a proof: it
-// checks nothing beyond waiting for each screen.
+//  - docs/readme/agents-{light,dark}.webp: the Agents inbox, a proposed change opened with its
+//    dry run done, the activity log under it;
+//  - docs/readme/health-{light,dark}.webp: the Health tab with a finding opened beside it.
+// Writes PNGs to outDir (default /tmp/rowkery-proof/readme-shots); with --commit it also converts
+// them (Python's Pillow) into the repo paths above. Not a proof: it checks nothing beyond waiting
+// for each screen.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
-//   node scripts/readme-shots.mjs [outDir] [--write]
-import { createRequire } from "node:module";
-import { mkdirSync, readFileSync } from "node:fs";
-import { execSync, execFileSync } from "node:child_process";
+//   node scripts/readme-shots.mjs [outDir] [--commit]
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { openApp, shot, close, launch, filter, hideKeyStrip, WS, OUT, ROOT } from "./docs-shots/lib.mjs";
 
-const FRAMES_SHIM = new globalThis.URL("./lib/frames-shim.js", import.meta.url).pathname;
-const ROOT = new globalThis.URL("../", import.meta.url).pathname;
+const COMMIT = process.argv.includes("--commit");
 
-const require = createRequire(import.meta.url);
-let playwright;
-try {
-  playwright = require("playwright");
-} catch {
-  playwright = require(`${execSync("npm root -g").toString().trim()}/playwright`);
-}
-const args = process.argv.slice(2);
-const WRITE = args.includes("--write");
-const OUT = args.find((a) => !a.startsWith("--")) ?? "/tmp/rowkery-proof/readme-shots";
-const URL = process.env.ROWKERY_DEV_URL ?? "http://localhost:1420/";
-mkdirSync(OUT, { recursive: true });
+/** What the README's screens need on top of the base stub (runs in the page). */
+function more() {
+  const D = window.__DOCS__;
+  const T = (h, m, s = 0) => Date.UTC(2026, 9, 14, h, m, s);
+  const [prd] = D.connections;
+  prd.mcp_until = T(12, 30);
 
-// After the frames shim's Linux pin: a Mac.
-function macPlatform() {
-  const mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
-  for (const [prop, value] of [["platform", "MacIntel"], ["userAgent", mac]]) {
-    Object.defineProperty(Navigator.prototype, prop, { get: () => value, configurable: true });
-  }
-}
-
-function stubTauri() {
-  localStorage.clear();
-  const col = (name, type_name, extra = {}) => ({ name, type_name, nullable: true, ...extra });
-  const id = col("id", "bigint", { nullable: false });
-  const table = (name, rows, columns = [id], kind = "table", foreign_keys = []) => ({
-    name,
-    kind,
-    columns,
-    primary_key: kind === "table" ? ["id"] : [],
-    indexes: kind === "table" ? [{ name: `${name}_pkey`, columns: ["id"], unique: true, primary: true }] : [],
-    foreign_keys,
-    row_estimate: { Approximate: rows },
-    partition_of: null,
-  });
-  const ORDER_COLS = [
-    ["id", "int8"],
-    ["customer_id", "int8"],
-    ["status", "order_status"],
-    ["total", "numeric"],
-    ["currency", "text"],
-    ["placed_at", "timestamptz"],
-  ];
-  const orders = table(
-    "orders",
-    84000,
-    ORDER_COLS.map(([n, t]) => col(n, t, { nullable: n !== "id" ? true : false })),
-    "table",
-    [{ name: "orders_customer_id_fkey", columns: ["customer_id"], ref_schema: "public", ref_table: "customers", ref_columns: ["id"], on_delete: "NO ACTION" }],
-  );
-  const catalog = {
-    databases: [
-      {
-        name: "shop",
-        schemas: [
-          {
-            name: "public",
-            tables: [
-              table("api_keys", 140),
-              table("categories", 38),
-              table("customers", 61000),
-              table("events", 4100000),
-              table("order_items", 310000),
-              orders,
-              table("products", 2400),
-            ],
-          },
-          { name: "audit", tables: [table("changes", 2000000), table("daily_totals", 400, [col("day", "date")], "view")] },
-        ],
-      },
-    ],
-  };
-  // The demo orders, newest first: one every 37 minutes.
-  const PAID = new Set([0, 1, 3, 6, 9, 12, 13, 15, 18, 21, 24, 25, 27, 30, 33, 36, 37, 39, 42, 45]);
-  const OTHER = ["shipped", "pending", "shipped", "refunded", "shipped", "cancelled"];
-  const TOTALS = { 0: "12.00", 1: "91.19", 2: "170.38", 3: "249.57", 4: "68.76", 5: "147.95", 6: "227.14", 7: "46.33", 8: "125.52", 9: "204.71", 10: "23.90", 12: "182.28", 13: "261.47", 15: "159.85", 18: "137.42", 21: "114.99", 24: "92.56", 25: "171.75", 27: "70.13", 30: "47.70", 33: "25.27", 36: "262.84", 37: "82.03", 39: "240.41", 42: "218.00", 45: "195.55" };
-  const CUR = ["EUR", "EUR", "GBP", "USD", "EUR", "SEK", "USD", "EUR", "EUR", "EUR", "GBP", "SEK", "EUR", "SEK", "USD", "EUR", "GBP", "SEK", "GBP", "SEK"];
-  const CUR_AT = { 0: "EUR", 1: "EUR", 2: "GBP", 3: "USD", 4: "EUR", 5: "SEK", 6: "USD", 7: "EUR", 8: "EUR", 9: "EUR", 10: "GBP", 12: "EUR", 13: "SEK", 15: "EUR", 18: "GBP", 21: "SEK", 24: "EUR", 25: "EUR", 27: "USD", 30: "USD", 33: "EUR", 36: "EUR", 37: "SEK", 39: "EUR", 42: "SEK", 45: "SEK" };
-  const base = Date.UTC(2026, 9, 14, 9, 41);
-  const pad = (n) => String(n).padStart(2, "0");
-  const ts = (ms) => {
-    const d = new Date(ms);
-    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00+00`;
-  };
-  const ROWS = Array.from({ length: 1200 }, (_, k) => {
-    const paid = k <= 45 ? PAID.has(k) : k % 3 === 0 && k < 490;
-    return {
-      id: 84210 - k,
-      customer_id: 3000 + ((37 * k) % 900),
-      status: paid ? "paid" : OTHER[k % OTHER.length],
-      total: TOTALS[k] ?? `${(((k * 7919) % 26000) / 100 + 10).toFixed(2)}`,
-      currency: CUR_AT[k] ?? CUR[k % CUR.length],
-      placed_at: ts(base - k * 37 * 60_000),
-    };
-  });
-  const browseSql = (a) => {
-    let sql = `SELECT * FROM ${a.schema}.${a.table}`;
-    if (a.filter?.trim()) sql += ` WHERE (${a.filter.trim()})`;
-    sql += " ORDER BY id DESC";
-    if (a.limit) sql += ` LIMIT ${a.limit}`;
-    return sql + ";";
-  };
-  const cell = (v) => (v === null ? "Null" : typeof v === "number" ? { Int: v } : { Text: v });
-
-  const host = "prd.shop.internal";
-  const scope = { databases: 1, mode: "picked", tables: 3, timeout_s: 10, max_rows: 200 };
-  const conn = (cid, environment, h) => ({
-    kind: "postgres",
-    id: cid,
-    name: "storefront",
-    host: h,
-    port: 5432,
-    database: "shop",
-    username: "app",
-    environment,
-    safe_mode: "confirm",
-    allow_mcp: true,
-    mcp_access: { shop: { mode: "picked", tables: ["public.orders", "public.order_items", "public.customers"] } },
-  });
-  const connections = [conn("prd", "prd", host), conn("stg", "stg", "stg.shop.internal")];
-  // The page's clock is held at 11:45 (UTC), so the log reads 11:37 … 11:39.
-  const clock = (h, m, s) => Date.UTC(2026, 9, 14, h, m, s);
-  const session = clock(11, 30, 0);
-  const answered = "select status, count(*) as orders, sum(total) as revenue from orders where placed_at > now() - interval '7 days' group by status order by orders desc";
+  // The log: a morning's calls from Claude Code, newest first on screen.
+  const session = T(11, 30);
+  const base = { session, client: "claude-code", connection: "prd", database: "shop" };
+  const scope = { databases: 1, mode: "picked", tables: 3, timeout_s: 10 };
+  const revenue = "select status, count(*) as orders, sum(total) as revenue from orders where placed_at > now() - interval '7 days' group by status order by orders desc";
+  const items = "select product_id, sum(quantity) as sold from order_items group by product_id order by sold desc limit 10";
   const log = [
+    { session, client: "claude-code", ts: T(11, 31, 2), tool: "list_connections", rows: 1, verdict: "ok", args: {}, bytes: 168 },
+    { ...base, ts: T(11, 31, 11), tool: "describe_table", target: "orders", verdict: "ok", args: { connection: "storefront", table: "orders" }, scope, bytes: 1288 },
+    { ...base, ts: T(11, 32, 40), tool: "query", sql: revenue, rows: 5, ms: 41, verdict: "ok", args: { connection: "storefront", sql: revenue }, scope: { ...scope, max_rows: 200 }, bytes: 265 },
     {
-      session,
-      client: "claude-code",
-      ts: clock(11, 37, 19),
+      ...base,
+      ts: T(11, 39, 37),
       tool: "query",
-      connection: "prd",
-      database: "shop",
-      sql: answered,
-      rows: 5,
-      ms: 41,
-      verdict: "ok",
-      args: { connection: "storefront", database: "shop", sql: answered, max_rows: 200 },
-      scope,
-      bytes: 486,
+      sql: items,
+      verdict: "Refused: the plan reads public.order_items (~310000 rows; indexed: (id)) end to end. Filter on an indexed column, or aggregate a narrower range.",
+      args: { connection: "storefront", sql: items },
+      scope: { ...scope, max_rows: 200 },
     },
-    { session, client: "claude-code", ts: clock(11, 38, 39), tool: "search_schema", connection: "stg", database: "shop", target: "checkout", verdict: "ok", bytes: 377, scope },
-    {
-      session,
-      client: "claude-code",
-      ts: clock(11, 39, 37),
-      tool: "query",
-      connection: "stg",
-      database: "shop",
-      sql: "select * from events where payload::text like '%checkout_failed%'",
-      verdict: "Refused: the plan reads public.events (~4100000 rows) end to end.",
-      scope,
-    },
+    { ...base, ts: T(11, 44, 52), tool: "propose_change", target: "orders", verdict: "ok", args: { connection: "storefront", statements: ["UPDATE orders SET status = 'refunded' WHERE id IN (84207, 84204)"] }, scope, bytes: 96 },
   ];
-  window.__MCP_NEXT__ = [];
   let offset = 0;
-  window.__TAURI_INTERNALS__ = {
-    metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
-    transformCallback: () => 0,
-    invoke: async (cmd, a) => {
-      switch (cmd) {
-        case "list_connections":
-          return { connections: structuredClone(connections), active_connection_id: null };
-        case "open_window":
-          return { database: "shop", catalog: structuredClone(catalog), elapsed_ms: 28, cached: false, open_seq: 1 };
-        case "browse_table_sql":
-          return browseSql(a);
-        case "count_rows":
-          return /paid/.test(a?.filter ?? "") ? 168 : 84000;
-        case "run_query": {
-          const paid = /status = 'paid'/.test(a.sql);
-          const rows = ROWS.filter((r) => !paid || r.status === "paid").slice(0, 1000);
-          return {
-            columns: ORDER_COLS.map(([name, type_name]) => ({ name, type_name })),
-            rows: rows.map((r) => ORDER_COLS.map(([n]) => cell(r[n]))),
-            row_count: rows.length,
-            elapsed_ms: 4,
-            error: null,
-            cancelled: false,
-          };
-        }
-        case "mcp_activity": {
-          if (a.since == null || a.since > offset) {
-            offset = log.length;
-            return { entries: structuredClone(log), offset, reset: true };
-          }
-          const next = window.__MCP_NEXT__.splice(0);
-          log.push(...next);
-          offset = log.length;
-          return { entries: next, offset, reset: false };
-        }
-        case "mcp_sample": {
-          const e = log.find((x) => x.ts === a.ts);
-          if (e?.sql !== answered) return null;
-          return {
-            session: e.session,
-            ts: e.ts,
-            text: '{"columns":["status","orders","revenue"],"rows":[["paid",1240,"86412.50"],["shipped",988,"70218.10"],["pending",212,"14930.00"],["refunded",31,"2210.40"],["cancelled",9,"612.00"]],"row_count":5,"more":false,"elapsed_ms":41,"types":["order_status","int8","numeric"]}',
-            bytes: 486,
-          };
-        }
-        case "probe_connection":
-          return { ok: true, message: "PostgreSQL 16.4", elapsed_ms: 28 };
-        default:
-          return null;
-      }
+
+  // A proposed change: two double-charged orders marked refunded.
+  const sql = "UPDATE orders SET status = 'refunded' WHERE id IN (84207, 84204)";
+  const proposal = {
+    id: "p_3f9a1c07b2e4",
+    ts: T(11, 44, 52),
+    connection: "prd",
+    database: "shop",
+    sql,
+    reason: "Orders 84207 and 84204 were charged twice (Stripe charges ch_8812 and ch_8820 were refunded this morning), but both still say paid.",
+    expect_rows: 2,
+    client: "claude-code",
+  };
+  const plan = { connection_name: "storefront", statements: [{ verb: "UPDATE", target: "orders", sql, destructive: false, triggers: [{ name: "orders_audit", event: "UPDATE" }] }] };
+  const cols = D.ORDER_COLS.map(([n]) => n);
+  const row = (id) => {
+    const r = D.ROWS.find((x) => x.id === id);
+    return cols.map((c) => r[c]);
+  };
+  const after = (id) => row(id).map((v, i) => (cols[i] === "status" ? "refunded" : v));
+  const dry = {
+    proposal,
+    connection_name: "storefront",
+    statements: [{ verb: "UPDATE", target: "orders", sql, destructive: false, rows: 2, columns: cols, key: ["id"], changed: ["status"], shown: [84207, 84204].map((id) => ({ before: row(id), after: after(id) })), triggers: ["orders_audit"] }],
+  };
+
+  // The Health tab's report, only while __HEALTH__ is set (the once-a-day toast stays out of the
+  // other screens); the proposal only while __PROPOSALS__ is (its badge stays off the banner).
+  const GB = 1024 ** 3;
+  const item = (over) => ({ schema: "public", table: "orders", name: null, bytes: null, fix: null, ...over });
+  const found = (check, severity, trust, items) => ({ check, severity, trust, state: "found", items });
+  const fine = (check, severity) => ({ check, severity, trust: "", state: "fine" });
+  const health = () => ({
+    database: "shop",
+    server: "Postgres 16.4",
+    size: { total_bytes: 48.2 * GB, table_bytes: 31 * GB, index_bytes: 17 * GB },
+    cache_hit: 0.994,
+    connections: { used: 42, max: 100, active: 6 },
+    stats_since: Math.floor(Date.now() / 1000) - 49 * 86_400,
+    transaction_age: 0.12,
+    checks: [
+      found("ids_running_out", "soon", "The date assumes inserts keep the pace seen since the statistics were last reset.", [
+        item({ name: "id", detail: { kind: "ids_running_out", type_name: "integer", used: 1_739_461_754, max: 2_147_483_647, days_left: 36 }, fix: "ALTER TABLE public.orders ALTER COLUMN id TYPE bigint;\nALTER SEQUENCE public.orders_id_seq AS bigint;" }),
+      ]),
+      found("unused_indexes", "waste", "Usage counts come from this server only.", [
+        item({ name: "orders_status_idx", bytes: 2.6 * GB, detail: { kind: "unused_index" }, fix: "DROP INDEX CONCURRENTLY public.orders_status_idx;" }),
+        item({ table: "events", name: "events_kind_created_idx", bytes: 1.3 * GB, detail: { kind: "unused_index" }, fix: "DROP INDEX CONCURRENTLY public.events_kind_created_idx;" }),
+      ]),
+      fine("transaction_age", "soon"),
+      fine("replication_slots", "soon"),
+      found("foreign_keys_without_index", "slow", "The row count is the planner's estimate.", [
+        item({ table: "order_items", name: "order_items_order_id_fkey", detail: { kind: "foreign_key_without_index", constraint: "order_items_order_id_fkey", columns: ["order_id"], parent_schema: "public", parent_table: "orders", rows: 310_000 }, fix: "CREATE INDEX CONCURRENTLY ON public.order_items (order_id);" }),
+      ]),
+      found("dead_rows", "upkeep", "Row counts are estimates kept by the statistics collector.", [
+        item({ table: "events", bytes: 12.6 * GB, detail: { kind: "dead_rows", dead: 1_100_000, live: 3_000_000, vacuumed_secs_ago: 9 * 86_400 }, fix: "VACUUM (ANALYZE) public.events;" }),
+      ]),
+      fine("duplicate_indexes", "tidy"),
+      fine("never_analyzed", "upkeep"),
+      fine("long_transactions", "upkeep"),
+    ],
+    slow_queries: {
+      state: "ranked",
+      partial: false,
+      queries: [
+        { query: "SELECT * FROM orders WHERE customer_id = $1 ORDER BY placed_at DESC", user: "app", calls: 84_000, total_ms: 17_808_000, mean_ms: 212, rows: 840_000, share: 0.62 },
+        { query: "UPDATE events SET seen = true WHERE user_id = $1 AND seen = false", user: "app", calls: 310_000, total_ms: 14_880_000, mean_ms: 48, rows: 310_000, share: 0.21 },
+        { query: "SELECT count(*) FROM order_items WHERE order_id = $1", user: "app", calls: 96_000, total_ms: 2_976_000, mean_ms: 31, rows: 96_000, share: 0.04 },
+      ],
     },
-  };
-}
+  });
 
-const browser = await playwright.chromium.launch({ executablePath: process.env.CHROMIUM_PATH ?? "/opt/pw-browsers/chromium" });
-const ws = '[data-testid="workspace"]:not([hidden])';
-const settle = (page) => page.waitForFunction((ws) => !document.querySelector(`${ws} [data-state="running"]`), ws);
-
-// macOS draws the traffic lights over the title bar (trafficLightPosition 18, 24); a browser
-// has none, so they are drawn where the native ones sit.
-function trafficLights() {
-  const add = () => {
-    if (document.getElementById("shot-lights")) return;
-    const box = document.createElement("div");
-    box.id = "shot-lights";
-    box.style.cssText = "position:fixed;left:18px;top:18px;display:flex;gap:8px;z-index:99999;pointer-events:none";
-    for (const c of ["#ff5f57", "#febc2e", "#28c840"]) {
-      const dot = document.createElement("i");
-      dot.style.cssText = `display:block;width:12px;height:12px;border-radius:50%;background:${c};box-shadow:inset 0 0 0 0.5px rgba(0,0,0,0.18)`;
-      box.append(dot);
+  window.__STUB_MORE__ = async (cmd, a) => {
+    switch (cmd) {
+      case "mcp_activity": {
+        if (a.since == null || a.since > offset) {
+          offset = log.length;
+          return { entries: structuredClone(log), offset, reset: true };
+        }
+        return { entries: [], offset, reset: false };
+      }
+      case "mcp_sample": {
+        const e = log.find((x) => x.ts === a.ts);
+        if (e?.sql !== revenue) return null;
+        const text = '{"columns":["status","orders","revenue"],"rows":[["paid",1240,"86412.50"],["shipped",988,"70218.10"],["pending",212,"14930.00"],["refunded",31,"2210.40"],["cancelled",9,"612.00"]],"row_count":5,"more":false,"elapsed_ms":41,"types":["order_status","int8","numeric"]}';
+        return { session: e.session, ts: e.ts, text, bytes: text.length };
+      }
+      case "proposals_waiting":
+        return window.__PROPOSALS__ ? [structuredClone(proposal)] : [];
+      case "proposal_plan":
+        return structuredClone(plan);
+      case "proposal_dry_run":
+        await new Promise((r) => setTimeout(r, 300));
+        return structuredClone(dry);
+      case "database_health":
+        return window.__HEALTH__ ? health() : null;
+      default:
+        return undefined;
     }
-    document.body.append(box);
   };
-  if (document.body) add();
-  else document.addEventListener("DOMContentLoaded", add);
 }
-
-/** A fresh window at w x h, connected to storefront (prd), on the orders table. */
-async function openApp(scheme, w, h, { filter = true } = {}) {
-  const context = await browser.newContext({ viewport: { width: w, height: h }, deviceScaleFactor: 2, colorScheme: scheme, reducedMotion: "reduce", timezoneId: "UTC" });
-  const page = await context.newPage();
-  page.on("pageerror", (e) => console.error("pageerror:", e.message));
-  await page.clock.setFixedTime(new Date("2026-10-14T11:45:00Z"));
-  await page.addInitScript({ path: FRAMES_SHIM });
-  await page.addInitScript(macPlatform);
-  await page.addInitScript(stubTauri);
-  await page.addInitScript(trafficLights);
-  await page.goto(URL);
-  await page.waitForFunction((s) => document.documentElement.dataset.theme === s, scheme);
-  await page.waitForSelector(ws);
-  await page.keyboard.press("Meta+Shift+O");
-  await page.waitForSelector('[data-testid="conn-popover"]');
-  await page.click('[data-conn-id="prd"]');
-  await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
-  await page.click(`${ws} [data-table="shop.public.orders"] [data-testid="sb-row-main"]`);
-  await page.waitForSelector(`${ws} [data-testid="results-grid-wrap"][data-row-count="1000"]`);
-  await settle(page);
-  if (filter) {
-    await page.keyboard.press("Meta+f");
-    await page.waitForSelector(`${ws} [data-sql-line] [data-chip-editor] [data-testid="sql-editor"]`);
-    await page.keyboard.type("status = 'paid'");
-    await page.keyboard.press("Enter");
-    await page.waitForSelector(`${ws} [data-testid="results-grid-wrap"][data-row-count="168"]`);
-    await settle(page);
-  }
-  await page.evaluate(() => document.fonts.ready);
-  return { context, page };
-}
-
-const shot = async (page, name, clip) => {
-  await page.mouse.move(640, 1);
-  await page.waitForTimeout(600);
-  const path = `${OUT}/${name}.png`;
-  await page.screenshot({ path, ...(clip ? { clip } : {}) });
-  console.log(path);
-  return path;
-};
-const hideKeyStrip = (page) => page.addStyleTag({ content: '[data-testid="key-strip"], [data-testid="cmd-hints"] { visibility: hidden !important; }' });
 
 const made = {};
+const take = async (page, name, clip) => (made[name] = (await shot(page, name, { clip }), `${OUT}/${name}.png`));
+
 for (const scheme of ["light", "dark"]) {
-  // 1. The whole window (the banner's app).
+  // 1. The whole window (the banner's app): orders filtered to paid.
   {
-    const { context, page } = await openApp(scheme, 1280, 800);
+    const { context, page } = await openApp({ w: 1280, h: 800, more, scheme });
+    await filter(page, "status = 'paid'", 168);
     await hideKeyStrip(page);
-    made[`window-${scheme}`] = await shot(page, `window-${scheme}`);
+    await take(page, `window-${scheme}`);
     await context.close();
   }
   // 2. ⌘K finding the orders tables, in a narrow window with the sidebar hidden (⌘B).
   {
-    const { context, page } = await openApp(scheme, 760, 540, { filter: false });
+    const { context, page } = await openApp({ w: 760, h: 540, more, scheme });
     await page.keyboard.press("Meta+b");
-    await page.waitForSelector('[data-sidebar-hidden]');
+    await page.waitForSelector("[data-sidebar-hidden]");
     await page.keyboard.press("Meta+k");
     await page.waitForSelector('[data-testid="cp-panel"]');
     await page.keyboard.type("orders");
     await page.waitForTimeout(300);
-    made[`k-palette-${scheme}`] = await shot(page, `k-palette-${scheme}`);
+    await take(page, `k-palette-${scheme}`);
     await context.close();
   }
-  // 3. The Agents inbox: the log, the prd query opened beside it.
+  // 3. The Agents inbox: the proposal opened, its dry run done, the log under it.
   {
-    const { context, page } = await openApp(scheme, 1280, 1000, { filter: false });
+    const { context, page } = await openApp({ w: 1280, h: 720, more, scheme, init: () => (window.__PROPOSALS__ = true) });
+    await hideKeyStrip(page);
     await page.click('[data-testid="sb-agents"]');
-    await page.waitForSelector('[data-testid="agents-page"] [data-mcp-entry]');
-    await page.click('[data-mcp-entry="0"]'); // Newest has the highest key: 0 is the prd query.
-    await page.waitForSelector('[data-testid="mcp-detail"] [data-mcp-box="response"] .mcp-json'); // Class on purpose: the sample is drawn.
+    await page.waitForSelector('[data-testid="agents-page"] [data-proposal-id="p_3f9a1c07b2e4"]');
+    await page.click('[data-proposal-id="p_3f9a1c07b2e4"]');
+    await page.waitForSelector('[data-testid="pp-dry-run"]');
+    await page.click('[data-testid="pp-dry-run"]');
+    await page.waitForSelector('[data-testid="pp-dry"][data-state="done"]');
     await page.waitForTimeout(300);
-    const box = await page.$eval('[data-testid="agents-page"]', (e) => e.getBoundingClientRect().toJSON());
-    const x = box.x;
-    const y = box.y;
-    const r = box.right;
-    const bottom = Math.min(box.bottom, box.y + 640); // The README shows the top of the page.
-    console.log(`log clip ${Math.round(r - x)}x${Math.round(bottom - y)}`);
-    made[`log-${scheme}`] = await shot(page, `log-${scheme}`, { x, y, width: Math.ceil(r - x), height: Math.ceil(bottom - y) });
+    await take(page, `agents-${scheme}`);
+    await context.close();
+  }
+  // 4. The Health tab, the IDs finding opened beside it.
+  {
+    const { context, page } = await openApp({ w: 1280, h: 800, more, scheme, init: () => (window.__HEALTH__ = true) });
+    await hideKeyStrip(page);
+    await page.addStyleTag({ content: "[data-toast] { display: none !important; }" });
+    await page.keyboard.press("Meta+k");
+    await page.waitForSelector('[data-testid="cp-panel"]');
+    await page.keyboard.type("Show health");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(`${WS} [data-health-check="ids_running_out"]`);
+    await page.click(`${WS} [data-health-check="ids_running_out"]`);
+    await page.waitForSelector(`${WS} [data-health-check="ids_running_out"][data-health-picked]`);
+    await page.waitForTimeout(400);
+    await take(page, `health-${scheme}`);
     await context.close();
   }
 }
 
-// 4. The banner: the website's hero line beside the window, an agent's two calls over it.
+// 5. The banner: the website's hero line beside the window, an agent's two calls over it.
 const font = (f) => readFileSync(`${ROOT}apps/web/app/fonts/${f}`).toString("base64");
 const engines = readFileSync(`${ROOT}apps/rowkery-tauri/src/engines.tsx`, "utf8");
 const logo = (k) => new RegExp(`${k}: \\{[\\s\\S]*?logo: "([^"]+)"`).exec(engines)[1];
@@ -352,10 +223,10 @@ const bannerHtml = (t, windowPng) => `<!doctype html><html><head><meta charset="
 @font-face { font-family: Plex; src: url(data:font/woff2;base64,${font("ibm-plex-sans-latin-600-normal.woff2")}); font-weight: 600; }
 @font-face { font-family: PlexMono; src: url(data:font/woff2;base64,${font("ibm-plex-mono-latin-400-normal.woff2")}); font-weight: 400; }
 html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; background: ${t.bg}; color: ${t.fg}; font-family: Plex, sans-serif; -webkit-font-smoothing: antialiased; }
-.copy { position: absolute; left: 72px; top: 152px; width: 410px; }
+.copy { position: absolute; left: 72px; top: 152px; width: 430px; }
 .brand { display: flex; align-items: center; gap: 16px; font-weight: 500; font-size: 34px; letter-spacing: -0.01em; }
 .brand svg { width: 44px; height: 47px; color: ${t.fg}; }
-h1 { margin: 34px 0 0; font-weight: 500; font-size: 52px; line-height: 1.04; letter-spacing: -0.025em; }
+h1 { margin: 34px 0 0; font-weight: 500; font-size: 50px; line-height: 1.06; letter-spacing: -0.025em; }
 h1 span { display: block; color: ${t.grey}; }
 p { margin: 26px 0 0; font-size: 19px; line-height: 1.45; color: ${t.copy}; }
 .eng { margin-top: 30px; display: flex; align-items: center; gap: 18px; font-size: 16px; color: ${t.grey}; }
@@ -375,8 +246,8 @@ pre { margin: 10px 0 0; font-family: PlexMono, monospace; font-size: 14px; line-
 </style></head><body>
 <div class="copy">
   <div class="brand"><svg viewBox="${MARK_BOX}"><path d="${MARK}" fill="currentColor" fill-rule="evenodd"/></svg>Rowkery</div>
-  <h1>Query it yourself.<span>Or ask your agent.</span></h1>
-  <p>A fast Mac app for Postgres and SQLite. Your agent can read through it. Only you can change your data.</p>
+  <h1>A database app for<span>you and your agent</span></h1>
+  <p>Postgres and SQLite on your Mac. Quick from the keyboard, and safe to hand to Claude or any other agent.</p>
   <div class="eng"><span><svg viewBox="0 0 24 24"><path d="${logo("postgres")}"/></svg>PostgreSQL</span><i></i><span><svg viewBox="0 0 24 24"><path d="${logo("sqlite")}"/></svg>SQLite</span><i></i><span>macOS</span></div>
 </div>
 <div class="win"><img src="data:image/png;base64,${readFileSync(windowPng).toString("base64")}"></div>
@@ -391,19 +262,20 @@ pre { margin: 10px 0 0; font-family: PlexMono, monospace; font-size: 14px; line-
   <div class="v no">✕ Refused: DELETE is not a read</div>
 </div>
 </body></html>`;
+const browser = await launch();
 for (const scheme of ["light", "dark"]) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 640 }, deviceScaleFactor: 2, colorScheme: scheme });
   const page = await context.newPage();
   await page.setContent(bannerHtml(THEMES[scheme], made[`window-${scheme}`]));
   await page.evaluate(() => document.fonts.ready);
-  made[`banner-${scheme}`] = await shot(page, `banner-${scheme}`);
+  await take(page, `banner-${scheme}`);
   await context.close();
 }
-await browser.close();
+await close();
 
-// 5. Into the repo (Python's Pillow converts): WebP at quality 86, the banners as optimised
+// 6. Into the repo (Python's Pillow converts): WebP at quality 86, the banners as optimised
 // lossless PNG (about 300 KB each).
-if (WRITE) {
+if (COMMIT) {
   const PY = `import sys
 from PIL import Image
 src, dest = sys.argv[1], sys.argv[2]
@@ -415,8 +287,7 @@ else:
   const convert = (src, dest) => execFileSync("python3", ["-I", "-c", PY, src, `${ROOT}${dest}`]);
   for (const s of ["light", "dark"]) {
     convert(made[`banner-${s}`], `docs/readme/banner-${s}.png`);
-    convert(made[`k-palette-${s}`], `docs/readme/k-palette-${s}.webp`);
-    convert(made[`log-${s}`], `docs/readme/log-${s}.webp`);
+    for (const n of ["k-palette", "agents", "health"]) convert(made[`${n}-${s}`], `docs/readme/${n}-${s}.webp`);
   }
   console.log("wrote docs/readme/*");
 }
