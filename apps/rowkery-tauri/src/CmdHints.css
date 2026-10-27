@@ -24,7 +24,7 @@
   color: var(--text);
   background: var(--bg);
   border-radius: var(--r-sm);
-  box-shadow: var(--pop), 0 0 0 1px var(--line2);
+  box-shadow: var(--pop);
 }
 @media (prefers-reduced-motion: reduce) {
   .cmd-hints,

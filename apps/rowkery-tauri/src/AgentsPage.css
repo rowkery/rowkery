@@ -131,7 +131,7 @@
 .ag-h3 {
   display: flex;
   align-items: center;
-  /* As tall as the bordered buttons, so both columns' labels sit level. */
+  /* As tall as the filled buttons, so both columns' labels sit level. */
   min-height: 28px;
   gap: 8px;
   margin: 0;
@@ -234,16 +234,16 @@
   gap: 6px;
 }
 
-/* Filters: bordered pills; the pressed one is ink on paper's wash. */
+/* Filters: filled pills; the pressed one takes the stronger --line2 wash. */
 .mcp-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 24px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-pill);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--mute);
   font: 500 12px var(--sans);
   cursor: pointer;
@@ -253,13 +253,12 @@
 }
 
 .mcp-chip:hover {
-  border-color: var(--dim);
+  background: var(--fill-h);
   color: var(--text);
 }
 
 .mcp-chip[aria-pressed="true"] {
-  border-color: var(--text2);
-  background: var(--hover);
+  background: var(--line2);
   color: var(--text);
 }
 
@@ -294,25 +293,25 @@
   background: var(--env-local);
 }
 
-/* The title bar's bordered button. */
+/* The title bar's filled button. */
 .mcp-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 28px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text2);
   font: 500 12px var(--sans);
   white-space: nowrap;
   cursor: pointer;
-  transition: border-color 0.18s ease;
+  transition: background-color 0.18s ease;
 }
 
 .mcp-btn:hover {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 /* The one primary action of a view: ink, white on dark. */
@@ -327,7 +326,7 @@
   background: var(--ink2);
 }
 
-/* A head action that isn't the view's own: no border until hovered. */
+/* A head action that isn't the view's own: no fill until hovered. */
 .mcp-btn.quiet {
   border-color: transparent;
   background: transparent;
@@ -335,12 +334,12 @@
 }
 
 .mcp-btn.quiet:hover {
-  border-color: var(--line2);
+  background: var(--fill-h);
   color: var(--text);
 }
 
 .mcp-btn kbd {
-  color: var(--dim);
+  color: var(--mute);
   font: 11px var(--mono);
 }
 
@@ -429,16 +428,16 @@
   color: var(--mute);
 }
 
-/* One call: a card ruled in --line on the sheet. */
+/* One call: a filled card on the sheet. */
 .mcp-entry {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr) auto;
   gap: 4px 12px;
   align-items: start;
   padding: 10px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--r-lg);
-  background: var(--bg);
+  background: var(--fill);
   cursor: default;
   transition:
     border-color 0.18s ease,
@@ -446,12 +445,11 @@
 }
 
 .mcp-entry:hover {
-  border-color: var(--line2);
+  background: var(--fill-h);
 }
 
 .mcp-entry[aria-selected="true"] {
-  border-color: var(--line2);
-  background: var(--panel);
+  background: var(--fill-h);
 }
 
 .mcp-time {
@@ -575,9 +573,9 @@
   gap: 6px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   user-select: text;
 }
 
@@ -660,14 +658,15 @@
   display: grid;
   gap: 3px;
   padding: 10px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--r-lg);
-  background: var(--bg);
-  transition: border-color 0.18s ease;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
+/* Shared: a raised filled card (not shared: flat, no fill); hover lifts it
+   further. */
 .mcp-cn[data-shared] {
-  border-color: var(--line2);
+  background: var(--fill);
   box-shadow: var(--shadow);
 }
 
@@ -677,7 +676,7 @@
 }
 
 .mcp-cn[data-mcp-edit]:not([data-editing]):hover {
-  border-color: var(--dim);
+  box-shadow: var(--shadow), 0 4px 12px -4px color-mix(in srgb, var(--shade) 40%, transparent);
 }
 
 /* The card whose Edit access is open beside it. */
@@ -950,9 +949,9 @@
   flex-shrink: 0;
   height: 28px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text);
   font: 12.5px var(--sans);
   outline: none;
@@ -1119,13 +1118,14 @@
   font-weight: 500;
 }
 
-/* The tick box: a control (a --line2 border); orange when on. */
+/* The tick box: the one control that keeps an edge, since an empty box on a
+   fill would vanish (it needs 3:1 against its ground); orange when on. */
 .ag-cb {
   position: relative;
   display: block;
   width: 14px;
   height: 14px;
-  border: 1px solid var(--line2);
+  border: 1px solid var(--dim);
   border-radius: var(--r-xs);
   background: var(--bg);
 }
@@ -1263,12 +1263,11 @@
   align-content: start;
   gap: 8px;
   padding: 12px 14px;
-  border: 1px solid var(--line);
   border-radius: var(--r-lg);
+  background: var(--fill);
 }
 
 .ag-panel.ag-never {
-  border-color: color-mix(in srgb, var(--del) 25%, var(--line));
   background: var(--delbg);
 }
 
@@ -1545,18 +1544,19 @@
   padding: 0 7px;
   border: 0;
   border-radius: var(--r-sm);
-  background: transparent;
+  background: var(--fill);
   color: var(--mute);
   font: 500 11.5px var(--sans);
   cursor: default;
 }
 
 .ag-filter:hover {
+  background: var(--fill-h);
   color: var(--text);
 }
 
 .ag-filter[aria-pressed="true"] {
-  background: var(--line);
+  background: var(--line2);
   color: var(--text);
 }
 

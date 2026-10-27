@@ -87,7 +87,7 @@
   text-transform: uppercase;
 }
 
-/* The title bar's bordered button; ink for a sheet's one primary action. */
+/* The title bar's filled button; ink for a sheet's one primary action. */
 .sheet-btn {
   display: inline-flex;
   flex-shrink: 0;
@@ -95,9 +95,9 @@
   gap: 6px;
   height: 28px;
   padding: 0 12px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text2);
   font: 500 12px var(--sans);
   cursor: pointer;
@@ -107,7 +107,7 @@
 }
 
 .sheet-btn:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .sheet-btn.ink {

@@ -369,9 +369,9 @@
 .page-size select {
   height: 26px;
   padding: 0 8px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text2);
   font: inherit;
   font-size: 12px;
@@ -380,7 +380,7 @@
 }
 
 .page-size select:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .page-size select:disabled {
@@ -392,9 +392,9 @@
   height: 26px;
   margin-left: 4px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text2);
   font: inherit;
   font-size: 12px;
@@ -402,7 +402,7 @@
 }
 
 .cancel-btn:not(:disabled):hover {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .cancel-btn:disabled {
@@ -412,7 +412,7 @@
 
 .cancel-key {
   margin-left: 4px;
-  color: var(--dim);
+  color: var(--mute);
   font-family: var(--mono);
 }
 

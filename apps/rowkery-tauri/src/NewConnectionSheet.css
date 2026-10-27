@@ -119,8 +119,7 @@
   padding: 0 10px;
   border: 0;
   border-radius: var(--r-md);
-  background: var(--bg);
-  box-shadow: inset 0 0 0 1px var(--line2);
+  background: var(--fill);
   color: var(--text);
   font: 13px var(--sans);
   outline: none;
@@ -132,7 +131,7 @@
 }
 
 .nc-input::placeholder {
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .nc-input:focus {
@@ -318,9 +317,9 @@ p.nc-hint[data-invalid] {
 .nc-group {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--r-lg);
-  background: var(--bg);
+  background: var(--fill);
 }
 
 .nc-group-body {
@@ -361,20 +360,20 @@ p.nc-hint[data-invalid] {
 .nc-toggle-sub,
 .nc-toggle-meta {
   font-size: 11px;
-  color: var(--dim);
+  color: var(--mute);
 }
 
 .nc-toggle-meta {
   font-family: var(--mono);
 }
 
-/* Share with agents: the prototype's 48 px bordered row. */
+/* Share with agents: the prototype's 48 px filled row. */
 .nc-mcp {
-  transition: border-color 0.18s ease;
+  transition: background-color 0.18s ease;
 }
 
 .nc-mcp:hover {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .nc-mcp-row {
@@ -465,11 +464,12 @@ p.nc-hint[data-invalid] {
   align-items: center;
   justify-content: center;
   height: 64px;
-  border: 1px dashed var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-lg);
   font-size: 12px;
   color: var(--dim);
   transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  background: var(--fill);
 }
 
 .nc-drop[data-dragging] {
@@ -478,22 +478,22 @@ p.nc-hint[data-invalid] {
   color: var(--text);
 }
 
-/* A small bordered button inside the form (Choose…). */
+/* A small filled button inside the form (Choose…). */
 .nc-btn {
   flex-shrink: 0;
   height: 32px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text);
   font: 500 12px var(--sans);
   cursor: pointer;
-  transition: border-color 0.18s ease;
+  transition: background-color 0.18s ease;
 }
 
 .nc-btn:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 /* ---------- Foot ---------- */

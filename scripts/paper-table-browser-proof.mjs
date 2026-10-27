@@ -274,8 +274,15 @@ check(tones.op === kw.k && tones.val === kw.n, `op in --kw, value in --num (${JS
 await page.waitForFunction((sel) => document.querySelector(sel)?.textContent.includes("312"), `${line} [data-line-end]`);
 check((await page.textContent(`${line} [data-line-end]`)).includes("312 of 312 rows"), `the count at the WHERE row's right: ${await page.textContent(`${line} [data-count]`)}`);
 check((await page.getAttribute(`${line} [data-sql-text]`, "data-sql-text")).includes("WHERE (opened_at >= '2026-03-01 00:00:00+08' AND price BETWEEN 100 AND 900 AND city = 'Klang')"), "the QUERY row shows the whole WHERE");
-const addBox = await page.$eval(`${line} [data-add-filter]`, (e) => getComputedStyle(e).borderStyle);
-check(addBox === "dashed", "+ Filter is the dashed pill");
+const addBox = await page.$eval(`${line} [data-add-filter]`, (e) => {
+  const p = document.createElement("span");
+  p.style.color = "var(--fill)";
+  document.body.append(p);
+  const fill = getComputedStyle(p).color;
+  p.remove();
+  return { bg: getComputedStyle(e).backgroundColor, fill };
+});
+check(addBox.bg === addBox.fill, `+ Filter is the filled pill (${addBox.bg})`);
 // Class on purpose: no wash box may sit in the QUERY row's WHERE text.
 check((await page.locator(`${line} [data-sql-query] .sql-line-where-sql.sql-wash, ${line} [data-sql-query] .sql-line-where-sql [data-wash]`).count()) === 0, "the QUERY row's WHERE is plain tokens (no wash box)");
 const rules = await page.evaluate((ws) => {

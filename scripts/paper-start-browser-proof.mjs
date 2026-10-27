@@ -187,21 +187,21 @@ for (const dark of [false, true]) {
   const cards = await page.$$eval("[data-empty-action]", (els) =>
     els.map((e) => {
       const cs = getComputedStyle(e);
-      return { id: e.dataset.emptyAction, sub: e.querySelector('[data-testid="ew-card-sub"]').textContent, key: e.querySelector("kbd").textContent, border: cs.borderTopWidth, radius: cs.borderTopLeftRadius, w: e.getBoundingClientRect().width };
+      return { id: e.dataset.emptyAction, sub: e.querySelector('[data-testid="ew-card-sub"]').textContent, key: e.querySelector("kbd").textContent, border: cs.borderTopColor, bg: cs.backgroundColor, radius: cs.borderTopLeftRadius, w: e.getBoundingClientRect().width };
     }),
   );
   const cardText = cards.map((c) => `${c.id}:${c.sub}:${c.key}`).join(" | ");
   check(cardText === "new:Postgres or SQLite:⌘N | file:or drop one anywhere:⌘O | paste:fills the form for you:⌘V | sample:six tables, one view:↵", `${theme}: four cards with sub-lines and registry keys (${cardText})`);
-  check(cards.every((c) => c.border === "1px" && c.radius === "14px" && Math.abs(c.w - 275) < 1), `${theme}: bordered 1 px, radius 14, two by two`);
+  const fill = await colorOf("--fill");
+  check(cards.every((c) => c.border === "rgba(0, 0, 0, 0)" && c.bg === fill && c.radius === "14px" && Math.abs(c.w - 275) < 1), `${theme}: filled with no border, radius 14, two by two`);
   const lists = await page.$$eval(`${ws} :is([data-saved-section], [data-found-section]) > ul`, (els) =>
     els.map((e) => {
       const cs = getComputedStyle(e);
       const row = getComputedStyle(e.querySelector('[data-testid="ew-row"]'));
-      return `${cs.borderTopWidth}/${cs.borderTopColor}/${cs.borderTopLeftRadius}/${cs.paddingTop}/${row.borderTopLeftRadius}`;
+      return `${cs.borderTopColor}/${cs.backgroundColor}/${cs.borderTopLeftRadius}/${cs.paddingTop}/${row.borderTopLeftRadius}`;
     }),
   );
-  const line2 = await colorOf("--line2");
-  check(lists.length === 2 && lists.every((l) => l === `1px/${line2}/14px/4px/10px`), `${theme}: each list is one bordered 14 px card, 4 px in, its rows 10 px (${lists.join(" | ")})`);
+  check(lists.length === 2 && lists.every((l) => l === `rgba(0, 0, 0, 0)/${fill}/14px/4px/10px`), `${theme}: each list is one filled 14 px card, 4 px in, its rows 10 px (${lists.join(" | ")})`);
   const sections = await page.$$eval('[data-testid="ew-section"]', (els) => els.map((e) => e.textContent));
   check(sections.join() === "Your connections,Found on this Mac", `${theme}: Your connections, then Found on this Mac`);
   check((await page.$$("[data-saved-conn]")).length === 4 && (await page.textContent('[data-saved-conn="prd"]')).includes("Connect ↵"), `${theme}: saved rows print Connect ↵`);
@@ -330,7 +330,7 @@ let look = await sheetLook("[data-timings]");
 check(paperSheet(look), `Timings: radius 12, --pop, title in a 42 px head with esc (${JSON.stringify(look)})`);
 check(/Mono/.test(await page.$eval("[data-timing]", (e) => getComputedStyle(e).fontFamily)), "the marks are a mono table");
 const copyBg = await page.$eval("[data-timings-copy]", (e) => getComputedStyle(e).backgroundColor);
-check(copyBg === (await colorOf("--bg")), `Copy is bordered, not ink: it commits nothing (${copyBg})`);
+check(copyBg === (await colorOf("--fill")), `Copy is filled, not ink: it commits nothing (${copyBg})`);
 await shot("timings");
 await page.keyboard.press("Escape");
 await page.waitForSelector("[data-timings]", { state: "detached" });
