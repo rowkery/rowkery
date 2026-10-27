@@ -1632,6 +1632,11 @@
   gap: 2px;
 }
 
+/* ↑ scrolls a row in below its day's header, not under it. */
+.ag-day-calls .ag-call {
+  scroll-margin-top: 32px;
+}
+
 .ag-calls-none {
   margin: 4px 10px;
 }

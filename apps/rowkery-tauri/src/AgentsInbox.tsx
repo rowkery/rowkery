@@ -124,16 +124,18 @@ export function AgentsInbox({
     }
     return out;
   }, [entries, filter, placeOn]);
-  // The calls under a header per local day, newest day first (rowkery/reports#20).
+  // The calls under a header per local day (rowkery/reports#20): a new
+  // header wherever the day changes, so the rows keep the log's order and
+  // ↑↓ walk them as shown even if an entry's clock ran out of order.
   const days = useMemo(() => {
-    const byDay = new Map<number, Call[]>();
+    const out: { day: number; calls: Call[] }[] = [];
     for (const c of calls) {
       const day = dayStart(c.e.ts);
-      const list = byDay.get(day);
-      if (list) list.push(c);
-      else byDay.set(day, [c]);
+      const run = out[out.length - 1];
+      if (run && run.day === day) run.calls.push(c);
+      else out.push({ day, calls: [c] });
     }
-    return [...byDay].map(([day, list]) => ({ day, calls: list }));
+    return out;
   }, [calls]);
   const refusedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "refused").length, [inPlace]);
   const failedCount = useMemo(() => inPlace.filter((e) => verdictOf(e) === "error").length, [inPlace]);
@@ -390,7 +392,7 @@ export function AgentsInbox({
           <span className="mcp-grow" />
           <h1 className="ag-title">Agents</h1>
         </header>
-        <div ref={listRef} className="ag-inbox-scroll">
+        <div ref={listRef} className="ag-inbox-scroll" data-testid="ag-inbox-scroll">
           {waiting.length > 0 && (
             <>
               <h2 className="ag-sec">
@@ -457,29 +459,28 @@ export function AgentsInbox({
             {calls.length === 0 && (
               <p className="mcp-muted ag-calls-none">{!entries.length ? "No calls yet." : filter === "error" ? "Nothing failed." : "Nothing refused."}</p>
             )}
-            {days.map(({ day, calls: dayCalls }) => {
-              const label = dayLabel(day, now);
-              return (
-                <section key={day} className="ag-day" data-testid="ag-day" aria-label={label}>
-                  <h3 className="ag-day-head">{label}</h3>
-                  <div className="ag-day-calls" role="list" aria-label={`Agent calls, ${label}`}>
-                    {dayCalls.map((c) => (
-                      <CallRow
-                        key={c.key}
-                        c={c}
-                        conn={c.e.connection ? byId.get(c.e.connection) : undefined}
-                        current={c === call}
-                        onPick={() => {
-                          setSel({ kind: "call", key: c.key });
-                          rootRef.current?.focus({ preventScroll: true });
-                        }}
-                        onOpen={() => openCall(c)}
-                      />
-                    ))}
-                  </div>
-                </section>
-              );
-            })}
+            {days.map(({ day, calls: dayCalls }) => (
+              <section key={dayCalls[0].key} className="ag-day" data-testid="ag-day">
+                <h3 className="ag-day-head" data-testid="ag-day-head">
+                  {dayLabel(day, now)}
+                </h3>
+                <div className="ag-day-calls" role="list" aria-label="Agent calls">
+                  {dayCalls.map((c) => (
+                    <CallRow
+                      key={c.key}
+                      c={c}
+                      conn={c.e.connection ? byId.get(c.e.connection) : undefined}
+                      current={c === call}
+                      onPick={() => {
+                        setSel({ kind: "call", key: c.key });
+                        rootRef.current?.focus({ preventScroll: true });
+                      }}
+                      onOpen={() => openCall(c)}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))}
           </div>
         </div>
         <footer className="ag-inbox-foot">
@@ -500,6 +501,7 @@ export function AgentsInbox({
           key={call.key}
           c={call}
           conn={call.e.connection ? byId.get(call.e.connection) : undefined}
+          now={now}
           canOpen={canOpen(call)}
           onOpen={() => openCall(call)}
         />
@@ -912,7 +914,9 @@ function CallRow({
       onClick={onPick}
       onDoubleClick={onOpen}
     >
-      <span className="ag-call-time">{clock(e.ts, false)}</span>
+      <span className="ag-call-time" data-testid="ag-call-time">
+        {clock(e.ts, false)}
+      </span>
       <span className="ag-call-tool">
         {e.tool}
         {e.connection && (
@@ -943,11 +947,13 @@ function CallRow({
 function CallView({
   c,
   conn,
+  now,
   canOpen,
   onOpen,
 }: {
   c: Call;
   conn: ConnectionRecord | undefined;
+  now: number;
   canOpen: boolean;
   onOpen: () => void;
 }) {
@@ -959,7 +965,7 @@ function CallView({
     clientLabel(e.client),
     e.connection ? (conn?.name ?? e.connection) : null,
     e.database && conn?.kind === "postgres" ? e.database : null,
-    `${dayLabel(e.ts)} ${clock(e.ts)}`,
+    `${dayLabel(e.ts, now)} ${clock(e.ts)}`,
     took && verdict !== "refused" && verdict !== "error" ? `took ${took}` : null,
   ]
     .filter(Boolean)
@@ -970,7 +976,9 @@ function CallView({
         <h1 className="ag-title" data-testid="ag-call-title">
           {e.tool}
         </h1>
-        <span className="pp-sub">{sub}</span>
+        <span className="pp-sub" data-testid="ag-call-sub">
+          {sub}
+        </span>
       </header>
       <div className="pp-previews">
         <section className="pp-stmt">

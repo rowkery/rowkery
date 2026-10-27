@@ -192,44 +192,62 @@ await page.waitForSelector(pageSel);
 await page.waitForTimeout(650);
 
 const days = await page.$$eval(`${pageSel} [data-testid="ag-day"]`, (els) =>
-  els.map((el) => ({ head: el.querySelector(".ag-day-head").textContent, n: el.querySelectorAll('[data-testid="ag-call"]').length })),
+  els.map((el) => ({ head: el.querySelector('[data-testid="ag-day-head"]').textContent, n: el.querySelectorAll('[data-testid="ag-call"]').length })),
 );
 const back3 = new Date();
 back3.setDate(back3.getDate() - 3);
-const back3Label = `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][back3.getDay()]} ${back3.getDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][back3.getMonth()]}`;
+const back3Label = `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][back3.getDay()]} ${back3.getDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][back3.getMonth()]}${back3.getFullYear() === new Date().getFullYear() ? "" : ` ${back3.getFullYear()}`}`;
+// Text on purpose: the headers' wording is what's under test.
 check(JSON.stringify(days) === JSON.stringify([{ head: "Today", n: 4 }, { head: "Yesterday", n: 5 }, { head: back3Label, n: 2 }]), `a header per day, newest first (${JSON.stringify(days)})`);
-const times = await page.$$eval(`${pageSel} .ag-call-time`, (els) => els.map((el) => el.textContent));
+const times = await page.$$eval(`${pageSel} [data-testid="ag-call-time"]`, (els) => els.map((el) => el.textContent));
 check(times.every((t) => /^\d\d:\d\d$/.test(t)), "rows keep just the time");
 await shot("1-days-light");
 
 // The picked call's head says its day as well as its time.
-await page.click(`${pageSel} [data-testid="ag-day"]:nth-of-type(2) [data-testid="ag-call"]`);
-const sub = await page.textContent(`${pageSel} [data-testid="ag-call-view"] .pp-sub`);
+await (await page.$$(`${pageSel} [data-testid="ag-day"]`))[1].$eval('[data-testid="ag-call"]', (el) => el.click());
+// Text on purpose: the head's wording is what's under test.
+const sub = await page.textContent(`${pageSel} [data-testid="ag-call-sub"]`);
 check(/Yesterday \d\d:\d\d:\d\d/.test(sub), `the right panel says the call's day (${sub})`);
 await shot("1b-picked-yesterday-light");
 
 // Scrolled into yesterday (in a shorter window, so the list scrolls): its
 // header sits at the list's top.
 await page.setViewportSize({ width: 1280, height: 520 });
-await page.$eval(`${pageSel} .ag-inbox-scroll`, (el) => {
+await page.$eval(`${pageSel} [data-testid="ag-inbox-scroll"]`, (el) => {
   const day = el.querySelectorAll('[data-testid="ag-day"]')[1];
   el.scrollTop = day.offsetTop - el.offsetTop + 70;
 });
 await page.waitForTimeout(100);
-const stuck = await page.$eval(`${pageSel} .ag-inbox-scroll`, (el) => {
+const stuck = await page.$eval(`${pageSel} [data-testid="ag-inbox-scroll"]`, (el) => {
   const top = el.getBoundingClientRect().top;
-  const head = el.querySelectorAll(".ag-day-head")[1];
+  const head = el.querySelectorAll('[data-testid="ag-day-head"]')[1];
   return Math.round(head.getBoundingClientRect().top - top);
 });
 check(stuck === 0, `Yesterday sticks to the list's top while its calls scroll (${stuck} px)`);
 await shot("2-scrolled-light");
+
+// ↑ from the oldest call: each picked row scrolls in below its day's
+// header, never under it.
+await page.$eval(`${pageSel} [data-testid="ag-inbox-scroll"]`, (el) => (el.scrollTop = el.scrollHeight));
+await (await page.$$(`${pageSel} [data-testid="ag-call"]`)).at(-1).click();
+let hidden = 0;
+for (let i = 0; i < 10; i++) {
+  await page.keyboard.press("ArrowUp");
+  await page.waitForTimeout(60);
+  hidden += await page.$eval(`${pageSel} [data-testid="ag-inbox-scroll"]`, (el) => {
+    const row = el.querySelector('[data-testid="ag-call"][aria-current="true"]');
+    const head = row.closest('[data-testid="ag-day"]').querySelector('[data-testid="ag-day-head"]');
+    return row.getBoundingClientRect().top < head.getBoundingClientRect().bottom - 1 ? 1 : 0;
+  });
+}
+check(hidden === 0, `↑ never leaves the picked row under a day header (${hidden} of 10 hidden)`);
 await page.setViewportSize({ width: 1280, height: 800 });
 
 await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
-await page.$eval(`${pageSel} .ag-inbox-scroll`, (el) => (el.scrollTop = 0));
+await page.$eval(`${pageSel} [data-testid="ag-inbox-scroll"]`, (el) => (el.scrollTop = 0));
 await shot("3-days-dark");
 await page.setViewportSize({ width: 1280, height: 520 });
-await page.$eval(`${pageSel} .ag-inbox-scroll`, (el) => {
+await page.$eval(`${pageSel} [data-testid="ag-inbox-scroll"]`, (el) => {
   const day = el.querySelectorAll('[data-testid="ag-day"]')[1];
   el.scrollTop = day.offsetTop - el.offsetTop + 70;
 });
