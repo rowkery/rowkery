@@ -178,9 +178,9 @@
   gap: 6px;
   height: 30px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text);
   font: 500 12px var(--sans);
   white-space: nowrap;
@@ -193,7 +193,7 @@
 }
 
 .insp-btn:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .insp-btn kbd {
@@ -541,9 +541,9 @@
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--r-lg);
-  background: var(--bg);
+  background: var(--fill);
   animation: rise 0.25s var(--ease-out) both;
 }
 
@@ -647,7 +647,7 @@
   }
 }
 
-/* A page's way out: a bordered control (it can be pressed), first in the head. */
+/* A page's way out: a filled control (it can be pressed), first in the head. */
 .page-back {
   display: inline-flex;
   align-items: center;
@@ -656,9 +656,9 @@
   max-width: 220px;
   height: 28px;
   padding: 0 6px 0 7px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: transparent;
+  background: var(--fill);
   color: var(--text);
   font: 500 13px var(--sans);
   white-space: nowrap;

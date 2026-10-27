@@ -132,7 +132,7 @@
   color: var(--mute);
 }
 
-/* The four ways in: bordered cards, two by two. */
+/* The four ways in: filled cards, two by two. */
 .ew-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -149,9 +149,9 @@
   gap: 6px;
   width: 100%;
   padding: 16px 18px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-xl);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text);
   font: inherit;
   text-align: left;
@@ -193,7 +193,7 @@
 }
 
 /* Your connections, Found on this Mac (2026-10-24): each list grouped on
-   one bordered card, every row of which connects; its 44 px rows run
+   one filled card, every row of which connects; its 44 px rows run
    concentric with it (14 px less the 4 px padding). No fill of its own: the
    glide paints under it. */
 .ew-lists {
@@ -236,9 +236,10 @@
 .ew-list {
   margin: 0;
   padding: 4px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-xl);
   list-style: none;
+  background: var(--fill);
 }
 
 .ew-row {
@@ -342,7 +343,7 @@
   box-shadow: 0 0 0 3px var(--accbg);
 }
 
-/* Couldn't connect: the raw error as code, then the bordered buttons. */
+/* Couldn't connect: the raw error as code, then the filled buttons. */
 .ew-error-text {
   max-height: calc(11.5px * 1.5 * 8 + 20px);
   margin: 0;
@@ -370,17 +371,17 @@
   gap: 6px;
   height: 28px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text2);
   font: 500 12px var(--sans);
   cursor: default;
-  transition: border-color 0.18s ease;
+  transition: background-color 0.18s ease;
 }
 
 .ew-btn:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .ew-btn:disabled {

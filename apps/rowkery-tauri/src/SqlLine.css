@@ -197,9 +197,9 @@
   gap: 6px;
   height: 26px;
   padding: 0 10px;
-  border: 1px dashed var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-pill);
-  background: transparent;
+  background: var(--fill);
   font: 12px var(--sans);
   color: var(--mute);
   white-space: nowrap;

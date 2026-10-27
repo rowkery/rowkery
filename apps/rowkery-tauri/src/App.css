@@ -25,6 +25,10 @@
   --line2: #d6d6d6;
   --rowline: #efefef;
   --hover: #ededed;
+  /* Controls and cards: a soft wash over whatever they sit on, no border
+     (borderless, 2026-10-27). */
+  --fill: rgba(0, 0, 0, 0.05);
+  --fill-h: rgba(0, 0, 0, 0.085);
   --sel: #ffffff;
   --kbd: #ededed;
   /* Text, strongest to faintest. */
@@ -143,6 +147,8 @@
   --line2: #3d3d3d;
   --rowline: #242424;
   --hover: #2a2a2a;
+  --fill: rgba(255, 255, 255, 0.06);
+  --fill-h: rgba(255, 255, 255, 0.1);
   --sel: #303030;
   --kbd: #2e2e2e;
   --text: #ffffff;

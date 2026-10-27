@@ -10,6 +10,8 @@ colors:
   line-control: "#d6d6d6"
   row-rule: "#efefef"
   hover: "#ededed"
+  fill: "rgba(0, 0, 0, 0.05)"
+  fill-hover: "rgba(0, 0, 0, 0.085)"
   text: "#0a0a0a"
   text-2: "#2b2b2b"
   mute: "#5c5c5c"
@@ -39,6 +41,8 @@ colors:
   dark-line: "#2e2e2e"
   dark-line-control: "#3d3d3d"
   dark-hover: "#2a2a2a"
+  dark-fill: "rgba(255, 255, 255, 0.06)"
+  dark-fill-hover: "rgba(255, 255, 255, 0.1)"
   dark-text: "#ffffff"
   dark-mute: "#a4a8ae"
   dark-dim: "#8b9097"
@@ -122,8 +126,8 @@ components:
     textColor: "{colors.ink-fg}"
     rounded: "{rounded.md}"
     height: "28px"
-  button-bordered:
-    backgroundColor: "{colors.paper}"
+  button-filled:
+    backgroundColor: "{colors.fill}"
     textColor: "{colors.text}"
     rounded: "{rounded.md}"
     height: "28px"
@@ -132,7 +136,7 @@ components:
     rounded: "{rounded.sm}"
     height: "24px"
   input:
-    backgroundColor: "{colors.paper}"
+    backgroundColor: "{colors.fill}"
     rounded: "{rounded.md}"
     height: "28px"
   chip-filter:
@@ -192,14 +196,14 @@ components:
 
 **Creative North Star: "The Printed Sheet"**
 
-Rowkery is a database tool printed on paper: opaque sheets with hairline rules, where every control is a bordered, familiar component and colour is spent on two things only. Orange marks what you are asking for: the statement under the caret, the filters in the WHERE, Run. Ink commits: the near-black button that writes to the database. Everything else is paper, rule and type. This file is the source of truth for that look (chosen 2026-10-10): the tokens above and the rules below.
+Rowkery is a database tool printed on paper: opaque sheets with hairline rules, where every control is a softly filled, familiar component and colour is spent on two things only. Orange marks what you are asking for: the statement under the caret, the filters in the WHERE, Run. Ink commits: the near-black button that writes to the database. Everything else is paper, rule and type. This file is the source of truth for that look (chosen 2026-10-10): the tokens above and the rules below.
 
 The window is dense the way a good ledger is dense: 30 px rows, mono data, tight labels, generous rules between groups rather than boxes around them. The work rests on sheets laid on a canvas (2026-10-24): the title bar and the schema column sit directly on the canvas, and the main column and the inspector are each a rounded sheet of opaque paper, set in from the window's edges. The sheets are still paper, not glass, and inside a sheet regions are still separated by rules, not boxed. Light and dark are the same sheet at two times of day, in the website's colours: white and neutral greys in light, #1a1a1a sheets with #212121 panels on a #121212 canvas and the site's cool greys in the dark, a step greyer than the site's #0a0a0a (2026-10-16); the theme follows macOS (Auto); the schema column's Appearance button cycles Auto / Light / Dark and is the only theme control.
 
 **Key Characteristics:**
 - Opaque paper sheets with rounded corners on a grey canvas, in black, grey and white; inside a sheet, structure is 1 px rules, never glass.
 - Ink commits, orange is what you ask for; nothing else is coloured except data meaning (ok, delete, key links, environments).
-- Borders mean controls: anything with a 1 px border is something you can press.
+- Fills mean controls: buttons, inputs, chips and pressable cards sit on a soft --fill wash with no border (2026-10-27).
 - 600-weight sans names places (connection, Results, Connect to start, a row's title); mono is data and SQL.
 - One hover highlight per list that glides from row to row.
 - Light and dark follow macOS; both are first-class.
@@ -219,7 +223,7 @@ The website's palette: white or black sheets, neutral grey rules, black or white
 - **Paper** (paper): the sheets themselves (the main column and the inspector column) and everything printed on them: grid, editor, modal sheets, cards.
 - **Panel** (panel): a half-step darker paper inside a sheet: the edits bar, the dark toast. The schema column and the inspector no longer use it; one sits on the canvas, the other is a paper sheet (2026-10-24).
 - **Bar** (bar): head and foot strips inside a sheet.
-- **Rule** (line) and **Control Rule** (line-control): 1 px structural rules and control borders. **Row Rule** (row-rule) rules grid rows; **Hover** (hover) is the glide highlight and keycap ground.
+- **Rule** (line) and **Control Rule** (line-control): 1 px structural rules; line-control is also the pressed chip's wash. **Fill** (fill, fill-hover): the translucent wash every control and card sits on, darker under the pointer; it reads on paper, panel and canvas alike. **Row Rule** (row-rule) rules grid rows; **Hover** (hover) is the glide highlight and keycap ground.
 - **Text** (text, text-2), **Mute** (mute), **Dim** (dim), **Faint** (faint): text from strongest to faintest. Faint is for disabled and decoration only, never words a person must read.
 
 ### Tertiary (meaning, not decoration)
@@ -276,7 +280,7 @@ Flat inside a sheet. Depth is tonal (canvas, paper, panel, bar) and ruled (1 px 
 "Sheet" names two things in this file: the inset sheets (the main and inspector columns, and the empty window) that rest on the canvas, and the modal sheets (Timings, Shortcuts, Connect an agent, Report, Notices) that float over the window as popover cards.
 
 ### Shadow Vocabulary
-- **Control** (`box-shadow: 0 1px 2px rgba(31, 27, 22, 0.12)`; dark `rgba(0, 0, 0, 0.4)`): bordered buttons and switch knobs.
+- **Control** (`box-shadow: 0 1px 2px rgba(31, 27, 22, 0.12)`; dark `rgba(0, 0, 0, 0.4)`): raised thumbs (the selected window pill, a selected schema row) and switch knobs.
 - **Sheet** (`--sheet-ring`: `box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04), 0 4px 16px -6px rgba(0,0,0,.06)`; dark `0 0 0 1px rgba(255,255,255,.07), 0 4px 16px -6px rgba(0,0,0,.6)`): the inset sheets on the canvas. The ring is depth, not a border (2026-10-24).
 - **Popover** (`box-shadow: 0 12px 32px -8px rgba(31, 27, 22, 0.25), 0 0 0 1px var(--line)`; dark `rgba(0,0,0,.45)` with --line2): menus, pickers, ⌘K, modal sheets.
 - **Scrim** (`--scrim`, rgba(31,27,22,.12) / rgba(0,0,0,.4)): the layer behind a modal sheet; it only catches the click away.
@@ -295,12 +299,12 @@ Rounded on a scale, from the keycap up to the sheet (2026-10-24). The CSS reads 
 - `--r-xl` **14px**: the inset sheets, the cards and grouped lists on Connect to start. ⌘K is a step rounder, 16px.
 - `--r-pill` **999px**: filter chips, env tags, the key strip, the toast.
 
-The window itself keeps its 12 px corner. Borders are 1 px. Rules are structure; borders are controls.
+The window itself keeps its 12 px corner. Rules are 1 px structure; controls are fills, not borders.
 
 ### Named Rules
 **The Concentric Rule.** A rounded thing held snugly inside another rounded thing takes the outer radius minus the padding between them, so the two curves run parallel. The Data / Structure switch is 10px outside with 3px padding, so its thumb is 7px; ⌘K is 16px with 6px padding, so its rows are 10px; a grouped list on Connect to start is 14px with 4px padding, so its rows are 10px. The rule is for snug nesting (padding under 8px). Something set a full 8 px inset away takes its own step on the scale and reads as its own shape: a sheet in the window, the edits bar in the main sheet (2026-10-24).
 
-**The Borders Mean Controls Rule.** A 1 px border around something says it can be pressed (buttons, inputs, cards on Connect to start, and the grouped lists there, every row of which connects). Regions inside a sheet are separated by rules, not boxed. A sheet's ring is not a border: it is depth, the sheet resting on the canvas.
+**The Fills Mean Controls Rule.** A soft --fill wash says something can be pressed or typed in (buttons, inputs, chips, cards on Connect to start, and the grouped lists there, every row of which connects). No grey border around a control: it read cheap (2026-10-27). Controls keep a transparent 1 px border so focus and drag states can colour it orange without moving anything. Regions inside a sheet are separated by rules, not boxed. A sheet's ring is not a border: it is depth, the sheet resting on the canvas.
 
 ## Components
 
@@ -308,21 +312,21 @@ The window itself keeps its 12 px corner. Borders are 1 px. Rules are structure;
 - **Shape:** `--r-md` (8px), 28px tall (Run 32px). Small icon buttons (24px and under) take `--r-sm` (6px).
 - **Run:** burnt orange fill, `--onfill` text, the run keys beside the word. Flat: no gradient, no glow. Hover orange-deep. On paper the prototype's white on orange is 3.6:1 for the 12.5px bold label (under 4.5:1); kept as drawn, the one known exception, and the dark theme's ink on orange is 5.3:1.
 - **Commit (ink):** ink fill, ink-fg text; disabled at 0.5–0.6 opacity.
-- **Bordered:** paper ground, 1px control rule, text colour; hover --hover. Ghost buttons drop the border.
+- **Filled:** --fill ground, no visible border, text colour; hover --fill-hover. Ghost buttons drop the fill.
 - **Focus:** a 2px --acc outline at 1px offset, from one zero-specificity rule; components may draw their own.
 
 ### Chips
-- **Filter chips:** 26px pills (`--r-pill`), orange wash, mono text you can read as SQL; × removes. "+ Filter ⌘F" is dashed.
+- **Filter chips:** 26px pills (`--r-pill`), orange wash, mono text you can read as SQL; × removes. "+ Filter ⌘F" is a --fill pill.
 - **Env tags:** a dot plus the word on its own wash (see the Text On Fills rule), `--r-pill`. **NULL:** a 9.5px uppercase chip in --mute on --hover, `--r-xs`.
 
 ### Cards / Containers
 - **Corner Style:** `--r-lg` (12px); on Connect to start, `--r-xl` (14px).
-- **Background:** paper on paper with a 1px control rule; Agents connection cards the same.
+- **Background:** --fill, no border; Agents connection cards the same, and a shared one is raised paper with the control shadow.
 - **Shadow Strategy:** none at rest.
-- **Connect to start** (2026-10-24): the four action cards are `--r-xl` with a 1px `--line2` border and 16px 18px padding. Each list (Your connections, Found on this Mac) is grouped on one paper card: `--r-xl`, a 1px `--line2` border, 4px padding, 44px rows at 10px (the Concentric Rule), sharing one glide hover.
+- **Connect to start** (2026-10-24): the four action cards are `--r-xl` on --fill and 16px 18px padding. Each list (Your connections, Found on this Mac) is grouped on one --fill card: `--r-xl`, 4px padding, 44px rows at 10px (the Concentric Rule), sharing one glide hover.
 
 ### Inputs / Fields
-- **Style:** paper ground, 1px control rule, `--r-md` (8px), 28–30px tall.
+- **Style:** --fill ground, no visible border, `--r-md` (8px), 28–30px tall; focus draws the orange ring.
 - **Focus:** the orange focus ring.
 
 ### Navigation
@@ -353,15 +357,16 @@ The posture penguin (Ready / Tilted, the original hand drawing) appears only at 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** separate regions inside a sheet with 1px --line rules and give controls a 1px --line2 border.
+- **Do** separate regions inside a sheet with 1px --line rules and set controls on --fill with no visible border.
 - **Do** keep orange to Run, the active statement, chips, switches that are on and the focus ring.
 - **Do** set the main and inspector columns as paper sheets on the canvas (`--r-xl`, the sheet ring, 8px insets and gap), and take every radius from the scale, nested ones by the Concentric Rule.
 - **Do** make the committing button ink.
 - **Do** check both themes: every colour is a token defined in light and dark; `scripts/paper-finish-browser-proof.mjs` fails on a light-only colour in dark.
-- **Do** keep small text (≤ 12.5px) at 4.5:1 on whatever it sits on; use --mute, not --dim, on --hover / --kbd / selected rows.
+- **Do** keep small text (≤ 12.5px) at 4.5:1 on whatever it sits on; use --mute, not --dim, on --hover / --kbd / selected rows, and on --fill over the panel.
 - **Do** make exits shorter than entries; keyboard-opened overlays appear at once; honour prefers-reduced-motion.
 
 ### Don't:
+- **Don't** draw a grey border around a button, input, chip or card; give it --fill.
 - **Don't** use glass, backdrop-filter or glow; the sheets and the canvas are opaque (⌘K's scrim is the one blur).
 - **Don't** hard-code a radius; take it from the `--r-*` scale, or from the Concentric Rule when one shape is nested snugly in another (the window pills, the Data / Structure switch and ⌘K are the named steps between).
 - **Don't** draw vertical rules between grid body cells.

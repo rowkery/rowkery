@@ -43,22 +43,22 @@
   margin-left: 4px;
 }
 
-/* Export: the title bar's bordered button, 26 px, after the count. */
+/* Export: the title bar's filled button, 26 px, after the count. */
 .results-export {
   flex-shrink: 0;
   height: 26px;
   padding: 0 10px;
-  border: 1px solid var(--line2);
+  border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: var(--fill);
   color: var(--text2);
   font: 500 11.5px var(--sans);
   cursor: pointer;
-  transition: border-color 0.18s ease;
+  transition: background-color 0.18s ease;
 }
 
 .results-export:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--fill-h);
 }
 
 .results-export:disabled {

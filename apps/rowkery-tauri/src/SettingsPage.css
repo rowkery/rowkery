@@ -187,11 +187,11 @@
   padding: 10px 14px;
   overflow: auto;
   border-radius: var(--r-md);
-  box-shadow: inset 0 0 0 1px var(--line);
   color: var(--text2);
   font: 12px/1.5 var(--sans);
   white-space: pre-wrap;
   animation: rise 0.2s var(--ease-out);
+  background: var(--fill);
 }
 
 .st-group {
