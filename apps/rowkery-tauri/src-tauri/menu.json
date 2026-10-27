@@ -110,7 +110,7 @@
       {
         "id": "refresh-schema",
         "title": "Refresh Schema",
-        "accelerator": "CmdOrCtrl+R"
+        "accelerator": null
       },
       {
         "id": "reconnect",
@@ -158,7 +158,7 @@
       {
         "id": "refresh-rows",
         "title": "Refresh Rows",
-        "accelerator": "CmdOrCtrl+Shift+R"
+        "accelerator": null
       },
       {
         "separator": true
@@ -192,6 +192,14 @@
         "id": "presenting",
         "title": "Start Presenting",
         "accelerator": null
+      },
+      {
+        "separator": true
+      },
+      {
+        "id": "refresh",
+        "title": "Refresh",
+        "accelerator": "CmdOrCtrl+R"
       },
       {
         "separator": true

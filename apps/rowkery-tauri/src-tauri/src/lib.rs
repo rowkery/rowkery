@@ -14,7 +14,7 @@ use rowkery_core::db::{
 };
 use rowkery_core::edits::{Change, EditTable};
 use rowkery_core::health::HealthReport;
-use rowkery_core::safety::SafetyHold;
+use rowkery_core::safety::{plain_read, Dialect, SafetyHold};
 use rowkery_core::secrets::ConnectionSecrets;
 use rowkery_core::CoreEvent;
 use serde::Serialize;
@@ -1477,6 +1477,17 @@ fn review_changes(
     rowkery_bridge::review_changes(kind, &table, &changes)
 }
 
+/// ⌘R on a query tab: whether its last statement only reads, so running it
+/// again changes nothing (core's `plain_read`).
+#[tauri::command]
+fn reads_only(engine: String, sql: String) -> bool {
+    let dialect = match engine.as_str() {
+        "postgres" => Dialect::Postgres,
+        _ => Dialect::Sqlite,
+    };
+    plain_read(&sql, dialect)
+}
+
 /// Commits staged edits as one transaction on the tab's session; held by
 /// Confirm writes until `confirmed` carries the SQL the user saw; refused
 /// when the window is no longer on `connection_id`, the edits' connection.
@@ -2265,6 +2276,7 @@ pub fn run(mut timings: Timings) {
             sql_file::cancel_sql_file,
             sql_file::forget_sql_file,
             list_connections,
+            reads_only,
             save_connection,
             delete_connection,
             forget_connection_secrets,

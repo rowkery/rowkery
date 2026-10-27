@@ -225,6 +225,10 @@ const toastText = () => page.$$eval("[data-toast] > span", (els) => els.map((e) 
 
 // 1. A table with a primary key: ↵ edits text; ↵ stages and selects the cell below.
 await openTable("kiosks");
+// Every row loaded with no filter: the sidebar counts 12 over the catalog's estimate of 40.
+const sidebarRows = (t) => page.locator(`${ws} [data-table="wallet.public.${t}"] [data-rows]`).first().getAttribute("data-rows", { timeout: 2000 }).catch(() => null);
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-table="wallet.public.kiosks"] [data-rows]`)?.getAttribute("data-rows") === "12", ws, { timeout: 3000 }).catch(() => {});
+check((await sidebarRows("kiosks")) === "12", `the sidebar counts the rows loaded: ${await sidebarRows("kiosks")}`);
 await pick(2, "city");
 await page.keyboard.press("Enter");
 check((await editorKind()) === "text", "↵ opens the text editor on city");

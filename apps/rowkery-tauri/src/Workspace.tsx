@@ -7,6 +7,7 @@ import {
   importCsv,
   previewCsv,
   copyAllResults,
+  readsOnly,
   reviewChanges,
   exportResults,
   browseTableSql,
@@ -78,7 +79,17 @@ import type { KeyColumns, QuickLookView } from "./gridTypes";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
 import { sqlStatementRanges, type CharRange } from "./sqlStatements";
-import { allTables, buildSchemaTree, findTable, isView, tableKey, takesImport, type SidebarTable } from "./schemaTree";
+import {
+  allTables,
+  buildSchemaTree,
+  findTable,
+  isView,
+  tableKey,
+  takesImport,
+  withSeenCounts,
+  type SeenCount,
+  type SidebarTable,
+} from "./schemaTree";
 import { prefetchOn } from "./prefetchSwitch";
 import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
@@ -977,6 +988,20 @@ export function Workspace({
   };
 
   const schemaTree = useMemo(() => buildSchemaTree(schema), [schema]);
+  /**
+   * Row counts this window saw itself, by table key: a table tab that loaded
+   * every row with no filter, an exact count (#) with none, a commit's
+   * inserts and deletes. The sidebar shows them over the catalog's estimate.
+   */
+  const [seenCounts, setSeenCounts] = useState<Record<string, SeenCount>>({});
+  useEffect(() => setSeenCounts({}), [activeId]);
+  const seenCountsRef = useRef(seenCounts);
+  seenCountsRef.current = seenCounts;
+  const sidebarTree = useMemo(() => withSeenCounts(schemaTree, seenCounts), [schemaTree, seenCounts]);
+  const seeCount = (key: string, rows: number) => {
+    const over = findTable(schemaTreeRef.current, key)?.rows ?? null;
+    setSeenCounts((prev) => (prev[key]?.rows === rows && prev[key]?.over === over ? prev : { ...prev, [key]: { rows, over } }));
+  };
   // Flattened once per schema load, when the browser is next idle (or at
   // once if ⌘K opens first); the palette only filters it.
   const tableIndex = useMemo(() => idleBuild(() => buildTableIndex(schemaTree)), [schemaTree]);
@@ -1297,6 +1322,13 @@ export function Workspace({
       formatMs(out.elapsed_ms),
     ].filter(Boolean);
     setTray(tab.id, { kind: "done", text: done.join(" · ") }, 1600);
+    // The sidebar's count moves with the commit; a reload that brings every row counts it exactly.
+    if (tab.tableKey && (out.inserted || out.deleted)) {
+      const key = tab.tableKey;
+      const was = seenCountsRef.current[key];
+      const before = was && was.over === (findTable(schemaTreeRef.current, key)?.rows ?? null) ? was.rows : findTable(schemaTreeRef.current, key)?.rows;
+      if (before != null) seeCount(key, Math.max(0, before + (out.inserted ?? 0) - (out.deleted ?? 0)));
+    }
     // The rows as the database has them now (new rows get their keys), when
     // the window is still on the connection they went to.
     if (activeIdRef.current === buffer.connectionId) void runTable({ ...tab, edits: undefined });
@@ -1910,19 +1942,13 @@ export function Workspace({
         closeActiveTabRef.current();
         return;
       }
-      // ⌘R (Ctrl+R): reload the schema, e.g. after a migration run elsewhere;
-      // on a window whose connection failed, connect again. ⌘E there opens
-      // the connection's settings with the field that failed marked.
-      // ⇧⌘R (Ctrl+Shift+R) on a table tab: its rows again.
-      if (mod && !e.altKey && e.shiftKey && e.code === "KeyR" && isTableTabRef.current) {
-        e.preventDefault();
-        refreshRowsRef.current();
-        return;
-      }
+      // ⌘R (Ctrl+R): the schema again (a migration run elsewhere) and the
+      // shown tab's rows; on a window whose connection failed, connect again.
+      // ⌘E there opens the connection's settings with the field that failed marked.
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyR") {
         e.preventDefault();
         if (failedRef.current) retryRef.current();
-        else refreshSchemaRef.current();
+        else refreshAllRef.current();
         return;
       }
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyE" && failedRef.current) {
@@ -3501,6 +3527,7 @@ export function Workspace({
         tab.filter?.trim() ? tab.filter : null,
       );
       setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value, counting: false } }));
+      if (!tab.filter?.trim() && tab.tableKey && value !== null) seeCount(tab.tableKey, value);
     } catch (e) {
       setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value: null, counting: false } }));
       flash(String(e));
@@ -3524,6 +3551,48 @@ export function Workspace({
 
   const refreshRowsRef = useRef(refreshRows);
   refreshRowsRef.current = refreshRows;
+
+  /**
+   * ⌘R: the schema again and the shown tab, as the database has it now: a
+   * table tab's rows, or a query tab's last statement when it only reads
+   * (core's `plain_read`). One that writes is never run again.
+   */
+  const refreshAll = async () => {
+    if (connState !== "connected") return;
+    const tab = activeTab;
+    const run = tab ? runsRef.current[tab.id] : undefined;
+    const sql = tab?.kind === "query" && run?.startedAt == null ? run?.ranSql : undefined;
+    if (isTableTab) refreshRows();
+    if (!sql || !tab || !activeConnection) return actions.refreshSchema(windowId, true);
+    const reads = await readsOnly(engineForConnection(activeConnection), sql).catch(() => false);
+    if (!reads) {
+      // Its own toast, not "Schema refreshed" over it.
+      actions.refreshSchema(windowId);
+      return showToast(`Schema refreshed · this query changes data, so ${commandKeys("run")} runs it again`);
+    }
+    actions.refreshSchema(windowId, true);
+    void onRun(sql, false, undefined, tab.id);
+  };
+  const refreshAllRef = useRef(refreshAll);
+  refreshAllRef.current = refreshAll;
+
+  // A table tab that loaded every row of its table, no filter, counted it.
+  const wholeTable =
+    isTableTab &&
+    !!activeTab?.tableKey &&
+    !activeTab.filter?.trim() &&
+    resultTableKey === activeTab.tableKey &&
+    runStartedAt === null &&
+    !activeRun.hasMore &&
+    !!result &&
+    !result.error &&
+    !result.capped &&
+    !atCap(result.rows.length);
+  const wholeRows = wholeTable ? result!.rows.length : null;
+  useEffect(() => {
+    if (wholeRows !== null && activeTab?.tableKey) seeCount(activeTab.tableKey, wholeRows);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wholeRows, activeTab?.tableKey, schemaTree]);
 
   const focusTableFilterRef = useRef(focusTableFilter);
   focusTableFilterRef.current = focusTableFilter;
@@ -4022,7 +4091,7 @@ export function Workspace({
     }
     switch (id) {
       case "refresh":
-        return activeTab && void runTable({ ...activeTab });
+        return void refreshAll();
       case "open-in-query":
         return void openInQueryTab();
       case "filter-rows":
@@ -4277,7 +4346,7 @@ export function Workspace({
         <Sidebar
           ref={filterRef}
           connectionId={activeId}
-          schemas={schemaTree}
+          schemas={sidebarTree}
           connecting={connState === "connecting"}
           failed={!!failure}
           selectedKey={activeTable?.key ?? null}

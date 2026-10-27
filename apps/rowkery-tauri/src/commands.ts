@@ -686,10 +686,18 @@ export const COMMANDS: Command[] = [
   { id: "next-window", title: "Next window", menuTitle: "Next Window", canRun: (s) => s.windowCount > 1 },
   { id: "prev-window", title: "Previous window", menuTitle: "Previous Window", canRun: (s) => s.windowCount > 1 },
   {
+    id: "refresh",
+    title: "Refresh",
+    menuTitle: "Refresh",
+    // The schema and the shown tab: a table tab's rows, a query tab's statement when it only reads.
+    chord: { mac: "Mod+R" },
+    synonyms: ["reload", "rerun"],
+    canRun: (s) => s.connected,
+  },
+  {
     id: "refresh-rows",
     title: "Refresh rows",
     menuTitle: "Refresh Rows",
-    chord: { mac: "Mod+Shift+R" },
     synonyms: ["reload", "rerun"],
     canRun: (s) => s.tableTab && s.connected && !s.running,
   },
@@ -697,13 +705,12 @@ export const COMMANDS: Command[] = [
     id: "refresh-schema",
     title: "Refresh schema",
     menuTitle: "Refresh Schema",
-    chord: { mac: "Mod+R" },
     canRun: (s) => s.connected,
   },
   {
     id: "retry-connect",
     title: "Retry connecting",
-    // ⌘R is Refresh schema while connected, Retry while failed.
+    // ⌘R is Refresh while connected, Retry while failed.
     chord: { mac: "Mod+R" },
     canRun: (s) => s.failed,
   },
@@ -892,7 +899,7 @@ export function eventMatches(
 
 /**
  * The command a keydown stands for under the active keymap: of the commands
- * on that chord, the first that can run now (⌘R: Refresh schema or Retry).
+ * on that chord, the first that can run now (⌘R: Refresh or Retry).
  */
 export function matchCommand(
   e: Parameters<typeof eventMatches>[0],
@@ -999,7 +1006,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   },
   {
     submenu: "View",
-    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-map", "show-sessions", "show-health", null, "theme:auto", "theme:light", "theme:dark"],
+    items: ["toggle-sidebar", "presenting", null, "refresh", null, "show-data", "show-structure", "show-map", "show-sessions", "show-health", null, "theme:auto", "theme:light", "theme:dark"],
   },
   {
     submenu: "Go",

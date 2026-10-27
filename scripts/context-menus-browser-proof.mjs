@@ -173,7 +173,7 @@ await page.waitForSelector(menu("tab"));
 const tabRows = await rows("tab");
 check(
   tabRows.join("|") ===
-    "keep=Keep open:~double-click|edit-sql=Edit SQL:Ctrl+E|refresh-rows=Refresh rows:Ctrl+Shift+R|new-tab=New query tab:|close=Close tab:Ctrl+W|close-others=Close other tabs:",
+    "keep=Keep open:~double-click|edit-sql=Edit SQL:Ctrl+E|refresh-rows=Refresh rows:|new-tab=New query tab:|close=Close tab:Ctrl+W|close-others=Close other tabs:",
   `preview table tab menu: ${tabRows.join(" · ")}`,
 );
 await page.screenshot({ path: `${OUT}/2-tab.png` });

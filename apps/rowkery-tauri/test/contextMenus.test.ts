@@ -144,7 +144,7 @@ describe("context menus", () => {
     expect(keys(panelRowMenu({ pinned: false, mac: true }))).toMatchObject({ structure: undefined, insert: "⌥↵" });
     expect(keys(tabMenu({ table: true, preview: false, tabCount: 2, closedTabs: 1 }))).toMatchObject({
       "edit-sql": "⌘E",
-      "refresh-rows": "⇧⌘R",
+      "refresh-rows": undefined,
       close: "⌘W",
       reopen: "⇧⌘T",
     });

@@ -22,10 +22,6 @@
         {
           "title": "Open a SQLite file…",
           "keys": "⌘O"
-        },
-        {
-          "title": "Refresh schema",
-          "keys": "⌘R"
         }
       ]
     },
@@ -55,10 +51,6 @@
         {
           "title": "Cancel query",
           "keys": "⌘."
-        },
-        {
-          "title": "Refresh rows",
-          "keys": "⇧⌘R"
         },
         {
           "title": "Export results…",
@@ -187,6 +179,10 @@
         {
           "title": "Hide sidebar",
           "keys": "⌘B"
+        },
+        {
+          "title": "Refresh",
+          "keys": "⌘R"
         },
         {
           "title": "Show data",
@@ -330,7 +326,7 @@
         },
         {
           "title": "Refresh schema",
-          "rowkery": "⌘R",
+          "rowkery": "",
           "keys": "⌥⌘Y"
         }
       ]
@@ -417,7 +413,7 @@
         },
         {
           "title": "Refresh Schema",
-          "keys": "⌘R"
+          "keys": ""
         },
         {
           "title": "Reconnect",
@@ -454,7 +450,7 @@
         },
         {
           "title": "Refresh Rows",
-          "keys": "⇧⌘R"
+          "keys": ""
         },
         {
           "title": "Copy Results as CSV",
@@ -480,6 +476,10 @@
         {
           "title": "Start Presenting",
           "keys": ""
+        },
+        {
+          "title": "Refresh",
+          "keys": "⌘R"
         },
         {
           "title": "Data",
@@ -745,12 +745,16 @@
       "keys": ""
     },
     {
+      "title": "Refresh",
+      "keys": "⌘R"
+    },
+    {
       "title": "Refresh rows",
-      "keys": "⇧⌘R"
+      "keys": ""
     },
     {
       "title": "Refresh schema",
-      "keys": "⌘R"
+      "keys": ""
     },
     {
       "title": "Retry connecting",

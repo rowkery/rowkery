@@ -140,7 +140,7 @@ await page.waitForSelector('[data-testid="conn-popover"]');
 await page.keyboard.press("Enter");
 await page.waitForSelector(`${visible}[data-conn-state="connected"]`);
 await page.waitForTimeout(300);
-check((await page.getAttribute(`${visible} [data-testid="sb-refresh"]`, "title")) === "Reload tables and columns  Ctrl+R", "refresh schema tooltip");
+check((await page.getAttribute(`${visible} [data-testid="sb-refresh"]`, "title")) === "Reload tables and columns", "refresh schema tooltip");
 
 // 2. A table COMMENT is the sidebar row's tooltip.
 const rowTitle = await page.getAttribute(`${visible} [data-table="wallet.public.wallet_tx"] [data-testid="sb-row-main"]`, "title");

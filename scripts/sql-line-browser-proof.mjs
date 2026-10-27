@@ -161,16 +161,16 @@ check((await lineText()) === "SELECT * FROM public.wallet_tx WHERE (status = 'pe
 await page.waitForFunction((sel) => document.querySelector(sel)?.textContent.includes("312 of 312"), `${line} [data-line-end]`);
 check(true, "a filtered result that fits reads 312 of 312 (no ≈)");
 
-// ↻ and ⇧⌘R run the first page again.
+// ↻ and ⌘R run the first page again.
 const browses = () => page.evaluate(() => window.__CALLS__.filter(([c]) => c === "run_query").length);
 let before = await browses();
 await page.click(`${line} [data-refresh-rows]`);
 await page.waitForFunction((n) => window.__CALLS__.filter(([c]) => c === "run_query").length > n, before);
 before = await browses();
 await page.click(`${ws} [data-row="1"] [data-col="0"]`);
-await page.keyboard.press("Control+Shift+R");
+await page.keyboard.press("Control+R");
 await page.waitForFunction((n) => window.__CALLS__.filter(([c]) => c === "run_query").length > n, before);
-check(true, "↻ and ⇧⌘R refresh the rows");
+check(true, "↻ and ⌘R refresh the rows");
 
 // All rows: no LIMIT in the SQL, but the page size still opens from the line.
 await page.click(`${line} [data-limit]`);
