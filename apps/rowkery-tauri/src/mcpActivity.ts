@@ -215,6 +215,26 @@ export function sinceLabel(at: number, now = Date.now()): string {
   return d.toLocaleDateString([], { day: "numeric", month: "short" });
 }
 
+/** Local midnight of the day `at` falls on: the key Activity groups calls by. */
+export function dayStart(at: number): number {
+  const d = new Date(at);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Activity's day headers: "Today", "Yesterday", "Mon 26 Oct", "Wed 31 Dec 2025". */
+export function dayLabel(at: number, now = Date.now()): string {
+  const d = new Date(at);
+  const today = new Date(now);
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (dayStart(at) === dayStart(now)) return "Today";
+  if (dayStart(at) === yesterday.getTime()) return "Yesterday";
+  const year = d.getFullYear() === today.getFullYear() ? "" : ` ${d.getFullYear()}`;
+  return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}${year}`;
+}
+
 /** "96 B", "1.1 KB", "3.4 MB". */
 export function bytesLabel(n: number): string {
   if (n < 1024) return `${n} B`;

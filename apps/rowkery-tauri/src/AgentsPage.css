@@ -1613,6 +1613,30 @@
   padding: 0 8px;
 }
 
+/* A day's calls under its name, which sticks to the list's top while they
+   scroll past and is pushed off by the next day's (rowkery/reports#20). */
+.ag-day-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 10px 4px;
+  background: var(--bg);
+  color: var(--mute);
+  font: 500 11.5px var(--sans);
+}
+
+.ag-day-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ↑ scrolls a row in below its day's header, not under it. */
+.ag-day-calls .ag-call {
+  scroll-margin-top: 32px;
+}
+
 .ag-calls-none {
   margin: 4px 10px;
 }

@@ -2,7 +2,7 @@
 // verdicts, per-connection counts, the window pills' recent set and masked hosts.
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { maskHost, mcpStats, mcpTagLive, recentConnections, verdictOf, type McpEntry } from "../src/mcpActivity";
+import { dayLabel, dayStart, maskHost, mcpStats, mcpTagLive, recentConnections, verdictOf, type McpEntry } from "../src/mcpActivity";
 
 const now = new Date(2026, 9, 8, 13, 10, 0).getTime();
 const at = (min: number) => now - min * 60_000;
@@ -67,4 +67,15 @@ test("a share's duration button reads back from its end time", async () => {
   assert.equal(shareDuration(undefined), "off");
   assert.equal(shareDuration(shareUntil("hour", now)), "hour");
   assert.equal(shareDuration(shareUntil("today", now)), "today");
+});
+
+test("Activity's day headers name today, yesterday, then the date", () => {
+  const now = new Date(2026, 9, 27, 0, 30).getTime();
+  assert.equal(dayLabel(new Date(2026, 9, 27, 0, 1).getTime(), now), "Today");
+  assert.equal(dayLabel(new Date(2026, 9, 26, 23, 59).getTime(), now), "Yesterday");
+  assert.equal(dayLabel(new Date(2026, 9, 25, 12).getTime(), now), "Sun 25 Oct");
+  assert.equal(dayLabel(new Date(2025, 11, 31, 12).getTime(), now), "Wed 31 Dec 2025");
+  // Across the new year, yesterday is still yesterday.
+  assert.equal(dayLabel(new Date(2025, 11, 31, 23).getTime(), new Date(2026, 0, 1, 8).getTime()), "Yesterday");
+  assert.equal(dayStart(new Date(2026, 9, 27, 18).getTime()), new Date(2026, 9, 27).getTime());
 });
