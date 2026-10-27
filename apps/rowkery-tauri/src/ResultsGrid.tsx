@@ -447,6 +447,8 @@ function ResultsGridView({
         if (!rows.isNull(target.row, col) && rows.text(target.row, col) === `<${columns[col]?.type_name}>`) return;
       }
       setQuickLook(false);
+      // A new row's cell: the loaded row selected before isn't what ⌫ or ⌘D act on now.
+      if ("insert" in target) setSel(null);
       setEditor({ target, col });
     },
     [editing, rows, columns, hiddenColumns],

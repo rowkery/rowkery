@@ -71,6 +71,8 @@ export interface CommandState {
   rowsSelected?: boolean;
   /** Every row under the grid's selection is marked for delete: ⌫ restores them. */
   rowsMarked?: boolean;
+  /** How many loaded rows the grid's selection holds. */
+  selectedRows?: number;
   /** The shown table tab has a staged change (or a Discard) ⌘Z can take back. */
   editUndoable?: boolean;
   /** …and one ⌘Z took back that ⇧⌘Z can put back. */
@@ -357,7 +359,8 @@ const zoneCommands = (): Command[] => [
     section: "Grid",
     chord: { mac: "Backspace" },
     palette: false,
-    canRun: (s) => s.tableTab && !s.rowsSelected,
+    // ⌫ in the grid is Delete row: COMMAND_ZONE (keyTracker.ts) tells them apart.
+    canRun: (s) => s.tableTab,
   },
 ];
 

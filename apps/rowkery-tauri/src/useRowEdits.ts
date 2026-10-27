@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { browseTable } from "./api";
 import type { KeyChoice } from "./CellEditor";
 import {
@@ -88,10 +88,13 @@ export function useRowEdits(o: Options) {
   const [selection, setSelection] = useState<{ rows: number[]; col: number }>({ rows: [], col: -1 });
   /**
    * Each tab's ⌘Z and ⇧⌘Z steps, in memory only. A step applies only while
-   * the tab's buffer is still the one it left: a commit, a Discard or a
-   * connection switch changed it some other way, and the steps go.
+   * the tab's buffer is still the one it left; anything else that changes
+   * the buffer (a commit, the Discard toast's Undo, a connection switch)
+   * calls `forget`, since an empty buffer can't tell those apart.
    */
   const history = useRef(new Map<number, { past: Step[]; future: Step[] }>());
+  // Another connection's steps never apply here.
+  useEffect(() => history.current.clear(), [o.connectionId]);
 
   const editors = useMemo((): (ColumnEditor | null)[] => {
     const byName = new Map((table?.columns ?? []).map((c) => [c.name, c]));
@@ -152,7 +155,7 @@ export function useRowEdits(o: Options) {
     const b = next(cur);
     const after = changeCount(b) ? b : undefined;
     // Nothing changed (Esc on a cell that wasn't edited): no step for ⌘Z to take back.
-    if (after === t.edits || JSON.stringify(after) === JSON.stringify(t.edits)) return;
+    if (b === cur || after === t.edits) return;
     const h = history.current.get(t.id) ?? { past: [], future: [] };
     history.current.set(t.id, { past: [...h.past, { before: t.edits, after }].slice(-UNDO_STEPS), future: [] });
     setEdits(t.id, after);
@@ -348,10 +351,14 @@ export function useRowEdits(o: Options) {
     insertRow,
     duplicateSelected: () => duplicate(selection.rows),
     /** ⌘Z can take back the tab's last staged change (or Discard), ⇧⌘Z put one back. */
-    undoable: !!lastDone && lastDone.after === tab?.edits,
-    redoable: !!lastUndone && lastUndone.before === tab?.edits,
+    undoable: rowsEditable && !!lastDone && lastDone.after === tab?.edits,
+    redoable: rowsEditable && !!lastUndone && lastUndone.before === tab?.edits,
     undo: () => step(true),
     redo: () => step(false),
+    /** The tab's buffer changed some other way (a commit, Undo in a toast), or the tab closed: its steps go. */
+    forget: (tabId: number) => history.current.delete(tabId),
+    /** How many loaded rows the selection holds (the cell menu's "Delete 3 rows"). */
+    selectedRows: selection.rows.length,
     /** Discard as a step of the tab's: ⌘Z in the grid brings `before` back. */
     noteDiscard: (tabId: number, before: EditBuffer) => {
       const h = history.current.get(tabId) ?? { past: [], future: [] };
