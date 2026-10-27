@@ -96,7 +96,7 @@ describe("findings", () => {
       item({
         table: "order_items",
         name: "order_items_order_id_fkey",
-        detail: { kind: "foreign_key_without_index", constraint: "order_items_order_id_fkey", columns: ["order_id"], references: "orders", rows: 120_000_000 },
+        detail: { kind: "foreign_key_without_index", constraint: "order_items_order_id_fkey", columns: ["order_id"], parent_schema: "public", parent_table: "orders", rows: 120_000_000 },
       }),
     ]);
     const t = findingText(fk as HealthCheck & { state: "found" }, report([fk]));

@@ -96,7 +96,7 @@ async fn guards_hold_against_a_real_postgres() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_e2e_secret, mcp_e2e_visible, mcp_e2e_big CASCADE;
+        "DROP TABLE IF EXISTS mcp_e2e_secret, mcp_e2e_visible, mcp_e2e_big, mcp_e2e_child CASCADE;
          DROP VIEW IF EXISTS mcp_e2e_secret_view;
          DROP FUNCTION IF EXISTS mcp_e2e_bump();
          DROP VIEW IF EXISTS mcp_e2e_peek_view;
@@ -384,6 +384,60 @@ async fn guards_hold_against_a_real_postgres() {
         .await
         .expect("end read");
 
+    // health: the report, with nothing about the hidden table (pg_stat_statements,
+    // when the server loads it, has the queries above). Made since the
+    // catalog was read: an index repeating the hidden table's key, and a
+    // shared table whose foreign key to it has no index.
+    session_execute(
+        &setup,
+        "CREATE INDEX mcp_e2e_secret_dup ON mcp_e2e_secret (id);
+         CREATE TABLE mcp_e2e_child (id int PRIMARY KEY, secret_id int REFERENCES mcp_e2e_secret);
+         INSERT INTO mcp_e2e_child SELECT g, NULL FROM generate_series(1, 20000) g;
+         ANALYZE mcp_e2e_child;",
+    )
+    .await
+    .expect("health fixtures");
+    let health = call(&mcp, "health", json!({ "connection": ID }))
+        .await
+        .expect("health");
+    let text = health.to_string();
+    let check = |kind: &str| {
+        health["checks"]
+            .as_array()
+            .and_then(|c| c.iter().find(|c| c["check"] == kind))
+            .cloned()
+            .unwrap_or(Json::Null)
+    };
+    let repeated = check("duplicate_indexes");
+    assert_eq!(repeated["state"], "found", "{text}");
+    assert!(repeated["left_out"].as_u64() >= Some(1), "{text}");
+    let fks = check("foreign_keys_without_index");
+    let child = fks["items"]
+        .as_array()
+        .and_then(|i| i.iter().find(|i| i["table"] == "mcp_e2e_child"))
+        .unwrap_or_else(|| panic!("the shared child's key: {text}"));
+    assert_eq!(
+        child["detail"]["parent_table"],
+        crate::health::UNSHARED_TABLE
+    );
+    assert_eq!(child["detail"]["constraint"], "(not shown)");
+    assert!(
+        health["server"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Postgres ")),
+        "{text}"
+    );
+    assert!(
+        matches!(
+            health["slow_queries"]["state"].as_str(),
+            Some("off" | "ranked")
+        ),
+        "{text}"
+    );
+    for leak in ["123-45-6789", "mcp_e2e_secret", "tok-visible"] {
+        assert!(!text.contains(leak), "{leak} in {text}");
+    }
+
     // Only ticked: the picked tables and nothing else, not even the
     // catalogs, a view over an unticked table, or another database.
     pg.mcp_access = Some(
@@ -452,7 +506,7 @@ async fn guards_hold_against_a_real_postgres() {
     let _ = session_execute(
         &setup,
         "DROP VIEW mcp_e2e_secret_view, mcp_e2e_peek_view; DROP DOMAIN mcp_e2e_dom;
-         DROP TABLE mcp_e2e_secret, mcp_e2e_visible, mcp_e2e_big, mcp_e2e_events;
+         DROP TABLE mcp_e2e_child, mcp_e2e_secret, mcp_e2e_visible, mcp_e2e_big, mcp_e2e_events;
          DROP FUNCTION mcp_e2e_bump(), mcp_e2e_peek(), mcp_e2e_peek_folded(), mcp_e2e_eq(int, int) CASCADE;",
     )
     .await;

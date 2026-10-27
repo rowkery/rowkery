@@ -1132,7 +1132,7 @@ export type HealthDetail =
   | { kind: "replication_slot"; slot_type: string; wal_bytes: number }
   | { kind: "unused_index" }
   | { kind: "duplicate_index"; covered_by: string }
-  | { kind: "foreign_key_without_index"; constraint: string; columns: string[]; references: string; rows: number | null }
+  | { kind: "foreign_key_without_index"; constraint: string; columns: string[]; parent_schema: string | null; parent_table: string; rows: number | null }
   | { kind: "dead_rows"; dead: number; live: number; vacuumed_secs_ago: number | null }
   | { kind: "never_analyzed"; rows: number | null }
   | { kind: "long_transaction"; pid: number; user: string | null; idle_secs: number; xact_secs: number | null }

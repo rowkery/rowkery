@@ -264,9 +264,10 @@ export function findingText(check: HealthCheck & { state: "found" }, report: Hea
     case "foreign_keys_without_index": {
       const d = one?.detail;
       if (one && d?.kind === "foreign_key_without_index") {
+        const parent = tableName({ ...one, schema: d.parent_schema, table: d.parent_table });
         return {
           title: `${tableName(one)}.${d.columns.join(", ")} has no index`,
-          line: `foreign key · each delete on ${d.references.replace(/^public\./, "")} reads ${d.rows === null ? "the whole table" : rowsText(d.rows)}`,
+          line: `foreign key · each delete on ${parent} reads ${d.rows === null ? "the whole table" : rowsText(d.rows)}`,
           weight: rowsText(d.rows),
         };
       }

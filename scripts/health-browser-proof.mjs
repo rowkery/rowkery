@@ -94,7 +94,7 @@ function stubTauri() {
       fine("transaction_age", "soon"),
       fine("replication_slots", "soon"),
       found("foreign_keys_without_index", "slow", "The row count is the planner's estimate.", [
-        item({ table: "order_items", name: "order_items_order_id_fkey", detail: { kind: "foreign_key_without_index", constraint: "order_items_order_id_fkey", columns: ["order_id"], references: "public.orders", rows: 120_000_000 }, fix: "CREATE INDEX CONCURRENTLY ON public.order_items (order_id);" }),
+        item({ table: "order_items", name: "order_items_order_id_fkey", detail: { kind: "foreign_key_without_index", constraint: "order_items_order_id_fkey", columns: ["order_id"], parent_schema: "public", parent_table: "orders", rows: 120_000_000 }, fix: "CREATE INDEX CONCURRENTLY ON public.order_items (order_id);" }),
       ]),
       found("dead_rows", "upkeep", "Row counts are estimates kept by the statistics collector.", [
         item({ table: "events", bytes: 12.6 * GB, detail: { kind: "dead_rows", dead: 41_000_000, live: 59_000_000, vacuumed_secs_ago: 9 * 86_400 }, fix: "VACUUM (ANALYZE) public.events;" }),

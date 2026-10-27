@@ -1,5 +1,5 @@
 {
-  "instructions": "Rowkery gives read-only access to the database connections the user shared from the Rowkery app. Start with list_connections. Before writing a query, look at the tables with list_tables or search_schema and call describe_table for each table you will use, so you know its columns and indexes. Filter on indexed columns, aggregate in SQL (count, sum, group by) instead of pulling rows, and ask for no more rows than you will read. Queries are single SELECT statements; results are capped (200 rows by default, 1000 at most) and a plan that reads a table of more than 100,000 rows end to end is refused, so rewrite it with an indexed WHERE. explain shows the plan without running the query. Columns the user marked sensitive come back masked (masked: and ten hex digits; the same value always gives the same stand-in). You can return or count a masked column (on SQLite only return it) but not filter, sort, group or join on it; describe_table lists them. For a slow or stuck database, sessions shows what's running, what each session waits on and who blocks whom. Queries never change data: the session is read-only. To change data, call propose_change with the INSERT, UPDATE or DELETE statements and why: the user reviews a dry run in Rowkery and commits or rejects it, and check_proposal tells you which. Don't send a rejected change again. Before a change, describe_table shows the columns, defaults, keys and enum labels; don't query existing rows just to see example values. Read only what the change depends on, such as the row it updates or an id it references, and select only the columns you need.",
+  "instructions": "Rowkery gives read-only access to the database connections the user shared from the Rowkery app. Start with list_connections. Before writing a query, look at the tables with list_tables or search_schema and call describe_table for each table you will use, so you know its columns and indexes. Filter on indexed columns, aggregate in SQL (count, sum, group by) instead of pulling rows, and ask for no more rows than you will read. Queries are single SELECT statements; results are capped (200 rows by default, 1000 at most) and a plan that reads a table of more than 100,000 rows end to end is refused, so rewrite it with an indexed WHERE. explain shows the plan without running the query. Columns the user marked sensitive come back masked (masked: and ten hex digits; the same value always gives the same stand-in). You can return or count a masked column (on SQLite only return it) but not filter, sort, group or join on it; describe_table lists them. For a slow or stuck database, sessions shows what's running, what each session waits on and who blocks whom, and health shows what will hurt soon (unused or missing indexes, dead rows, ids running out, the slowest queries). Queries never change data: the session is read-only. To change data, call propose_change with the INSERT, UPDATE or DELETE statements and why: the user reviews a dry run in Rowkery and commits or rejects it, and check_proposal tells you which. Don't send a rejected change again. Before a change, describe_table shows the columns, defaults, keys and enum labels; don't query existing rows just to see example values. Read only what the change depends on, such as the row it updates or an id it references, and select only the columns you need.",
   "limits": {
     "big_table_rows": 100000,
     "cell_chars": 200,
@@ -231,6 +231,29 @@
         }
       ],
       "name": "sessions",
+      "read_only": true
+    },
+    {
+      "description": "What will hurt soon on the database, from its catalog and statistics (on Postgres no table is read; on SQLite it walks the file's pages): IDs running out, transaction age, inactive replication slots, unused and repeated indexes, foreign keys with no index, dead rows, never-analyzed tables, long idle transactions, and on Postgres the slowest queries from pg_stat_statements. Each finding has its numbers, how far to trust it and the SQL that would fix it, which you can't run: tell the user. Only shared tables are covered: left_out counts a check's findings on tables not shared, and a foreign key's unshared parent is not named. Query text has its values replaced by ?.",
+      "inputs": [
+        {
+          "description": "Connection id or name from list_connections",
+          "maximum": null,
+          "minimum": null,
+          "name": "connection",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Postgres database (default: the connection's own)",
+          "maximum": null,
+          "minimum": null,
+          "name": "database",
+          "required": false,
+          "type": "string"
+        }
+      ],
+      "name": "health",
       "read_only": true
     },
     {

@@ -1274,6 +1274,7 @@ const TOOLS: [string, string][] = [
   ["explain", "Query plan without running it"],
   ["query", "Run one read-only SELECT"],
   ["sessions", "What's running and who blocks whom"],
+  ["health", "Unused indexes, dead rows, slowest queries"],
   ["propose_change", "Send an INSERT, UPDATE or DELETE for you to review"],
   ["check_proposal", "Whether you committed or rejected it"],
 ];

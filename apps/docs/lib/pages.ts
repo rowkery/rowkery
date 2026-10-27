@@ -36,6 +36,7 @@ export const GROUPS: DocGroup[] = [
       { href: "/importing-csv/", title: "Importing a CSV", file: "importing-csv/page.mdx" },
       { href: "/query-plans/", title: "Query plans", file: "query-plans/page.mdx" },
       { href: "/sessions/", title: "Sessions", file: "sessions/page.mdx" },
+      { href: "/health/", title: "Health", file: "health/page.mdx" },
     ],
   },
   {
