@@ -233,6 +233,8 @@ export type ConnectionRecord =
       mcp_until?: number | null;
       /** Don't keep 24 h samples of what MCP calls returned. */
       mcp_samples_off?: boolean;
+      /** Longest one agent query may run, in seconds (`MCP_TIMEOUTS`); unset is 10. */
+      mcp_timeout_s?: number | null;
       /** Databases and tables shared with agents (mcpAccess.ts); unset on connections saved before it. */
       mcp_access?: McpAccess | null;
       /** Sensitive columns per database, as `schema.table.column`: agents get stand-ins. */
@@ -262,6 +264,8 @@ export type ConnectionRecord =
       mcp_until?: number | null;
       /** Don't keep 24 h samples of what MCP calls returned. */
       mcp_samples_off?: boolean;
+      /** Longest one agent query may run, in seconds (`MCP_TIMEOUTS`); unset is 10. */
+      mcp_timeout_s?: number | null;
       /** Databases and tables shared with agents (mcpAccess.ts); unset on connections saved before it. */
       mcp_access?: McpAccess | null;
       /** Sensitive columns per database, as `schema.table.column`: agents get stand-ins. */

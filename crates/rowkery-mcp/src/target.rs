@@ -16,10 +16,14 @@ use rowkery_core::db::{Column, Driver, DriverError, SchemaCatalog, Value};
 use rowkery_core::health::HealthReport;
 use rowkery_core::safety::SafeMode;
 
-use crate::guard::STATEMENT_TIMEOUT;
+/// Longest a call waits to open a session.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Longest any one call waits on the database, connecting included.
-const CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest a call waits on a session once open: the statement limit, and
+/// time beside it for the plan check and the guards.
+fn call_timeout(statement: Duration) -> Duration {
+    statement + Duration::from_secs(10)
+}
 
 /// A shared connection with the database a call asked for.
 pub struct Target {
@@ -35,6 +39,11 @@ impl Target {
 
     pub(crate) fn key(&self) -> (String, String) {
         (self.id().to_string(), self.database.clone())
+    }
+
+    /// The limit on one statement here ([`crate::guard::statement_timeout`]).
+    pub fn timeout(&self) -> Duration {
+        crate::guard::statement_timeout(&self.record)
     }
 }
 
@@ -113,10 +122,10 @@ pub struct Read<S> {
 /// the session sends ahead of each statement itself. Sent again ahead of
 /// each call, in the same round trip, so a `set_config` in an earlier
 /// SELECT can't loosen it. Pruning is put back after [`Store::read_unpruned`].
-fn guards() -> String {
+fn guards(timeout: Duration) -> String {
     format!(
         "SET statement_timeout = '{}s'; RESET enable_partition_pruning",
-        STATEMENT_TIMEOUT.as_secs()
+        timeout.as_secs()
     )
 }
 
@@ -142,11 +151,11 @@ pub struct Store {
     adopted: Option<(String, String)>,
 }
 
-fn message(err: DriverError) -> String {
+fn message(err: DriverError, timeout: Duration) -> String {
     match err {
         DriverError::Cancelled => format!(
             "Stopped after {} s (statement timeout). Filter on an indexed column or aggregate less.",
-            STATEMENT_TIMEOUT.as_secs()
+            timeout.as_secs()
         ),
         other => other.to_string(),
     }
@@ -155,22 +164,22 @@ fn message(err: DriverError) -> String {
 /// Opens the file with writes refused (`PRAGMA query_only`).
 fn open_sqlite(path: &str) -> Result<SqliteDriver, String> {
     let mut driver = SqliteDriver::new(path).read_only(true);
-    driver.connect().map_err(message)?;
+    driver.connect().map_err(|e| e.to_string())?;
     Ok(driver)
 }
 
 /// Each health check's own limit: the dozen of them run one after another
-/// within [`CALL_TIMEOUT`], so a slow one is "unavailable" on its own.
+/// within the call's timeout, so a slow one is "unavailable" on its own.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// The file's health on a read-only connection, interrupted after the
 /// timeout like [`sqlite_read`]: sizing walks the file's pages.
-fn sqlite_health(path: &str) -> Result<HealthReport, String> {
+fn sqlite_health(path: &str, timeout: Duration) -> Result<HealthReport, String> {
     let mut driver = open_sqlite(path)?;
     let interrupt = driver.take_interrupt_handle();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let watchdog = std::thread::spawn(move || {
-        if done_rx.recv_timeout(STATEMENT_TIMEOUT).is_err() {
+        if done_rx.recv_timeout(timeout).is_err() {
             if let Some(handle) = interrupt {
                 handle.interrupt();
             }
@@ -179,12 +188,18 @@ fn sqlite_health(path: &str) -> Result<HealthReport, String> {
     let report = driver.health();
     let _ = done_tx.send(());
     let _ = watchdog.join();
-    report.map_err(message)
+    report.map_err(|e| message(e, timeout))
 }
 
 /// Runs `sql` on a read-only SQLite connection, interrupted after the timeout,
 /// handing each row to `each` until it wants no more.
-fn sqlite_read<S, F>(path: &str, sql: &str, mut state: S, mut each: F) -> Result<Read<S>, String>
+fn sqlite_read<S, F>(
+    path: &str,
+    sql: &str,
+    timeout: Duration,
+    mut state: S,
+    mut each: F,
+) -> Result<Read<S>, String>
 where
     F: FnMut(&mut S, Vec<Value>) -> bool,
 {
@@ -192,7 +207,7 @@ where
     let interrupt = driver.take_interrupt_handle();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let watchdog = std::thread::spawn(move || {
-        if done_rx.recv_timeout(STATEMENT_TIMEOUT).is_err() {
+        if done_rx.recv_timeout(timeout).is_err() {
             if let Some(handle) = interrupt {
                 handle.interrupt();
             }
@@ -216,7 +231,7 @@ where
     let _ = done_tx.send(());
     let _ = watchdog.join();
     if !stopped {
-        result.map_err(message)?;
+        result.map_err(|e| message(e, timeout))?;
     }
     Ok(Read {
         columns,
@@ -253,10 +268,11 @@ impl Store {
         }
         if !self.sessions.contains_key(&key) {
             let config = read_only(pg, &target.database);
-            let session = tokio::time::timeout(CALL_TIMEOUT, open_session(pg.id.clone(), config))
-                .await
-                .map_err(|_| "Timed out connecting.".to_string())?
-                .map_err(message)?;
+            let session =
+                tokio::time::timeout(CONNECT_TIMEOUT, open_session(pg.id.clone(), config))
+                    .await
+                    .map_err(|_| "Timed out connecting.".to_string())?
+                    .map_err(|e| e.to_string())?;
             self.sessions.insert(key.clone(), session);
             self.left_open.remove(&key);
         }
@@ -266,11 +282,11 @@ impl Store {
     /// [`guards`], with pruning turned off when `unpruned`, after rolling
     /// back a transaction a call that stopped early left open, when this
     /// statement isn't inside a call's own.
-    fn guards_for(&self, key: &(String, String), unpruned: bool) -> String {
+    fn guards_for(&self, key: &(String, String), timeout: Duration, unpruned: bool) -> String {
         let guards = if self.open.as_ref() != Some(key) && self.left_open.contains(key) {
-            format!("ROLLBACK; {}", guards())
+            format!("ROLLBACK; {}", guards(timeout))
         } else {
-            guards()
+            guards(timeout)
         };
         if unpruned {
             format!("{guards}; SET enable_partition_pruning = off")
@@ -344,7 +360,7 @@ impl Store {
     }
 
     /// Runs `call` on the target's session with [`guards`] sent ahead in the
-    /// same round trip, within [`CALL_TIMEOUT`]. A session that doesn't
+    /// same round trip, within [`call_timeout`]. A session that doesn't
     /// answer in time has its statement cancelled and is dropped, as is one
     /// that refuses the guards (what ran beside them is thrown away).
     async fn guarded<T>(
@@ -373,7 +389,7 @@ impl Store {
         let guards = if adopted {
             unpruned.then(|| "SET LOCAL enable_partition_pruning = off".to_string())
         } else {
-            Some(self.guards_for(&key, unpruned))
+            Some(self.guards_for(&key, target.timeout(), unpruned))
         };
         let session = self.sessions.get(&key).expect("session");
         let cancel = (session.cancel_token.clone(), session.cancel_via.clone());
@@ -388,7 +404,7 @@ impl Store {
             }
             (set, out)
         };
-        let (set, out) = match tokio::time::timeout(CALL_TIMEOUT, run).await {
+        let (set, out) = match tokio::time::timeout(call_timeout(target.timeout()), run).await {
             Ok(done) => done,
             Err(_) => {
                 let _ =
@@ -399,13 +415,13 @@ impl Store {
         };
         if let Err(err) = set {
             self.sessions.remove(&key);
-            return Err(message(err));
+            return Err(message(err, target.timeout()));
         }
         // A transaction an earlier call left open is closed now.
         if guards.as_deref().is_some_and(|g| g.starts_with("ROLLBACK")) {
             self.left_open.remove(&key);
         }
-        out.map_err(message)
+        out.map_err(|e| message(e, target.timeout()))
     }
 
     /// Holds nothing worth keeping: no session, no cached schema.
@@ -441,7 +457,7 @@ impl Store {
             let catalog = match &target.record {
                 ConnectionRecord::Sqlite(sqlite) => {
                     let mut driver = open_sqlite(&sqlite.path)?;
-                    driver.introspect_catalog().map_err(message)?
+                    driver.introspect_catalog().map_err(|e| e.to_string())?
                 }
                 ConnectionRecord::Postgres(_) => {
                     self.guarded(target, "Timed out reading the schema.", async |s| {
@@ -478,8 +494,8 @@ impl Store {
     pub async fn health(&mut self, target: &Target) -> Result<HealthReport, String> {
         match &target.record {
             ConnectionRecord::Sqlite(sqlite) => {
-                let path = sqlite.path.clone();
-                tokio::task::spawn_blocking(move || sqlite_health(&path))
+                let (path, timeout) = (sqlite.path.clone(), target.timeout());
+                tokio::task::spawn_blocking(move || sqlite_health(&path, timeout))
                     .await
                     .map_err(|e| e.to_string())?
             }
@@ -597,8 +613,8 @@ impl Store {
         match &target.record {
             ConnectionRecord::Sqlite(sqlite) => {
                 let path = sqlite.path.clone();
-                let sql = sql.to_string();
-                tokio::task::spawn_blocking(move || sqlite_read(&path, &sql, state, each))
+                let (sql, timeout) = (sql.to_string(), target.timeout());
+                tokio::task::spawn_blocking(move || sqlite_read(&path, &sql, timeout, state, each))
                     .await
                     .map_err(|e| e.to_string())?
             }
@@ -933,6 +949,7 @@ mod tests {
         let read = sqlite_read(
             path.to_str().unwrap(),
             "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c",
+            crate::guard::STATEMENT_TIMEOUT,
             0usize,
             |seen, _| {
                 *seen += 1;
@@ -942,8 +959,35 @@ mod tests {
         .unwrap();
         assert_eq!(read.state, 3);
         assert_eq!(read.columns.len(), 1);
-        assert!(started.elapsed() < STATEMENT_TIMEOUT);
+        assert!(started.elapsed() < crate::guard::STATEMENT_TIMEOUT);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sqlite_read_stops_at_the_timeout_it_is_given() {
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let started = Instant::now();
+        let err = sqlite_read(
+            path.to_str().unwrap(),
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+            Duration::from_secs(1),
+            (),
+            |_, _| true,
+        )
+        .err()
+        .expect("interrupted");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(err.starts_with("Stopped after 1 s"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_guards_set_the_connections_limit() {
+        assert!(guards(Duration::from_secs(300)).starts_with("SET statement_timeout = '300s';"));
+        assert!(call_timeout(Duration::from_secs(300)) > Duration::from_secs(300));
     }
 
     #[test]

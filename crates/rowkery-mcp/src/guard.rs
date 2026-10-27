@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use rowkery_core::connections::ConnectionRecord;
 use rowkery_core::safety::{check_sql, Dialect, StatementKind};
 use rowkery_core::Value;
 use serde_json::Value as Json;
@@ -11,8 +12,12 @@ use serde_json::Value as Json;
 pub const DEFAULT_ROWS: usize = 200;
 /// Most rows a query may return, whatever the caller asks for.
 pub const MAX_ROWS: usize = 1000;
-/// Server-side limit on one statement.
+/// Server-side limit on one statement, unless the connection gives agents
+/// longer (Settings › Agents).
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The statement limits a connection may give agents, in seconds; the
+/// first is [`STATEMENT_TIMEOUT`].
+pub const STATEMENT_TIMEOUTS_S: [u64; 4] = [10, 30, 60, 300];
 /// Tables with more rows than this may not be read end to end.
 pub const BIG_TABLE_ROWS: u64 = 100_000;
 /// Longer text cells are cut to this many characters.
@@ -23,6 +28,16 @@ pub const PAYLOAD_BYTES: usize = 64 * 1024;
 /// or many joins, can make a plan far bigger than its SQL (about 26 bytes
 /// per partition and column), and parsed it takes several times its text.
 pub const PLAN_BYTES: usize = 8 * 1024 * 1024;
+
+/// The connection's limit on one agent statement: the one it saved when
+/// that's one of [`STATEMENT_TIMEOUTS_S`], else [`STATEMENT_TIMEOUT`], so a
+/// hand-edited config can't give agents longer than the app offers.
+pub fn statement_timeout(record: &ConnectionRecord) -> Duration {
+    match record.mcp_timeout_s() {
+        Some(s) if STATEMENT_TIMEOUTS_S.contains(&s) => Duration::from_secs(s),
+        _ => STATEMENT_TIMEOUT,
+    }
+}
 
 /// The JSON plan in `EXPLAIN (FORMAT JSON …)`'s one cell, and its text;
 /// refused past [`PLAN_BYTES`] before it's parsed.

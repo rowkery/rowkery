@@ -15,12 +15,14 @@ import { GESTURES, gestureKeys, keysFor } from "./commands";
 import { McpConnectSheet } from "./McpConnectSheet";
 import {
   MCP_LIMITS,
+  MCP_TIMEOUTS,
   bytesLabel,
   clearMcp,
   maskHost,
   mcpSample,
   mcpShared,
   mcpStats,
+  secondsLabel,
   shareDuration,
   shareUntil,
   sinceLabel,
@@ -67,6 +69,7 @@ export function AgentSharing({
   fillEditing,
   onEdit,
   onSetAllow,
+  onSetTimeout,
   onStopAll,
   onSetAccess,
   onSetMasked,
@@ -81,6 +84,8 @@ export function AgentSharing({
   fillEditing?: boolean;
   onEdit: (connectionId: string | null) => void;
   onSetAllow: (connectionId: string, allow: boolean, until?: number | null) => void;
+  /** The longest one agent query may run on the connection, in seconds. */
+  onSetTimeout: (connectionId: string, seconds: number) => void;
   /** Stop sharing every shared connection at once. */
   onStopAll: () => void;
   onSetAccess: (connectionId: string, access: McpAccess) => void;
@@ -159,6 +164,7 @@ export function AgentSharing({
             editing={editing}
             onEdit={onEdit}
             onSetAllow={onSetAllow}
+            onSetTimeout={onSetTimeout}
             onStopAll={onStopAll}
           />
           <div className="ag-log-upkeep" data-testid="ag-log-upkeep">
@@ -307,7 +313,7 @@ export function CallDetail({
               <dd>
                 {[
                   scope.max_rows !== undefined ? `${scope.max_rows.toLocaleString()} rows` : null,
-                  `${scope.timeout_s ?? L.timeoutSeconds} s`,
+                  secondsLabel(scope.timeout_s ?? L.timeoutSeconds),
                   "read-only",
                 ]
                   .filter(Boolean)
@@ -481,6 +487,7 @@ function AccessColumn({
   editing,
   onEdit,
   onSetAllow,
+  onSetTimeout,
   onStopAll,
 }: {
   connections: ConnectionRecord[];
@@ -491,6 +498,7 @@ function AccessColumn({
   editing: string | null;
   onEdit: (connectionId: string | null) => void;
   onSetAllow: (connectionId: string, allow: boolean, until?: number | null) => void;
+  onSetTimeout: (connectionId: string, seconds: number) => void;
   onStopAll: () => void;
 }) {
   // Shared first, then by name; the order is fixed while the page is up, so
@@ -531,6 +539,7 @@ function AccessColumn({
             switchRef={i === 0 ? firstSwitch : undefined}
             onEdit={onEdit}
             onSetAllow={onSetAllow}
+            onSetTimeout={onSetTimeout}
           />
         ))}
       </div>
@@ -553,6 +562,7 @@ function AccessCard({
   switchRef,
   onEdit,
   onSetAllow,
+  onSetTimeout,
 }: {
   conn: ConnectionRecord;
   stats: { today: number; refused: number; last: number | null };
@@ -561,8 +571,10 @@ function AccessCard({
   switchRef?: Ref<HTMLInputElement>;
   onEdit: (connectionId: string | null) => void;
   onSetAllow: (connectionId: string, allow: boolean, until?: number | null) => void;
+  onSetTimeout: (connectionId: string, seconds: number) => void;
 }) {
   const shared = mcpShared(c);
+  const timeout = c.mcp_timeout_s ?? MCP_TIMEOUTS[0];
   const ended = !!c.allow_mcp && !shared;
   const duration = shareDuration(c.mcp_until);
   const summary = accessSummary(c);
@@ -648,6 +660,23 @@ function AccessCard({
               </button>
             ))}
           </div>
+          <span className="mcp-cn-limit">
+            <span className="mcp-cn-label">Query limit</span>
+            <div className="mcp-mini-seg" role="radiogroup" aria-label={`Longest agent query on ${c.name}`}>
+            {MCP_TIMEOUTS.map((s) => (
+              <button
+                key={s}
+                type="button"
+                role="radio"
+                data-mcp-timeout={s}
+                aria-checked={timeout === s}
+                onClick={() => timeout !== s && onSetTimeout(c.id, s)}
+              >
+                {secondsLabel(s)}
+              </button>
+            ))}
+            </div>
+          </span>
         </div>
       )}
     </div>
@@ -1320,7 +1349,8 @@ function CanDoSheet({ host, onClose }: { host: string | null; onClose: () => voi
               <li>
                 <Icon name="clock" />
                 <span>
-                  <b>Run for {L.timeoutSeconds} seconds</b> at most per query
+                  <b>Run for {L.timeoutSeconds} seconds</b> per query (up to {MCP_TIMEOUTS[MCP_TIMEOUTS.length - 1] / 60} minutes where
+                  you allow it)
                 </span>
               </li>
               <li>

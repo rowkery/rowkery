@@ -93,7 +93,7 @@ An agent never gets a connection that can write. It reads through the checks bel
 ### How much and how long
 
 - **Rows.** 200 rows unless the agent asks for more, 1,000 at most. Text over 200 characters is cut, and an answer stops at 64 KB.
-- **Time.** Each statement is stopped after 10 seconds.
+- **Time.** Each statement is stopped after 10 seconds, or after the longer query limit you chose for the connection (30 s, 1 min or 5 min at most).
 - **Big tables.** On Postgres, a query whose plan reads a table of more than 100,000 rows from start to end is refused, so an agent can't load a production server with a full scan. A plan over 8 MB is refused rather than checked.
 
 ### Sensitive columns

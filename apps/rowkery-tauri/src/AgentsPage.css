@@ -720,9 +720,25 @@
 
 .mcp-cn-row {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 4px;
+  /* The first button's edge lines up with the lines above, past the
+     track's 2px padding. */
+  margin-left: -2px;
+}
+
+.mcp-cn-limit {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.mcp-cn-label {
+  color: var(--mute);
+  font-size: 12px;
 }
 
 .mcp-cn-stats {

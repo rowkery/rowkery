@@ -303,3 +303,11 @@ export const MCP_LIMITS = {
   timeoutSeconds: 10,
   bigTableRows: 100_000,
 };
+
+/** The query limits a connection can give agents (Settings › Agents), in seconds; the first is the default. */
+export const MCP_TIMEOUTS = [10, 30, 60, 300] as const;
+
+/** "10 s", "1 min". */
+export function secondsLabel(s: number): string {
+  return s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`;
+}

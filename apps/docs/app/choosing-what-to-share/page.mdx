@@ -55,6 +55,7 @@ A toast confirms each change, such as "Shared with agents · storefront". The MC
 | Second line | What is shared: the databases, how many tables, and "until 12:30" when there is a time limit. "Not shared" otherwise, or "Sharing ended 12:30" once a time limit has passed |
 | Third line | Calls today, how many were refused, and when an agent last read it |
 | Until turned off, 1 hour, Today | How long to share, while it is shared |
+| Query limit | How long one agent query may run on it: 10 s, 30 s, 1 min or 5 min |
 
 Click a shared card, or press <kbd>↵</kbd> or <kbd>Space</kbd> on it, to open its Edit access.
 
@@ -67,6 +68,10 @@ Click a shared card, or press <kbd>↵</kbd> or <kbd>Space</kbd> on it, to open 
 | Today | At midnight, your Mac's time |
 
 Choosing **1 hour** again starts a fresh hour. When the time is up, Rowkery shows "Stopped sharing with agents" with the connection's name, and the card says "Sharing ended" with the time. The agent's next call finds the connection gone.
+
+## Query limit
+
+Each agent query stops after 10 seconds unless you give the connection longer. Pick **30 s**, **1 min** or **5 min** on its card for a report that needs it, such as a replica you keep for slow queries. The agent's next call runs under the new limit, `list_connections` tells the agent a limit longer than 10 s, and the activity log shows the limit each call ran under. The limit covers every call on the connection, reading the schema included. While a long query runs, the agent's other calls on the same connection wait for it, and a call that waited checks what is shared again before it runs. When you stop sharing or change what's shared while a call runs, its answer is dropped. The other limits, a plan that reads a table of over 100,000 rows end to end included, stay the same.
 
 ## Edit access
 
@@ -131,7 +136,7 @@ These limits apply to every shared connection, whatever you tick. The same rules
 | Rows | 200 by default; the agent can ask for up to 1,000 |
 | Long text | Cells over 200 characters are cut |
 | Response size | Rows stop once the answer passes 64 KB, and the agent is told |
-| Time | Each statement stops after 10 seconds; a whole call, connecting included, after 20 |
+| Time | Each statement stops after the connection's [query limit](#query-limit), 10 seconds unless you chose longer; a call waits 10 seconds past it, and up to 20 to connect |
 | Large tables | A plan that reads a table of over 100,000 rows end to end is refused on Postgres. The agent gets the table's indexes so it can filter on one. On SQLite the query runs, with a note |
 | Large plans | A Postgres plan over 8 MB, such as a query across thousands of partitions, is refused rather than checked |
 | Functions | On Postgres, only functions built into Postgres that compute on their arguments, like `count`, `date_trunc` or `lower`. Functions defined in the database are refused, because their bodies don't show in the plan |

@@ -29,6 +29,7 @@ fn config(port: u16, ssl_mode: PostgresSslMode) -> PostgresConnection {
         mcp_hidden_tables: Vec::new(),
         mcp_until: None,
         mcp_samples_off: false,
+        mcp_timeout_s: None,
         mcp_access: None,
         masked_columns: Default::default(),
     }
