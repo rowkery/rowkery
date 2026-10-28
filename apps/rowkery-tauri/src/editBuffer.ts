@@ -523,6 +523,25 @@ export function jsonEditorText(raw: string): string {
   return a.length === b.length && a.every((n, i) => n === b[i]) ? pretty : raw;
 }
 
+/** Past this, Quick Look shows JSON as stored: pretty-printing it would stall a render. */
+const JSON_SHOWN_PRETTY_MAX = 256 * 1024;
+const shownJson = new Map<string, string>();
+
+/**
+ * `jsonEditorText` for Quick Look, which renders on every selection move:
+ * kept for the last few values, and as stored past `JSON_SHOWN_PRETTY_MAX`.
+ */
+export function jsonShownText(raw: string): string {
+  if (raw.length > JSON_SHOWN_PRETTY_MAX) return raw;
+  let text = shownJson.get(raw);
+  if (text === undefined) {
+    text = jsonEditorText(raw);
+    if (shownJson.size >= 32) shownJson.delete(shownJson.keys().next().value as string);
+    shownJson.set(raw, text);
+  }
+  return text;
+}
+
 /** What a cell's editor starts with: NULL (and a new row's DEFAULT) is empty. */
 export function editorStartText(kind: EditorKind, initial: Value | null): string {
   if (!initial || "Null" in initial) return "";

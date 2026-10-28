@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { CELL_SHOWN_CHARS, CELL_TITLE_CHARS, clipText } from "./gridLayout";
 import { HIDDEN_TEXT } from "./presenting";
 import { valueText, type ResultRows } from "./resultStore";
 import type { RowEditState } from "./gridTypes";
@@ -127,7 +128,9 @@ export const Row = memo(function Row({
         className={cls}
         style={{ width: widths[ci] }}
         data-hidden={hidden ? "" : undefined}
-        title={hidden ? undefined : staged ? `Was ${wasText(staged.was)} · Esc reverts` : isNull ? "NULL" : text}
+        title={
+          hidden ? undefined : staged ? `Was ${wasText(staged.was)} · Esc reverts` : isNull ? "NULL" : clipText(text, CELL_TITLE_CHARS)
+        }
       >
         {hidden ? (
           HIDDEN_TEXT
@@ -136,7 +139,7 @@ export const Row = memo(function Row({
         ) : looks.timestamp[ci] ? (
           <TimestampText text={text} />
         ) : (
-          text
+          clipText(text, CELL_SHOWN_CHARS)
         )}
       </div>,
     );
