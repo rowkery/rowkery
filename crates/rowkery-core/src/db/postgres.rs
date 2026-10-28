@@ -1922,7 +1922,10 @@ pub async fn session_table_indexes(
         .query(
             r"
             SELECT t.relname, i.relname,
-                   pg_catalog.pg_get_indexdef(ix.indexrelid),
+                   -- Each key column or expression on its own, without the
+                   -- WHERE, INCLUDE or operator class the whole definition has.
+                   ARRAY(SELECT pg_catalog.pg_get_indexdef(ix.indexrelid, k, true)
+                         FROM generate_series(1, ix.indnkeyatts) k ORDER BY k),
                    ix.indisunique, ix.indisprimary, am.amname,
                    i.relpages::bigint * current_setting('block_size')::bigint,
                    s.idx_scan
@@ -1951,7 +1954,8 @@ pub async fn session_table_indexes(
         .collect();
     for row in rows {
         let table: String = row.get(0);
-        let indexdef: String = row.get(2);
+        // An index dropped while this reads has NULLs here.
+        let columns: Vec<Option<String>> = row.try_get(2).unwrap_or_default();
         let size_bytes: Option<i64> = row.get(6);
         let Some(entry) = out.iter_mut().find(|t| t.table == table) else {
             continue;
@@ -1961,7 +1965,7 @@ pub async fn session_table_indexes(
         }
         entry.indexes.push(IndexNode {
             name: row.get(1),
-            columns: parse_index_columns(&indexdef),
+            columns: columns.iter().flatten().map(|c| unquote_ident(c)).collect(),
             unique: row.get(3),
             primary: row.get(4),
             method: Some(row.get(5)),
@@ -2031,17 +2035,12 @@ pub async fn session_plan_facts(
     facts
 }
 
-fn parse_index_columns(indexdef: &str) -> Vec<String> {
-    let upper = indexdef.to_uppercase();
-    let start = upper.find('(').map(|i| i + 1);
-    let end = upper.rfind(')');
-    match (start, end) {
-        (Some(s), Some(e)) if e > s => indexdef[s..e]
-            .split(',')
-            .map(|c| c.trim().trim_matches('"').to_string())
-            .filter(|c| !c.is_empty())
-            .collect(),
-        _ => Vec::new(),
+/// A quoted identifier's name (`"Odd ""Col"""` is `Odd "Col"`); anything
+/// else, an expression, as written.
+fn unquote_ident(text: &str) -> String {
+    match text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(inner) if !inner.replace(r#""""#, "").contains('"') => inner.replace(r#""""#, r#"""#),
+        _ => text.to_string(),
     }
 }
 
