@@ -352,6 +352,17 @@ impl<'a> Plan<'a> {
                 spec.table
             ));
         }
+        // Without the whole key every row would be new: inserted, not updated.
+        if spec.on_conflict == OnConflict::Update {
+            if let Some(k) = key
+                .iter()
+                .find(|k| !fields.iter().any(|(_, c)| &c.name == *k))
+            {
+                return Err(format!(
+                    "Update finds rows by {k}, and no column goes to it. Match one, or pick Stop or Skip."
+                ));
+            }
+        }
         Ok(Self {
             engine,
             target_sql: qualified_table_sql(engine, &spec.schema, &spec.table),
@@ -423,8 +434,8 @@ impl<'a> Plan<'a> {
             .join(", ")
     }
 
-    /// Update, when the file carries the whole key: where each key field
-    /// sits among the fields. `None`: every row is new.
+    /// Update: where each key field sits among the fields (`Plan::new`
+    /// refuses an Update without the whole key). `None` for Stop or Skip.
     fn update_key(&self) -> Option<Vec<usize>> {
         if self.on_conflict != OnConflict::Update {
             return None;
@@ -1236,6 +1247,13 @@ mod tests {
         };
         assert!(err(&[(0, "id")], OnConflict::Update, &keyless).is_some());
         assert!(err(&[(0, "id")], OnConflict::Skip, &keyless).is_none());
+        // Update without the key would insert every row (rowkery/reports#37).
+        assert_eq!(
+            err(&[(0, "email")], OnConflict::Update, &target).as_deref(),
+            Some("Update finds rows by id, and no column goes to it. Match one, or pick Stop or Skip.")
+        );
+        assert!(err(&[(0, "id"), (1, "email")], OnConflict::Update, &target).is_none());
+        assert!(err(&[(0, "email")], OnConflict::Skip, &target).is_none());
     }
 
     #[test]
