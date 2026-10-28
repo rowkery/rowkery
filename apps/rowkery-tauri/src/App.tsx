@@ -58,7 +58,7 @@ import { defaultAccess } from "./mcpAccess";
 import { moveItem } from "./tabReorder";
 import { planSqliteOpen } from "./sqliteOpen";
 import { TitleBar } from "./TitleBar";
-import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall } from "./updates";
+import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall, watchInstallFailures } from "./updates";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
 import { forgetHistory } from "./queryHistory";
@@ -353,10 +353,12 @@ function App() {
     const first = window.setTimeout(quiet, FIRST_CHECK_MS);
     const again = window.setInterval(quiet, RECHECK_MS);
     const idle = watchIdleInstall(runningQueries);
+    const failures = watchInstallFailures();
     return () => {
       window.clearTimeout(first);
       window.clearInterval(again);
       idle();
+      failures();
     };
   }, [loaded, runningQueries]);
 

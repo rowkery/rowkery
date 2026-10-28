@@ -21,6 +21,7 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 
+mod app_location;
 mod done_notify;
 #[cfg(feature = "e2e")]
 mod e2e;
