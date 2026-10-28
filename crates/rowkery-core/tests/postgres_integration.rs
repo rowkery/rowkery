@@ -1064,26 +1064,32 @@ async fn postgres_other_sessions_temp_tables_stay_out_of_the_catalog() {
     let ours = open_session(config.id.clone(), config.clone())
         .await
         .expect("open");
-    let other = open_session(config.id.clone(), config)
-        .await
-        .expect("open");
+    let other = open_session(config.id.clone(), config).await.expect("open");
     let names = |catalog: &rowkery_core::db::SchemaCatalog| -> Vec<String> {
         catalog
             .databases
             .iter()
             .flat_map(|d| &d.schemas)
-            .flat_map(|s| s.tables.iter().map(move |t| format!("{}.{}", s.name, t.name)))
+            .flat_map(|s| {
+                s.tables
+                    .iter()
+                    .map(move |t| format!("{}.{}", s.name, t.name))
+            })
             .collect()
     };
 
-    let before = session_catalog_fingerprint(&ours).await.expect("fingerprint");
+    let before = session_catalog_fingerprint(&ours)
+        .await
+        .expect("fingerprint");
     session_execute(
         &other,
         "CREATE TEMP TABLE it_their_scratch (id int PRIMARY KEY, n int)",
     )
     .await
     .expect("their temp table");
-    let after = session_catalog_fingerprint(&ours).await.expect("fingerprint");
+    let after = session_catalog_fingerprint(&ours)
+        .await
+        .expect("fingerprint");
     assert_eq!(before, after, "another session's temp table moves nothing");
     let listed = names(&session_introspect(&ours).await.expect("introspect"));
     assert!(
