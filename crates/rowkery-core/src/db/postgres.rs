@@ -141,6 +141,9 @@ pub struct PostgresSession {
     /// Whether the session writes money as `text_types::money` does, as of
     /// the last result with money in it ([`query_prepared`]).
     money_shown: AtomicBool,
+    /// The database stores bytes unchecked (`SQL_ASCII`), so a value need
+    /// not be UTF-8, and the server refuses to send one that isn't.
+    sql_ascii: bool,
 }
 
 /// Prepared statements kept per session: a re-run, and every cursor
@@ -387,7 +390,7 @@ pub async fn open_session_via(
             Ok::<_, DriverError>(started)
         }
     };
-    let (client, connection_task) = match connect(pg_config.clone()).await? {
+    let (client, (connection_task, sql_ascii)) = match connect(pg_config.clone()).await? {
         Ok(connected) => connected,
         // A long-lived process (the MCP server) remembers the password it
         // read first; the app may have saved a new one since. Read it again
@@ -457,6 +460,7 @@ pub async fn open_session_via(
         cancel_aborted: false,
         guard: None,
         money_shown: AtomicBool::new(false),
+        sql_ascii,
     })
 }
 
@@ -474,16 +478,19 @@ fn no_answer(host: &str, port: u16) -> DriverError {
 /// progress" warnings and keeping every warning's text. A notice is handled
 /// before the messages after it, so both are current when the batch that
 /// caused it returns.
+/// Also says whether the database is `SQL_ASCII`, read from what the
+/// server reported at startup.
 fn drive_connection<S, T>(
     mut connection: tokio_postgres::Connection<S, T>,
     txn_warnings: Arc<AtomicU64>,
     warnings: Warnings,
-) -> tokio::task::JoinHandle<()>
+) -> (tokio::task::JoinHandle<()>, bool)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    let sql_ascii = connection.parameter("server_encoding") == Some("SQL_ASCII");
+    let task = tokio::spawn(async move {
         loop {
             match futures::future::poll_fn(|cx| connection.poll_message(cx)).await {
                 Some(Ok(AsyncMessage::Notice(notice))) => {
@@ -506,7 +513,8 @@ where
                 None => break,
             }
         }
-    })
+    });
+    (task, sql_ascii)
 }
 
 impl PostgresSession {
@@ -567,11 +575,14 @@ pub async fn session_server_version(session: &PostgresSession) -> Result<String,
         .to_string())
 }
 
-fn map_query_error(err: &tokio_postgres::Error, username: &str) -> DriverError {
+fn map_query_error(err: &tokio_postgres::Error, username: &str, sql_ascii: bool) -> DriverError {
     if err.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
         return DriverError::Cancelled;
     }
-    let message = humanize_postgres_error(err, username);
+    let mut message = humanize_postgres_error(err, username);
+    if sql_ascii && err.code() == Some(&SqlState::CHARACTER_NOT_IN_REPERTOIRE) {
+        message = sql_ascii_message(&message);
+    }
     match err.as_db_error() {
         Some(db) => DriverError::Server {
             message,
@@ -762,7 +773,7 @@ pub async fn session_execute(session: &PostgresSession, sql: &str) -> Result<(),
         .client
         .batch_execute(sql)
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))
 }
 
 /// What makes a read-only connection's sessions read-only at the server.
@@ -809,13 +820,13 @@ pub async fn session_run_file_statement(
         .client
         .simple_query_raw(sql)
         .await
-        .map_err(|e| map_query_error(&e, username))?;
+        .map_err(|e| map_query_error(&e, username, session.sql_ascii))?;
     let mut stream = std::pin::pin!(stream);
     let mut rows = 0;
     while let Some(message) = stream
         .try_next()
         .await
-        .map_err(|e| map_query_error(&e, username))?
+        .map_err(|e| map_query_error(&e, username, session.sql_ascii))?
     {
         if let tokio_postgres::SimpleQueryMessage::CommandComplete(n) = message {
             rows += n;
@@ -835,12 +846,12 @@ pub async fn session_copy_in(
         .client
         .copy_in(sql)
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))
 }
 
 /// The message to show for a COPY's failure.
 pub fn copy_error(session: &PostgresSession, err: &tokio_postgres::Error) -> DriverError {
-    map_query_error(err, &session.config.username)
+    map_query_error(err, &session.config.username, session.sql_ascii)
 }
 
 pub async fn session_query_stream<F>(
@@ -883,10 +894,11 @@ where
 {
     let started = std::time::Instant::now();
     let username = session.config.username.clone();
+    let sql_ascii = session.sql_ascii;
     let trimmed = sql.trim();
     let (st, stream) = start_query(session, trimmed, ahead)
         .await
-        .map_err(|e| map_query_error(&e, &username))?;
+        .map_err(|e| map_query_error(&e, &username, sql_ascii))?;
     // The prepared statement says whether rows come back, whatever the SQL
     // starts with (a comment, a bracket, `INSERT … RETURNING`, `CALL`).
     if st.columns().is_empty() {
@@ -894,7 +906,7 @@ where
         while stream
             .try_next()
             .await
-            .map_err(|e| map_query_error(&e, &username))?
+            .map_err(|e| map_query_error(&e, &username, sql_ascii))?
             .is_some()
         {}
         return Ok(StreamStats {
@@ -927,7 +939,7 @@ where
     while let Some(row) = stream
         .try_next()
         .await
-        .map_err(|e| map_query_error(&e, &username))?
+        .map_err(|e| map_query_error(&e, &username, sql_ascii))?
     {
         let row: Row = row;
         if first_row.is_none() {
@@ -1019,14 +1031,24 @@ where
         );
         ahead = false;
         if let Err(err) = set {
-            return Err(map_query_error(&err, &session.config.username));
+            return Err(map_query_error(
+                &err,
+                &session.config.username,
+                session.sql_ascii,
+            ));
         }
         match begun {
             Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => {
                 session.txn = TxnState::Users;
                 return Ok(None);
             }
-            Err(err) => return Err(map_query_error(&err, &session.config.username)),
+            Err(err) => {
+                return Err(map_query_error(
+                    &err,
+                    &session.config.username,
+                    session.sql_ascii,
+                ))
+            }
             Ok(()) if session.txn_warnings.load(Ordering::SeqCst) != before => {
                 // Our BEGIN's warning, not the user's.
                 session_take_warnings(session);
@@ -1116,7 +1138,7 @@ pub async fn session_declare_cursor(
         .query_typed(&declare_sql(cursor, sql), &[])
         .await
         .map(drop)
-        .map_err(|e| map_query_error(&e, &session.config.username))
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))
 }
 
 /// The server's warnings since the last call (`there is no transaction in
@@ -1289,7 +1311,9 @@ pub async fn session_apply_changes_within(
         )
     };
     let username = session.config.username.clone();
-    let message = |e: &tokio_postgres::Error| map_query_error(e, &username).into_message();
+    let sql_ascii = session.sql_ascii;
+    let message =
+        |e: &tokio_postgres::Error| map_query_error(e, &username, sql_ascii).into_message();
     session_close_cursor(session).await;
     let users = || {
         ApplyFailure::other(
@@ -1442,7 +1466,9 @@ async fn reach_beyond(
         .client
         .batch_execute("SET CONSTRAINTS ALL IMMEDIATE")
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username).into_message())?;
+        .map_err(|e| {
+            map_query_error(&e, &session.config.username, session.sql_ascii).into_message()
+        })?;
     let Some(after) = reach::pg_counts(session).await? else {
         return Ok(Reach::default());
     };
@@ -1548,7 +1574,7 @@ pub async fn session_list_databases(
             &[],
         )
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))?;
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))?;
     Ok(rows
         .iter()
         .map(|row| DatabaseInfo {
@@ -2212,6 +2238,17 @@ pub fn humanize_postgres_error(err: &tokio_postgres::Error, username: &str) -> S
         );
     }
     text
+}
+
+/// A value the server won't send because the database is `SQL_ASCII` and
+/// the value isn't UTF-8 (Latin-1 bytes, usually). Rowkery reads UTF-8
+/// only; showing the bytes another way would let an edit write them back
+/// changed.
+fn sql_ascii_message(server: &str) -> String {
+    format!(
+        "This database uses the SQL_ASCII encoding, and a value here isn't valid UTF-8, \
+         so Rowkery can't show it ({server}). To see its bytes, select the column as column_name::bytea."
+    )
 }
 
 /// The error with its causes, since tokio-postgres keeps TLS and IO details
