@@ -764,9 +764,9 @@ async fn search_schema(store: &mut Store, target: &Target, text: &str) -> Outcom
     const MAX_HITS: usize = 40;
     let needle = text.trim().to_lowercase();
     let rule = rule(target);
+    let marks = masked_marks(store, target).await?;
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
-    let marks = mask::parse(target.record.masked_columns(&target.database));
     let mut tables = Vec::new();
     let mut columns = Vec::new();
     let (mut more_tables, mut more_columns) = (0usize, 0usize);
@@ -819,6 +819,7 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
     };
     let rule = rule(target);
     store.load_indexes(target, &schema, &table).await?;
+    let marks = masked_marks(store, target).await?;
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
     let (_, t) = find_table(catalog, &format!("{schema}.{table}"))?;
@@ -928,7 +929,7 @@ async fn describe_table(store: &mut Store, target: &Target, name: &str) -> Outco
         out["enum_values"] = Json::Object(enums);
     }
     let above = access::above(catalog, &schema, t);
-    let mut masked: Vec<String> = mask::parse(target.record.masked_columns(&target.database))
+    let mut masked: Vec<String> = marks
         .into_iter()
         .filter(|m| above.contains(&(m.schema.as_str(), m.table.as_str())))
         .map(|m| m.column)
@@ -1075,7 +1076,7 @@ async fn run_read(
     let alias = guard::wrapper_alias();
     let capped = guard::wrap_limit(&sql, cap + 1, &alias);
     let rule = rule(target);
-    let marks = mask::parse(target.record.masked_columns(&target.database));
+    let marks = masked_marks(store, target).await?;
 
     // The plan, and the big tables it would read end to end.
     let mut sqlite_eqp: Vec<(i64, i64, String)> = Vec::new();
@@ -1374,6 +1375,94 @@ async fn run_read(
         out["notes"] = json!(notes);
     }
     Ok(out)
+}
+
+/// The columns the user marked sensitive, and every generated column that
+/// would hand one back under another name (`email_lower … AS
+/// (lower(email))`, rowkery/reports#30). Postgres: a generated column whose
+/// expression names a marked column of its table (by word, so a near miss
+/// over-masks, never under-masks). SQLite keeps the expression only in the
+/// CREATE TABLE text, so every generated column of a table with a marked
+/// column is masked.
+pub(crate) async fn masked_marks(
+    store: &mut Store,
+    target: &Target,
+) -> Result<Vec<mask::Marked>, String> {
+    let mut marks = mask::parse(target.record.masked_columns(&target.database));
+    if marks.is_empty() {
+        return Ok(marks);
+    }
+    let text = |v: Option<&rowkery_core::Value>| match v {
+        Some(rowkery_core::Value::Text(t)) => t.clone(),
+        _ => String::new(),
+    };
+    let engine = engine(&target.record);
+    let lit = |v: &str| {
+        rowkery_core::query_util::sql_literal(engine, &rowkery_core::Value::Text(v.to_string()))
+    };
+    let mut tables: Vec<(String, String)> = Vec::new();
+    for m in &marks {
+        if !tables.contains(&(m.schema.clone(), m.table.clone())) {
+            tables.push((m.schema.clone(), m.table.clone()));
+        }
+    }
+    let mut more = Vec::new();
+    match engine {
+        EngineKind::Postgres => {
+            let names: Vec<String> = tables
+                .iter()
+                .filter_map(|(s, t)| Some(format!("({}, {})", lit(s)?, lit(t)?)))
+                .collect();
+            let sql = format!(
+                "SELECT n.nspname, c.relname, a.attname, pg_get_expr(d.adbin, d.adrelid) \
+                 FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                 WHERE a.attgenerated <> '' AND NOT a.attisdropped \
+                   AND (n.nspname, c.relname) IN (VALUES {})",
+                names.join(", ")
+            );
+            for row in store.read(target, &sql).await?.rows {
+                let (schema, table) = (text(row.first()), text(row.get(1)));
+                let words = functions::scan_sql(&text(row.get(3))).words;
+                let from_marked = marks.iter().any(|m| {
+                    m.schema == schema
+                        && m.table == table
+                        && words.iter().any(|w| w.eq_ignore_ascii_case(&m.column))
+                });
+                if from_marked {
+                    more.push(mask::Marked {
+                        schema,
+                        table,
+                        column: text(row.get(2)),
+                    });
+                }
+            }
+        }
+        EngineKind::Sqlite => {
+            for (schema, table) in tables
+                .iter()
+                .filter(|(s, _)| s.eq_ignore_ascii_case("main"))
+            {
+                let Some(name) = lit(table) else { continue };
+                let sql =
+                    format!("SELECT name FROM pragma_table_xinfo({name}) WHERE hidden IN (2, 3)");
+                for row in store.read(target, &sql).await?.rows {
+                    more.push(mask::Marked {
+                        schema: schema.clone(),
+                        table: table.clone(),
+                        column: text(row.first()),
+                    });
+                }
+            }
+        }
+    }
+    for m in more {
+        if !marks.contains(&m) {
+            marks.push(m);
+        }
+    }
+    Ok(marks)
 }
 
 /// The Postgres side of the masked-column check: a table whose marked column
@@ -1815,6 +1904,10 @@ mod tests {
                 "create table customers(id integer primary key, email text);
                  create index customers_email on customers(email);
                  insert into customers(email) values ('mara@fjord.se'), ('tomas@ibarra.dev');
+                 create table people(id integer primary key, email text,
+                   dom text generated always as (substr(email, instr(email, '@') + 1)) virtual,
+                   up text generated always as (upper(email)) stored);
+                 insert into people(email) values ('mara@fjord.se');
                  analyze;",
             )
             .unwrap();
@@ -1863,6 +1956,21 @@ mod tests {
         call(&mcp, "query", q("select count(*) from customers"))
             .await
             .expect("plain read");
+
+        // A generated column carries the marked one (rowkery/reports#30).
+        save(vec!["main.people.email".into()]);
+        let out = call(&mcp, "query", q("select dom, up from people"))
+            .await
+            .expect("returned");
+        let text = out["rows"].to_string();
+        assert!(!text.contains("fjord") && !text.contains("FJORD"), "{text}");
+        for sql in [
+            "select id from people where up like 'M%'",
+            "select lower(dom) from people",
+        ] {
+            let err = call(&mcp, "query", q(sql)).await.expect_err(sql);
+            assert!(err.starts_with("Refused"), "{sql}: {err}");
+        }
 
         // Nothing masked: nothing to keep back.
         save(Vec::new());
