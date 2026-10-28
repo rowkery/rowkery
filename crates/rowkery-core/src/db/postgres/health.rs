@@ -342,7 +342,7 @@ fn failed(error: &tokio_postgres::Error, username: &str) -> CheckState {
         };
     }
     CheckState::Unavailable {
-        message: map_query_error(error, username).to_string(),
+        message: map_query_error(error, username, false).to_string(),
     }
 }
 
@@ -379,14 +379,14 @@ pub async fn session_health_within(
             each.as_millis().max(1)
         ))
         .await
-        .map_err(|e| map_query_error(&e, username))?;
+        .map_err(|e| map_query_error(&e, username, false))?;
     let read = read_health(session).await;
     // The session is the window's own, shared with the Sessions tab.
     let reset = session
         .client
         .batch_execute("RESET lock_timeout; RESET statement_timeout")
         .await
-        .map_err(|e| map_query_error(&e, username));
+        .map_err(|e| map_query_error(&e, username, false));
     let report = read?;
     reset?;
     Ok(report)
@@ -420,7 +420,7 @@ async fn read_health(session: &PostgresSession) -> Result<HealthReport, DriverEr
         client.query(&sql[9], &[]),
         client.query_opt(PGSS_SCHEMA_SQL, &[]),
     );
-    let tiles = tiles.map_err(|e| map_query_error(&e, username))?;
+    let tiles = tiles.map_err(|e| map_query_error(&e, username, false))?;
     let sees_all: bool = tiles.get(8);
     let xact_age: Option<i64> = tiles.get(7);
 
@@ -600,7 +600,7 @@ async fn slow_queries(
     sees_all: bool,
 ) -> SlowQueries {
     let unavailable = |e: &tokio_postgres::Error| SlowQueries::Unavailable {
-        message: map_query_error(e, &session.config.username).to_string(),
+        message: map_query_error(e, &session.config.username, session.sql_ascii).to_string(),
     };
     let row = match extension {
         Ok(Some(row)) => row,
