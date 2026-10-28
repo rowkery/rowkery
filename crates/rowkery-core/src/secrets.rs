@@ -106,7 +106,7 @@ fn load_fallback_key() -> Result<[u8; 32], SecretError> {
 /// Replaces `path` with `bytes` whole: a reader in another process never
 /// sees half.
 fn replace_whole(path: &std::path::Path, bytes: &[u8]) -> Result<(), SecretError> {
-    fs::create_dir_all(config_dir())?;
+    crate::config::create_private_dir(&config_dir())?;
     let tmp = path.with_extension(format!("tmp.{}", random_hex(8)));
     let placed = write_whole(&tmp, bytes).and_then(|()| Ok(fs::rename(&tmp, path)?));
     if placed.is_err() {
@@ -593,14 +593,16 @@ fn locked<T>(change: impl FnOnce() -> Result<T, SecretError>) -> Result<T, Secre
     if HELD.get() {
         return change();
     }
-    let file = fs::create_dir_all(config_dir()).ok().and_then(|_| {
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(config_dir().join(LOCK_FILE))
-            .ok()
-    });
+    let file = crate::config::create_private_dir(&config_dir())
+        .ok()
+        .and_then(|_| {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(config_dir().join(LOCK_FILE))
+                .ok()
+        });
     let started = std::time::Instant::now();
     let _held = match file {
         Some(file) => loop {

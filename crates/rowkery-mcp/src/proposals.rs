@@ -19,7 +19,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rowkery_core::config::{config_dir, AppConfig};
+use rowkery_core::config::{config_dir, create_private_dir, open_private, AppConfig};
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{open_session, session_execute, session_query_stream};
 use rowkery_core::reach::{self, Reach};
@@ -114,17 +114,14 @@ fn new_id() -> String {
 
 fn append_line(file: &str, line: &impl Serialize) -> Result<(), String> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    create_private_dir(&dir).map_err(|e| e.to_string())?;
     let mut text = serde_json::to_string(line).map_err(|e| e.to_string())?;
     text.push('\n');
     let path = dir.join(file);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
         let _ = std::fs::rename(&path, dir.join(format!("{file}.1")));
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    open_private(&path, OpenOptions::new().create(true).append(true))
         .and_then(|mut f| f.write_all(text.as_bytes()))
         .map_err(|e| format!("Couldn't save the proposal: {e}"))
 }
