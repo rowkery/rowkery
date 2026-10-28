@@ -324,6 +324,20 @@ impl<'a> Plan<'a> {
         if spec.columns.is_empty() {
             return Err("Pick at least one column to import".into());
         }
+        // An identity (ALWAYS) key can't come from the file, so rows can't
+        // be found by it: said before "filled in by the database, skip it",
+        // which would leave the key unmapped.
+        if spec.on_conflict == OnConflict::Update {
+            if let Some(k) = target
+                .key
+                .iter()
+                .find(|k| target.columns.iter().any(|c| &c.name == *k && c.generated))
+            {
+                return Err(format!(
+                    "Update finds rows by {k}, which the database fills in, so the file can't name them. Pick Stop or Skip."
+                ));
+            }
+        }
         let mut fields = Vec::new();
         for c in &spec.columns {
             let col = target
@@ -1254,6 +1268,28 @@ mod tests {
         );
         assert!(err(&[(0, "id"), (1, "email")], OnConflict::Update, &target).is_none());
         assert!(err(&[(0, "email")], OnConflict::Skip, &target).is_none());
+        // A two-column key needs both.
+        let pair = ImportTarget {
+            key: vec!["id".into(), "email".into()],
+            ..orders()
+        };
+        assert_eq!(
+            err(&[(0, "id")], OnConflict::Update, &pair).as_deref(),
+            Some("Update finds rows by email, and no column goes to it. Match one, or pick Stop or Skip.")
+        );
+        // An identity key: the file can't name rows, mapped or not.
+        let mut identity = orders();
+        identity.columns[0].generated = true;
+        let said = Some("Update finds rows by id, which the database fills in, so the file can't name them. Pick Stop or Skip.");
+        assert_eq!(
+            err(&[(1, "email")], OnConflict::Update, &identity).as_deref(),
+            said
+        );
+        assert_eq!(
+            err(&[(0, "id"), (1, "email")], OnConflict::Update, &identity).as_deref(),
+            said
+        );
+        assert!(err(&[(1, "email")], OnConflict::Skip, &identity).is_none());
     }
 
     #[test]
