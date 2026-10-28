@@ -103,6 +103,9 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'NaN'::numeric",
         "(-7)::int2",
         "1.5::float4",
+        // A real shows the digits it holds, as psql does.
+        "0.1::real",
+        "3.14::real",
         // Every digit survives: no trip through an f64.
         r#"'{"id": 9007199254740993, "amount": 0.1000000000000000055}'::jsonb"#,
         r#"'{"id":9007199254740993,  "amount":0.1000000000000000055}'::json"#,
@@ -299,6 +302,40 @@ async fn postgres_decodes_dates_uuid_numeric() {
         let row = got.expect("row");
         assert_eq!(row[0], row[1], "{expr}");
     }
+
+    // A real read back names its row again: as an edit's key, and as the
+    // literal a lookup writes.
+    let mut got = None;
+    session_query_stream(&session, "SELECT 0.1::real AS r", |batch, _| {
+        got = batch.rows.into_iter().next();
+        Ok(())
+    })
+    .await
+    .expect("query");
+    let real = got.expect("row").remove(0);
+    for lit in [
+        rowkery_core::edits::literal(rowkery_core::db::EngineKind::Postgres, "real", &real)
+            .expect("literal"),
+        rowkery_core::query_util::sql_literal(rowkery_core::db::EngineKind::Postgres, &real)
+            .expect("literal"),
+    ] {
+        let mut got = None;
+        session_query_stream(
+            &session,
+            &format!("SELECT 0.1::real = {lit}, 0.1::float8 = {lit}"),
+            |batch, _| {
+                got = batch.rows.into_iter().next();
+                Ok(())
+            },
+        )
+        .await
+        .expect("compare");
+        assert_eq!(
+            got.expect("row"),
+            vec![Value::Bool(true), Value::Bool(true)],
+            "{lit}"
+        );
+    }
 }
 
 /// int8 at the edges of its range reaches the webview exact: as a BigInt
@@ -365,6 +402,7 @@ async fn postgres_errors_and_slow_streams() {
 
     let err = session_query_stream(&session, "SELECT id FROM no_such_table", |_, _| Ok(()))
         .await
+        .map(|_| ())
         .expect_err("missing table");
     match err {
         DriverError::Server {
@@ -698,6 +736,7 @@ async fn postgres_read_only_session_refuses_writes() {
         |_, _| Ok(()),
     )
     .await
+    .map(|_| ())
     .expect_err("read-only session");
     assert!(err.to_string().contains("read-only transaction"), "{err}");
     let rows = session_query_stream(&session, "SELECT 1", |_, _| Ok(()))
@@ -906,8 +945,8 @@ async fn postgres_rereads_a_password_saved_since() {
     };
     let err = open_session(empty.id.clone(), empty)
         .await
-        .err()
-        .expect("no password saved");
+        .map(|_| ())
+        .expect_err("no password saved");
     assert!(err.to_string().contains("none is saved"), "{err}");
 }
 
@@ -1148,4 +1187,93 @@ async fn postgres_rows_from_any_statement_that_returns_them() {
     .await
     .expect("delete");
     assert_eq!((n, batches), (2, 0));
+}
+
+/// rowkery/reports#61: on a SQL_ASCII database a Latin-1 byte stops the
+/// page; the error says why and how to see the bytes, and rows without one
+/// still read.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn postgres_sql_ascii_rows_say_why_they_cannot_show() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use rowkery_core::db::postgres::{session_execute, session_query_cursor, StreamOptions};
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-ascii-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let admin = open_session(config.id.clone(), config.clone())
+        .await
+        .expect("open session");
+    // A UTF-8 database's own encoding error stays as Postgres said it.
+    let utf8 = session_query_stream(
+        &admin,
+        "SELECT convert_from('\\xe9'::bytea, 'UTF8')",
+        |_, _| Ok(()),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("not UTF-8")
+    .into_message();
+    assert!(utf8.starts_with("invalid byte sequence"), "{utf8}");
+    // Left from an earlier run, or made now.
+    let _ = session_execute(
+        &admin,
+        "CREATE DATABASE rowkery_sql_ascii ENCODING 'SQL_ASCII' \
+         LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0",
+    )
+    .await;
+
+    let ascii = PostgresConnection {
+        database: "rowkery_sql_ascii".into(),
+        ..config
+    };
+    let mut session = open_session(ascii.id.clone(), ascii)
+        .await
+        .expect("open the SQL_ASCII database");
+    session_execute(
+        &session,
+        "DROP TABLE IF EXISTS people; \
+         CREATE TABLE people (id int PRIMARY KEY, name text); \
+         INSERT INTO people VALUES (1, 'plain'), \
+           (2, convert_from('\\x4ae972f46d65'::bytea, 'SQL_ASCII'))",
+    )
+    .await
+    .expect("setup");
+
+    let plain = session_query_stream(&session, "SELECT name FROM people WHERE id = 1", |_, _| {
+        Ok(())
+    })
+    .await
+    .expect("an ASCII row reads");
+    assert_eq!(plain, 1);
+
+    let browse = session_query_cursor(
+        &mut session,
+        "SELECT * FROM people ORDER BY id",
+        100,
+        StreamOptions::default(),
+        |_, _| Ok(()),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("the Latin-1 row stops the page")
+    .into_message();
+    assert!(
+        browse.starts_with("This database uses the SQL_ASCII encoding"),
+        "{browse}"
+    );
+    assert!(browse.contains("invalid byte sequence"), "{browse}");
+    assert!(browse.contains("::bytea"), "{browse}");
+
+    let bytes = session_query_stream(&session, "SELECT name::bytea FROM people", |_, _| Ok(()))
+        .await
+        .expect("the bytes read");
+    assert_eq!(bytes, 2);
 }

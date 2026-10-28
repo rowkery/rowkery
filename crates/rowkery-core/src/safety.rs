@@ -153,9 +153,18 @@ pub fn check_sql(sql: &str, dialect: Dialect) -> Vec<StatementCheck> {
 
 /// One statement's check, from its tokens.
 fn check_tokens(toks: &[Tok]) -> StatementCheck {
-    let mut check = unclear_check(toks)
-        .or_else(|| signal_check(toks))
-        .unwrap_or_else(|| check_statement(toks));
+    // A write that also calls one keeps its own verb, target and weight.
+    let mut check = unclear_check(toks).unwrap_or_else(|| {
+        let own = check_statement(toks);
+        match signal_check(toks) {
+            Some(signal) if own.kind == StatementKind::Read => signal,
+            Some(signal) => StatementCheck {
+                destructive: own.destructive || signal.destructive,
+                ..own
+            },
+            None => own,
+        }
+    });
     if sets_read_only_config(toks) {
         check.unlocks_writes = true;
     }
@@ -365,20 +374,76 @@ fn unclear_check(toks: &[Tok]) -> Option<StatementCheck> {
     })
 }
 
-/// Server functions that stop another session. They're called from a
-/// SELECT, so the first word reads as a read; they count as writes.
-const SIGNAL_FUNCTIONS: &[&str] = &["PG_CANCEL_BACKEND", "PG_TERMINATE_BACKEND"];
+/// Server functions that change something beyond the statement's own
+/// result: stop another session, switch or drop WAL and replication state,
+/// reload settings, write files, message other sessions. They're
+/// called from a SELECT, so the first word reads as a read, and a read-only
+/// transaction stops none of them; they count as writes. Advisory locks
+/// don't: Postgres takes them in a read-only transaction, and they change
+/// no data.
+const SIGNAL_FUNCTIONS: &[&str] = &[
+    "PG_CANCEL_BACKEND",
+    "PG_TERMINATE_BACKEND",
+    "PG_RELOAD_CONF",
+    "PG_ROTATE_LOGFILE",
+    "PG_SWITCH_WAL",
+    "PG_PROMOTE",
+    "PG_CREATE_RESTORE_POINT",
+    "PG_DROP_REPLICATION_SLOT",
+    "PG_LOG_BACKEND_MEMORY_CONTEXTS",
+    "PG_NOTIFY",
+    "DBLINK_EXEC",
+    "PG_STAT_STATEMENTS_RESET",
+    "PG_LOGICAL_EMIT_MESSAGE",
+    "PG_LOGICAL_SLOT_GET_CHANGES",
+    "PG_LOGICAL_SLOT_GET_BINARY_CHANGES",
+    "PG_REPLICATION_SLOT_ADVANCE",
+    "PG_REPLICATION_ORIGIN_CREATE",
+    "PG_REPLICATION_ORIGIN_DROP",
+    "PG_REPLICATION_ORIGIN_ADVANCE",
+    "PG_REPLICATION_ORIGIN_SESSION_SETUP",
+    "PG_REPLICATION_ORIGIN_SESSION_RESET",
+    "PG_REPLICATION_ORIGIN_XACT_SETUP",
+    "PG_REPLICATION_ORIGIN_XACT_RESET",
+    // Large objects: lo_export writes a file on the server.
+    "LO_IMPORT",
+    "LO_EXPORT",
+    "LO_CREAT",
+    "LO_CREATE",
+    "LO_UNLINK",
+    "LO_PUT",
+    "LO_FROM_BYTEA",
+    "LO_TRUNCATE",
+    "LO_TRUNCATE64",
+    "LOWRITE",
+];
+
+/// The same, by the start of their names.
+const SIGNAL_PREFIXES: &[&str] = &[
+    "PG_CREATE_",
+    "PG_BACKUP_",
+    "PG_WAL_REPLAY_",
+    "PG_STAT_RESET",
+    "PG_FILE_",
+];
+
+fn signals(name: &str) -> bool {
+    SIGNAL_FUNCTIONS.contains(&name) || SIGNAL_PREFIXES.iter().any(|p| name.starts_with(p))
+}
 
 /// A statement that calls a [`SIGNAL_FUNCTIONS`] function anywhere in it,
 /// by its bare or quoted name.
 fn signal_check(toks: &[Tok]) -> Option<StatementCheck> {
     let called = toks.windows(2).find_map(|w| {
         let name = w[0].name()?;
-        (w[1] == Tok::Open && SIGNAL_FUNCTIONS.contains(&name.as_str())).then_some(name)
+        (w[1] == Tok::Open && signals(&name)).then_some(name)
     })?;
     Some(StatementCheck {
         kind: StatementKind::Write,
-        destructive: called == "PG_TERMINATE_BACKEND",
+        destructive: matches!(
+            called.as_str(),
+            "PG_TERMINATE_BACKEND" | "PG_DROP_REPLICATION_SLOT"
+        ),
         verb: called,
         target: None,
         unlocks_writes: false,
@@ -1872,6 +1937,62 @@ mod tests {
         }
         assert!(check_sql("SELECT pg_terminate_backend(1)", Dialect::Either)[0].destructive);
         assert!(!check_sql("SELECT pg_cancel_backend(1)", Dialect::Either)[0].destructive);
+        // Server state a read-only transaction doesn't stop (reports#46).
+        for sql in [
+            "SELECT pg_switch_wal()",
+            "SELECT pg_drop_replication_slot('x')",
+            "SELECT pg_create_physical_replication_slot('x')",
+            "SELECT pg_reload_conf()",
+            "SELECT pg_rotate_logfile()",
+            "SELECT pg_create_restore_point('x')",
+            "SELECT pg_notify('c', 'p')",
+            "SELECT pg_logical_emit_message(true, 'p', 'm')",
+            "SELECT pg_stat_reset()",
+            "SELECT pg_file_write('f', 'x', false)",
+            "SELECT lo_export(16384, '/tmp/x')",
+            "SELECT dblink_exec('dbname=x', 'DELETE FROM t')",
+        ] {
+            assert!(
+                hold_for(SafeMode::ReadOnly, sql, true, Dialect::Postgres).is_some(),
+                "{sql}"
+            );
+        }
+        assert!(
+            check_sql("SELECT pg_drop_replication_slot('x')", Dialect::Postgres)[0].destructive
+        );
+        // A write that also calls one stays that write.
+        let delete = &check_sql(
+            "DELETE FROM jobs WHERE pg_cancel_backend(pid)",
+            Dialect::Postgres,
+        )[0];
+        assert_eq!(
+            (
+                delete.verb.as_str(),
+                delete.target.as_deref(),
+                delete.destructive
+            ),
+            ("DELETE", Some("jobs"), false)
+        );
+        assert!(
+            check_sql(
+                "UPDATE t SET a = pg_terminate_backend(1) WHERE id = 1",
+                Dialect::Postgres
+            )[0]
+            .destructive
+        );
+        // Reading large objects or the WAL position stays a read.
+        for sql in [
+            "SELECT lo_get(16384)",
+            "SELECT pg_current_wal_lsn()",
+            "SELECT pg_try_advisory_xact_lock(7)",
+            "SELECT * FROM pg_logical_slot_peek_changes('s', NULL, NULL)",
+        ] {
+            assert_eq!(
+                check_sql(sql, Dialect::Postgres)[0].kind,
+                StatementKind::Read,
+                "{sql}"
+            );
+        }
         // Named, not called: still a read.
         for sql in [
             "SELECT 'pg_terminate_backend(1)'",

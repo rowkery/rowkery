@@ -130,6 +130,7 @@ const NUMBER_TYPE =
 const BOOL_TYPE = /^bool/i;
 const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string)\b/i;
 const TIME_TYPE = /^(timestamp|date|time|datetime|interval)/i;
+const REAL_TYPE = /^(real|float4)$/i;
 const NUMBER_TEXT = /^-?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
 
 /** An identifier as the line shows it: quoted only when it needs to be (core's `quote_ident` rules). */
@@ -170,7 +171,10 @@ export function chipLiteral(value: string, type: string, engine: ChipEngine = "p
   const v = value.trim();
   if (isNull(v)) return "NULL";
   if (QUOTED_NULL.test(v)) return quoteText(v.slice(1, -1), engine);
-  if (isNumberType(type) && NUMBER_TEXT.test(v)) return v;
+  // A real's `0.1` is quoted so it reads as a real: bare, it's a double no real equals.
+  if (isNumberType(type) && NUMBER_TEXT.test(v)) {
+    return engine === "postgres" && REAL_TYPE.test(type.trim()) ? `'${v}'` : v;
+  }
   if (BOOL_TYPE.test(type) && /^(true|false)$/i.test(v)) return v.toUpperCase();
   return quoteText(value, engine);
 }

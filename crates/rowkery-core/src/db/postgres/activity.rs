@@ -86,7 +86,7 @@ pub async fn session_activity(
         .client
         .query(SESSIONS_SQL, &[])
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))?;
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -130,7 +130,7 @@ pub async fn session_locks_held(
             &[&pid],
         )
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))?;
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))?;
     Ok(rows
         .iter()
         .map(|row| HeldLock {
@@ -178,7 +178,7 @@ pub async fn session_stop(
             Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) => DriverError::Message(
                 "Your login can't stop this session. Postgres lets you stop your own login's sessions, or anyone's with superuser or pg_signal_backend.".into(),
             ),
-            _ => map_query_error(&e, &session.config.username),
+            _ => map_query_error(&e, &session.config.username, session.sql_ascii),
         })?;
     Ok(row.get(0))
 }
@@ -203,7 +203,7 @@ pub async fn session_cancel_tagged(
             &[&format!("{APP_NAME} {tag}")],
         )
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))?;
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))?;
     Ok(row.get(0))
 }
 
