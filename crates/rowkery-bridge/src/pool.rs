@@ -140,6 +140,9 @@ pub(crate) struct SessionPool {
     prefetchers: HashMap<String, (u64, Arc<Prefetcher>)>,
     /// Slots whose own session is out (leased or being pinged), by checkout.
     out: HashMap<Key, u64>,
+    /// Slots whose pinged session was dead and is being replaced: a run
+    /// takes the slot over rather than wait for the new session to open.
+    replacing: HashSet<Key>,
     /// Woken whenever a checkout ends.
     returned: Arc<tokio::sync::Notify>,
     /// Tabs whose session went while it may have held a transaction:
@@ -310,6 +313,7 @@ impl SessionPool {
         }
         // Checkouts of the old generation end on their own; nothing waits on them.
         self.out.retain(|(w, _), _| w != window_id);
+        self.replacing.retain(|(w, _)| w != window_id);
         self.out_risk.retain(|(w, _), _| w != window_id);
         self.closed.retain(|(w, _)| w != window_id);
         self.tags.retain(|_, (w, _)| w != window_id);
@@ -585,7 +589,8 @@ impl SessionPool {
     }
 
     /// The window's sessions idle for `idle` or longer, taken out to be
-    /// pinged (their slots marked out, so a run waits for the ping). Never a
+    /// pinged (their slots marked out, so a run waits for the ping, though
+    /// not for a dead one's replacement). Never a
     /// session that may hold the user's transaction.
     fn take_idle(&mut self, window_id: &str, idle: Duration) -> Vec<(Slot, Parked, u64)> {
         let keys: Vec<Key> = self
@@ -607,7 +612,8 @@ impl SessionPool {
             .collect()
     }
 
-    /// Puts back a pinged session without counting the ping as use.
+    /// Puts back a pinged session without counting the ping as use. Not
+    /// when a run took the slot over meanwhile, or its tab closed.
     fn restore(
         &mut self,
         window_id: &str,
@@ -616,12 +622,17 @@ impl SessionPool {
         parked: Option<Parked>,
     ) -> Option<PostgresSession> {
         let key = (window_id.to_string(), slot);
-        if self.out.get(&key) == Some(&id) {
+        let ours = self.out.get(&key) == Some(&id);
+        let closed = ours && self.closed.remove(&key);
+        if ours {
             self.out.remove(&key);
+            self.replacing.remove(&key);
             self.returned.notify_waiters();
         }
         let parked = parked?;
-        if parked.session.is_closed()
+        if !ours
+            || closed
+            || parked.session.is_closed()
             || self.generation(window_id) != parked.generation
             || self.parked.contains_key(&key)
         {
@@ -648,6 +659,14 @@ impl SessionPool {
             risk: None,
         }
     }
+}
+
+/// What a run waits for: its tab's own session (an earlier run, or a ping,
+/// still has it), or a free place under the connection's cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaitFor {
+    Tab,
+    Place,
 }
 
 /// What a lease found in the pool (short-lived, so its size doesn't matter).
@@ -683,9 +702,9 @@ pub(crate) async fn lease(
     .await
 }
 
-/// [`lease`], calling `on_wait(true)` when it must wait (the slot's session
-/// is still out with an earlier run, or a new session needs a free place
-/// under the connection's cap), and `on_wait(false)` once it has one.
+/// [`lease`], calling `on_wait(Some(_))` when it must wait (the slot's session
+/// is still out with an earlier run or a ping, or a new session needs a free
+/// place under the connection's cap), and `on_wait(None)` once it has one.
 /// Dropping the future while it waits gives nothing up.
 pub(crate) async fn lease_or_wait(
     pool: &SharedPool,
@@ -694,7 +713,7 @@ pub(crate) async fn lease_or_wait(
     generation: u64,
     connection_id: String,
     config: PostgresConnection,
-    on_wait: &(dyn Fn(bool) + Send + Sync),
+    on_wait: &(dyn Fn(Option<WaitFor>) + Send + Sync),
 ) -> Result<Lease, DriverError> {
     let key = (window_id.to_string(), slot);
     // Waiting on the slot's own session (an earlier run still holds it) says
@@ -709,6 +728,11 @@ pub(crate) async fn lease_or_wait(
         }
         let found = match pool.lock() {
             Ok(mut p) => {
+                // A replacement being opened for a dead session isn't waited
+                // for: the run opens its own, and the replacement is dropped.
+                if p.replacing.remove(&key) {
+                    p.out.remove(&key);
+                }
                 if waits(slot) && p.out.contains_key(&key) && p.generation(window_id) == generation
                 {
                     Found::Busy
@@ -729,7 +753,7 @@ pub(crate) async fn lease_or_wait(
             Found::Busy => {
                 if !busy_waited {
                     busy_waited = true;
-                    on_wait(true);
+                    on_wait(Some(WaitFor::Tab));
                 }
                 match wake.as_mut().as_pin_mut() {
                     Some(w) => w.await,
@@ -745,7 +769,7 @@ pub(crate) async fn lease_or_wait(
         }
     };
     if busy_waited {
-        on_wait(false);
+        on_wait(None);
     }
     // Already known dead: replaced before anything is sent, so this is safe
     // for any statement. No ping here; that would cost a round trip per run.
@@ -791,13 +815,13 @@ async fn room(
     pool: &SharedPool,
     connection_id: &str,
     wait: bool,
-    on_wait: &(dyn Fn(bool) + Send + Sync),
+    on_wait: &(dyn Fn(Option<WaitFor>) + Send + Sync),
 ) -> Option<OwnedSemaphorePermit> {
     let returned = pool.lock().ok()?.returned.clone();
     let mut waited = false;
     let done = |place: Option<OwnedSemaphorePermit>, waited: bool| {
         if waited {
-            on_wait(false);
+            on_wait(None);
         }
         place
     };
@@ -837,7 +861,7 @@ async fn room(
         }
         if !waited {
             waited = true;
-            on_wait(true);
+            on_wait(Some(WaitFor::Place));
         }
         tokio::select! {
             place = cap.acquire_owned() => return done(place.ok(), waited),
@@ -849,7 +873,7 @@ async fn room(
 
 /// Pings the window's sessions idle for `idle` or longer, all at once and off
 /// any query's path; a dead one is replaced by a fresh session in its slot, so
-/// the next run finds it warm. Returns how many were replaced.
+/// the next run finds it warm. Returns how many were replaced (and kept).
 pub(crate) async fn ping_idle(
     pool: &SharedPool,
     window_id: &str,
@@ -866,46 +890,57 @@ pub(crate) async fn ping_idle(
             !parked.session.is_closed() && session_ping(&parked.session, PING_TIMEOUT).await;
         (slot, parked, id, alive)
     });
-    let mut replaced = 0;
+    // A dead one's slot is handed to a run that comes for it; replacements
+    // open side by side, so a dead network costs one open's timeout, not one
+    // per session, and nobody waits for it.
+    let mut opens = Vec::new();
     for (slot, parked, id, alive) in futures::future::join_all(checks).await {
-        let back = if alive {
-            pool.lock()
-                .ok()
-                .and_then(|mut p| p.restore(window_id, slot, id, Some(parked)))
-        } else {
-            let Parked {
-                generation,
-                last_used,
-                session,
-            } = parked;
-            drop(session);
-            // The dead one's place, unless a waiting run took it first.
-            let (tunnel, place) = pool
+        if alive {
+            let back = pool
                 .lock()
-                .map(|mut p| {
-                    let place = p.cap(&connection_id).try_acquire_owned().ok();
-                    (p.tunnel(window_id, generation), place)
-                })
-                .unwrap_or((None, None));
-            let opened = match place {
-                Some(place) => {
-                    open_session_via(connection_id.clone(), config.clone(), None, tunnel)
-                        .await
-                        .map(|mut fresh| {
-                            fresh.hold(Box::new(place));
-                            fresh
-                        })
+                .ok()
+                .and_then(|mut p| p.restore(window_id, slot, id, Some(parked)));
+            drop(back);
+            continue;
+        }
+        let Parked {
+            generation,
+            last_used,
+            session,
+        } = parked;
+        drop(session);
+        // The dead one's place, unless a waiting run took it first.
+        let (tunnel, place) = pool
+            .lock()
+            .map(|mut p| {
+                let key = (window_id.to_string(), slot);
+                if p.out.get(&key) == Some(&id) {
+                    p.replacing.insert(key);
+                    p.returned.notify_waiters();
                 }
+                let place = p.cap(&connection_id).try_acquire_owned().ok();
+                (p.tunnel(window_id, generation), place)
+            })
+            .unwrap_or((None, None));
+        let (connection_id, config) = (connection_id.clone(), config.clone());
+        opens.push(async move {
+            let opened = match place {
+                Some(place) => open_session_via(connection_id, config, None, tunnel)
+                    .await
+                    .map(|mut fresh| {
+                        fresh.hold(Box::new(place));
+                        fresh
+                    }),
                 None => Err(DriverError::Message("no free place".into())),
             };
-            match opened {
-                Ok(fresh) => {
-                    replaced += 1;
-                    pool.lock().ok().and_then(|mut p| {
+            let (fresh, back) = match opened {
+                Ok(fresh) => pool
+                    .lock()
+                    .map(|mut p| {
                         if let Some(t) = fresh.route() {
                             p.keep_tunnel(window_id, generation, t);
                         }
-                        p.restore(
+                        let back = p.restore(
                             window_id,
                             slot,
                             id,
@@ -914,18 +949,26 @@ pub(crate) async fn ping_idle(
                                 generation,
                                 last_used,
                             }),
-                        )
+                        );
+                        (back.is_none(), back)
                     })
-                }
-                Err(_) => pool
-                    .lock()
-                    .ok()
-                    .and_then(|mut p| p.restore(window_id, slot, id, None)),
-            }
-        };
-        drop(back);
+                    .unwrap_or((false, None)),
+                Err(_) => (
+                    false,
+                    pool.lock()
+                        .ok()
+                        .and_then(|mut p| p.restore(window_id, slot, id, None)),
+                ),
+            };
+            drop(back);
+            fresh
+        });
     }
-    replaced
+    futures::future::join_all(opens)
+        .await
+        .into_iter()
+        .filter(|kept| *kept)
+        .count()
 }
 
 /// Parks a session after use, dropping it outside the lock if it isn't kept,
@@ -1262,7 +1305,7 @@ mod tests {
             // A new session closes the least recently used idle one: tab 1.
             let waits = Arc::new(Mutex::new(Vec::new()));
             let seen = waits.clone();
-            let on_wait = move |w: bool| seen.lock().unwrap().push(w);
+            let on_wait = move |w: Option<WaitFor>| seen.lock().unwrap().push(w);
             let place = room(&pool, id, true, &on_wait).await.expect("a place");
             assert!(!parked(Slot::Tab(1)), "tab 1's idle session went");
             assert!(waits.lock().unwrap().is_empty(), "no wait");
@@ -1314,7 +1357,7 @@ mod tests {
             let waiting = {
                 let (pool, seen) = (pool.clone(), waits.clone());
                 tokio::spawn(async move {
-                    room(&pool, id, true, &move |w: bool| {
+                    room(&pool, id, true, &move |w: Option<WaitFor>| {
                         seen.lock().unwrap().push(w)
                     })
                     .await
@@ -1322,7 +1365,7 @@ mod tests {
             };
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert!(!waiting.is_finished(), "waits");
-            assert_eq!(*waits.lock().unwrap(), vec![true]);
+            assert_eq!(*waits.lock().unwrap(), vec![Some(WaitFor::Place)]);
             // Cancelled: the wait holds nothing.
             waiting.abort();
             let _ = waiting.await;
@@ -1333,7 +1376,7 @@ mod tests {
             let waiting = {
                 let (pool, seen) = (pool.clone(), waits.clone());
                 tokio::spawn(async move {
-                    room(&pool, id, true, &move |w: bool| {
+                    room(&pool, id, true, &move |w: Option<WaitFor>| {
                         seen.lock().unwrap().push(w)
                     })
                     .await
@@ -1348,7 +1391,10 @@ mod tests {
                 .expect("goes once a place frees")
                 .unwrap();
             assert!(place.is_some());
-            assert_eq!(*waits.lock().unwrap(), vec![true, true, false]);
+            assert_eq!(
+                *waits.lock().unwrap(),
+                vec![Some(WaitFor::Place), Some(WaitFor::Place), None]
+            );
             assert!(parked(Slot::Tab(2)), "the transaction's session stayed");
 
             // A run that finishes parks an idle session: a waiting one closes it.

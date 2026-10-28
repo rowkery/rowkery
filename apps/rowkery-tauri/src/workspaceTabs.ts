@@ -1,4 +1,4 @@
-import type { QueryPlan } from "./api";
+import type { QueryPlan, WaitingFor } from "./api";
 import type { EditBuffer } from "./editBuffer";
 import type { FilterChip } from "./filterChips";
 import type { HistoryEntry as NavEntry } from "./history";
@@ -123,10 +123,12 @@ export interface TabRun {
   /** A second cancel now is a Force stop: a second after the first (core's `FORCE_ASK_AFTER`). */
   forceReady?: boolean;
   /**
-   * The run waits for a free connection: every one the saved connection may
-   * hold (10) is busy running something or holding a transaction.
+   * The run waits for a free connection ("connection": every one the saved
+   * connection may hold, 10, is busy running something or holding a
+   * transaction), or for its tab's own ("tab": an earlier run, or a check
+   * after a sleep, still has it).
    */
-  waiting?: boolean;
+  waiting?: WaitingFor | null;
   /** How the last run ended: a green or red dot on the tab until the next run. */
   outcome: "done" | "error" | null;
   /** How long the last finished run took; shown after the tab's name. */

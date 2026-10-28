@@ -113,6 +113,8 @@ If the server's owner tells you the key changed on purpose (the server was rebui
 
 Each saved connection holds at most 10 sessions to the server, shared by its windows and tabs. When all of them are busy, a new run says **Waiting for a free connection** with the time, and starts as soon as one frees. <kbd>Esc</kbd> cancels the wait.
 
+A run that says **Waiting for this tab's connection** is waiting for its own tab's session: an earlier run on that tab is still ending (after a Cancel, say), or Rowkery is checking the session after your Mac woke. The check gives up after 3 seconds. If the session turns out to be dead, the run opens a new one and doesn't wait for Rowkery's replacement.
+
 ## The agent can't see Rowkery
 
 Work through these in order.
