@@ -199,31 +199,61 @@ fn in_flight(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Marks `id` in flight until dropped.
-struct Flight(String);
+/// One commit of `id`, in flight until dropped.
+struct Flight {
+    id: String,
+    /// This commit wrote its `Committing` line.
+    marked: std::sync::atomic::AtomicBool,
+}
 
 impl Flight {
     fn start(id: &str) -> Self {
         if let Ok(mut l) = IN_FLIGHT.lock() {
             l.push(id.to_string());
         }
-        Self(id.to_string())
+        Self {
+            id: id.to_string(),
+            marked: false.into(),
+        }
+    }
+
+    /// Notes that COMMIT is about to go, so a crash before its outcome is
+    /// written leaves a sign (rowkery/reports#49). Unwritten, nothing is sent.
+    fn mark(&self) -> Result<(), String> {
+        decide(&self.id, Decision::Committing {})
+            .map_err(|e| format!("{e}. Nothing was saved."))?;
+        self.marked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn marked(&self) -> bool {
+        self.marked.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 impl Drop for Flight {
     fn drop(&mut self) {
+        // One entry only: a second commit of the same id may still run.
         if let Ok(mut l) = IN_FLIGHT.lock() {
-            l.retain(|i| *i != self.0);
+            if let Some(at) = l.iter().position(|i| *i == self.id) {
+                l.remove(at);
+            }
         }
     }
 }
 
-/// A commit started and never finished, by its line.
-fn cut_short(p: &Proposal, d: &Option<DecisionLine>) -> Option<u64> {
+/// When the commit its line says started, if one did and has no outcome.
+fn commit_started(d: &Option<DecisionLine>) -> Option<u64> {
     d.as_ref()
-        .filter(|line| matches!(line.decision, Decision::Committing {}) && !in_flight(&p.id))
+        .filter(|line| matches!(line.decision, Decision::Committing {}))
         .map(|line| line.ts)
+}
+
+/// A commit started and never finished. Only this process knows its own
+/// commits in flight, so only the app's review tells the two apart.
+fn cut_short(p: &Proposal, d: &Option<DecisionLine>) -> Option<u64> {
+    commit_started(d).filter(|_| !in_flight(&p.id))
 }
 
 /// Proposals nobody has decided on yet, oldest first.
@@ -295,16 +325,18 @@ pub fn status(id: &str) -> Result<Json, String> {
         .find(|(p, _)| p.id == id.trim())
         .ok_or_else(|| format!("No proposal called \"{}\".", id.trim()))?;
     let mut out = match &d {
-        Some(line) if line.decision.open() => {
+        Some(line) if line.decision.open() && is_waiting(&p, &d, now) => {
             // Still the user's to decide; the agent waits, and proposes
-            // nothing new for it.
+            // nothing new for it. The agent's process can't tell a commit
+            // still running from one cut short, and either may have saved.
             let mut v = json!({ "state": "waiting" });
-            if let Some(at) = cut_short(&p, &d) {
+            if let Some(at) = commit_started(&d) {
                 v["commit_started_ms"] = json!(at);
-                v["hint"] = json!("Rowkery closed while committing this change, so it may already be saved. The user will check. Don't send it again.");
+                v["hint"] = json!("A commit of this change started, so it may already be saved. The user will check. Don't send it again.");
             }
             v
         }
+        Some(line) if line.decision.open() => json!({ "state": "expired" }),
         Some(line) => {
             let mut v = serde_json::to_value(&line.decision).unwrap_or(Json::Null);
             v["at_ms"] = json!(line.ts);
@@ -691,22 +723,22 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
     if seen.rows.len() != changes.len() {
         return Err("The change moved since you reviewed it. Review it again.".into());
     }
-    let _flight = Flight::start(id);
+    let flight = std::sync::Arc::new(Flight::start(id));
     let ran = match &record {
         ConnectionRecord::Postgres(pg) => {
             let target = Target {
                 record: record.clone(),
                 database: database.clone(),
             };
-            pg_commit(pg, &target, &proposal.sql, seen, id).await
+            pg_commit(pg, &target, &proposal.sql, seen, &flight).await
         }
         ConnectionRecord::Sqlite(c) => {
             let path = c.path.clone();
             let changes = changes.clone();
             let seen = seen.clone();
-            let id = id.to_string();
+            let flight = flight.clone();
             tokio::task::spawn_blocking(move || {
-                sqlite_run(&path, &changes, Some((&seen, id.as_str())))
+                sqlite_run(&path, &changes, Some((&seen, flight.as_ref())))
             })
             .await
             .map_err(|e| e.to_string())?
@@ -736,9 +768,10 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
                         error: error.clone(),
                     },
                 )?;
-            } else {
-                // Rolled back: no longer a commit cut short, if one was
-                // marked. Unwritten, the next review warns needlessly.
+            } else if flight.marked() {
+                // Rolled back after its mark: no longer a commit cut short.
+                // An error before the mark leaves an earlier one standing.
+                // Unwritten, the next review warns needlessly.
                 let _ = decide(id, Decision::Uncommitted {});
             }
             Ok(CommitOutcome::Failed { error })
@@ -1039,7 +1072,7 @@ async fn pg_commit(
     target: &Target,
     sql: &str,
     seen: &Seen,
-    id: &str,
+    flight: &Flight,
 ) -> Result<RunResult, String> {
     let session = open_session(pg.id.clone(), pg_config(pg, &target.database))
         .await
@@ -1080,7 +1113,7 @@ async fn pg_commit(
             return Err(e);
         }
     };
-    if let Err(e) = committing(id) {
+    if let Err(e) = flight.mark() {
         let _ = session_execute(&session, "ROLLBACK").await;
         return Err(e);
     }
@@ -1131,17 +1164,11 @@ fn matches(seen: Option<&Reach>, now: &Option<Reach>) -> bool {
 /// RETURNING inside a savepoint, for its rows; for an UPDATE the savepoint
 /// is rolled back to read the old rows by key, then the statement runs
 /// again so the next one sees it.
-/// Notes that COMMIT is about to go, so a crash before its outcome is
-/// written leaves a sign (rowkery/reports#49). Unwritten, nothing is sent.
-fn committing(id: &str) -> Result<(), String> {
-    decide(id, Decision::Committing {}).map_err(|e| format!("{e}. Nothing was saved."))
-}
-
 /// `commit`: what the user saw, and the proposal it commits.
 fn sqlite_run(
     path: &str,
     changes: &[RowChange],
-    commit: Option<(&Seen, &str)>,
+    commit: Option<(&Seen, &Flight)>,
 ) -> Result<(Vec<StatementPreview>, Option<RunResult>), String> {
     let expected = commit.map(|(seen, _)| seen);
     use rowkery_core::db::sqlite::sqlite_value_to_core;
@@ -1272,7 +1299,7 @@ fn sqlite_run(
     })();
     let committing = matches!(result, Ok((_, Some(RunResult::Committed(_)))));
     if committing {
-        if let Some(Err(e)) = commit.map(|(_, id)| self::committing(id)) {
+        if let Some(Err(e)) = commit.map(|(_, flight)| flight.mark()) {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e);
         }
@@ -1728,11 +1755,16 @@ pub(crate) mod tests {
                 .contains("may already be saved"),
             "{told}"
         );
-        // While this process commits it, the marker is no warning.
+        // While this process commits it, the marker is no warning, even
+        // once a second commit of it ends. The agent's process can't tell,
+        // so it still hears that the commit started.
         {
-            let _flight = Flight::start(&p.id);
+            let _first = Flight::start(&p.id);
+            drop(Flight::start(&p.id));
             assert_eq!(waiting()[0].commit_started_ms, None);
+            assert!(status(&p.id).unwrap()["commit_started_ms"].is_u64());
         }
+        assert!(waiting()[0].commit_started_ms.is_some());
         // Rolled back: waiting again, with no warning.
         decide(&p.id, Decision::Uncommitted {}).unwrap();
         assert_eq!(waiting()[0].commit_started_ms, None);
@@ -1746,6 +1778,15 @@ pub(crate) mod tests {
         // The queue file never holds the field.
         let queue = std::fs::read_to_string(dir.join(QUEUE_FILE)).unwrap();
         assert!(!queue.contains("commit_started_ms"), "{queue}");
+        // A day on, a rolled-back one has expired, as one never committed.
+        let old = Proposal {
+            id: "p_old".into(),
+            ts: now_ms() - EXPIRES_MS - 1,
+            ..p.clone()
+        };
+        append_line(QUEUE_FILE, &old).unwrap();
+        decide(&old.id, Decision::Uncommitted {}).unwrap();
+        assert_eq!(status(&old.id).unwrap()["state"], "expired");
         std::env::remove_var("ROWKERY_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }
