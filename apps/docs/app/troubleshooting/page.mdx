@@ -149,6 +149,12 @@ Press <kbd>Esc</kbd> or <kbd>⌘.</kbd>, or click **Cancel** beside the running 
 
 If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop** a second after you cancel. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
 
+## A table won't show on an old database
+
+If a page of rows fails with `This database uses the SQL_ASCII encoding, and a value here isn't valid UTF-8`, the database was created with `SQL_ASCII`, which stores bytes without checking them. A row holds bytes that aren't UTF-8 (often Latin-1 accents), and Postgres refuses to send it to a UTF-8 client like Rowkery. Pages without such a row still show.
+
+To see the bytes, select the column as `column_name::bytea` in a query tab. Rowkery doesn't decode the bytes another way.
+
 ## Rowkery feels slow
 
 - **Big results.** A query tab loads every row its query returns, so add a `LIMIT` to load fewer. A table tab loads 1,000 rows at a time and **Load more** gets the next page; its page-size control also offers 5,000 and All. A tab holds at most 1,000,000 rows and says **Stopped at 1,000,000 rows** when it gets there. To get a whole large result, use **Export results…** <kbd>⇧⌘E</kbd>, which streams it straight to a file without loading the rows into the window. On a table tab, **Copy all results as CSV** in <kbd>⌘K</kbd> does the same to the clipboard.
