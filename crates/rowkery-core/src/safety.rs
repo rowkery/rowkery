@@ -965,6 +965,69 @@ pub fn row_changes(sql: &str) -> Result<Vec<RowChange>, String> {
     Ok(out)
 }
 
+/// The columns an UPDATE's SET assigns (`SET a = 1, (b, c) = (2, 3)`),
+/// upper-cased as [`Tok::name`] gives them; none for any other statement.
+pub fn assigned_columns(sql: &str) -> Vec<String> {
+    let Some(toks) = tokenize(sql, Dialect::Either)
+        .into_iter()
+        .find(|t| !t.is_empty())
+    else {
+        return Vec::new();
+    };
+    if !toks[0].is("UPDATE") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    // At the start of an assignment: right after SET or a comma between two.
+    let mut start = false;
+    let mut in_list = false;
+    let mut set = false;
+    for tok in &toks {
+        match tok {
+            Tok::Open => {
+                if depth == 0 && start {
+                    in_list = true;
+                }
+                depth += 1;
+                start = false;
+                continue;
+            }
+            Tok::Close => {
+                depth -= 1;
+                in_list = false;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            if tok.is("SET") {
+                set = true;
+                start = true;
+                continue;
+            }
+            if tok.is("WHERE") || tok.is("RETURNING") || tok.is("FROM") {
+                break;
+            }
+            if matches!(tok, Tok::Other(',')) {
+                start = set;
+                continue;
+            }
+            if start {
+                if let Some(name) = tok.name() {
+                    out.push(name);
+                }
+                start = false;
+            }
+        } else if depth == 1 && in_list {
+            if let Some(name) = tok.name() {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 /// Every identifier in `sql`, lower-cased, quotes taken off (strings and
 /// comments left out): which columns a statement names.
 pub fn identifiers(sql: &str) -> Vec<String> {
@@ -1480,6 +1543,26 @@ fn object_name(toks: &[Tok]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_columns_an_update_sets() {
+        let set = |sql: &str| assigned_columns(sql);
+        assert_eq!(
+            set("UPDATE t SET a = 1, \"Id\" = 2 WHERE id = 3"),
+            ["A", "ID"]
+        );
+        assert_eq!(
+            set("update only t set (a, b) = (1, 2), c = f(d, e)"),
+            ["A", "B", "C"]
+        );
+        // What the right side reads, a subquery's WHERE included, isn't set.
+        assert_eq!(
+            set("UPDATE t SET a = (SELECT id FROM u WHERE u.x = 1), b = id WHERE id = 1"),
+            ["A", "B"]
+        );
+        assert!(set("DELETE FROM t WHERE id = 1").is_empty());
+        assert!(set("INSERT INTO t (id) VALUES (1)").is_empty());
+    }
 
     #[test]
     fn proposed_changes_take_plain_row_statements_only() {

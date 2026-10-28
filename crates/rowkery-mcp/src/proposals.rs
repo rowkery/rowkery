@@ -806,21 +806,16 @@ async fn pg_preview_one(
              top AS (SELECT n.nspname::text AS s, c.relname::text AS r FROM up \
                JOIN pg_class c ON c.oid = up.oid JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE NOT c.relispartition) \
-             SELECT 'k', a.attname::text FROM pg_index i \
-             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-             WHERE i.indrelid = {rel}::regclass AND i.indisprimary \
-             UNION ALL SELECT 't', tgname::text FROM pg_trigger \
+             SELECT 't', tgname::text FROM pg_trigger \
              WHERE tgrelid = {rel}::regclass AND NOT tgisinternal \
              UNION ALL SELECT 's', s FROM top UNION ALL SELECT 'r', r FROM top"
         ),
     )
     .await?
     .1;
-    let key: Vec<String> = facts
-        .iter()
-        .filter(|r| text(r.first()) == "k")
-        .map(|r| text(r.get(1)))
-        .collect();
+    // In key order, as the commit reads it, so both digest the same row().
+    let key = pg_key(session, &change.target).await?;
+    sets_no_key(change, &key)?;
     let triggers: Vec<String> = facts
         .iter()
         .filter(|r| text(r.first()) == "t")
@@ -835,7 +830,11 @@ async fn pg_preview_one(
     let table = fact("s").zip(fact("r")).map(|(s, r)| [s, r]);
     let quote = quote_ident;
     let join_old = change.verb != "DELETE" && !key.is_empty();
-    let digest = pg_digest(&change.verb, &key).unwrap_or_else(|| "NULL::text".into());
+    // One row whatever the change returns: the digest aggregates them.
+    let seen = match pg_digest(&change.verb, &key) {
+        Some(digest) => format!("SELECT {digest} AS d FROM rk_change"),
+        None => "SELECT NULL::text AS d".into(),
+    };
     let sql = if join_old {
         let new_key: Vec<String> = key
             .iter()
@@ -843,7 +842,7 @@ async fn pg_preview_one(
             .collect();
         let old_key: Vec<String> = key.iter().map(|k| format!("rk_old.{}", quote(k))).collect();
         format!(
-            "WITH rk_change AS ({}\nRETURNING *), rk_seen AS (SELECT {digest} AS d FROM rk_change) \
+            "WITH rk_change AS ({}\nRETURNING *), rk_seen AS ({seen}) \
              SELECT rk_change.*, rk_old.*, (rk_old.{} IS NOT NULL) AS rk_had_old, \
              (SELECT d FROM rk_seen) AS rk_digest, count(*) OVER () AS rk_total \
              FROM rk_change LEFT JOIN {} rk_old ON ({}) = ({}) LIMIT {PREVIEW_ROWS}",
@@ -855,7 +854,7 @@ async fn pg_preview_one(
         )
     } else {
         format!(
-            "WITH rk_change AS ({}\nRETURNING *), rk_seen AS (SELECT {digest} AS d FROM rk_change) \
+            "WITH rk_change AS ({}\nRETURNING *), rk_seen AS ({seen}) \
              SELECT rk_change.*, (SELECT d FROM rk_seen) AS rk_digest, count(*) OVER () AS rk_total \
              FROM rk_change LIMIT {PREVIEW_ROWS}",
             change.sql
@@ -910,7 +909,9 @@ fn quote_ident(c: &str) -> String {
 }
 
 /// The SQL of a statement's `digest` over `rk_change` (its RETURNING rows):
-/// an md5 of the sorted primary keys. None where a digest says nothing.
+/// each row's primary key hashed (SHA-256), the hashes summed in two 64-bit
+/// halves, so no order and no string of every key is needed. NULL for no
+/// rows; None where a digest says nothing.
 fn pg_digest(verb: &str, key: &[String]) -> Option<String> {
     if !digested(verb, key) {
         return None;
@@ -919,10 +920,26 @@ fn pg_digest(verb: &str, key: &[String]) -> Option<String> {
         .iter()
         .map(|k| format!("rk_change.{}", quote_ident(k)))
         .collect();
-    let row = format!("row({})::text", row.join(", "));
-    Some(format!(
-        "md5(coalesce(string_agg({row}, ',' ORDER BY {row}), ''))"
-    ))
+    let hash = format!(
+        "encode(sha256(convert_to(row({})::text, 'UTF8')), 'hex')",
+        row.join(", ")
+    );
+    let half =
+        |at: usize| format!("sum(('x' || substr({hash}, {at}, 16))::bit(64)::bigint::numeric)");
+    Some(format!("({} || ':' || {})", half(1), half(17)))
+}
+
+/// Refuses an UPDATE that sets a primary key column: the commit is checked
+/// against the dry run by the keys the change returns, and keys it sets
+/// itself would match whichever rows it hit.
+fn sets_no_key(change: &RowChange, key: &[String]) -> Result<(), String> {
+    let set = rowkery_core::safety::assigned_columns(&change.sql);
+    match key.iter().find(|k| set.iter().any(|c| c.eq_ignore_ascii_case(k))) {
+        Some(k) => Err(format!(
+            "Refused: this UPDATE sets the primary key ({k}). Rowkery checks that the commit changes the rows the dry run showed by their keys, so a proposed change can't set them. Leave key changes to the user."
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The table's primary key columns, in key order.
@@ -1078,6 +1095,7 @@ async fn pg_commit_run(
             // The same rows as the dry run's, not just as many: their keys.
             Some(_) => {
                 let key = pg_key(session, &change.target).await?;
+                sets_no_key(change, &key)?;
                 let Some(digest) = pg_digest(&change.verb, &key) else {
                     return Ok(None);
                 };
@@ -1158,6 +1176,7 @@ fn sqlite_run(
                     Some(_) => sqlite_key(&conn, &change.target).map_err(err)?,
                     None => Vec::new(),
                 };
+                sets_no_key(change, &key)?;
                 if wanted.is_some() && !digested(&change.verb, &key) {
                     return Ok((Vec::new(), Some(RunResult::Moved)));
                 }
@@ -1211,6 +1230,7 @@ fn sqlite_run(
         for change in changes {
             let table = unquote_last(&change.target);
             let key = sqlite_key(&conn, &change.target).map_err(err)?;
+            sets_no_key(change, &key)?;
             let triggers: Vec<String> = conn
                 .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 COLLATE NOCASE")
                 .and_then(|mut s| s.query_map([&table], |r| r.get(0))?.collect())
@@ -1331,32 +1351,27 @@ fn digested(verb: &str, key: &[String]) -> bool {
     matches!(verb, "UPDATE" | "DELETE") && !key.is_empty()
 }
 
-/// A statement's rows by primary key, in any order: the sorted keys' hash.
+/// A statement's rows by primary key, in any order: each key's SHA-256,
+/// summed in 64-bit lanes (as `pg_digest`), so no key is kept.
 #[derive(Default)]
 struct KeyDigest {
-    keys: Vec<String>,
+    sums: [u64; 4],
     n: u64,
 }
 
 impl KeyDigest {
     fn add(&mut self, key: Vec<Value>) {
+        use sha2::{Digest, Sha256};
         self.n += 1;
-        self.keys.push(format!("{key:?}"));
+        let hash = Sha256::digest(format!("{key:?}").as_bytes());
+        for (sum, lane) in self.sums.iter_mut().zip(hash.chunks_exact(8)) {
+            *sum = sum.wrapping_add(u64::from_be_bytes(lane.try_into().unwrap()));
+        }
     }
 
     /// None when no row was added.
-    fn finish(mut self) -> Option<String> {
-        use sha2::{Digest, Sha256};
-        if self.keys.is_empty() {
-            return None;
-        }
-        self.keys.sort_unstable();
-        let mut hash = Sha256::new();
-        for k in &self.keys {
-            hash.update(k.as_bytes());
-            hash.update(b"\n");
-        }
-        Some(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    fn finish(self) -> Option<String> {
+        (self.n > 0).then(|| self.sums.iter().map(|s| format!("{s:016x}")).collect())
     }
 }
 
@@ -1603,6 +1618,20 @@ pub(crate) mod tests {
         assert_eq!(refunded, 3);
         assert_eq!(status(&p.id).unwrap()["state"], "committed");
         assert!(commit(&p.id, &seen(&[3])).await.is_err(), "decided once");
+        // An UPDATE that sets the key is refused: its keys say nothing of
+        // which rows it hit.
+        let rekey = submit(
+            "shop",
+            "main",
+            "UPDATE orders SET \"ID\" = -1 WHERE id = 1",
+            "Renumber",
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = dry_run(&rekey.id).await.expect_err("sets the key");
+        assert!(refused.contains("sets the primary key (id)"), "{refused}");
+        reject(&rekey.id, None).unwrap();
 
         // Rejected with a note; the cap of waiting proposals.
         let q = submit(
