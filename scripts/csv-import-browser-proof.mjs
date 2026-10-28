@@ -247,6 +247,20 @@ await pickField(6, "created_at");
 check((await page.getAttribute(`${panel} [data-import-matched]`, "data-import-matched")) === "7", "7 of 8 matched after picking two");
 const secondPreview = await page.$$eval(`${ws} [data-import-row="1"] [data-col]`, (els) => els.map((e) => e.textContent.trim()));
 check(secondPreview[4] === "10.50" && secondPreview[5] === "NULL", `the preview follows the mapping, an empty note is NULL (${secondPreview.join(" | ")})`);
+// Update finds rows by id: with no column going to id it would insert every
+// row, so it says so and Import waits (rowkery/reports#37).
+await page.click(`${panel} [data-import-option="conflict"] [data-choice="update"]`);
+check((await page.$(`${panel} [data-import-unmapped-key]`)) === null, "Update with id matched: nothing to say");
+await page.click(`${panel} [data-import-pick="0"]`);
+await page.waitForSelector('[data-menu="import-column"]');
+await page.locator('[data-menu="import-column"] [data-item]').first().click();
+const unmapped = (await page.textContent(`${panel} [data-import-unmapped-key]`).catch(() => "")) ?? "";
+check(
+  /Update finds rows by id/.test(unmapped) && (await page.isDisabled(`${panel} [data-import-run]`)),
+  `Update with id skipped: it says why and Import waits (${unmapped.trim()})`,
+);
+await pickField(0, "id");
+check((await page.$(`${panel} [data-import-unmapped-key]`)) === null && !(await page.isDisabled(`${panel} [data-import-run]`)), "id matched again: Import is back");
 await page.click(`${panel} [data-import-option="conflict"] [data-choice="skip"]`);
 await page.mouse.move(600, 650);
 await shot("1-panel");
