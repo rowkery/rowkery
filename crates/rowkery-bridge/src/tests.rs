@@ -1067,6 +1067,16 @@ fn sqlite_explain_reads_the_plan_and_runs_nothing() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A timed plan never wraps its statement in `BEGIN … ROLLBACK` unless the
+/// tab surely has no transaction: an unknown state (the probe didn't answer)
+/// takes the savepoint form, which can't end the user's transaction.
+#[test]
+fn a_timed_plan_on_an_unknown_transaction_keeps_it() {
+    assert!(!super::plan_in_savepoint(TxnState::None));
+    assert!(super::plan_in_savepoint(TxnState::Users));
+    assert!(super::plan_in_savepoint(TxnState::Unknown));
+}
+
 /// ⌘E on Postgres: an estimate with a missing-index hint; a timed plan of
 /// a write held by Confirm writes, then run and rolled back, also inside
 /// the user's own transaction.
