@@ -1960,3 +1960,122 @@ async fn a_longer_query_limit_lets_a_read_run_past_the_default() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// postgres_fdw pushes a join of two foreign tables down to the remote
+/// server as one Foreign Scan that names neither: with a table hidden, the
+/// guard can't tell what it reads, so it refuses. Loops back to this server.
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_join_pushed_down_to_a_foreign_server_is_checked() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-fdw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let setup = open_session(ID.into(), config.clone())
+        .await
+        .expect("connect");
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    session_execute(
+        &setup,
+        "DROP SCHEMA IF EXISTS mcp_fdw_remote, mcp_fdw CASCADE;
+         DROP SERVER IF EXISTS mcp_fdw_loop CASCADE;",
+    )
+    .await
+    .expect("cleanup");
+    // Committed first: the foreign server reads it on a session of its own.
+    session_execute(
+        &setup,
+        "CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+         CREATE SCHEMA mcp_fdw_remote;
+         CREATE TABLE mcp_fdw_remote.people (id int PRIMARY KEY, email text);
+         CREATE TABLE mcp_fdw_remote.accounts (pid int, plan text);
+         INSERT INTO mcp_fdw_remote.people VALUES (1, 'ada@example.com');
+         INSERT INTO mcp_fdw_remote.accounts VALUES (1, 'team');",
+    )
+    .await
+    .expect("remote tables");
+    session_execute(
+        &setup,
+        &format!(
+            // The server's own address, not ours: in CI it runs in a
+            // container whose port is mapped.
+            "DO $$ BEGIN EXECUTE format(
+               'CREATE SERVER mcp_fdw_loop FOREIGN DATA WRAPPER postgres_fdw
+                  OPTIONS (host %L, port %L, dbname %L, use_remote_estimate %L)',
+               'localhost', current_setting('port'), current_database(), 'true'); END $$;
+             CREATE USER MAPPING FOR CURRENT_USER SERVER mcp_fdw_loop
+               OPTIONS (user {}, password {});
+             CREATE SCHEMA mcp_fdw;
+             IMPORT FOREIGN SCHEMA mcp_fdw_remote FROM SERVER mcp_fdw_loop INTO mcp_fdw;",
+            literal(&config.username),
+            literal(&password),
+        ),
+    )
+    .await
+    .expect("fixtures");
+
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    pg.mcp_hidden_tables = vec!["mcp_fdw.people".into()];
+    save(pg);
+    let mcp = RowkeryMcp::default();
+    // The plan Postgres gives, as text: what postgres_fdw pushed down.
+    let plan = |sql: String| {
+        let setup = &setup;
+        async move {
+            let mut text = String::new();
+            rowkery_core::db::postgres::session_query_stream(
+                setup,
+                &format!("EXPLAIN (FORMAT JSON) {sql}"),
+                |batch, _| {
+                    text.push_str(&format!("{:?}", batch.rows));
+                    Ok(())
+                },
+            )
+            .await
+            .expect("explain");
+            text
+        }
+    };
+    // A join pushed down names its tables only in `Relations`: the hidden
+    // one among them is refused like any other.
+    let join = "SELECT p.email FROM mcp_fdw.people p JOIN mcp_fdw.accounts a ON a.pid = p.id";
+    assert!(
+        plan(join.into()).await.contains("INNER JOIN"),
+        "pushed down"
+    );
+    let err = query(&mcp, join).await.expect_err("pushed-down join");
+    assert!(
+        err.starts_with("Refused") && err != crate::guard::UNNAMED_SCAN_REFUSAL,
+        "{err}"
+    );
+    // An aggregate over the shared one, pushed down too, is fine.
+    let count = "SELECT count(*) FROM mcp_fdw.accounts";
+    assert!(
+        plan(count.into()).await.contains("Aggregate on"),
+        "pushed down"
+    );
+    let counted = query(&mcp, count).await.expect("aggregate");
+    assert_eq!(counted["rows"], json!([[1]]));
+    // The shared foreign table on its own is named in the plan, and fine.
+    let own = query(&mcp, "SELECT plan FROM mcp_fdw.accounts")
+        .await
+        .expect("one foreign table");
+    assert_eq!(own["rows"], json!([["team"]]));
+    let err = query(&mcp, "SELECT email FROM mcp_fdw.people")
+        .await
+        .expect_err("hidden");
+    assert!(err.starts_with("Refused"), "{err}");
+
+    session_execute(
+        &setup,
+        "DROP SCHEMA mcp_fdw_remote, mcp_fdw CASCADE; DROP SERVER mcp_fdw_loop CASCADE;",
+    )
+    .await
+    .expect("cleanup");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
