@@ -67,6 +67,11 @@ pub fn sql_literal(engine: crate::db::EngineKind, value: &crate::db::Value) -> O
     use crate::db::{EngineKind, Value};
     match value {
         Value::Int(n) => Some(n.to_string()),
+        // Quoted on Postgres so it takes the column's type: a real `0.1`
+        // doesn't equal the double a bare `0.1` reads as.
+        Value::Float(f) if f.is_finite() && engine == EngineKind::Postgres => {
+            Some(format!("'{f}'"))
+        }
         Value::Float(f) if f.is_finite() => Some(f.to_string()),
         Value::Text(t) if t.contains('\0') => None,
         Value::Text(t) if engine == EngineKind::Postgres && t.contains('\\') => Some(format!(
@@ -100,7 +105,7 @@ mod literal_tests {
             Some("'x''; DROP TABLE t; --'")
         );
         assert_eq!(pg(&Value::Bool(false)).as_deref(), Some("FALSE"));
-        assert_eq!(pg(&Value::Float(1.5)).as_deref(), Some("1.5"));
+        assert_eq!(pg(&Value::Float(1.5)).as_deref(), Some("'1.5'"));
         assert_eq!(pg(&Value::Float(f64::NAN)), None);
         assert_eq!(pg(&Value::Null), None);
         assert_eq!(pg(&Value::Bytes(vec![1])), None);

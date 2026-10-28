@@ -103,6 +103,9 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'NaN'::numeric",
         "(-7)::int2",
         "1.5::float4",
+        // A real shows the digits it holds, as psql does.
+        "0.1::real",
+        "3.14::real",
         // Every digit survives: no trip through an f64.
         r#"'{"id": 9007199254740993, "amount": 0.1000000000000000055}'::jsonb"#,
         r#"'{"id":9007199254740993,  "amount":0.1000000000000000055}'::json"#,
@@ -188,6 +191,40 @@ async fn postgres_decodes_dates_uuid_numeric() {
     let row = got.expect("row");
     assert_eq!(row[0], Value::Text("2026-09-26 14:43:23+00".into()));
     assert_eq!(row[1], Value::Null);
+
+    // A real read back names its row again: as an edit's key, and as the
+    // literal a lookup writes.
+    let mut got = None;
+    session_query_stream(&session, "SELECT 0.1::real AS r", |batch, _| {
+        got = batch.rows.into_iter().next();
+        Ok(())
+    })
+    .await
+    .expect("query");
+    let real = got.expect("row").remove(0);
+    for lit in [
+        rowkery_core::edits::literal(rowkery_core::db::EngineKind::Postgres, "real", &real)
+            .expect("literal"),
+        rowkery_core::query_util::sql_literal(rowkery_core::db::EngineKind::Postgres, &real)
+            .expect("literal"),
+    ] {
+        let mut got = None;
+        session_query_stream(
+            &session,
+            &format!("SELECT 0.1::real = {lit}, 0.1::float8 = {lit}"),
+            |batch, _| {
+                got = batch.rows.into_iter().next();
+                Ok(())
+            },
+        )
+        .await
+        .expect("compare");
+        assert_eq!(
+            got.expect("row"),
+            vec![Value::Bool(true), Value::Bool(true)],
+            "{lit}"
+        );
+    }
 }
 
 /// int8 at the edges of its range reaches the webview exact: as a BigInt

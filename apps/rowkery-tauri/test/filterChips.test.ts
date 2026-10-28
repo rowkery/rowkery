@@ -55,6 +55,8 @@ describe("chipsToWhere", () => {
     ["BETWEEN", pred("amount", "numeric", "BETWEEN", "50", "200"), "amount BETWEEN 50 AND 200"],
     ["IS NULL", pred("note", "text", "IS NULL"), "note IS NULL"],
     ["IS NOT NULL", pred("note", "text", "IS NOT NULL"), "note IS NOT NULL"],
+    // A real's digits, quoted: a bare 0.1 is a double that no real equals.
+    ["=", pred("ratio", "float4", "=", "0.1"), "ratio = '0.1'"],
   ])("%s", (_op, chip, sql) => {
     expect(chipsToWhere([chip])).toBe(sql);
   });

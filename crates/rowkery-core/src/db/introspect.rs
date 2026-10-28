@@ -1012,7 +1012,7 @@ mod tests {
         };
         assert_eq!(
             table_browse_query(EngineKind::Postgres, "public", "t", &opts),
-            "SELECT * FROM public.t\nWHERE (score < 2.5 OR score IS NULL)\n   OR (score = 2.5 AND (name > 'b' OR name IS NULL))\n   OR (score = 2.5 AND name = 'b' AND id > 3)\nORDER BY score DESC NULLS LAST, name NULLS LAST, id\nLIMIT 1000;"
+            "SELECT * FROM public.t\nWHERE (score < '2.5' OR score IS NULL)\n   OR (score = '2.5' AND (name > 'b' OR name IS NULL))\n   OR (score = '2.5' AND name = 'b' AND id > 3)\nORDER BY score DESC NULLS LAST, name NULLS LAST, id\nLIMIT 1000;"
         );
         // The last row's sort value was NULL: only NULLs (by key) follow.
         let opts = BrowseOptions {
