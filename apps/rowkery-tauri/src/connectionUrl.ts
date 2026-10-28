@@ -47,21 +47,43 @@ function decode(s: string): string {
   }
 }
 
-function parseUrl(trimmed: string): Partial<PgForm> | null {
-  let url: URL;
+/**
+ * `postgres://…` as http's rules read it, or null; `socket` when it names
+ * no host (`app@/db?host=/var/run/postgresql`), read as `localhost` until
+ * `?host=` names one. As libpq does, the user part is what comes before an
+ * `@` ahead of the first `/`, so a password holding `#`, `?` or `@` needn't be
+ * encoded (`app:pa#ss@db`); one holding `/` must be (`%2F`).
+ */
+function readUrl(trimmed: string): { url: URL; socket: boolean } | null {
+  // Non-special schemes parse inconsistently across engines; borrow http's rules.
+  const rest = trimmed.replace(/^postgres(ql)?:\/\//i, "");
+  const slash = rest.indexOf("/");
+  const at = rest.lastIndexOf("@", slash < 0 ? rest.length : slash);
+  const user = at < 0 ? "" : `${rest.slice(0, at).replace(/[#?@]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}@`;
+  const after = rest.slice(at + 1);
+  const socket = /^(?:[/?]|$)/.test(after);
   try {
-    // Non-special schemes parse inconsistently across engines; borrow http's rules.
-    url = new URL(trimmed.replace(/^postgres(ql)?:/i, "http:"));
+    return { url: new URL(`http://${user}${socket ? "localhost" : ""}${after}`), socket };
   } catch {
     return null;
   }
+}
+
+function parseUrl(trimmed: string): Partial<PgForm> | null {
+  const read = readUrl(trimmed);
+  if (!read) return null;
+  const { url, socket } = read;
   const out: Partial<PgForm> = {};
-  if (url.hostname) out.host = decode(url.hostname);
-  out.port = url.port || "5432";
-  const db = decode(url.pathname.replace(/^\//, ""));
+  const q = (key: string) => url.searchParams.get(key) || undefined;
+  const host = q("host") ?? (socket ? undefined : decode(url.hostname));
+  if (host) out.host = host;
+  out.port = q("port") ?? (url.port || "5432");
+  const db = q("dbname") ?? decode(url.pathname.replace(/^\//, ""));
   if (db) out.database = db;
-  if (url.username) out.username = decode(url.username);
-  if (url.password) out.password = decode(url.password);
+  const username = q("user") ?? (url.username ? decode(url.username) : undefined);
+  if (username) out.username = username;
+  const password = q("password") ?? (url.password ? decode(url.password) : undefined);
+  if (password) out.password = password;
   const ssl = sslFrom(url.searchParams.get("sslmode"));
   if (ssl) out.ssl = ssl;
   const rootCert = url.searchParams.get("sslrootcert");
@@ -147,4 +169,35 @@ function parsePsql(s: string): Partial<PgForm> | null {
   }
   if (loose[1] && !out.username) out.username = loose[1];
   return Object.keys(out).length > 0 ? out : null;
+}
+
+/** What a hidden password reads as in the URL field. */
+export const HIDDEN_PASSWORD = "•••";
+
+/**
+ * `text` with the password it holds shown as {@link HIDDEN_PASSWORD}: the
+ * URL's (`user:…@`, `?password=…`) or a keyword string's (`password=…`).
+ * Text that holds none comes back as it was.
+ */
+export function hidePassword(text: string): string {
+  if (/^\s*(?:(?:export\s+)?[A-Z_][A-Z0-9_]*=["']?)?postgres(ql)?:\/\//i.test(text)) {
+    const start = text.indexOf("//") + 2;
+    const slash = text.indexOf("/", start);
+    const at = text.lastIndexOf("@", slash < 0 ? text.length : slash);
+    const colon = text.indexOf(":", start);
+    let out = text;
+    if (at > start && colon >= 0 && colon < at) out = `${text.slice(0, colon + 1)}${HIDDEN_PASSWORD}${text.slice(at)}`;
+    return out.replace(/([?&]password=)[^&#\s"']*/i, `$1${HIDDEN_PASSWORD}`);
+  }
+  return text.replace(/(\bpassword=)('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)/, `$1${HIDDEN_PASSWORD}`);
+}
+
+/**
+ * Why a pasted `postgres://` URL can't be read, or null when it can (or
+ * isn't one).
+ */
+export function connectionUrlProblem(text: string): string | null {
+  const t = text.trim();
+  if (!/^(?:(?:export\s+)?[A-Z_][A-Z0-9_]*=["']?)?postgres(ql)?:\/\//i.test(t) || parsePostgresUrl(t)) return null;
+  return "A / in the password needs %2F";
 }

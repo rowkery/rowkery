@@ -19,7 +19,7 @@ import {
   TEST_PG_SECRETS,
   type LocalServer,
 } from "./api";
-import { parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, parsePostgresUrl } from "./connectionUrl";
 import { CatalogUpdates, type CatalogUpdate } from "./catalogUpdates";
 import { applyTableCounts } from "./rowCounts";
 import { ConnectionSwitcher } from "./ConnectionSwitcher";
@@ -1130,7 +1130,8 @@ function App() {
   /** ⌘V outside a text field: a connection string fills the sheet; anything else does nothing. */
   const pasteConnection = async (text?: string, openAnyway = false) => {
     const t = text ?? (await readClipboardText().catch(() => ""));
-    if (parsePostgresUrl(t)) openSheet({ url: t.trim() });
+    // One it can't read opens too, to say why.
+    if (parsePostgresUrl(t) || connectionUrlProblem(t)) openSheet({ url: t.trim() });
     else if (openAnyway) openSheet(null);
   };
   const editConnection = (id: string, mark?: { field: string; message: string }) => {
@@ -1301,7 +1302,7 @@ function App() {
       pasteSeen.current = true;
       if (newConnOpen || report || isTextField(e.target)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (!parsePostgresUrl(text)) return;
+      if (!parsePostgresUrl(text) && !connectionUrlProblem(text)) return;
       e.preventDefault();
       actionsRef.current.pasteConnection(text);
     };

@@ -19,7 +19,7 @@ import {
   type ProbeResult,
 } from "./api";
 import { defaultSslMode, guessEnvironment } from "./connectionEnv";
-import { parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, hidePassword, parsePostgresUrl } from "./connectionUrl";
 import { commandTip, keysFor } from "./commands";
 import { isMacPlatform } from "./platform";
 import { prefetchOn, setPrefetch } from "./prefetchSwitch";
@@ -242,7 +242,8 @@ export function NewConnectionSheet({
     // The sheet's starting point, read once.
     [],
   );
-  const [url, setUrl] = useState(() => (prefilled && prefill?.url) || "");
+  // The password goes to its own field; the URL shows it hidden.
+  const [url, setUrl] = useState(() => hidePassword((prefilled && prefill?.url) || ""));
   // A new connection's SSL follows its host (`defaultSslMode`) until picked,
   // or set by a pasted string's sslmode; a saved one keeps its own.
   const [pg, setPg] = useState<PgForm>(() => {
@@ -375,9 +376,12 @@ export function NewConnectionSheet({
     });
   };
 
-  const onUrl = (text: string) => {
-    setUrl(text);
+  /** `pasted`: shown with its password hidden at once, not only on blur. */
+  const onUrl = (text: string, pasted = false) => {
+    setUrl(pasted ? hidePassword(text) : text);
     const parsed = parsePostgresUrl(text);
+    // The hidden password, edited around, isn't a new one.
+    if (parsed?.password?.includes("•")) delete parsed.password;
     if (parsed) {
       touch();
       setEdited((prev) => new Set([...prev, ...(Object.keys(parsed) as (keyof PgForm)[])]));
@@ -935,7 +939,7 @@ export function NewConnectionSheet({
                 </div>
               </div>
               {!cloud && (
-              <Field label="Paste a connection URL" name="url">
+              <Field label="Paste a connection URL" name="url" error={connectionUrlProblem(url) ?? undefined}>
                 <input
                   autoFocus={!editing}
                   data-testid="nc-input"
@@ -945,6 +949,14 @@ export function NewConnectionSheet({
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(e) => onUrl(e.target.value)}
+                  onPaste={(e) => {
+                    const text = e.clipboardData.getData("text/plain");
+                    if (!text) return;
+                    e.preventDefault();
+                    const input = e.currentTarget;
+                    onUrl(input.value.slice(0, input.selectionStart ?? 0) + text + input.value.slice(input.selectionEnd ?? input.value.length), true);
+                  }}
+                  onBlur={() => setUrl((u) => hidePassword(u))}
                 />
               </Field>
               )}
