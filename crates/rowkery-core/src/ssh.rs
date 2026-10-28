@@ -114,7 +114,8 @@ static KNOWN_HOSTS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// The keys a tunnel refused as changed (`host:port` → the saved one), seen
 /// by Rowkery itself: Forget acts only on one of these, never on what an
 /// error message says (a database server's error text could imitate it).
-static CHANGED_SEEN: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+static CHANGED_SEEN: std::sync::Mutex<Option<HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
 
 fn saw_changed(host_key: &str, saved: &str) {
     if let Ok(mut seen) = CHANGED_SEEN.lock() {

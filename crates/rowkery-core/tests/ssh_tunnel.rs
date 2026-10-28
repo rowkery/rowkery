@@ -194,7 +194,10 @@ async fn tunnel_checks_host_keys_and_carries_bytes() {
         rowkery_core::ssh::take_newly_trusted("127.0.0.1", port),
         Some(fingerprint.clone())
     );
-    assert_eq!(rowkery_core::ssh::take_newly_trusted("127.0.0.1", port), None);
+    assert_eq!(
+        rowkery_core::ssh::take_newly_trusted("127.0.0.1", port),
+        None
+    );
 
     // Saved: opens without trusting again.
     let tunnel = open(
