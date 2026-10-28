@@ -67,8 +67,16 @@ export interface CommandState {
   cellEditable?: boolean;
   /** `cellEditable`, the column takes NULL and the cell's row isn't marked for delete: Set NULL. */
   cellNullable?: boolean;
-  /** Whole rows are selected in the grid (row numbers): ⌫ marks them for delete. */
+  /** `rowsEditable`, and loaded rows are under the grid's selection (a cell is its row): ⌫ marks them for delete. */
   rowsSelected?: boolean;
+  /** Every row under the grid's selection is marked for delete: ⌫ restores them. */
+  rowsMarked?: boolean;
+  /** How many loaded rows the grid's selection holds. */
+  selectedRows?: number;
+  /** The shown table tab has a staged change (or a Discard) ⌘Z can take back. */
+  editUndoable?: boolean;
+  /** …and one ⌘Z took back that ⇧⌘Z can put back. */
+  editRedoable?: boolean;
   /** Staged edits waiting in the shown table tab's tray. */
   pendingEdits?: number;
   /** A write waits for ⇧⌘↵: a held statement, held edits, or Review SQL is open. */
@@ -314,7 +322,7 @@ const zoneCommands = (): Command[] => [
     id: "delete-row",
     title: "Delete row",
     section: "Grid",
-    // ⌫ on chips removes a filter; on whole rows selected in the grid, marks them.
+    // ⌫ on chips removes a filter; on the grid's selection, marks its rows.
     chord: { mac: "Backspace" },
     palette: false,
     canRun: (s) => !!s.rowsEditable && !!s.rowsSelected,
@@ -351,7 +359,8 @@ const zoneCommands = (): Command[] => [
     section: "Grid",
     chord: { mac: "Backspace" },
     palette: false,
-    canRun: (s) => s.tableTab && !s.rowsSelected,
+    // ⌫ in the grid is Delete row: COMMAND_ZONE (keyTracker.ts) tells them apart.
+    canRun: (s) => s.tableTab,
   },
 ];
 
@@ -372,6 +381,24 @@ const editCommands = (): Command[] => [
     chord: { mac: "Mod+D" },
     synonyms: ["copy row"],
     canRun: (s) => !!s.cellEditable,
+  },
+  {
+    id: "undo-edit",
+    title: "Undo the last change",
+    section: "Grid",
+    chord: { mac: "Mod+Z" },
+    sharesPredefined: "a table tab's keydown takes back the change before Edit > Undo sees the key; in a text field it stays the field's",
+    palette: false,
+    canRun: (s) => s.tableTab && !!s.editUndoable,
+  },
+  {
+    id: "redo-edit",
+    title: "Redo the change",
+    section: "Grid",
+    chord: { mac: "Mod+Shift+Z" },
+    sharesPredefined: "a table tab's keydown puts the change back before Edit > Redo sees the key; in a text field it stays the field's",
+    palette: false,
+    canRun: (s) => s.tableTab && !!s.editRedoable,
   },
   {
     id: "commit-edits",

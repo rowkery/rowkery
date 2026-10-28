@@ -6,8 +6,9 @@
 // boolean, the enum's labels, the foreign key picker searching the
 // referenced table, JSON in its own pane), ↵ stages, Esc reverts, ⌥⇧N
 // (Ctrl+Alt+N here) stages NULL, ⌘I inserts a row with its defaults, ⌘D
-// duplicates, ⌫ on whole rows marks them, a pasted block stages cell by
-// cell. Marks are data attributes: `data-edited` on a cell (the 2 px bar),
+// duplicates, ⌫ on a cell or whole rows marks them (the cell menu's Delete
+// row / Restore row too), ⌘Z and ⇧⌘Z step through the staged changes, a
+// pasted block stages cell by cell. Marks are data attributes: `data-edited` on a cell (the 2 px bar),
 // `data-mark` on a row (the gutter dot). A table without a primary key and a
 // Read-only connection open no editor and say why. Staged edits are saved
 // with the tab and come back with Reopen closed tab. The tray counts them;
@@ -349,6 +350,32 @@ check((await rowMark(10)) === null, "⌫ again unmarks");
 await pick(9, "city");
 await page.keyboard.press("Enter");
 check(await noEditor(), "a row marked for delete isn't edited");
+
+// 9b. ⌫ on a lone cell marks its row; ⌘Z (Ctrl+Z) takes back each change, ⇧⌘Z puts it back.
+await pick(8, "city");
+await page.keyboard.press("Backspace");
+check((await rowMark(8)) === "delete", "⌫ on a cell marks its row for delete");
+await page.keyboard.press("Control+z");
+check((await rowMark(8)) === null, "Ctrl+Z takes the mark back");
+await page.keyboard.press("Control+Shift+z");
+check((await rowMark(8)) === "delete", "Ctrl+Shift+Z puts it back");
+// The cell menu: Restore row on a marked row, Delete row on another, both printing ⌫.
+const menuRow = (id) => page.locator(`.grid-menu [data-item="${id}"]`);
+await cell(8, "city").click({ button: "right" });
+check((await menuRow("delete-row").textContent()).startsWith("Restore row"), "right-click a marked row: Restore row");
+check((await menuRow("delete-row").getAttribute("data-keys")) === "Backspace", "the row prints ⌫");
+await menuRow("delete-row").click();
+check((await rowMark(8)) === null, "Restore row unmarks it");
+await cell(7, "name").click({ button: "right" });
+check((await menuRow("delete-row").textContent()).startsWith("Delete row"), "right-click a row: Delete row");
+await menuRow("delete-row").click();
+check((await rowMark(7)) === "delete", "Delete row marks it");
+await page.keyboard.press("Control+z");
+await page.keyboard.press("Control+z");
+check((await rowMark(7)) === null && (await rowMark(8)) === "delete", "Ctrl+Z steps back one change at a time");
+await page.keyboard.press("Control+z");
+check((await rowMark(8)) === null, "…to before the first ⌫");
+await shot("4b-undo");
 
 // 10. Paste-to-edit: a TSV block from the ring, cell by cell.
 await pick(10, "city");

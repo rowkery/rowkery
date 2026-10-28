@@ -45,6 +45,14 @@ describe("staging", () => {
     expect(changeCount(b)).toBe(0);
   });
 
+  test("staging what is already there returns the same buffer (no ⌘Z step)", () => {
+    const empty = emptyBuffer("t", "c1");
+    expect(stageCell(empty, key(1), "city", { Text: "KL" }, { Text: "KL" })).toBe(empty);
+    const b = stageCell(empty, key(1), "city", { Text: "PJ" }, { Text: "KL" });
+    expect(stageCell(b, key(1), "city", { Text: "PJ" }, { Text: "KL" })).toBe(b);
+    expect(stageCell(b, key(1), "city", { Text: "KL" }, { Text: "KL" })).not.toBe(b);
+  });
+
   test("Esc reverts one cell and keeps the others", () => {
     let b = stageCell(emptyBuffer("t", "c1"), key(1), "a", { Int: 2 }, { Int: 1 });
     b = stageCell(b, key(1), "b", null, { Text: "x" });

@@ -124,6 +124,9 @@ export function stageCell(
   const k = rowKey(key);
   const cur = b.updates[k];
   const original = cur && column in cur.was ? cur.was[column] : was;
+  // Nothing new: the same buffer, so no ⌘Z step is made of it.
+  const staged = !!cur && column in cur.set;
+  if (staged ? sameValue(value, cur.set[column], kind) && !sameValue(value, original, kind) : sameValue(value, original, kind)) return b;
   const set = { ...cur?.set };
   const before = { ...cur?.was };
   if (sameValue(value, original, kind)) {

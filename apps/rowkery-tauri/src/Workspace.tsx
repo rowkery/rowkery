@@ -45,7 +45,7 @@ import { catalogResult } from "./catalogRows";
 import { columnComments } from "./comments";
 import { TimingsSheet } from "./TimingsSheet";
 import { syncMenu } from "./menuSync";
-import { setShownState } from "./keyTracker";
+import { OVERLAY as OVERLAY_KEYS, setShownState } from "./keyTracker";
 import { closeScope, setCloseScope, subscribeCloseScope } from "./closeScope";
 import { useKeymap } from "./keymaps";
 import { KeyStrip } from "./KeyStrip";
@@ -719,6 +719,7 @@ export function Workspace({
   const closeTabNow = (id: number) => {
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
+    rowEditsRef.current.forget(id);
     const tab = tabs[index];
     // Closing the import tab is the panel's Cancel (a running import is
     // cancelled first); it never goes to Recently closed.
@@ -1388,6 +1389,8 @@ export function Workspace({
     // Only what was sent is done: an edit staged while it ran stays staged,
     // and neither the tab's buffer nor a parked copy of it sends it twice.
     setTabEdits(tab.id, (cur) => withoutCommittedTab({ edits: cur }, buffer).edits);
+    // What committed can't be taken back by ⌘Z.
+    rowEdits.forget(tab.id);
     setTabs((prev) =>
       prev.map((t) => (t.id === tab.id && t.parked ? { ...t, parked: withoutCommittedTab(t, buffer).parked } : t)),
     );
@@ -1438,7 +1441,8 @@ export function Workspace({
     const tab = activeTab;
     const prev = rowEdits.buffer ?? undefined;
     const n = changeCount(prev);
-    if (!tab || !n) return;
+    if (!tab || !prev || !n) return;
+    rowEdits.noteDiscard(tab.id, prev);
     setTabEdits(tab.id, undefined);
     setTray(tab.id, null);
     const action: Undoable = {
@@ -1447,7 +1451,10 @@ export function Workspace({
       undo: () => {
         const now = tabsRef.current.find((t) => t.id === tab.id);
         if (!now) return showToast("Can't undo the discard: its tab is closed");
+        // ⌘Z in the grid brought it back already.
+        if (now.edits === prev) return;
         if (changeCount(now.edits) > 0) return showToast("Can't undo the discard: the tab has edits staged since");
+        rowEdits.forget(tab.id);
         setTabEdits(tab.id, prev);
       },
       lasting: true,
@@ -2128,6 +2135,30 @@ export function Workspace({
         if (e.key === "Enter" && mod && e.shiftKey && !e.altKey) {
           e.preventDefault();
           void commitEditsRef.current(heldCommit.sql);
+          return;
+        }
+      }
+      // Table tabs: ⌘Z takes back the last staged change, ⇧⌘Z puts it back. A
+      // text field (the cell editor, the SQL line) and an overlay keep theirs;
+      // nothing moves while a commit is on its way.
+      const target = e.target as Element | null;
+      if (
+        mod &&
+        !e.altKey &&
+        e.code === "KeyZ" &&
+        isTableTabRef.current &&
+        !isTypingTarget(e.target) &&
+        !target?.closest?.(OVERLAY_KEYS) &&
+        !e.defaultPrevented
+      ) {
+        const edits = rowEditsRef.current;
+        const inGrid = !!target?.closest?.(".results-grid-wrap");
+        const can = (e.shiftKey ? edits.redoable : edits.undoable) && !committing.current.has(activeTabIdRef.current);
+        // In the grid ⌘Z is always the grid's: Edit > Undo never reaches a field that lost focus.
+        if (can || inGrid) e.preventDefault();
+        if (can) {
+          if (e.shiftKey) edits.redo();
+          else edits.undo();
           return;
         }
       }
@@ -3895,6 +3926,10 @@ export function Workspace({
       cellEditable: rowEdits.cellEditable,
       cellNullable: rowEdits.cellNullable,
       rowsSelected: rowEdits.rowsSelected,
+      rowsMarked: rowEdits.rowsMarked,
+      selectedRows: rowEdits.selectedRows,
+      editUndoable: rowEdits.undoable,
+      editRedoable: rowEdits.redoable,
       pendingEdits: rowEdits.count,
       writeHeld: !!activeRun.held || !!heldEdit || !!review,
       connectionForm: !!connectionForm,
@@ -3932,6 +3967,10 @@ export function Workspace({
       rowEdits.cellEditable,
       rowEdits.cellNullable,
       rowEdits.rowsSelected,
+      rowEdits.rowsMarked,
+      rowEdits.selectedRows,
+      rowEdits.undoable,
+      rowEdits.redoable,
       rowEdits.count,
       activeRun.held,
       heldEdit,
@@ -4245,6 +4284,10 @@ export function Workspace({
         return discardEdits();
       case "insert-row":
         return rowEdits.insertRow();
+      case "undo-edit":
+        return rowEdits.undo();
+      case "redo-edit":
+        return rowEdits.redo();
       case "duplicate-row":
         return rowEdits.duplicateSelected();
       case "clear-results":

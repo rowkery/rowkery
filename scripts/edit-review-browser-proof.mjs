@@ -6,7 +6,7 @@
 // and closes when you click away; a page loading below keeps the staged
 // marks and an open editor; a double-tapped ⌘S sends one commit; an edit
 // staged while a commit runs stays staged after it; ⌫ on a lone cell of a
-// one-column table marks nothing (its row number does); the cell menu's Set
+// one-column table marks its row (its row number again unmarks); the cell menu's Set
 // NULL appears only where ⌥⇧N works (a nullable column, a row not marked for
 // delete); ⌘C, the SQL line's selection stats and Quick Look (and its ⌘C)
 // read the staged values. Find exists on query tabs only, where nothing is
@@ -308,14 +308,14 @@ await shot("3-after-commit");
 await page.evaluate(() => (window.__APPLY_DELAY__ = 5));
 await page.locator(`${ws} [data-discard]`).click();
 
-// 8. ⌫ on a one-column table: a lone cell isn't a row; its row number is.
+// 8. ⌫ on a one-column table: a lone cell marks its row, like any cell; its row number again unmarks.
 await openTable("tags", 3);
 await page.locator(`${ws} [data-testid="rg-body"] [data-row="0"] [data-col="0"]`).click();
 await page.keyboard.press("Backspace");
-check((await rowMark(0)) === null, "⌫ on a lone cell of a one-column table marks nothing");
+check((await rowMark(0)) === "delete", "⌫ on a lone cell of a one-column table marks its row");
 await page.locator(`${ws} [data-testid="rg-body"] [data-row="0"] [data-testid="rg-gutter"]`).click();
 await page.keyboard.press("Backspace");
-check((await rowMark(0)) === "delete", "⌫ on its row number marks the row");
+check((await rowMark(0)) === null, "⌫ on its row number unmarks it");
 await shot("4-one-column");
 
 await browser.close();
