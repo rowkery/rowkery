@@ -1472,6 +1472,7 @@ pub(crate) mod tests {
             safe_mode: Default::default(),
             sample: false,
             allow_mcp: true,
+            mcp_timeout_s: None,
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
