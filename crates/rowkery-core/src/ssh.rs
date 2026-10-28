@@ -237,7 +237,9 @@ impl SshTunnel {
     }
 
     /// `open`, giving up after [`SSH_OPEN_TIMEOUT`] (an unreachable bastion
-    /// otherwise waits for the OS's TCP timeout).
+    /// otherwise waits for the OS's TCP timeout). The SSH secret is read
+    /// first, off the clock: the keychain may be waiting on its prompt, and
+    /// that wait isn't the bastion's.
     pub async fn open_with_timeout(
         ssh: &SshConfig,
         connection_id: &str,
@@ -245,9 +247,21 @@ impl SshTunnel {
         remote_port: u16,
         secrets: Option<&ConnectionSecrets>,
     ) -> Result<Self, SshError> {
+        let mut known = secrets.cloned().unwrap_or_default();
+        match ssh.auth_method {
+            SshAuthMethod::Password if known.ssh_password.is_none() => {
+                known.ssh_password =
+                    secret_off_thread(connection_id, SecretKind::SshPassword).await?;
+            }
+            SshAuthMethod::KeyFile if known.ssh_key_passphrase.is_none() => {
+                known.ssh_key_passphrase =
+                    secret_off_thread(connection_id, SecretKind::SshKeyPassphrase).await?;
+            }
+            _ => {}
+        }
         tokio::time::timeout(
             SSH_OPEN_TIMEOUT,
-            Self::open(ssh, connection_id, remote_host, remote_port, secrets),
+            Self::open(ssh, connection_id, remote_host, remote_port, Some(&known)),
         )
         .await
         .map_err(|_| {
