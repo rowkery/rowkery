@@ -20,6 +20,36 @@ pub struct ConnectExplanation {
     /// `password`, `ssl`, `sshHost`, `sshPassword`, `account`, `instance`,
     /// `ipType`.
     pub field: Option<&'static str>,
+    /// `ssh_changed`: the bastion and both fingerprints, for the panel to
+    /// show and for Forget saved key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_keys: Option<HostKeys>,
+}
+
+/// A changed SSH host key: the saved fingerprint and the one offered now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostKeys {
+    pub host: String,
+    pub port: u16,
+    pub saved: String,
+    pub offered: String,
+}
+
+/// Reads the tunnel's own refusal: "SSH host key for {host}:{port} has
+/// CHANGED; nothing was sent (saved {saved}, offered now {offered})".
+fn host_keys(raw: &str) -> Option<HostKeys> {
+    let rest = raw.split_once("SSH host key for ")?.1;
+    let (host_port, rest) = rest.split_once(" has CHANGED")?;
+    let (host, port) = host_port.rsplit_once(':')?;
+    let rest = rest.split_once("(saved ")?.1;
+    let (saved, rest) = rest.split_once(", offered now ")?;
+    let offered = rest.split(')').next()?;
+    Some(HostKeys {
+        host: host.to_string(),
+        port: port.parse().ok()?,
+        saved: saved.to_string(),
+        offered: offered.to_string(),
+    })
 }
 
 /// What the panel needs to say about the connection, beyond the raw text.
@@ -60,19 +90,23 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
         class,
         cause,
         field,
+        host_keys: None,
     };
 
     if let Some(x) = explain_cloud_sql(raw, t) {
         return x;
     }
     if has("has CHANGED") {
-        return e(
-            "ssh_changed",
-            Some(format!(
-                "The SSH host key for {bastion} has CHANGED. Nothing was sent."
-            )),
-            Some("sshHost"),
-        );
+        return ConnectExplanation {
+            host_keys: host_keys(raw),
+            ..e(
+                "ssh_changed",
+                Some(format!(
+                    "The SSH host key for {bastion} has CHANGED. Nothing was sent. If the server was rebuilt, check the new key with whoever runs it."
+                )),
+                Some("sshHost"),
+            )
+        };
     }
     if says("unknown ssh host key") || has("Unknown host key") || has("Unknown server key") {
         return e(
@@ -225,6 +259,7 @@ fn explain_cloud_sql(raw: &str, t: &Target) -> Option<ConnectExplanation> {
             class,
             cause: Some(cause),
             field,
+            host_keys: None,
         })
     };
     let name = t.cloud_sql.and_then(crate::cloudsql::InstanceName::parse);
@@ -442,6 +477,20 @@ mod tests {
         assert_eq!(
             class("Could not open tunnel to bastion.internal: SSH host key for bastion.internal:22 has CHANGED; nothing was sent", &S).0,
             "ssh_changed"
+        );
+        // Both fingerprints, read from the tunnel's own words.
+        let x = explain_connect_error(
+            "Could not open tunnel to bastion.internal: SSH host key for bastion.internal:2222 has CHANGED; nothing was sent (saved SHA256:old+/=, offered now SHA256:new/+=)",
+            &S,
+        );
+        assert_eq!(
+            x.host_keys,
+            Some(HostKeys {
+                host: "bastion.internal".into(),
+                port: 2222,
+                saved: "SHA256:old+/=".into(),
+                offered: "SHA256:new/+=".into(),
+            })
         );
         assert_eq!(
             class("Could not open tunnel to bastion.internal: Unknown SSH host key for bastion.internal:22", &S),

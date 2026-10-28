@@ -177,6 +177,31 @@ export interface ConnectExplanation {
   class: string;
   cause: string | null;
   field: string | null;
+  /** `ssh_changed`: the bastion and both fingerprints. */
+  host_keys?: HostKeys;
+}
+
+/** A changed SSH host key: the saved fingerprint and the one offered now. */
+export interface HostKeys {
+  host: string;
+  port: number;
+  saved: string;
+  offered: string;
+}
+
+/** Forget saved key: true when the key shown was still the one saved (and is gone now). */
+export async function forgetSshHostKey(host: string, port: number, fingerprint: string): Promise<boolean> {
+  return invoke("forget_ssh_host_key", { host, port, fingerprint });
+}
+
+/** Undo of Forget saved key: false when the host has a key again by now. */
+export async function restoreSshHostKey(host: string, port: number, fingerprint: string): Promise<boolean> {
+  return invoke("restore_ssh_host_key", { host, port, fingerprint });
+}
+
+/** The key a first connect to this bastion trusted since the last call, if any. */
+export async function takeTrustedHostKey(host: string, port: number): Promise<string | null> {
+  return (await invoke<string | null>("take_trusted_host_key", { host, port })) ?? null;
 }
 
 export async function explainConnectError(

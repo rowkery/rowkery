@@ -107,7 +107,7 @@ SSL is under **Advanced** in the connection's form. A new connection to another 
 
 Rowkery remembers each SSH server's host key the first time it connects, in `ssh_known_hosts` in [Rowkery's folder](/where-rowkery-keeps-things/). If a server later shows a different key, Rowkery stops before sending anything, since that's what a server pretending to be yours would look like.
 
-If the server's owner tells you the key changed on purpose (the server was rebuilt or moved), open `~/Library/Application Support/Rowkery/ssh_known_hosts` in a text editor and delete the line that starts with that server's `host:port`. The next connect treats it as new and, with **Trust the host key on first connect** on, remembers the new key.
+The panel shows both fingerprints: **Saved**, the key Rowkery remembered, and **Now**, the one the server offered this time. Ask the server's owner whether the new one is right. If it changed on purpose (the server was rebuilt or moved), press **Forget saved key**, then **Retry**. With **Trust the host key on first connect** on, Retry remembers the new key, and a toast names the fingerprint it saved. Undo in the Forget toast puts the old key back.
 
 ### Waiting for a free connection
 
