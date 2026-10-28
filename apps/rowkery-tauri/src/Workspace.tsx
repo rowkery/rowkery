@@ -111,11 +111,13 @@ import {
   chipsToWhere,
   defaultOp,
   parseFragment,
+  readsAsNull,
   renameFragmentColumn,
   savedChips,
   textColumns,
   unknownColumn,
   type FilterChip,
+  type PredicateChip,
 } from "./filterChips";
 import { flushPersist, readKey, writeKey } from "./persist";
 import type { SelectionStats } from "./selectionStats";
@@ -3081,13 +3083,14 @@ export function Workspace({
     const t = db ? findTable(schemaTree, tableKey(db, target.schema, target.table)) : undefined;
     if (!t || sqlLiteral(value) === null) return;
     const v = value as Record<string, unknown>;
-    const chip: FilterChip = {
+    const chip: PredicateChip = {
       kind: "pred",
       column: target.column,
       type: t.table.columns?.find((c) => c.name === target.column)?.type_name ?? "",
       op: "=",
       value: "Text" in v ? String(v.Text) : "BigInt" in v ? String(v.BigInt) : safeFormatCell(value),
     };
+    if (readsAsNull(chip.value)) chip.text = true;
     lookOnLand.current = { tableKey: t.key, stale: result ?? null };
     openTable(t, {
       keep: own,
@@ -3266,7 +3269,16 @@ export function Workspace({
 
   /** The grid's cell menu, profile segments and histogram drags add chips. */
   const gridFilter = useStableCallback((column: string, op: ChipDraft["op"], value: string = "", value2?: string) =>
-    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 }),
+    addChip({
+      kind: "pred",
+      column,
+      type: chipType(column),
+      op,
+      value,
+      value2,
+      // A cell's text is itself, even the word null (rowkery/reports#44).
+      ...(readsAsNull(value) && (op === "=" || op === "IS DISTINCT FROM") ? { text: true as const } : {}),
+    }),
   );
 
   /**

@@ -78,7 +78,7 @@ export function chipWords(chip: FilterChip): string {
     case "BETWEEN":
       return `${chip.column} between ${chip.value} and ${chip.value2 ?? ""}`;
     default:
-      return `${chip.column} ${OP_WORDS[chip.op]} ${chip.value}`;
+      return `${chip.column} ${OP_WORDS[chip.op]} ${chip.text ? quoteText(chip.value) : chip.value}`;
   }
 }
 
@@ -95,6 +95,11 @@ export interface PredicateChip {
   op: FilterOp;
   value: string;
   value2?: string;
+  /**
+   * The value is a cell's text as it is, never NULL or a quoted null
+   * (a cell holding the word `null`, or `'null'` with its quotes).
+   */
+  text?: true;
 }
 
 /** "any text column": `(a ILIKE '%x%' OR b ILIKE '%x%')` over the table's text columns. */
@@ -123,7 +128,7 @@ export type ChipEngine = "postgres" | "sqlite";
 const NUMBER_TYPE =
   /^(int[248]?|integer|bigint|smallint|tinyint|mediumint|real|double|float[48]?|numeric|decimal|money|oid|serial[248]?|bigserial|smallserial)\b/i;
 const BOOL_TYPE = /^bool/i;
-const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string)/i;
+const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string)\b/i;
 const TIME_TYPE = /^(timestamp|date|time|datetime|interval)/i;
 const NUMBER_TEXT = /^-?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
 
@@ -156,8 +161,12 @@ export function quoteText(v: string, engine: ChipEngine = "postgres"): string {
 const QUOTED_NULL = /^'null'$/i;
 const isNull = (v: string) => /^null$/i.test(v.trim());
 
-/** A value as a literal for a column of `type`: numbers and booleans bare, the rest quoted. */
-export function chipLiteral(value: string, type: string, engine: ChipEngine = "postgres"): string {
+/** Whether a cell's text needs `text: true` on its chip to be read as itself. */
+export const readsAsNull = (value: string) => isNull(value) || QUOTED_NULL.test(value.trim());
+
+/** A value as a literal for a column of `type`: numbers and booleans bare, the rest quoted; `asText`, quoted as it is. */
+export function chipLiteral(value: string, type: string, engine: ChipEngine = "postgres", asText = false): string {
+  if (asText) return quoteText(value, engine);
   const v = value.trim();
   if (isNull(v)) return "NULL";
   if (QUOTED_NULL.test(v)) return quoteText(v.slice(1, -1), engine);
@@ -264,7 +273,7 @@ export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): stri
     return parts.join(" OR ");
   }
   const col = chipIdent(chip.column);
-  const lit = (v: string) => chipLiteral(v, chip.type, engine);
+  const lit = (v: string) => chipLiteral(v, chip.type, engine, chip.text);
   switch (chip.op) {
     case "IS NULL":
     case "IS NOT NULL":
@@ -281,11 +290,11 @@ export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): stri
       return `${col} BETWEEN ${lit(chip.value)} AND ${lit(chip.value2 ?? "")}`;
     case "IS DISTINCT FROM":
       // Not equal, keeping the rows where it is NULL ("Hide rows where col = v").
-      if (isNull(chip.value)) return `${col} IS NOT NULL`;
+      if (!chip.text && isNull(chip.value)) return `${col} IS NOT NULL`;
       return `${col} ${engine === "sqlite" ? "IS NOT" : "IS DISTINCT FROM"} ${lit(chip.value)}`;
     default: {
       // NULL never equals anything: = NULL means IS NULL.
-      if (isNull(chip.value)) return `${col} ${chip.op === "<>" ? "IS NOT NULL" : "IS NULL"}`;
+      if (!chip.text && isNull(chip.value)) return `${col} ${chip.op === "<>" ? "IS NOT NULL" : "IS NULL"}`;
       return `${col} ${chip.op} ${lit(chip.value)}`;
     }
   }
