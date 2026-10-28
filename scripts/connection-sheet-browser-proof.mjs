@@ -3,10 +3,11 @@
 // (libpq defaults dim) → probe line → Advanced (closed; SSL sentence) →
 // Labels and safety in words. Auto-probe fires 600 ms after Host, Database
 // and User are filled, never twice for one tuple, and stops after two
-// refused logins until a field changes; ⌘T always probes. A probe error
+// refused logins until a field changes; Test always probes. A probe error
 // lands under its field. Save on a failed tuple keeps the sheet ("Save
 // anyway"); a good tuple saves without probing again. SQLite: Choose file…
-// and a dropped file fill the path.
+// and a dropped file fill the path. Cancel while Save is still connecting
+// drops the save; a Save pressed before the auto-probe fires isn't lost.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/connection-sheet-browser-proof.mjs [outDir]
@@ -30,6 +31,7 @@ function stubTauri() {
   localStorage.clear();
   window.__PROBES__ = [];
   window.__SAVED__ = [];
+  window.__OPENED__ = 0;
   const col = (name, type_name) => ({ name, type_name, nullable: false });
   const tables = [{ name: "kiosks", columns: [col("id", "int8")], primary_key: ["id"], indexes: [], foreign_keys: [], row_estimate: { Approximate: 3 }, partition_of: null }];
   window.__TAURI_INTERNALS__ = {
@@ -40,13 +42,15 @@ function stubTauri() {
         case "list_connections":
           return { connections: [{ kind: "postgres", id: "pg", name: "arcade", host: "127.0.0.1", port: 5432, database: "rowkery", username: "rowkery" }, ...window.__SAVED__], active_connection_id: null };
         case "open_window":
+          window.__OPENED__++;
           return { database: "rowkery", catalog: { databases: [{ name: "rowkery", schemas: [{ name: "public", tables }] }] }, elapsed_ms: 2, cached: false, open_seq: 1 };
         case "probe_connection": {
           const { connection: c, secrets } = args;
           window.__PROBES__.push({ ...c, password: secrets.db_password ?? "" });
-          await new Promise((r) => setTimeout(r, 60));
+          // "slow" answers after 2 s, as a far host would.
+          await new Promise((r) => setTimeout(r, secrets.db_password === "slow" ? 2000 : 60));
           if (c.kind === "sqlite") return { ok: true, message: "SQLite 3.45.0", elapsed_ms: 4 };
-          if (secrets.db_password === "right") return { ok: true, message: "PostgreSQL 16.4", elapsed_ms: 212 };
+          if (secrets.db_password === "right" || secrets.db_password === "slow") return { ok: true, message: "PostgreSQL 16.4", elapsed_ms: 212 };
           return { ok: false, message: `password authentication failed for user "${c.username}"`, elapsed_ms: 0 };
         }
         case "explain_connect_error":
@@ -124,10 +128,10 @@ await page.waitForSelector('[data-probe="locked"]');
 check((await page.textContent("[data-probe]")).includes("Stopped trying after two failed logins"), "two refused logins: stopped trying");
 await page.screenshot({ path: `${OUT}/3-locked.png` });
 
-// ⌘T ignores the lockout and the dedupe.
-await page.keyboard.press("Control+T");
+// Test ignores the lockout and the dedupe (it has no chord: ⌘T is New window).
+await page.click("[data-test-connection]");
 await page.waitForFunction(() => window.__PROBES__.length === 3);
-check(true, "⌘T probes the same tuple again");
+check(true, "Test probes the same tuple again");
 await quiet();
 
 // Changing a field lifts the lockout; a tuple already probed isn't probed again.
@@ -187,4 +191,35 @@ await page.screenshot({ path: `${OUT}/5-sqlite-drag.png` });
 await page.evaluate(() => window.dispatchEvent(new CustomEvent("rowkery:file-drag", { detail: { type: "drop", paths: ["/tmp/shop.db"] } })));
 await page.waitForFunction(() => document.querySelector('[data-field="path"] input')?.value === "/tmp/shop.db");
 check((await page.$("[data-drop-zone][data-dragging]")) === null, "a dropped .db fills the path");
+await page.click("[data-cancel]");
+await page.waitForFunction(() => !document.querySelector('[data-testid="nc-sheet"]'));
+
+// rowkery/reports#31: Save while its probe runs says so; Cancel drops it.
+const savedSoFar = await page.evaluate(() => window.__SAVED__.length);
+const openedSoFar = await page.evaluate(() => window.__OPENED__);
+const fillSlow = async (name, wait = 0) => {
+  await page.keyboard.press("Control+N");
+  await page.waitForSelector('[data-testid="nc-sheet"]');
+  await page.fill(field("name"), name);
+  await page.fill(field("host"), "far.example");
+  await page.fill(field("database"), "wallet");
+  await page.fill(field("username"), "app");
+  await page.fill(field("password"), "slow");
+  // At once: inside the 600 ms auto-probe delay; or once it has fired.
+  if (wait) await page.waitForTimeout(wait);
+  await page.click("[data-save]");
+};
+await fillSlow("dropped", 800);
+await page.waitForTimeout(150);
+check((await page.textContent("[data-save]")).startsWith("Connecting…") && (await page.isDisabled("[data-save]")), "Save while connecting reads Connecting… and takes no second press");
+await page.screenshot({ path: `${OUT}/6-connecting.png` });
+await page.click("[data-cancel]");
+await page.waitForFunction(() => !document.querySelector('[data-testid="nc-sheet"]'));
+await page.waitForTimeout(2600);
+check((await page.evaluate(() => window.__SAVED__.length)) === savedSoFar && (await page.evaluate(() => window.__OPENED__)) === openedSoFar, "Cancel during Save's probe: nothing saved, no window opened");
+
+// The auto-probe's timer no longer supersedes a Save pressed before it.
+await fillSlow("kept");
+await page.waitForFunction(() => window.__SAVED__.some((c) => c.name === "kept"), null, { timeout: 5000 }).catch(() => {});
+check((await page.evaluate(() => window.__SAVED__.filter((c) => c.name === "kept").length)) === 1, "a Save pressed inside the auto-probe delay still saves, once");
 await browser.close();
