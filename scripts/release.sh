@@ -61,18 +61,21 @@ if [[ -z "$report_url" ]]; then
   [[ "${ALLOW_NO_REPORT_URL:-}" == 1 ]] \
     || die "VITE_ROWKERY_REPORT_URL is unset, so Report an Issue could only copy (ALLOW_NO_REPORT_URL=1 to build anyway)"
 fi
-identity="${APPLE_SIGNING_IDENTITY:-$(conf_get 'c.bundle.macOS.signingIdentity || ""')}"
+identity="${APPLE_SIGNING_IDENTITY:-$(conf_get 'c.bundle?.macOS?.signingIdentity ?? ""')}"
 notarise=false
 [[ -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_PATH:-}" ]] && notarise=true
 [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]] && notarise=true
 signed=true
 if [[ -z "$identity" ]] || ! $notarise; then
   [[ "${ALLOW_UNSIGNED:-}" == 1 ]] \
-    || die "no Apple signing identity and notarisation credentials (see the top of this script), so the build would be unsigned (ALLOW_UNSIGNED=1 to build it anyway)"
+    || die "no Apple signing identity or notarisation credentials (see the top of this script), so Gatekeeper would block the build (ALLOW_UNSIGNED=1 to build it anyway)"
   signed=false
 fi
 if $signed; then
-  security find-identity -v -p codesigning | grep -qF "$identity" \
+  [[ "$identity" != "-" ]] || die "an ad-hoc identity ('-') isn't a Developer ID"
+  # Read whole first: `grep -q` quitting early can fail the pipe (pipefail).
+  identities="$(security find-identity -v -p codesigning)"
+  grep -F -- "$identity" <<<"$identities" >/dev/null \
     || die "the keychain has no code signing identity matching '$identity'"
 fi
 releases="https://github.com/$repo/releases"
@@ -109,7 +112,7 @@ if $signed; then
   spctl --assess --type exec -vv "$bundle/macos/Rowkery.app" || die "Gatekeeper would refuse the app"
   xcrun stapler validate "$bundle/macos/Rowkery.app" || die "the app has no notarisation ticket stapled"
 else
-  say "UNSIGNED build (ALLOW_UNSIGNED=1): Gatekeeper will block it until users choose Open Anyway"
+  say "NOT NOTARISED build (ALLOW_UNSIGNED=1): Gatekeeper will block it until users choose Open Anyway"
 fi
 # A stable name, so the website can link releases/latest/download/Rowkery.dmg.
 cp "$dmg" "$out/Rowkery.dmg"
