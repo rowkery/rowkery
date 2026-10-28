@@ -149,6 +149,46 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'a'::\"char\"",
         "''::\"char\"",
         "ARRAY['a', 'b']::\"char\"[]",
+        // rowkery/reports#42: shown as psql shows them, not as `<tstzrange>`.
+        "'[1,5)'::int4range",
+        "'empty'::int4range",
+        "'(,10]'::int8range",
+        "numrange(1.5, 2.25, '[]')",
+        "'[2026-01-01,2026-02-01)'::daterange",
+        "tstzrange('2026-01-01 00:00+00', '2026-01-02 00:00+00')",
+        "tsrange(NULL, '2026-01-02 10:00')",
+        "'{[1,3),[5,7)}'::int4multirange",
+        "'{}'::int4multirange",
+        r#"ROW(1, 'a b', NULL, 'x"y\z', '', 2.5::float8)"#,
+        "ROW(ROW(1, 'a'), ARRAY[1, 2], int4range(1, 3))",
+        "'(1.5,2)'::point",
+        "'[(0,0),(1,1)]'::lseg",
+        "'(1,1),(0,0)'::box",
+        "'((0,0),(1,0),(1,1))'::path",
+        "'[(0,0),(1,1)]'::path",
+        "'((0,0),(1,0),(1,1))'::polygon",
+        "'{1,-1,0}'::line",
+        "'<(1,2),3>'::circle",
+        "'(0,1)'::tid",
+        "'(4294967295,65535)'::tid",
+        "'16/B374D848'::pg_lsn",
+        "'18446744073709551615'::xid8",
+        "'a fat cat:3A sat:2,4B mat:1C rat:5D'::tsvector",
+        "to_tsvector('english', 'The fat cats sat on the mat')",
+        r#"$$'it''s' 'back\\slash' 'two words'$$::tsvector"#,
+        "''::tsvector",
+        "'10:20:10,14,15'::txid_snapshot",
+        "'10:20:'::pg_snapshot",
+        "'1 2 3'::int2vector",
+        "'1 23'::oidvector",
+        "ARRAY[[1, 2], [3, 4]]",
+        "'[0:1][1:2]={{1,2},{3,4}}'::int[]",
+        "ARRAY[[NULL, 'a b'], ['c', 'd']]::text[]",
+        "ARRAY['(1,1),(0,0)'::box, '(2,2),(1,1)'::box]",
+        "ARRAY[int4range(1, 2), 'empty']",
+        "ARRAY['\\x00ff'::bytea]",
+        "ARRAY[ROW(1, 'a b'), ROW(2, NULL)]",
+        "ARRAY['(1,2)'::point]",
     ];
     for expr in cases {
         // format('%s') writes the type's own output, as psql shows it
@@ -188,6 +228,68 @@ async fn postgres_decodes_dates_uuid_numeric() {
     let row = got.expect("row");
     assert_eq!(row[0], Value::Text("2026-09-26 14:43:23+00".into()));
     assert_eq!(row[1], Value::Null);
+
+    // rowkery/reports#53: timestamptz in the session's time zone, as psql
+    // shows it, following `SET TIME ZONE`.
+    use rowkery_core::db::postgres::session_execute;
+    for zone in [
+        "Asia/Kolkata",
+        "America/New_York",
+        "+05:30",
+        "UTC+3",
+        "<+05:30>-05:30",
+        "Etc/UTC",
+    ] {
+        session_execute(&session, &format!("SET TIME ZONE '{zone}'"))
+            .await
+            .expect("set zone");
+        for expr in [
+            "'2026-01-15 12:00:00+00'::timestamptz",
+            "'2026-07-15 12:00:00.5+00'::timestamptz",
+            "'1850-01-01 00:00+00'::timestamptz",
+            "'infinity'::timestamptz",
+            "tstzrange('2026-01-01 00:00+00', NULL)",
+            "ARRAY['2026-03-08 07:00+00'::timestamptz]",
+        ] {
+            let sql = format!("SELECT {expr} AS v, format('%s', {expr}) AS t");
+            let mut got = None;
+            session_query_stream(&session, &sql, |batch, _| {
+                got = batch.rows.into_iter().next();
+                Ok(())
+            })
+            .await
+            .expect("query");
+            let row = got.expect("row");
+            assert_eq!(row[0], row[1], "{expr} in {zone}");
+        }
+    }
+    session_execute(&session, "RESET TIME ZONE")
+        .await
+        .expect("reset zone");
+
+    // A composite type of the user's own, with an enum and a range in it.
+    session_execute(
+        &session,
+        "CREATE TYPE pg_temp.it_mood AS ENUM ('ok', 'not ok'); \
+         CREATE TYPE pg_temp.it_address AS (street text, zip int, mood pg_temp.it_mood, open int4range)",
+    )
+    .await
+    .expect("types");
+    for expr in [
+        "ROW('1 Main St', 12345, 'not ok', '[9,17)')::pg_temp.it_address",
+        "ARRAY[ROW('x', NULL, 'ok', NULL)::pg_temp.it_address]",
+    ] {
+        let sql = format!("SELECT {expr} AS v, format('%s', {expr}) AS t");
+        let mut got = None;
+        session_query_stream(&session, &sql, |batch, _| {
+            got = batch.rows.into_iter().next();
+            Ok(())
+        })
+        .await
+        .expect("query");
+        let row = got.expect("row");
+        assert_eq!(row[0], row[1], "{expr}");
+    }
 }
 
 /// int8 at the edges of its range reaches the webview exact: as a BigInt

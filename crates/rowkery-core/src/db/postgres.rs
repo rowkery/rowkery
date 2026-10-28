@@ -34,6 +34,7 @@ use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 mod activity;
 mod health;
 mod text_types;
+mod zone;
 pub use activity::{
     rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
     HeldLock, ServerSession, StopKind,
@@ -141,6 +142,8 @@ pub struct PostgresSession {
     /// Whether the session writes money as `text_types::money` does, as of
     /// the last result with money in it ([`query_prepared`]).
     money_shown: AtomicBool,
+    /// The session's `TimeZone`, which timestamptz shows in.
+    zone: zone::SessionZone,
 }
 
 /// Prepared statements kept per session: a re-run, and every cursor
@@ -327,6 +330,7 @@ pub async fn open_session_via(
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
     let warnings = Warnings::default();
+    let session_zone = zone::SessionZone::default();
     let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
     // The outer error is the Cloud SQL connector's (no Postgres error to
     // retry on); the inner one is Postgres's.
@@ -335,6 +339,7 @@ pub async fn open_session_via(
         let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
         let warnings = warnings.clone();
+        let session_zone = session_zone.clone();
         let late = no_answer(&config.host, config.port);
         async move {
             if let Some(dialer) = dialer {
@@ -364,7 +369,15 @@ pub async fn open_session_via(
                         }
                         started => {
                             return Ok(started.map(|(client, connection)| {
-                                (client, drive_connection(connection, txn_warnings, warnings))
+                                (
+                                    client,
+                                    drive_connection(
+                                        connection,
+                                        txn_warnings,
+                                        warnings,
+                                        session_zone,
+                                    ),
+                                )
                             }));
                         }
                     }
@@ -375,10 +388,16 @@ pub async fn open_session_via(
             let started = tokio::time::timeout_at(deadline, async {
                 match tls {
                     Some(tls) => pg_config.connect(tls).await.map(|(client, connection)| {
-                        (client, drive_connection(connection, txn_warnings, warnings))
+                        (
+                            client,
+                            drive_connection(connection, txn_warnings, warnings, session_zone),
+                        )
                     }),
                     None => pg_config.connect(NoTls).await.map(|(client, connection)| {
-                        (client, drive_connection(connection, txn_warnings, warnings))
+                        (
+                            client,
+                            drive_connection(connection, txn_warnings, warnings, session_zone),
+                        )
                     }),
                 }
             })
@@ -457,6 +476,7 @@ pub async fn open_session_via(
         cancel_aborted: false,
         guard: None,
         money_shown: AtomicBool::new(false),
+        zone: session_zone,
     })
 }
 
@@ -478,6 +498,7 @@ fn drive_connection<S, T>(
     mut connection: tokio_postgres::Connection<S, T>,
     txn_warnings: Arc<AtomicU64>,
     warnings: Warnings,
+    session_zone: zone::SessionZone,
 ) -> tokio::task::JoinHandle<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -485,7 +506,14 @@ where
 {
     tokio::spawn(async move {
         loop {
-            match futures::future::poll_fn(|cx| connection.poll_message(cx)).await {
+            let message = futures::future::poll_fn(|cx| {
+                let polled = connection.poll_message(cx);
+                // Reported at login and by each `SET TIME ZONE`, before the
+                // rows that follow it.
+                session_zone.follow(connection.parameter("TimeZone"));
+                polled
+            });
+            match message.await {
                 Some(Ok(AsyncMessage::Notice(notice))) => {
                     if notice.code() == &SqlState::ACTIVE_SQL_TRANSACTION {
                         txn_warnings.fetch_add(1, Ordering::SeqCst);
@@ -761,6 +789,7 @@ fn holds_money(ty: &Type) -> bool {
     use tokio_postgres::types::Kind;
     match ty.kind() {
         Kind::Array(element) | Kind::Domain(element) => holds_money(element),
+        Kind::Composite(fields) => fields.iter().any(|f| holds_money(f.type_())),
         _ => *ty == Type::MONEY,
     }
 }
@@ -914,6 +943,7 @@ where
     }
 
     let money_shown = session.money_shown.load(Ordering::SeqCst);
+    let zone = session.zone.current();
     futures::pin_mut!(stream);
     // From the statement, not the first row: a result with no rows still
     // has its columns.
@@ -949,7 +979,7 @@ where
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
-            let value = postgres_value_to_core(&row, i, money_shown);
+            let value = postgres_value_to_core(&row, i, money_shown, zone.as_ref());
             batch_bytes += value.heap_bytes();
             values.push(value);
         }
@@ -2275,7 +2305,7 @@ pub fn map_postgres_error_to_fields(message: &str) -> crate::connections::Postgr
 /// (`decode_raw`), else through tokio-postgres's own conversions, else
 /// `<type name>`. Money only `money_shown` ([`query_prepared`]): written
 /// wrong, a key or an edit sent back would fail or mean another amount.
-fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool) -> Value {
+fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool, zone: Zone) -> Value {
     let ty = row.columns().get(index).map(|c| c.type_().clone());
     if let Some(ty) = ty.as_ref() {
         if !money_shown && holds_money(ty) {
@@ -2284,7 +2314,7 @@ fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool) -> Value {
                 _ => Value::Text(format!("<{}>", ty.name())),
             };
         }
-        if let Some(v) = decode_known_type(row, index, ty) {
+        if let Some(v) = decode_known_type(row, index, ty, zone) {
             return v;
         }
     }
@@ -2346,23 +2376,51 @@ impl<'a> tokio_postgres::types::FromSql<'a> for RawValue<'a> {
     }
 }
 
-fn decode_known_type(row: &Row, index: usize, ty: &Type) -> Option<Value> {
+/// The session's time zone, which timestamptz shows in (`None`: UTC).
+type Zone<'a> = Option<&'a jiff::tz::TimeZone>;
+
+fn decode_known_type(row: &Row, index: usize, ty: &Type, zone: Zone) -> Option<Value> {
     match row.try_get::<_, Option<RawValue>>(index) {
         Ok(None) => Some(Value::Null),
-        Ok(Some(RawValue(bytes))) => decode_raw(ty, bytes),
+        Ok(Some(RawValue(bytes))) => decode_raw(ty, bytes, zone),
         Err(_) => None,
     }
 }
 
 /// A binary wire value of type `ty`, or `None` for a type decoded no
 /// other way than the generic `FromSql` paths (and then a placeholder).
-fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
+fn decode_raw(ty: &Type, b: &[u8], zone: Zone) -> Option<Value> {
     use tokio_postgres::types::Kind;
+    let text = |s: Option<String>| s.map(Value::Text);
     match ty.kind() {
         // An enum's binary value is its label.
         Kind::Enum(_) => return std::str::from_utf8(b).ok().map(|s| Value::Text(s.into())),
-        Kind::Domain(base) => return decode_raw(base, b),
-        Kind::Array(element) => return decode_array(element, b).map(Value::Text),
+        Kind::Domain(base) => return decode_raw(base, b, zone),
+        // Arrays on the wire, but written with spaces (`1 2 3`).
+        Kind::Array(element) if matches!(*ty, Type::OID_VECTOR | Type::INT2_VECTOR) => {
+            let (_, items) = read_array(element, b, zone)?;
+            return text(
+                items
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .map(|v| v.join(" ")),
+            );
+        }
+        Kind::Array(element) => return text(decode_array(element, b, zone)),
+        Kind::Range(element) => return text(decode_range(element, b, zone)),
+        Kind::Multirange(element) => return text(decode_multirange(element, b, zone)),
+        Kind::Composite(fields) => {
+            let types: Vec<Type> = fields.iter().map(|f| f.type_().clone()).collect();
+            return text(decode_record(Some(&types), b, zone));
+        }
+        _ => {}
+    }
+    match ty.name() {
+        name @ ("point" | "lseg" | "box" | "path" | "polygon" | "line" | "circle")
+            if ty.schema() == "pg_catalog" =>
+        {
+            return text(text_types::geometric(name, b));
+        }
         _ => {}
     }
     match *ty {
@@ -2381,7 +2439,18 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
         Type::DATE => decode_date(b).map(Value::Text),
         Type::TIME => decode_time(b).map(Value::Text),
         Type::TIMESTAMP => decode_timestamp(b).map(Value::Text),
-        Type::TIMESTAMPTZ => decode_timestamp(b).map(|s| Value::Text(format!("{s}+00"))),
+        Type::TIMESTAMPTZ => decode_timestamptz(b, zone).map(Value::Text),
+        Type::RECORD => text(decode_record(None, b, zone)),
+        // A pseudo-type to tokio-postgres, but a plain array on the wire.
+        Type::RECORD_ARRAY => text(decode_array(&Type::RECORD, b, zone)),
+        Type::TID => text(text_types::tid(b)),
+        Type::XID | Type::CID => Some(Value::Int(u32::from_be_bytes(b.try_into().ok()?).into())),
+        Type::XID8 => Some(Value::Text(
+            u64::from_be_bytes(b.try_into().ok()?).to_string(),
+        )),
+        Type::PG_LSN => text(text_types::lsn(b)),
+        Type::TXID_SNAPSHOT | Type::PG_SNAPSHOT => text(text_types::snapshot(b)),
+        Type::TS_VECTOR => text(text_types::tsvector(b)),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
             std::str::from_utf8(b).ok().map(|s| Value::Text(s.into()))
         }
@@ -2409,44 +2478,6 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
     }
 }
 
-/// Whether arrays of `element` are shown as text (else a placeholder).
-fn array_element_shown(element: &Type) -> bool {
-    use tokio_postgres::types::Kind;
-    matches!(element.kind(), Kind::Enum(_))
-        || matches!(
-            *element,
-            Type::TEXT
-                | Type::VARCHAR
-                | Type::BPCHAR
-                | Type::NAME
-                | Type::INT2
-                | Type::INT4
-                | Type::INT8
-                | Type::FLOAT4
-                | Type::FLOAT8
-                | Type::BOOL
-                | Type::NUMERIC
-                | Type::UUID
-                | Type::DATE
-                | Type::TIME
-                | Type::TIMESTAMP
-                | Type::TIMESTAMPTZ
-                | Type::JSON
-                | Type::JSONB
-                | Type::XML
-                | Type::INTERVAL
-                | Type::INET
-                | Type::CIDR
-                | Type::MACADDR
-                | Type::MACADDR8
-                | Type::MONEY
-                | Type::BIT
-                | Type::VARBIT
-                | Type::TIMETZ
-                | Type::CHAR
-        )
-}
-
 /// Postgres's text output of a float (`Infinity`, not Rust's `inf`).
 fn format_pg_float(f: f64, as_f32: bool) -> String {
     if f.is_nan() {
@@ -2462,15 +2493,16 @@ fn format_pg_float(f: f64, as_f32: bool) -> String {
 
 /// One array element as Postgres's array output writes it: in double
 /// quotes (with `"` and `\` escaped) when it is empty, reads as NULL, or
-/// holds a brace, comma, quote, backslash or white space.
-fn quote_array_element(text: &str) -> String {
+/// holds a brace, the delimiter, quote, backslash or white space.
+fn quote_array_element(text: &str, delim: char) -> String {
     let needs = text.is_empty()
         || text.eq_ignore_ascii_case("null")
         || text.chars().any(|c| {
-            matches!(
-                c,
-                '{' | '}' | ',' | '"' | '\\' | ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'
-            )
+            c == delim
+                || matches!(
+                    c,
+                    '{' | '}' | '"' | '\\' | ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'
+                )
         });
     if !needs {
         return text.to_string();
@@ -2487,50 +2519,192 @@ fn quote_array_element(text: &str) -> String {
     out
 }
 
-/// A one-dimensional binary array (`ndim`, has-null flag, element oid, then
-/// per dimension its length and lower bound, then per element a length,
-/// -1 for NULL, and the bytes) as Postgres's text output: `{a,NULL,"c d"}`,
-/// `[0:1]={a,b}` when it doesn't start at 1. `None` for more dimensions or
-/// an element type not shown.
-fn decode_array(element: &Type, b: &[u8]) -> Option<String> {
-    if !array_element_shown(element) {
+/// Inside a range or a record, a bound or field goes in double quotes
+/// (with `"` and `\` doubled) when it is empty or holds one of `specials`
+/// or white space, as `range_out` and `record_out` write it.
+fn quote_doubled(text: &str, specials: &[char]) -> String {
+    if !(text.is_empty()
+        || text
+            .chars()
+            .any(|c| c.is_whitespace() || specials.contains(&c)))
+    {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        if c == '"' || c == '\\' {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// One value inside an array, a range or a record, as Postgres's text
+/// output writes it. `None` for a type not decoded.
+fn element_text(ty: &Type, raw: &[u8], zone: Zone) -> Option<String> {
+    Some(match decode_raw(ty, raw, zone)? {
+        Value::Text(s) => s,
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => format_pg_float(f, *ty == Type::FLOAT4),
+        Value::Bool(v) => if v { "t" } else { "f" }.to_string(),
+        Value::Bytes(b) => {
+            let mut hex = String::with_capacity(2 + b.len() * 2);
+            hex.push_str("\\x");
+            for byte in b {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            hex
+        }
+        Value::Null => return None,
+    })
+}
+
+/// A binary array (`ndim`, has-null flag, element oid, then per dimension
+/// its length and lower bound, then per element a length, -1 for NULL, and
+/// the bytes): its dimensions and its elements as text, `None` for NULL.
+/// `None` when an element's type isn't decoded.
+#[allow(clippy::type_complexity)]
+fn read_array(
+    element: &Type,
+    b: &[u8],
+    zone: Zone,
+) -> Option<(Vec<(usize, i32)>, Vec<Option<String>>)> {
+    let mut w = text_types::Wire(b);
+    let ndim = usize::try_from(w.i32()?).ok()?;
+    w.take(8)?;
+    let mut dims = Vec::with_capacity(ndim.min(6));
+    let mut count = 1usize;
+    for _ in 0..ndim {
+        let len = usize::try_from(w.i32()?).ok()?;
+        count = count.checked_mul(len)?;
+        dims.push((len, w.i32()?));
+    }
+    if ndim == 0 {
+        count = 0;
+    }
+    // Each element takes at least its 4-byte length.
+    if count > w.0.len() / 4 {
         return None;
     }
-    let int =
-        |i: usize| -> Option<i32> { Some(i32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?)) };
-    match int(0)? {
-        0 => return Some("{}".into()),
-        1 => {}
-        _ => return None,
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        items.push(match w.value()? {
+            None => None,
+            Some(raw) => Some(element_text(element, raw, zone)?),
+        });
     }
-    let len = usize::try_from(int(12)?).ok()?;
-    let lower = int(16)?;
-    let mut pos = 20;
-    let mut parts = Vec::with_capacity(len.min(4096));
-    for _ in 0..len {
-        let n = int(pos)?;
-        pos += 4;
-        let Ok(n) = usize::try_from(n) else {
-            parts.push("NULL".to_string());
-            continue;
-        };
-        let raw = b.get(pos..pos + n)?;
-        pos += n;
-        let text = match decode_raw(element, raw)? {
-            Value::Text(s) => s,
-            Value::Int(n) => n.to_string(),
-            Value::Float(f) => format_pg_float(f, *element == Type::FLOAT4),
-            Value::Bool(v) => if v { "t" } else { "f" }.to_string(),
-            _ => return None,
-        };
-        parts.push(quote_array_element(&text));
+    w.done().then_some((dims, items))
+}
+
+/// A binary array as Postgres's text output: `{a,NULL,"c d"}`,
+/// `{{1,2},{3,4}}`, `[0:1]={a,b}` when a dimension doesn't start at 1.
+fn decode_array(element: &Type, b: &[u8], zone: Zone) -> Option<String> {
+    let (dims, items) = read_array(element, b, zone)?;
+    if dims.is_empty() {
+        return Some("{}".into());
     }
-    let body = format!("{{{}}}", parts.join(","));
-    Some(if lower == 1 {
+    // `box` is the one built-in type whose arrays use `;`.
+    let delim = if *element == Type::BOX { ';' } else { ',' };
+    let mut items = items.into_iter().map(|item| match item {
+        None => "NULL".to_string(),
+        Some(text) => quote_array_element(&text, delim),
+    });
+    fn nest(dims: &[(usize, i32)], delim: char, items: &mut dyn Iterator<Item = String>) -> String {
+        let (len, _) = dims[0];
+        let parts: Vec<String> = (0..len)
+            .map(|_| {
+                if dims.len() == 1 {
+                    items.next().unwrap_or_default()
+                } else {
+                    nest(&dims[1..], delim, items)
+                }
+            })
+            .collect();
+        format!("{{{}}}", parts.join(&delim.to_string()))
+    }
+    let body = nest(&dims, delim, &mut items);
+    Some(if dims.iter().all(|&(_, lower)| lower == 1) {
         body
     } else {
-        format!("[{}:{}]={body}", lower, i64::from(lower) + len as i64 - 1)
+        let bounds: String = dims
+            .iter()
+            .map(|&(len, lower)| format!("[{lower}:{}]", i64::from(lower) + len as i64 - 1))
+            .collect();
+        format!("{bounds}={body}")
     })
+}
+
+/// A binary range (a flags byte, then each bound present as a length and
+/// its bytes) as `range_out` writes it: `[1,5)`, `(,"2026-01-01 00:00:00+00"]`,
+/// `empty`.
+fn decode_range(element: &Type, b: &[u8], zone: Zone) -> Option<String> {
+    const EMPTY: u8 = 0x01;
+    const LB_INC: u8 = 0x02;
+    const UB_INC: u8 = 0x04;
+    const LB_INF: u8 = 0x08;
+    const UB_INF: u8 = 0x10;
+    let mut w = text_types::Wire(b);
+    let flags = w.u8()?;
+    if flags & EMPTY != 0 {
+        return w.done().then(|| "empty".to_string());
+    }
+    let specials = ['"', '\\', '(', ')', '[', ']', ','];
+    let mut bound = |infinite: bool| -> Option<String> {
+        if infinite {
+            return Some(String::new());
+        }
+        let raw = w.value()??;
+        Some(quote_doubled(&element_text(element, raw, zone)?, &specials))
+    };
+    let lower = bound(flags & LB_INF != 0)?;
+    let upper = bound(flags & UB_INF != 0)?;
+    let open = if flags & LB_INC != 0 { '[' } else { '(' };
+    let close = if flags & UB_INC != 0 { ']' } else { ')' };
+    w.done().then(|| format!("{open}{lower},{upper}{close}"))
+}
+
+/// A binary multirange (a count, then each range as a length and its bytes)
+/// as `{[1,3),[5,7)}`.
+fn decode_multirange(element: &Type, b: &[u8], zone: Zone) -> Option<String> {
+    let mut w = text_types::Wire(b);
+    let n = usize::try_from(w.i32()?).ok()?;
+    if n > w.0.len() / 4 {
+        return None;
+    }
+    let ranges: Vec<String> = (0..n)
+        .map(|_| decode_range(element, w.value()??, zone))
+        .collect::<Option<_>>()?;
+    w.done().then(|| format!("{{{}}}", ranges.join(",")))
+}
+
+/// A binary record (a field count, then per field its type oid, a length,
+/// -1 for NULL, and the bytes) as `record_out` writes it: `(1,"a b",)`.
+/// `types` are a composite type's own fields; an anonymous record's come
+/// from their oids (built-in types only).
+fn decode_record(types: Option<&[Type]>, b: &[u8], zone: Zone) -> Option<String> {
+    let mut w = text_types::Wire(b);
+    let n = usize::try_from(w.i32()?).ok()?;
+    if n > w.0.len() / 8 || types.is_some_and(|t| t.len() != n) {
+        return None;
+    }
+    let specials = ['"', '\\', '(', ')', ','];
+    let mut fields = Vec::with_capacity(n);
+    for i in 0..n {
+        let oid = w.u32()?;
+        let raw = w.value()?;
+        let ty = match types {
+            Some(types) => types[i].clone(),
+            None => Type::from_oid(oid)?,
+        };
+        fields.push(match raw {
+            None => String::new(),
+            Some(raw) => quote_doubled(&element_text(&ty, raw, zone)?, &specials),
+        });
+    }
+    w.done().then(|| format!("({})", fields.join(",")))
 }
 
 fn decode_uuid(b: &[u8]) -> Option<String> {
@@ -2585,6 +2759,23 @@ fn decode_date(b: &[u8]) -> Option<String> {
 
 fn decode_time(b: &[u8]) -> Option<String> {
     Some(format_time_of_day(i64::from_be_bytes(b.try_into().ok()?)))
+}
+
+/// A timestamptz in the session's time zone with its offset, as psql shows
+/// it (`2026-01-15 17:30:00+05:30`); in UTC (`+00`) when the zone isn't
+/// known or the value is outside the years its rules cover.
+fn decode_timestamptz(b: &[u8], zone: Zone) -> Option<String> {
+    let micros = i64::from_be_bytes(b.try_into().ok()?);
+    if matches!(micros, i64::MAX | i64::MIN) {
+        return decode_timestamp(b);
+    }
+    if let Some((local, offset)) = zone.and_then(|zone| zone::localize(micros, zone)) {
+        return Some(format!(
+            "{}{offset}",
+            decode_timestamp(&local.to_be_bytes())?
+        ));
+    }
+    Some(format!("{}+00", decode_timestamp(b)?))
 }
 
 fn decode_timestamp(b: &[u8]) -> Option<String> {
@@ -2683,15 +2874,15 @@ mod decode_tests {
         let mut jsonb = vec![1];
         jsonb.extend_from_slice(text.as_bytes());
         assert_eq!(
-            decode_raw(&Type::JSONB, &jsonb),
+            decode_raw(&Type::JSONB, &jsonb, None),
             Some(Value::Text(text.into()))
         );
         assert_eq!(
-            decode_raw(&Type::JSON, text.as_bytes()),
+            decode_raw(&Type::JSON, text.as_bytes(), None),
             Some(Value::Text(text.into()))
         );
         // An unknown jsonb version isn't guessed at.
-        assert_eq!(decode_raw(&Type::JSONB, &[2, b'1']), None);
+        assert_eq!(decode_raw(&Type::JSONB, &[2, b'1'], None), None);
     }
 
     #[test]
