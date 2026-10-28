@@ -1586,11 +1586,13 @@ pub async fn session_catalog_fingerprint(session: &PostgresSession) -> Result<St
                        ',' ORDER BY k.oid))
                      FROM pg_catalog.pg_constraint k
                      JOIN pg_catalog.pg_namespace kn ON kn.oid = k.connamespace
-                     WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')), '')
+                     WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')
+                       AND NOT pg_catalog.pg_is_other_temp_schema(kn.oid)), '')
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
               AND n.nspname NOT LIKE 'pg_toast%'
             ",
             &[],
@@ -1630,6 +1632,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                ON parent.oid = inh.inhparent AND parent.relnamespace = c.relnamespace
         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2
         ",
         &[],
@@ -1659,6 +1662,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
           AND a.attnum > 0
           AND NOT a.attisdropped
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2, a.attnum
         ",
         &[],
@@ -1677,6 +1681,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
         WHERE ix.indisprimary
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
           AND n.nspname NOT LIKE 'pg_toast%'
         ORDER BY 1, 2, k.ord
         ",
@@ -1695,6 +1700,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
         WHERE t.typtype = 'e'
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2
         ",
         &[],
@@ -1708,6 +1714,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE p.prokind IN ('f', 'a', 'w')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
           AND n.nspname NOT LIKE 'pg_toast%'
           AND NOT EXISTS (
             SELECT 1 FROM pg_catalog.pg_depend dep
@@ -1743,6 +1750,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         WHERE con.contype = 'f'
           AND con.conparentid = 0
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2, 3
         ",
         &[],
