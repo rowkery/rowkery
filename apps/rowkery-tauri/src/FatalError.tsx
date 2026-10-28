@@ -16,7 +16,7 @@ export function FatalError({ error }: { error: Error }) {
   const [copied, setCopied] = useState(false);
   const [held, setHeld] = useState<OpenTransaction[]>([]);
   useEffect(() => {
-    openTransactions().then(setHeld, () => {});
+    openTransactions(true).then((list) => Array.isArray(list) && setHeld(list), () => {});
   }, []);
   const text = error.stack || error.message || String(error);
 
@@ -28,7 +28,11 @@ export function FatalError({ error }: { error: Error }) {
   };
 
   const reload = async () => {
-    for (const w of new Set(held.map((t) => t.window_id))) await closeWindow(w).catch(() => {});
+    // Every window core would refuse to re-point, a running write's too;
+    // asked now, as the list above may not have arrived yet.
+    const list = await openTransactions().catch(() => null);
+    const now = Array.isArray(list) ? list : held;
+    for (const w of new Set(now.map((t) => t.window_id))) await closeWindow(w).catch(() => {});
     location.reload();
   };
 

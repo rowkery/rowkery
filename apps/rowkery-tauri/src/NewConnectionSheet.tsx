@@ -53,7 +53,7 @@ interface NewConnectionSheetProps {
    * open, unchanged (a reconnect or an emptied window would roll back a
    * tab's open transaction).
    */
-  beforeChange?: () => Promise<boolean>;
+  beforeChange?: (deleting: boolean) => Promise<boolean>;
   /** A failed connection's field to focus, with the reason printed under it. */
   markField?: { field: string; message: string } | null;
   /** Called after `editing` was deleted. */
@@ -654,7 +654,7 @@ export function NewConnectionSheet({
         return;
       }
     }
-    if (beforeChange && !(await beforeChange())) return;
+    if (beforeChange && !(await beforeChange(false))) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -671,8 +671,9 @@ export function NewConnectionSheet({
 
   const onDelete = async () => {
     if (!editing || saving) return;
-    if (beforeChange && !(await beforeChange())) return;
+    // Busy before the check, so a second click can't delete twice.
     setSaving(true);
+    if (beforeChange && !(await beforeChange(true))) return setSaving(false);
     try {
       // Asked first in the foot; the toast still offers Undo, so the
       // keychain entries stay until it is gone.

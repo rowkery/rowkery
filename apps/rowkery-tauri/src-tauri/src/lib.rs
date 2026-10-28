@@ -1276,14 +1276,22 @@ struct OpenTransactionDto {
 
 /// The query tabs whose session may hold the user's open transaction:
 /// re-pointing their window would roll it back, so the webview refuses.
+/// `held`: only those surely in one, a running write outside one left out
+/// (closing a tab, which cancels such a write).
 #[tauri::command]
-async fn open_transactions(app: AppHandle) -> Result<Vec<OpenTransactionDto>, String> {
-    on_blocking_pool(app, |bridge| {
-        bridge
-            .open_transactions()
-            .into_iter()
-            .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
-            .collect()
+async fn open_transactions(
+    app: AppHandle,
+    held: Option<bool>,
+) -> Result<Vec<OpenTransactionDto>, String> {
+    on_blocking_pool(app, move |bridge| {
+        if held == Some(true) {
+            bridge.held_transactions()
+        } else {
+            bridge.open_transactions()
+        }
+        .into_iter()
+        .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
+        .collect()
     })
     .await
 }

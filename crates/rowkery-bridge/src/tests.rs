@@ -2579,6 +2579,23 @@ fn sqlite_a_running_tab_keeps_its_transaction() {
     bridge.cancel_window_query("w1", 2);
     wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
 
+    // A write outside one may open one, so a re-point waits; closing the
+    // tab (held) doesn't: it cancels the write, as it always did.
+    let queue = bridge
+        .run_window_query(
+            "w1",
+            2,
+            format!("DELETE FROM orders WHERE id = ({SLOW_SQLITE})"),
+            None,
+            false,
+        )
+        .expect("run");
+    wait_running();
+    assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 2)]);
+    assert!(bridge.held_transactions().is_empty(), "a write outside one");
+    bridge.cancel_window_query("w1", 2);
+    wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
+
     run(1, "BEGIN");
     assert_eq!(run(1, "DELETE FROM orders").4, Some(30));
     let queue = bridge
@@ -2586,6 +2603,7 @@ fn sqlite_a_running_tab_keeps_its_transaction() {
         .expect("run");
     wait_running();
     assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 1)]);
+    assert_eq!(bridge.held_transactions(), vec![("w1".to_string(), 1)]);
     assert_eq!(bridge.busy_work().transactions, 1, "a quit asks first");
     let refused = bridge
         .open_window("w1", "cancel-sqlite", None)

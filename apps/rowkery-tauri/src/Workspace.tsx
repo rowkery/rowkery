@@ -95,7 +95,7 @@ import type { CompletionResult } from "./sqlComplete";
 import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } from "./doneNotify";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
-import { forgetTabTitles, noteTabTitles, transactionInTheWay } from "./openTransactions";
+import { forgetTabTitles, noteTabTitles, transactionBlocksClose } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -691,7 +691,7 @@ export function Workspace({
   const [closedCount, setClosedCount] = useState(0);
   // Closing ends the tab's session: never over its open transaction.
   const closeTab = async (id: number) => {
-    if (await transactionInTheWay([windowId], [id])) return;
+    if (await transactionBlocksClose([windowId], [id])) return;
     closeTabNowRef.current(id);
   };
   const closeTabNow = (id: number) => {
@@ -750,7 +750,7 @@ export function Workspace({
   /** The tab menu's Close other tabs: each goes to Recently closed; Undo puts them all back. */
   const closeOtherTabs = async (keepId: number) => {
     const others = tabsRef.current.filter((t) => t.id !== keepId).map((t) => t.id);
-    if (await transactionInTheWay([windowId], others)) return;
+    if (await transactionBlocksClose([windowId], others)) return;
     closeOtherTabsNowRef.current(keepId);
   };
   const closeOtherTabsNow = (keepId: number) => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ⌘W / Ctrl+W and idle env dots without a Tauri webview (stubbed `invoke`).
-// A tab whose session holds an open transaction (`__OPEN_TXNS__`) isn't
-// closed: a toast names it, and its session stays.
+// A tab or window whose session holds an open transaction (`__OPEN_TXNS__`)
+// isn't closed: a toast names it, and its session stays.
 // Ctrl+W closes the active query tab (at once; Undo toast when it had SQL), never
 // the window; the last tab turns into an empty "Query 1". On macOS ⌘W is the
 // menu bar's Close Tab, which reaches the page as `rowkery:command` "close-tab"
@@ -266,6 +266,26 @@ const addTabs = async (page, n) => {
   await page.keyboard.press("Control+w");
   await page.waitForTimeout(300);
   check((await tabTitles(page)).length === 1, "once it ends, the tab closes");
+  await page.context().close();
+}
+
+// 4. Nor does its window: Close Window is refused the same way.
+{
+  const page = await open(false);
+  const windows = () => page.locator('[data-testid="win-tab"][data-reorder-key]').count();
+  await page.evaluate(() => (window.__OPEN_TXNS__ = [{ window_id: "w3", tab_id: 1 }]));
+  const closeWindow = () => page.evaluate(() => window.dispatchEvent(new CustomEvent("rowkery:command", { detail: "close-window" })));
+  await closeWindow();
+  await page.waitForTimeout(300);
+  check((await windows()) === 3, "the window with a transaction stayed");
+  const toast = await page.$$eval("[data-toast] > span", (els) => els.map((e) => e.textContent.trim()).join(" "));
+  check(toast.startsWith("A transaction is open in"), `a toast says why (${toast})`);
+  const closes = await page.evaluate(() => window.__ROWKERY_CALLS__.filter(([c]) => c === "close_window").length);
+  check(closes === 0, "its sessions weren't closed");
+  await page.evaluate(() => (window.__OPEN_TXNS__ = []));
+  await closeWindow();
+  await page.waitForTimeout(300);
+  check((await windows()) === 2, "once it ends, the window closes");
   await page.context().close();
 }
 

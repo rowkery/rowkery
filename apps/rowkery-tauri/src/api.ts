@@ -564,9 +564,13 @@ export interface OpenTransaction {
   tab_id: number;
 }
 
-/** The query tabs, in every window, whose open transaction a re-point or a new safe mode would roll back. */
-export async function openTransactions(): Promise<OpenTransaction[]> {
-  return invoke("open_transactions");
+/**
+ * The query tabs, in every window, whose open transaction a re-point or a
+ * new safe mode would roll back. `held`: only a tab surely in one, not one
+ * running a write outside one (which closing the tab cancels).
+ */
+export async function openTransactions(held = false): Promise<OpenTransaction[]> {
+  return invoke("open_transactions", { held });
 }
 
 /** How an export or a copy-all ended (src-tauri `ExportFrame::Done`). */
