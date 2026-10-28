@@ -1261,6 +1261,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
                     "public.mcp_p_ident".into(),
                     "public.mcp_p_peeks".into(),
                     "public.mcp_p_other".into(),
+                    "public.mcp_p_pair".into(),
                 ],
             },
         )]
