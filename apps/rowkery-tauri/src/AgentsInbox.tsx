@@ -651,6 +651,12 @@ export function AgentsInbox({
               <blockquote className="pp-reason" data-testid="pp-reason">
                 {proposal.reason}
               </blockquote>
+              {proposal.commit_started_ms !== undefined && (
+                <p className="pp-cut-short" data-testid="pp-cut-short" role="alert">
+                  A commit of this change started {sinceLabel(proposal.commit_started_ms)} and Rowkery closed before it
+                  finished, so it may already be saved. Check the table before you commit again.
+                </p>
+              )}
               {dry && (
                 <>
                   <div className="pp-count" data-testid="pp-count">
