@@ -18,9 +18,13 @@
 # VITE_ROWKERY_REPORT_URL (env or apps/rowkery-tauri/.env; ALLOW_NO_REPORT_URL=1
 # builds without it). Release notes: docs/releases/v<version>.md if present.
 #
-# The app is unsigned for the alpha (2026-10-06): users open it with
-# System Settings > Privacy & Security > Open Anyway. Usually run through
-# `make release`.
+# Signed and notarised with a Developer ID: Tauri signs with
+# APPLE_SIGNING_IDENTITY (or bundle.macOS.signingIdentity) and notarises with
+# an App Store Connect API key (APPLE_API_ISSUER, APPLE_API_KEY,
+# APPLE_API_KEY_PATH) or an Apple ID (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID).
+# Without them it stops; ALLOW_UNSIGNED=1 builds an unsigned copy on purpose
+# (users then open it with System Settings > Privacy & Security > Open
+# Anyway). Usually run through `make release`.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,6 +61,20 @@ if [[ -z "$report_url" ]]; then
   [[ "${ALLOW_NO_REPORT_URL:-}" == 1 ]] \
     || die "VITE_ROWKERY_REPORT_URL is unset, so Report an Issue could only copy (ALLOW_NO_REPORT_URL=1 to build anyway)"
 fi
+identity="${APPLE_SIGNING_IDENTITY:-$(conf_get 'c.bundle.macOS.signingIdentity || ""')}"
+notarise=false
+[[ -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_PATH:-}" ]] && notarise=true
+[[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]] && notarise=true
+signed=true
+if [[ -z "$identity" ]] || ! $notarise; then
+  [[ "${ALLOW_UNSIGNED:-}" == 1 ]] \
+    || die "no Apple signing identity and notarisation credentials (see the top of this script), so the build would be unsigned (ALLOW_UNSIGNED=1 to build it anyway)"
+  signed=false
+fi
+if $signed; then
+  security find-identity -v -p codesigning | grep -qF "$identity" \
+    || die "the keychain has no code signing identity matching '$identity'"
+fi
 releases="https://github.com/$repo/releases"
 feed="$releases/latest/download/latest.json"
 if $publish; then
@@ -83,6 +101,16 @@ out="$root/target/release-out/$tag"
 rm -rf "$out"
 mkdir -p "$out"
 dmg="$(ls -t "$bundle"/dmg/*.dmg | head -1)"
+if $signed; then
+  # What Gatekeeper will check on a user's Mac: signed, accepted, and the
+  # notarisation ticket stapled to the app.
+  say "checking the app's signature and notarisation"
+  codesign --verify --deep --strict "$bundle/macos/Rowkery.app" || die "the app's signature doesn't verify"
+  spctl --assess --type exec -vv "$bundle/macos/Rowkery.app" || die "Gatekeeper would refuse the app"
+  xcrun stapler validate "$bundle/macos/Rowkery.app" || die "the app has no notarisation ticket stapled"
+else
+  say "UNSIGNED build (ALLOW_UNSIGNED=1): Gatekeeper will block it until users choose Open Anyway"
+fi
 # A stable name, so the website can link releases/latest/download/Rowkery.dmg.
 cp "$dmg" "$out/Rowkery.dmg"
 cp "$bundle/macos/Rowkery.app.tar.gz" "$out/Rowkery.app.tar.gz"

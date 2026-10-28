@@ -81,7 +81,7 @@ The app in it isn't signed, so on another Mac, macOS blocks it the first time. A
 xattr -dr com.apple.quarantine /Applications/Rowkery.app
 ```
 
-`make release` builds the public release (a universal disk image, the signed update and its feed). It needs the Rowkery team's update signing key, so it's only for maintainers.
+`make release` builds the public release (a universal disk image, the signed update and its feed). It needs the Rowkery team's update signing key and Apple Developer ID, so it's only for maintainers.
 
 ## Linux and Windows
 
