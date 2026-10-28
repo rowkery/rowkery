@@ -50,6 +50,10 @@ pub enum State {
     Other,
     /// Claude Desktop's config isn't valid JSON; Rowkery won't touch it.
     Unreadable,
+    /// This copy runs from the disk image or a translocated copy, so its
+    /// path stops working once the disk is ejected or the app is moved:
+    /// Run is refused until it runs from a lasting place.
+    Misplaced,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +69,8 @@ pub struct ConnectCheck {
     pub existing: Option<String>,
     /// Claude Desktop's config file, `~` for the home directory.
     pub config_file: Option<String>,
-    /// Why the config can't be read (Unreadable).
+    /// Why the config can't be read (Unreadable), why Run is refused
+    /// (Misplaced), or that the command it has now is gone (Other).
     pub problem: Option<String>,
 }
 
@@ -90,6 +95,8 @@ pub struct Env {
     pub desktop_config: PathBuf,
     /// Places whose existence means Claude Desktop is installed.
     pub desktop_markers: Vec<PathBuf>,
+    /// Why `exe` won't last (`app_location::misplaced`).
+    pub misplaced: Option<String>,
 }
 
 impl Env {
@@ -110,6 +117,7 @@ impl Env {
             path: None,
             desktop_config,
             desktop_markers,
+            misplaced: crate::app_location::misplaced().map(String::from),
         })
     }
 
@@ -218,10 +226,27 @@ fn desktop_entry_json(exe: &str) -> String {
 }
 
 pub fn check(client: Client, env: &Env) -> ConnectCheck {
-    match client {
+    let mut out = match client {
         Client::ClaudeCode => check_code(env, find_claude(env).is_some()),
         Client::ClaudeDesktop => check_desktop(env),
+    };
+    if let (Some(reason), State::Ready | State::Other | State::Connected) =
+        (&env.misplaced, out.state)
+    {
+        out.state = State::Misplaced;
+        out.problem = Some(reason.clone());
+    } else if out.state == State::Other {
+        out.problem = gone(out.existing.as_deref());
     }
+    out
+}
+
+/// Says so when the command a client has now no longer exists (a copy run
+/// from the disk image, then ejected, or since moved).
+fn gone(existing: Option<&str>) -> Option<String> {
+    let command = existing?.strip_suffix(" --mcp")?;
+    (Path::new(command).is_absolute() && !Path::new(command).exists())
+        .then(|| "That copy of Rowkery isn't there any more, so the agent can't start it.".into())
 }
 
 fn check_code(env: &Env, installed: bool) -> ConnectCheck {
@@ -285,6 +310,13 @@ fn check_desktop(env: &Env) -> ConnectCheck {
 }
 
 pub fn run(client: Client, env: &Env) -> ConnectRun {
+    if let Some(reason) = &env.misplaced {
+        return ConnectRun {
+            ok: false,
+            output: reason.clone(),
+            check: check(client, env),
+        };
+    }
     let (ok, output) = match client {
         Client::ClaudeCode => run_code(env),
         Client::ClaudeDesktop => match write_desktop(env) {
@@ -521,7 +553,53 @@ mod tests {
             desktop_config: home.join("Claude/claude_desktop_config.json"),
             desktop_markers: vec![home.join("Claude")],
             home,
+            misplaced: None,
         }
+    }
+
+    /// rowkery/reports#33: a copy that won't last isn't written down.
+    #[test]
+    fn a_misplaced_copy_is_refused() {
+        let dir = tmp();
+        let mut e = env(&dir);
+        std::fs::create_dir_all(e.desktop_config.parent().unwrap()).unwrap();
+        e.exe = "/Volumes/Rowkery 0.3.0/Rowkery.app/Contents/MacOS/Rowkery".into();
+        e.misplaced = Some("Rowkery is running from the disk image.".into());
+        let c = check(Client::ClaudeDesktop, &e);
+        assert_eq!(c.state, State::Misplaced);
+        assert_eq!(
+            c.problem.as_deref(),
+            Some("Rowkery is running from the disk image.")
+        );
+        let r = run(Client::ClaudeDesktop, &e);
+        assert!(!r.ok);
+        assert!(!e.desktop_config.exists(), "nothing written");
+    }
+
+    /// A client whose rowkery command is gone says so; Run replaces it.
+    #[test]
+    fn a_command_that_is_gone_is_named() {
+        let dir = tmp();
+        let e = env(&dir);
+        std::fs::create_dir_all(e.desktop_config.parent().unwrap()).unwrap();
+        let stale = dir.join("ejected/Rowkery");
+        std::fs::write(
+            &e.desktop_config,
+            serde_json::json!({ "mcpServers": { NAME: { "command": stale, "args": ["--mcp"] } } })
+                .to_string(),
+        )
+        .unwrap();
+        let c = check(Client::ClaudeDesktop, &e);
+        assert_eq!(c.state, State::Other);
+        assert!(c.problem.unwrap().contains("isn't there any more"));
+        let here = std::env::current_exe().unwrap();
+        std::fs::write(
+            &e.desktop_config,
+            serde_json::json!({ "mcpServers": { NAME: { "command": here, "args": ["--mcp"] } } })
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(check(Client::ClaudeDesktop, &e).problem, None);
     }
 
     fn tmp() -> PathBuf {
