@@ -77,6 +77,10 @@ jobs:
         run: |
           npm ci
           npm run build
+      # No dependencies: Node runs the TypeScript tests itself (22.18 and later).
+      - name: Report relay tests
+        working-directory: apps/relay
+        run: npm test
 
   macos:
     runs-on: macos-latest

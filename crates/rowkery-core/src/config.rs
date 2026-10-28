@@ -267,6 +267,57 @@ pub const DEV_BUILD: bool = match option_env!("ROWKERY_CHANNEL") {
 /// Rowkery Dev has its own, so a link never lands in the other app.
 pub const LINK_SCHEME: &str = if DEV_BUILD { "rowkery-dev" } else { "rowkery" };
 
+/// Creates `dir` and its parents for this user only: the app's files hold
+/// SQL and row values (rowkery/reports#47). The app's own folder, made
+/// readable by an older build, is narrowed too; one `ROWKERY_CONFIG_DIR`
+/// names keeps its mode, since the user may share it.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        builder.mode(0o700);
+        builder.create(dir)?;
+        if std::env::var_os("ROWKERY_CONFIG_DIR").is_none() && dir == config_dir() {
+            // Best effort, as in `open_private`.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    builder.create(dir)
+}
+
+/// Opens `path` as a file only this user can read: made so, or, written by
+/// an older build, narrowed to it.
+pub fn open_private(path: &Path, options: &mut fs::OpenOptions) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let file = options.open(path)?;
+        // Best effort: a file another user owns still opens as before.
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    options.open(path)
+}
+
+/// [`fs::write`] to a file only this user can read.
+pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    open_private(
+        path,
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )?
+    .write_all(bytes.as_ref())
+}
+
 /// Directory for Rowkery app data (`ROWKERY_CONFIG_DIR` overrides for tests).
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ROWKERY_CONFIG_DIR") {
@@ -487,7 +538,7 @@ impl AppConfig {
     fn write(&self) -> Result<(), ConfigError> {
         self.save_gate.ready()?;
         let dir = config_dir();
-        fs::create_dir_all(&dir)?;
+        create_private_dir(&dir)?;
         let path = config_path();
         let tmp = dir.join(format!("{CONFIG_FILE}.tmp"));
         let mut value = serde_json::to_value(self)?;
@@ -498,7 +549,7 @@ impl AppConfig {
             }
         }
         let json = serde_json::to_vec_pretty(&value)?;
-        fs::write(&tmp, json)?;
+        write_private(&tmp, json)?;
         fs::rename(&tmp, &path)?;
         Ok(())
     }
@@ -623,6 +674,24 @@ mod tests {
     fn test_guard() -> (MutexGuard<'static, ()>, PathBuf) {
         let guard = test_dir_guard("config");
         (guard, config_dir())
+    }
+
+    /// rowkery/reports#47: the folder and config.json are this user's only,
+    /// and a file an older build left readable is narrowed when next opened.
+    #[cfg(unix)]
+    #[test]
+    fn app_files_are_only_this_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, dir) = test_guard();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        AppConfig::default().save().unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&config_path()), 0o600);
+        let old = dir.join("old.jsonl");
+        fs::write(&old, "x").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+        open_private(&old, fs::OpenOptions::new().append(true)).unwrap();
+        assert_eq!(mode(&old), 0o600);
     }
 
     #[test]

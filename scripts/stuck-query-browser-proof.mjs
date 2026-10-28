@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // A query stuck on a dead connection (stubbed `invoke`: the "server" ignores
-// a cancel, as a dead socket does). Cancel turns into Force stop, which (or
+// a cancel, as a dead socket does). Cancel turns into Force stop a second
+// later (a quick double Esc is one cancel), which (or
 // Esc again) stops it; ⌘K "Stop all queries" stops every tab; the run's
 // sweep stays in the main column, in Run's orange; scrollbars are thin.
 // Core's side (a run stopped 3 s after an unanswered cancel, at once on the
@@ -129,11 +130,18 @@ await page.click(`${ws} [data-cancel="force"]`);
 await page.waitForSelector(`${ws} [data-testid="card-meta"][data-state="cancelled"]`);
 check((await calls("cancel_query")) === 2, "Force stop asked core again, and the run ended");
 
-// Esc twice does the same.
+// A quick double Esc is one cancel: Force stop, which rolls back an open
+// transaction, comes only a second later.
 await page.click(`${ws} textarea[data-testid="sql-editor"]`);
 await page.keyboard.press("Control+Enter");
 await page.waitForSelector(`${ws} [data-cancel="cancel"]`);
 await page.keyboard.press("Escape");
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
+check(
+  (await calls("cancel_query")) === 3 && (await page.$(`${ws} [data-cancel="cancel"][disabled]`)) !== null,
+  "Esc twice at once: one cancel, still running",
+);
 await page.waitForSelector(`${ws} [data-cancel="force"]`);
 await page.keyboard.press("Escape");
 await page.waitForSelector(`${ws} [data-testid="card-meta"][data-state="cancelled"]`);

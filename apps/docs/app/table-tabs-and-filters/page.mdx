@@ -107,11 +107,13 @@ The operator list shows the four most useful for the column's type first (for te
 | less than | `<` |
 | at least | `>=` |
 | at most | `<=` |
-| contains | `ILIKE` on Postgres, `LIKE` on SQLite |
+| contains | `ILIKE` on Postgres (on a number, date or other non-text column, over its text: `CAST(col AS TEXT) ILIKE`), `LIKE` on SQLite |
 | one of | `IN`, values separated by commas |
 | between | `BETWEEN`, a low and a high value |
 | is empty | `IS NULL` |
 | is not empty | `IS NOT NULL` |
+
+A value of `null` means SQL's NULL, so **is** `null` writes `IS NULL`. To find the text "null", quote it: **is** `'null'` writes `= 'null'`.
 
 ### Filtering from a cell
 

@@ -131,6 +131,9 @@ pub enum DriverError {
         sqlstate: String,
         /// 1-based character offset into the statement, as Postgres reports it.
         position: Option<u32>,
+        /// The server's `DETAIL:` and `HINT:` lines, as psql prints them
+        /// (`DETAIL:  Key (email)=(a@b.c) already exists.`).
+        detail: Option<String>,
     },
 }
 
@@ -142,6 +145,20 @@ impl DriverError {
             DriverError::Server { message, .. } => message,
             DriverError::Cancelled => "Cancelled".to_string(),
             DriverError::NotImplemented(f) => format!("not implemented: {f}"),
+        }
+    }
+
+    /// [`Self::into_message`], with the server's DETAIL and HINT lines under
+    /// it: for the user's own view, never an agent's (DETAIL can quote a
+    /// row's values).
+    pub fn into_full_message(self) -> String {
+        match self {
+            DriverError::Server {
+                message,
+                detail: Some(detail),
+                ..
+            } => format!("{message}\n{detail}"),
+            other => other.into_message(),
         }
     }
 }

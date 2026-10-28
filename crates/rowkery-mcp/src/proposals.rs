@@ -19,7 +19,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rowkery_core::config::{config_dir, AppConfig};
+use rowkery_core::config::{config_dir, create_private_dir, open_private, AppConfig};
 use rowkery_core::connections::{ConnectionRecord, PostgresConnection};
 use rowkery_core::db::postgres::{open_session, session_execute, session_query_stream};
 use rowkery_core::reach::{self, Reach};
@@ -69,6 +69,11 @@ pub struct Proposal {
     /// The MCP client's name (`claude-ai`, `claude-code`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// When a commit of it was started that never finished (Rowkery closed
+    /// mid-COMMIT, rowkery/reports#49): it may already be saved. Never
+    /// written to the queue; `waiting` fills it in.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub commit_started_ms: Option<u64>,
 }
 
 /// What the user decided, or what became of the commit.
@@ -83,6 +88,19 @@ pub enum Decision {
     },
     /// The commit failed (nothing was saved, unless the error says otherwise).
     Failed { error: String },
+    /// Written just before COMMIT is sent, and followed by the outcome. Alone,
+    /// Rowkery closed in between: the change may or may not be saved.
+    Committing {},
+    /// The commit stopped with nothing saved (the server refused COMMIT):
+    /// waiting again, like a change never committed.
+    Uncommitted {},
+}
+
+impl Decision {
+    /// Still the user's to decide: a later line takes its place.
+    fn open(&self) -> bool {
+        matches!(self, Decision::Committing {} | Decision::Uncommitted {})
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,17 +132,14 @@ fn new_id() -> String {
 
 fn append_line(file: &str, line: &impl Serialize) -> Result<(), String> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    create_private_dir(&dir).map_err(|e| e.to_string())?;
     let mut text = serde_json::to_string(line).map_err(|e| e.to_string())?;
     text.push('\n');
     let path = dir.join(file);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
         let _ = std::fs::rename(&path, dir.join(format!("{file}.1")));
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    open_private(&path, OpenOptions::new().create(true).append(true))
         .and_then(|mut f| f.write_all(text.as_bytes()))
         .map_err(|e| format!("Couldn't save the proposal: {e}"))
 }
@@ -143,8 +158,14 @@ fn load() -> Vec<(Proposal, Option<DecisionLine>)> {
     let since = now_ms().saturating_sub(KEEP_MS);
     let mut decided: HashMap<String, DecisionLine> = HashMap::new();
     for line in read_lines::<DecisionLine>(OUTCOMES_FILE) {
-        // The first decision stands.
-        decided.entry(line.id.clone()).or_insert(line);
+        // The first decision stands; a commit that was started gives way
+        // to what became of it.
+        match decided.get(&line.id) {
+            Some(first) if !first.decision.open() => {}
+            _ => {
+                decided.insert(line.id.clone(), line);
+            }
+        }
     }
     let mut seen = std::collections::HashSet::new();
     read_lines::<Proposal>(QUEUE_FILE)
@@ -157,8 +178,79 @@ fn load() -> Vec<(Proposal, Option<DecisionLine>)> {
         .collect()
 }
 
+/// Undecided, or a commit was started and never finished: the user decides
+/// again, told it may already be saved.
 fn is_waiting(p: &Proposal, d: &Option<DecisionLine>, now: u64) -> bool {
-    d.is_none() && now.saturating_sub(p.ts) < EXPIRES_MS
+    let open = d.as_ref().is_none_or(|line| line.decision.open());
+    open && now.saturating_sub(p.ts) < EXPIRES_MS
+}
+
+/// The proposals this process is committing right now: their `Committing`
+/// line is no sign of a commit cut short.
+static IN_FLIGHT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn in_flight(id: &str) -> bool {
+    IN_FLIGHT
+        .lock()
+        .map(|l| l.iter().any(|i| i == id))
+        .unwrap_or(false)
+}
+
+/// One commit of `id`, in flight until dropped.
+struct Flight {
+    id: String,
+    /// This commit wrote its `Committing` line.
+    marked: std::sync::atomic::AtomicBool,
+}
+
+impl Flight {
+    fn start(id: &str) -> Self {
+        if let Ok(mut l) = IN_FLIGHT.lock() {
+            l.push(id.to_string());
+        }
+        Self {
+            id: id.to_string(),
+            marked: false.into(),
+        }
+    }
+
+    /// Notes that COMMIT is about to go, so a crash before its outcome is
+    /// written leaves a sign (rowkery/reports#49). Unwritten, nothing is sent.
+    fn mark(&self) -> Result<(), String> {
+        decide(&self.id, Decision::Committing {})
+            .map_err(|e| format!("{e}. Nothing was saved."))?;
+        self.marked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn marked(&self) -> bool {
+        self.marked.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        // One entry only: a second commit of the same id may still run.
+        if let Ok(mut l) = IN_FLIGHT.lock() {
+            if let Some(at) = l.iter().position(|i| *i == self.id) {
+                l.remove(at);
+            }
+        }
+    }
+}
+
+/// When the commit its line says started, if one did and has no outcome.
+fn commit_started(d: &Option<DecisionLine>) -> Option<u64> {
+    d.as_ref()
+        .filter(|line| matches!(line.decision, Decision::Committing {}))
+        .map(|line| line.ts)
+}
+
+/// A commit started and never finished. Only this process knows its own
+/// commits in flight, so only the app's review tells the two apart.
+fn cut_short(p: &Proposal, d: &Option<DecisionLine>) -> Option<u64> {
+    commit_started(d).filter(|_| !in_flight(&p.id))
 }
 
 /// Proposals nobody has decided on yet, oldest first.
@@ -167,7 +259,10 @@ pub fn waiting() -> Vec<Proposal> {
     load()
         .into_iter()
         .filter(|(p, d)| is_waiting(p, d, now))
-        .map(|(p, _)| p)
+        .map(|(mut p, d)| {
+            p.commit_started_ms = cut_short(&p, &d);
+            p
+        })
         .collect()
 }
 
@@ -199,6 +294,7 @@ pub fn submit(
         reason: reason.trim().to_string(),
         expect_rows,
         client,
+        commit_started_ms: None,
     };
     append_line(QUEUE_FILE, &proposal)?;
     Ok(proposal)
@@ -226,6 +322,18 @@ pub fn status(id: &str) -> Result<Json, String> {
         .find(|(p, _)| p.id == id.trim())
         .ok_or_else(|| format!("No proposal called \"{}\".", id.trim()))?;
     let mut out = match &d {
+        Some(line) if line.decision.open() && is_waiting(&p, &d, now) => {
+            // Still the user's to decide; the agent waits, and proposes
+            // nothing new for it. The agent's process can't tell a commit
+            // still running from one cut short, and either may have saved.
+            let mut v = json!({ "state": "waiting" });
+            if let Some(at) = commit_started(&d) {
+                v["commit_started_ms"] = json!(at);
+                v["hint"] = json!("A commit of this change started, so it may already be saved. The user will check. Don't send it again.");
+            }
+            v
+        }
+        Some(line) if line.decision.open() => json!({ "state": "expired" }),
         Some(line) => {
             let mut v = serde_json::to_value(&line.decision).unwrap_or(Json::Null);
             v["at_ms"] = json!(line.ts);
@@ -295,6 +403,10 @@ pub struct StatementPreview {
     /// `[schema, table]` the statement's own rows count under in `reach`
     /// (a partition's top parent).
     pub table: Option<[String; 2]>,
+    /// Which rows an UPDATE or DELETE changed, as a digest of their primary
+    /// keys: a commit must change the same rows, not just as many. None for
+    /// an INSERT (its rows are new), a table without a key, or no rows.
+    pub digest: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -327,6 +439,9 @@ pub struct Seen {
     pub reach: Vec<Option<Reach>>,
     #[serde(default)]
     pub at_commit: Option<Reach>,
+    /// Each statement's `digest`.
+    #[serde(default)]
+    pub digests: Vec<Option<String>>,
 }
 
 /// What the commit did.
@@ -612,22 +727,26 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
     if seen.rows.len() != changes.len() {
         return Err("The change moved since you reviewed it. Review it again.".into());
     }
+    let flight = std::sync::Arc::new(Flight::start(id));
     let ran = match &record {
         ConnectionRecord::Postgres(pg) => {
             let target = Target {
                 record: record.clone(),
                 database: database.clone(),
             };
-            pg_commit(pg, &target, &proposal.sql, seen).await
+            pg_commit(pg, &target, &proposal.sql, seen, &flight).await
         }
         ConnectionRecord::Sqlite(c) => {
             let path = c.path.clone();
             let changes = changes.clone();
             let seen = seen.clone();
-            tokio::task::spawn_blocking(move || sqlite_run(&path, &changes, Some(&seen)))
-                .await
-                .map_err(|e| e.to_string())?
-                .map(|(_, ran)| ran.unwrap_or(RunResult::Moved))
+            let flight = flight.clone();
+            tokio::task::spawn_blocking(move || {
+                sqlite_run(&path, &changes, Some((&seen, flight.as_ref())))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|(_, ran)| ran.unwrap_or(RunResult::Moved))
         }
     };
     match ran {
@@ -653,6 +772,11 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
                         error: error.clone(),
                     },
                 )?;
+            } else if flight.marked() {
+                // Rolled back after its mark: no longer a commit cut short.
+                // An error before the mark leaves an earlier one standing.
+                // Unwritten, the next review warns needlessly.
+                let _ = decide(id, Decision::Uncommitted {});
             }
             Ok(CommitOutcome::Failed { error })
         }
@@ -799,21 +923,16 @@ async fn pg_preview_one(
              top AS (SELECT n.nspname::text AS s, c.relname::text AS r FROM up \
                JOIN pg_class c ON c.oid = up.oid JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE NOT c.relispartition) \
-             SELECT 'k', a.attname::text FROM pg_index i \
-             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-             WHERE i.indrelid = {rel}::regclass AND i.indisprimary \
-             UNION ALL SELECT 't', tgname::text FROM pg_trigger \
+             SELECT 't', tgname::text FROM pg_trigger \
              WHERE tgrelid = {rel}::regclass AND NOT tgisinternal \
              UNION ALL SELECT 's', s FROM top UNION ALL SELECT 'r', r FROM top"
         ),
     )
     .await?
     .1;
-    let key: Vec<String> = facts
-        .iter()
-        .filter(|r| text(r.first()) == "k")
-        .map(|r| text(r.get(1)))
-        .collect();
+    // In key order, as the commit reads it, so both digest the same row().
+    let key = pg_key(session, &change.target).await?;
+    sets_no_key(change, &key)?;
     let triggers: Vec<String> = facts
         .iter()
         .filter(|r| text(r.first()) == "t")
@@ -826,8 +945,13 @@ async fn pg_preview_one(
             .map(|r| text(r.get(1)))
     };
     let table = fact("s").zip(fact("r")).map(|(s, r)| [s, r]);
-    let quote = |c: &str| format!("\"{}\"", c.replace('"', "\"\""));
+    let quote = quote_ident;
     let join_old = change.verb != "DELETE" && !key.is_empty();
+    // One row whatever the change returns: the digest aggregates them.
+    let seen = match pg_digest(&change.verb, &key) {
+        Some(digest) => format!("SELECT {digest} AS d FROM rk_change"),
+        None => "SELECT NULL::text AS d".into(),
+    };
     let sql = if join_old {
         let new_key: Vec<String> = key
             .iter()
@@ -835,8 +959,9 @@ async fn pg_preview_one(
             .collect();
         let old_key: Vec<String> = key.iter().map(|k| format!("rk_old.{}", quote(k))).collect();
         format!(
-            "WITH rk_change AS ({}\nRETURNING *) \
-             SELECT rk_change.*, rk_old.*, (rk_old.{} IS NOT NULL) AS rk_had_old, count(*) OVER () AS rk_total \
+            "WITH rk_change AS ({}\nRETURNING *), rk_seen AS ({seen}) \
+             SELECT rk_change.*, rk_old.*, (rk_old.{} IS NOT NULL) AS rk_had_old, \
+             (SELECT d FROM rk_seen) AS rk_digest, count(*) OVER () AS rk_total \
              FROM rk_change LEFT JOIN {} rk_old ON ({}) = ({}) LIMIT {PREVIEW_ROWS}",
             change.sql,
             quote(&key[0]),
@@ -846,17 +971,25 @@ async fn pg_preview_one(
         )
     } else {
         format!(
-            "WITH rk_change AS ({}\nRETURNING *) SELECT rk_change.*, count(*) OVER () AS rk_total FROM rk_change LIMIT {PREVIEW_ROWS}",
+            "WITH rk_change AS ({}\nRETURNING *), rk_seen AS ({seen}) \
+             SELECT rk_change.*, (SELECT d FROM rk_seen) AS rk_digest, count(*) OVER () AS rk_total \
+             FROM rk_change LIMIT {PREVIEW_ROWS}",
             change.sql
         )
     };
     let (columns, rows) = pg_rows(session, &sql).await?;
     let (reach, after) = pg_reach(session, counts).await?;
     let width = if join_old {
-        (columns.len() - 2) / 2
+        (columns.len() - 3) / 2
     } else {
-        columns.len() - 1
+        columns.len() - 2
     };
+    let digest = rows
+        .first()
+        .and_then(|r| match r.get(r.len().wrapping_sub(2)) {
+            Some(Value::Text(d)) => Some(d.clone()),
+            _ => None,
+        });
     let total = rows
         .first()
         .and_then(|r| r.last())
@@ -884,7 +1017,65 @@ async fn pg_preview_one(
         reach,
     );
     preview.table = table;
+    preview.digest = digest;
     Ok((preview, after))
+}
+
+fn quote_ident(c: &str) -> String {
+    format!("\"{}\"", c.replace('"', "\"\""))
+}
+
+/// The SQL of a statement's `digest` over `rk_change` (its RETURNING rows):
+/// each row's primary key hashed (SHA-256), the hashes summed in two 64-bit
+/// halves, so no order and no string of every key is needed. NULL for no
+/// rows; None where a digest says nothing.
+fn pg_digest(verb: &str, key: &[String]) -> Option<String> {
+    if !digested(verb, key) {
+        return None;
+    }
+    let row: Vec<String> = key
+        .iter()
+        .map(|k| format!("rk_change.{}", quote_ident(k)))
+        .collect();
+    let hash = format!(
+        "encode(sha256(convert_to(row({})::text, 'UTF8')), 'hex')",
+        row.join(", ")
+    );
+    let half =
+        |at: usize| format!("sum(('x' || substr({hash}, {at}, 16))::bit(64)::bigint::numeric)");
+    Some(format!("({} || ':' || {})", half(1), half(17)))
+}
+
+/// Refuses an UPDATE that sets a primary key column: the commit is checked
+/// against the dry run by the keys the change returns, and keys it sets
+/// itself would match whichever rows it hit.
+fn sets_no_key(change: &RowChange, key: &[String]) -> Result<(), String> {
+    let set = rowkery_core::safety::assigned_columns(&change.sql);
+    match key.iter().find(|k| set.iter().any(|c| c.eq_ignore_ascii_case(k))) {
+        Some(k) => Err(format!(
+            "Refused: this UPDATE sets the primary key ({k}). Rowkery checks that the commit changes the rows the dry run showed by their keys, so a proposed change can't set them. Leave key changes to the user."
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The table's primary key columns, in key order.
+async fn pg_key(
+    session: &rowkery_core::db::postgres::PostgresSession,
+    target: &str,
+) -> Result<Vec<String>, String> {
+    let rel = literal(target);
+    let (_, rows) = pg_rows(
+        session,
+        &format!(
+            "SELECT a.attname::text FROM pg_index i \
+             CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, n) \
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+             WHERE i.indrelid = {rel}::regclass AND i.indisprimary ORDER BY k.n"
+        ),
+    )
+    .await?;
+    Ok(rows.iter().map(|r| text(r.first())).collect())
 }
 
 /// Cells for the UI; which side is which depends on the verb: DELETE
@@ -941,6 +1132,7 @@ fn finish(
         triggers,
         reach,
         table: None,
+        digest: None,
     }
 }
 
@@ -952,6 +1144,7 @@ async fn pg_commit(
     target: &Target,
     sql: &str,
     seen: &Seen,
+    flight: &Flight,
 ) -> Result<RunResult, String> {
     let session = open_session(pg.id.clone(), pg_config(pg, &target.database))
         .await
@@ -992,6 +1185,10 @@ async fn pg_commit(
             return Err(e);
         }
     };
+    if let Err(e) = flight.mark() {
+        let _ = session_execute(&session, "ROLLBACK").await;
+        return Err(e);
+    }
     if let Err(e) = session_execute(&session, "COMMIT").await {
         if session.is_closed() {
             return Err(format!(
@@ -1015,11 +1212,42 @@ async fn pg_commit_run(
     let mut counts = Vec::new();
     let mut tables = reach::pg_counts(session).await?;
     for (i, (change, want)) in changes.iter().zip(&seen.rows).enumerate() {
-        let n = session_query_stream(session, &change.sql, |_, _| Ok(()))
-            .await
-            .map_err(|e| e.into_message())?;
+        let wanted = seen.digests.get(i).cloned().flatten();
+        let (n, digest) = match &wanted {
+            // The same rows as the dry run's, not just as many: their keys.
+            Some(_) => {
+                let key = pg_key(session, &change.target).await?;
+                sets_no_key(change, &key)?;
+                let Some(digest) = pg_digest(&change.verb, &key) else {
+                    return Ok(None);
+                };
+                let (_, rows) = pg_rows(
+                    session,
+                    &format!(
+                        "WITH rk_change AS ({}\nRETURNING *) SELECT count(*), {digest} FROM rk_change",
+                        change.sql
+                    ),
+                )
+                .await?;
+                let row = rows.first();
+                let n = match row.and_then(|r| r.first()) {
+                    Some(Value::Int(n)) => *n as u64,
+                    _ => 0,
+                };
+                (n, row.map(|r| text(r.get(1))))
+            }
+            None => {
+                let n = session_query_stream(session, &change.sql, |_, _| Ok(()))
+                    .await
+                    .map_err(|e| e.into_message())?;
+                (n, None)
+            }
+        };
         let (reach, after) = pg_reach(session, tables.as_ref()).await?;
-        if n != *want || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach) {
+        if n != *want
+            || digest != wanted
+            || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach)
+        {
             return Ok(None);
         }
         counts.push(n);
@@ -1039,11 +1267,13 @@ fn matches(seen: Option<&Reach>, now: &Option<Reach>) -> bool {
 /// RETURNING inside a savepoint, for its rows; for an UPDATE the savepoint
 /// is rolled back to read the old rows by key, then the statement runs
 /// again so the next one sees it.
+/// `commit`: what the user saw, and the proposal it commits.
 fn sqlite_run(
     path: &str,
     changes: &[RowChange],
-    expected: Option<&Seen>,
+    commit: Option<(&Seen, &Flight)>,
 ) -> Result<(Vec<StatementPreview>, Option<RunResult>), String> {
+    let expected = commit.map(|(seen, _)| seen);
     use rowkery_core::db::sqlite::sqlite_value_to_core;
     let err = |e: rusqlite::Error| e.to_string();
     let conn =
@@ -1064,18 +1294,56 @@ fn sqlite_run(
                 // With RETURNING as in the dry run: a bare `DELETE FROM t`
                 // would take SQLite's truncate path, which the hook never
                 // sees, and the counts would never match.
-                let n = (|| -> rusqlite::Result<u64> {
-                    let mut stmt = conn.prepare(&format!("{}\nRETURNING 1", change.sql))?;
+                // The same rows as the dry run's, not just as many: their keys.
+                let wanted = seen.digests.get(i).cloned().flatten();
+                let key = match wanted {
+                    Some(_) => sqlite_key(&conn, &change.target).map_err(err)?,
+                    None => Vec::new(),
+                };
+                sets_no_key(change, &key)?;
+                if wanted.is_some() && !digested(&change.verb, &key) {
+                    return Ok((Vec::new(), Some(RunResult::Moved)));
+                }
+                let returning = if key.is_empty() {
+                    "1".to_string()
+                } else {
+                    key.iter()
+                        .map(|k| quote_ident(k))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let (n, digest) = (|| -> rusqlite::Result<(u64, Option<String>)> {
+                    let mut stmt =
+                        conn.prepare(&format!("{}\nRETURNING {returning}", change.sql))?;
                     let mut rows = stmt.query([])?;
-                    let mut n = 0;
-                    while rows.next()?.is_some() {
-                        n += 1;
+                    let mut digest = KeyDigest::default();
+                    while let Some(row) = rows.next()? {
+                        digest.add(
+                            (0..key.len())
+                                .map(|i| {
+                                    row.get_ref(i)
+                                        .map(sqlite_value_to_core)
+                                        .unwrap_or(Value::Null)
+                                })
+                                .collect(),
+                        );
                     }
-                    Ok(n)
+                    let n = digest.n;
+                    Ok((
+                        n,
+                        if key.is_empty() {
+                            None
+                        } else {
+                            digest.finish()
+                        },
+                    ))
                 })()
                 .map_err(err)?;
                 let reach = Some(counter.reach(&conn).map_err(err)?);
-                if n != *want || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach) {
+                if n != *want
+                    || digest != wanted
+                    || !matches(seen.reach.get(i).and_then(Option::as_ref), &reach)
+                {
                     return Ok((Vec::new(), Some(RunResult::Moved)));
                 }
                 counts.push(n);
@@ -1085,10 +1353,8 @@ fn sqlite_run(
         let mut out = Vec::new();
         for change in changes {
             let table = unquote_last(&change.target);
-            let key: Vec<String> = conn
-                .prepare("SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk")
-                .and_then(|mut s| s.query_map([&table], |r| r.get(0))?.collect())
-                .map_err(err)?;
+            let key = sqlite_key(&conn, &change.target).map_err(err)?;
+            sets_no_key(change, &key)?;
             let triggers: Vec<String> = conn
                 .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 COLLATE NOCASE")
                 .and_then(|mut s| s.query_map([&table], |r| r.get(0))?.collect())
@@ -1099,11 +1365,29 @@ fn sqlite_run(
                 .prepare(&format!("{}\nRETURNING *", change.sql))
                 .map_err(err)?;
             let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+            let key_at: Vec<usize> = key
+                .iter()
+                .filter_map(|k| columns.iter().position(|c| c.eq_ignore_ascii_case(k)))
+                .collect();
+            let digested = digested(&change.verb, &key) && key_at.len() == key.len();
+            let mut digest = KeyDigest::default();
             let mut returned: Vec<Vec<Value>> = Vec::new();
             let mut total = 0u64;
             let mut rows = stmt.query([]).map_err(err)?;
             while let Some(row) = rows.next().map_err(err)? {
                 total += 1;
+                if digested {
+                    digest.add(
+                        key_at
+                            .iter()
+                            .map(|&i| {
+                                row.get_ref(i)
+                                    .map(sqlite_value_to_core)
+                                    .unwrap_or(Value::Null)
+                            })
+                            .collect(),
+                    );
+                }
                 if returned.len() < PREVIEW_ROWS {
                     returned.push(
                         (0..columns.len())
@@ -1119,10 +1403,6 @@ fn sqlite_run(
             drop(rows);
             drop(stmt);
             let mut old: Vec<Option<Vec<Value>>> = vec![None; returned.len()];
-            let key_at: Vec<usize> = key
-                .iter()
-                .filter_map(|k| columns.iter().position(|c| c.eq_ignore_ascii_case(k)))
-                .collect();
             if change.verb == "UPDATE" && !key.is_empty() && key_at.len() == key.len() {
                 conn.execute_batch("ROLLBACK TO rk_preview").map_err(err)?;
                 let filter: Vec<String> = key
@@ -1166,12 +1446,17 @@ fn sqlite_run(
                 .collect();
             let mut preview = finish(change, columns, key, total, shown, triggers, Some(reach));
             preview.table = Some(["main".to_string(), table]);
+            preview.digest = digest.finish().filter(|_| digested);
             out.push(preview);
         }
         Ok((out, None))
     })();
     let committing = matches!(result, Ok((_, Some(RunResult::Committed(_)))));
     if committing {
+        if let Some(Err(e)) = commit.map(|(_, flight)| flight.mark()) {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
         if let Err(e) = conn.execute_batch("COMMIT") {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e.to_string());
@@ -1180,6 +1465,43 @@ fn sqlite_run(
         let _ = conn.execute_batch("ROLLBACK");
     }
     result
+}
+
+/// The table's primary key columns, in key order.
+fn sqlite_key(conn: &rusqlite::Connection, target: &str) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk")
+        .and_then(|mut s| s.query_map([unquote_last(target)], |r| r.get(0))?.collect())
+}
+
+/// Whether a statement gets a `digest`: an UPDATE or DELETE on a table
+/// with a key (as `pg_digest`).
+fn digested(verb: &str, key: &[String]) -> bool {
+    matches!(verb, "UPDATE" | "DELETE") && !key.is_empty()
+}
+
+/// A statement's rows by primary key, in any order: each key's SHA-256,
+/// summed in 64-bit lanes (as `pg_digest`), so no key is kept.
+#[derive(Default)]
+struct KeyDigest {
+    sums: [u64; 4],
+    n: u64,
+}
+
+impl KeyDigest {
+    fn add(&mut self, key: Vec<Value>) {
+        use sha2::{Digest, Sha256};
+        self.n += 1;
+        let hash = Sha256::digest(format!("{key:?}").as_bytes());
+        for (i, sum) in self.sums.iter_mut().enumerate() {
+            let lane: [u8; 8] = hash[i * 8..i * 8 + 8].try_into().unwrap();
+            *sum = sum.wrapping_add(u64::from_be_bytes(lane));
+        }
+    }
+
+    /// None when no row was added.
+    fn finish(self) -> Option<String> {
+        (self.n > 0).then(|| self.sums.iter().map(|s| format!("{s:016x}")).collect())
+    }
 }
 
 /// `main."Orders"` → `Orders`.
@@ -1374,6 +1696,30 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(pending, 2);
 
+        // As many rows, but other ones (order 3 is pending, 2 isn't): the
+        // keys differ, nothing is saved.
+        assert!(s.digest.is_some());
+        let saw = Seen {
+            rows: vec![2],
+            digests: vec![s.digest.clone()],
+            ..Seen::default()
+        };
+        conn.execute_batch(
+            "UPDATE orders SET status = 'paid' WHERE id = 2; UPDATE orders SET status = 'pending' WHERE id = 3;",
+        )
+        .unwrap();
+        match commit(&p.id, &saw).await.unwrap() {
+            CommitOutcome::Moved { dry_run } => {
+                assert_eq!(dry_run.statements[0].rows, 2);
+                assert_ne!(dry_run.statements[0].digest, s.digest);
+            }
+            other => panic!("{other:?}"),
+        }
+        conn.execute_batch(
+            "UPDATE orders SET status = 'pending' WHERE id = 2; UPDATE orders SET status = 'paid' WHERE id = 3;",
+        )
+        .unwrap();
+
         // Another pending order appears: the counts differ, nothing is saved.
         conn.execute("INSERT INTO orders VALUES (4, 'pending', 5)", [])
             .unwrap();
@@ -1381,7 +1727,13 @@ pub(crate) mod tests {
             CommitOutcome::Moved { dry_run } => assert_eq!(dry_run.statements[0].rows, 3),
             other => panic!("{other:?}"),
         }
-        match commit(&p.id, &seen(&[3])).await.unwrap() {
+        let again = dry_run(&p.id).await.unwrap();
+        let saw = Seen {
+            rows: vec![3],
+            digests: vec![again.statements[0].digest.clone()],
+            ..Seen::default()
+        };
+        match commit(&p.id, &saw).await.unwrap() {
             CommitOutcome::Committed { rows } => assert_eq!(rows, vec![3]),
             other => panic!("{other:?}"),
         }
@@ -1395,6 +1747,20 @@ pub(crate) mod tests {
         assert_eq!(refunded, 3);
         assert_eq!(status(&p.id).unwrap()["state"], "committed");
         assert!(commit(&p.id, &seen(&[3])).await.is_err(), "decided once");
+        // An UPDATE that sets the key is refused: its keys say nothing of
+        // which rows it hit.
+        let rekey = submit(
+            "shop",
+            "main",
+            "UPDATE orders SET \"ID\" = -1 WHERE id = 1",
+            "Renumber",
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = dry_run(&rekey.id).await.expect_err("sets the key");
+        assert!(refused.contains("sets the primary key (id)"), "{refused}");
+        reject(&rekey.id, None).unwrap();
 
         // Rejected with a note; the cap of waiting proposals.
         let q = submit(
@@ -1534,6 +1900,7 @@ pub(crate) mod tests {
             rows: vec![1],
             reach: vec![Some(reach)],
             at_commit: run.at_commit.clone(),
+            ..Seen::default()
         };
 
         // Another payment lands: the customer's own row count is the same,
@@ -1565,6 +1932,7 @@ pub(crate) mod tests {
             rows: vec![1],
             reach: vec![again.statements[0].reach.clone()],
             at_commit: again.at_commit.clone(),
+            ..Seen::default()
         };
         match commit(&p.id, &saw).await.unwrap() {
             CommitOutcome::Committed { rows } => assert_eq!(rows, vec![1]),
@@ -1587,12 +1955,78 @@ pub(crate) mod tests {
             rows: vec![run.statements[0].rows],
             reach: vec![run.statements[0].reach.clone()],
             at_commit: None,
+            ..Seen::default()
         };
         match commit(&all.id, &saw).await.unwrap() {
             CommitOutcome::Committed { rows } => assert_eq!(rows, vec![2]),
             other => panic!("{other:?}"),
         }
         std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_commit_cut_short_stays_waiting_and_says_so() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let p = submit(
+            "shop",
+            "main",
+            "DELETE FROM notes WHERE id = 1",
+            "old",
+            None,
+            None,
+        )
+        .unwrap();
+        // COMMIT was about to go when Rowkery closed (rowkery/reports#49).
+        decide(&p.id, Decision::Committing {}).unwrap();
+        let listed = waiting();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].commit_started_ms.is_some());
+        let told = status(&p.id).unwrap();
+        assert_eq!(told["state"], "waiting");
+        assert!(
+            told["hint"]
+                .as_str()
+                .unwrap()
+                .contains("may already be saved"),
+            "{told}"
+        );
+        // While this process commits it, the marker is no warning, even
+        // once a second commit of it ends. The agent's process can't tell,
+        // so it still hears that the commit started.
+        {
+            let _first = Flight::start(&p.id);
+            drop(Flight::start(&p.id));
+            assert_eq!(waiting()[0].commit_started_ms, None);
+            assert!(status(&p.id).unwrap()["commit_started_ms"].is_u64());
+        }
+        assert!(waiting()[0].commit_started_ms.is_some());
+        // Rolled back: waiting again, with no warning.
+        decide(&p.id, Decision::Uncommitted {}).unwrap();
+        assert_eq!(waiting()[0].commit_started_ms, None);
+        assert!(status(&p.id).unwrap().get("hint").is_none());
+        // Committed after all: decided, and that stands.
+        decide(&p.id, Decision::Committing {}).unwrap();
+        decide(&p.id, Decision::Committed { rows: vec![1] }).unwrap();
+        decide(&p.id, Decision::Committing {}).unwrap();
+        assert!(waiting().is_empty());
+        assert_eq!(status(&p.id).unwrap()["state"], "committed");
+        // The queue file never holds the field.
+        let queue = std::fs::read_to_string(dir.join(QUEUE_FILE)).unwrap();
+        assert!(!queue.contains("commit_started_ms"), "{queue}");
+        // A day on, a rolled-back one has expired, as one never committed.
+        let old = Proposal {
+            id: "p_old".into(),
+            ts: now_ms() - EXPIRES_MS - 1,
+            ..p.clone()
+        };
+        append_line(QUEUE_FILE, &old).unwrap();
+        decide(&old.id, Decision::Uncommitted {}).unwrap();
+        assert_eq!(status(&old.id).unwrap()["state"], "expired");
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

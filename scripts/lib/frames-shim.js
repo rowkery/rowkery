@@ -40,6 +40,7 @@
       error: res.error ?? null,
       sqlstate: res.sqlstate ?? null,
       error_position: res.error_position ?? null,
+      error_detail: res.error_detail ?? null,
       hold: null,
     });
     return out;

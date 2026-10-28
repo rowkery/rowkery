@@ -19,7 +19,7 @@ import {
   type ProbeResult,
 } from "./api";
 import { defaultSslMode, guessEnvironment } from "./connectionEnv";
-import { parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, HIDDEN_PASSWORD, hidePassword, parsePostgresUrl } from "./connectionUrl";
 import { commandTip, keysFor } from "./commands";
 import { isMacPlatform } from "./platform";
 import { prefetchOn, setPrefetch } from "./prefetchSwitch";
@@ -49,10 +49,11 @@ interface NewConnectionSheetProps {
   /** `firstShare`: shared with agents here for the first time, no tables picked yet. */
   onSaved: (id: string, name: string, firstShare: boolean) => void;
   /**
-   * Asked before the record is saved; `false` keeps the sheet open, unsaved
-   * (a reconnect would roll back a tab's open transaction).
+   * Asked before the record is saved or deleted; `false` keeps the sheet
+   * open, unchanged (a reconnect or an emptied window would roll back a
+   * tab's open transaction).
    */
-  beforeSave?: () => Promise<boolean>;
+  beforeChange?: (deleting: boolean) => Promise<boolean>;
   /** A failed connection's field to focus, with the reason printed under it. */
   markField?: { field: string; message: string } | null;
   /** Called after `editing` was deleted. */
@@ -230,7 +231,7 @@ export function NewConnectionSheet({
   markField,
   onClose,
   onSaved,
-  beforeSave,
+  beforeChange,
   onDeleted,
   prefill,
   mcpStats,
@@ -242,7 +243,10 @@ export function NewConnectionSheet({
     // The sheet's starting point, read once.
     [],
   );
-  const [url, setUrl] = useState(() => (prefilled && prefill?.url) || "");
+  // The password goes to its own field; the URL shows it hidden.
+  const [url, setUrl] = useState(() => hidePassword((prefilled && prefill?.url) || ""));
+  // Read from the URL as written: hidden, one that can't be read would pass.
+  const [urlProblem, setUrlProblem] = useState(() => connectionUrlProblem((prefilled && prefill?.url) || ""));
   // A new connection's SSL follows its host (`defaultSslMode`) until picked,
   // or set by a pasted string's sslmode; a saved one keeps its own.
   const [pg, setPg] = useState<PgForm>(() => {
@@ -375,9 +379,13 @@ export function NewConnectionSheet({
     });
   };
 
-  const onUrl = (text: string) => {
-    setUrl(text);
+  /** `pasted`: shown with its password hidden at once, not only on blur. */
+  const onUrl = (text: string, pasted = false) => {
+    setUrl(pasted ? hidePassword(text) : text);
+    setUrlProblem(connectionUrlProblem(text));
     const parsed = parsePostgresUrl(text);
+    // The hidden password, edited around, isn't a new one.
+    if (parsed?.password === HIDDEN_PASSWORD) delete parsed.password;
     if (parsed) {
       touch();
       setEdited((prev) => new Set([...prev, ...(Object.keys(parsed) as (keyof PgForm)[])]));
@@ -653,7 +661,7 @@ export function NewConnectionSheet({
         return;
       }
     }
-    if (beforeSave && !(await beforeSave())) return;
+    if (beforeChange && !(await beforeChange(false))) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -670,7 +678,9 @@ export function NewConnectionSheet({
 
   const onDelete = async () => {
     if (!editing || saving) return;
+    // Busy before the check, so a second click can't delete twice.
     setSaving(true);
+    if (beforeChange && !(await beforeChange(true))) return setSaving(false);
     try {
       // Asked first in the foot; the toast still offers Undo, so the
       // keychain entries stay until it is gone.
@@ -935,7 +945,7 @@ export function NewConnectionSheet({
                 </div>
               </div>
               {!cloud && (
-              <Field label="Paste a connection URL" name="url">
+              <Field label="Paste a connection URL" name="url" error={urlProblem ?? undefined}>
                 <input
                   autoFocus={!editing}
                   data-testid="nc-input"
@@ -945,6 +955,16 @@ export function NewConnectionSheet({
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(e) => onUrl(e.target.value)}
+                  onPaste={(e) => {
+                    const text = e.clipboardData.getData("text/plain");
+                    if (!text) return;
+                    e.preventDefault();
+                    const input = e.currentTarget;
+                    // One line, as the field shows it.
+                    const line = text.replace(/[\r\n]+/g, "");
+                    onUrl(input.value.slice(0, input.selectionStart ?? 0) + line + input.value.slice(input.selectionEnd ?? input.value.length), true);
+                  }}
+                  onBlur={() => setUrl((u) => hidePassword(u))}
                 />
               </Field>
               )}
