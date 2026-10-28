@@ -391,8 +391,10 @@ fn cache_forget(account: &str) {
 /// Why a connection's keychain item couldn't be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unread {
-    /// A denied or unanswerable prompt, or a value that isn't our JSON.
+    /// A denied or unanswerable prompt: a save then saves nothing.
     Refused,
+    /// A value that isn't our JSON: left alone, the file holds what is saved.
+    Unparseable,
     /// No keychain to ask: the file holds everything.
     NoKeychain,
     /// A keychain this machine answered before can't be reached now (a
@@ -496,7 +498,7 @@ fn finish_fold(connection_id: &str) {
 /// connection's item and deleted (macOS asks once for each, one last time).
 fn read_item(connection_id: &str) -> Result<Item, Unread> {
     // A value that isn't our JSON is left alone rather than overwritten.
-    let parse = |json: String| serde_json::from_str::<Item>(&json).map_err(|_| Unread::Refused);
+    let parse = |json: String| serde_json::from_str::<Item>(&json).map_err(|_| Unread::Unparseable);
     let unread = |err: SecretError| match err {
         SecretError::NoKeychain(_) if keychain_used() => Unread::Outage,
         SecretError::NoKeychain(_) => Unread::NoKeychain,
@@ -688,11 +690,11 @@ fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<
 /// connection's keychain item, made from the item as it is now.
 ///
 /// Where the item can't take a secret (no keychain, a keychain that can't
-/// be reached, too big for it), the encrypted file does. A denied prompt
-/// saves nothing: it isn't asked again until the next save. Reads look in the file first, and
-/// every save into the item drops the file's copy, so the newer of the two
-/// is always the one read, and an item that couldn't be read is never
-/// saved from an older copy.
+/// be reached, a value that isn't ours, too big for it), the encrypted file
+/// does. A denied prompt saves nothing, and the next save asks again.
+/// Reads look in the file first, and every save into the item drops the
+/// file's copy, so the newer of the two is always the one read, and an item
+/// that couldn't be read is never saved from an older copy.
 fn change_secrets(
     connection_id: &str,
     set: &[(SecretKind, &str)],
@@ -704,15 +706,14 @@ fn change_secrets(
                 Ok(read) => Some(read),
                 // No keychain: the file holds everything.
                 Err(unread) if none_here(unread) => None,
-                // A secret left in the item can't be removed from the file.
                 // A denied prompt: the password isn't put anywhere else.
                 Err(Unread::Refused) => {
                     if let Ok(mut c) = item_cache().lock() {
                         c.remove(&cache_key(connection_id));
                     }
                     return Err(SecretError::Message(
-                        "The keychain prompt was denied, so nothing was saved. Save again and \
-                         click Always Allow."
+                        "The keychain prompt was denied or couldn't be shown, so nothing was \
+                         saved. Save again and click Always Allow."
                             .into(),
                     ));
                 }
@@ -1532,6 +1533,17 @@ mod tests {
         );
         delete_secret("k10", SecretKind::GcpKey).unwrap();
         assert_eq!(get_secret("k10", SecretKind::GcpKey).unwrap(), None);
+        // An item holding something that isn't ours is left alone; the
+        // save goes to the file.
+        put_item("k91", "not ours");
+        store_secret("k91", SecretKind::DbPassword, "pw").unwrap();
+        assert_eq!(mock_state(|k| k.items["k91"].clone()), "not ours");
+        assert_eq!(
+            get_secret("k91", SecretKind::DbPassword)
+                .unwrap()
+                .as_deref(),
+            Some("pw")
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
