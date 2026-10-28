@@ -107,7 +107,37 @@ describe("passwords that aren't encoded (rowkery/reports#57)", () => {
   });
 });
 
+describe("URLs that read as before", () => {
+  test("an @ in the query of a URL with no path", () => {
+    expect(parsePostgresUrl("postgres://u:p@h:5432?application_name=a@b")).toMatchObject({ host: "h", port: "5432", username: "u", password: "p" });
+    expect(parsePostgresUrl("postgres://h:5433?application_name=a@b")).toEqual({ host: "h", port: "5433" });
+    expect(parsePostgresUrl("postgres://h?options=x@y:z")).toEqual({ host: "h", port: "5432" });
+  });
+
+  test("nothing to connect to, or a port that isn't one", () => {
+    expect(parsePostgresUrl("postgres://")).toBeNull();
+    expect(parsePostgresUrl("postgres://:@/")).toBeNull();
+    expect(parsePostgresUrl("postgres://h/db?port=abc")).toMatchObject({ port: "5432" });
+    expect(connectionUrlProblem("postgres://")).toBeNull();
+    expect(connectionUrlProblem("postgres://h:x:y/db")).toBe("This URL can't be read");
+  });
+});
+
 describe("hidePassword (rowkery/reports#48)", () => {
+  test("every form a password can come in", () => {
+    expect(hidePassword("postgres://u:sec/ret@h/db")).toBe(`postgres://u:${HIDDEN_PASSWORD}@h/db`);
+    expect(hidePassword("postgres://h/db?a=b&password=sec&password=ret")).toBe(`postgres://h/db?a=b&password=${HIDDEN_PASSWORD}&password=${HIDDEN_PASSWORD}`);
+    expect(hidePassword('"postgres://h/db?password=se cret"')).not.toContain("cret");
+    expect(hidePassword("psql postgres://u:secret@h/db")).toBe(`psql postgres://u:${HIDDEN_PASSWORD}@h/db`);
+    expect(hidePassword("psql 'postgres://u:secret@h/db'")).toBe(`psql 'postgres://u:${HIDDEN_PASSWORD}@h/db'`);
+    expect(hidePassword("postgres://u:p@h:5432?application_name=a@b")).toBe(`postgres://u:${HIDDEN_PASSWORD}@h:5432?application_name=a@b`);
+    // A space in the password, which the parse reads.
+    expect(parsePostgresUrl("postgres://u:sec ret@h/db")?.password).toBe("sec ret");
+    expect(hidePassword("postgres://u:sec ret@h/db")).toBe(`postgres://u:${HIDDEN_PASSWORD}@h/db`);
+    expect(hidePassword('DATABASE_URL="postgres://u:sec ret@h/db"')).toBe(`DATABASE_URL="postgres://u:${HIDDEN_PASSWORD}@h/db"`);
+    expect(hidePassword("postgres://u:pw@h/db sslmode")).toBe(`postgres://u:${HIDDEN_PASSWORD}@h/db sslmode`);
+  });
+
   test("URL, query and keyword passwords", () => {
     expect(hidePassword("postgres://app:Sup3r#Secret@db.internal/wallet")).toBe(`postgres://app:${HIDDEN_PASSWORD}@db.internal/wallet`);
     expect(hidePassword("postgres://app@db/w?password=x&sslmode=require")).toBe(`postgres://app@db/w?password=${HIDDEN_PASSWORD}&sslmode=require`);
