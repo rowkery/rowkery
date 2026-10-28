@@ -189,6 +189,13 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "ARRAY['\\x00ff'::bytea]",
         "ARRAY[ROW(1, 'a b'), ROW(2, NULL)]",
         "ARRAY['(1,2)'::point]",
+        "ROW(1e20::float8, 1e-5::float8, '-0'::float8, 'NaN'::float8, '-Infinity'::float8, 1e15::float8, 1e14::float8)",
+        "'(1e-5,1e20)'::point",
+        "ARRAY[1234567::float4, 123456::float4, 0.00001::float4, 0.1::float4]",
+        "ARRAY[1.2345678901234568e+17::float8, 0.0001::float8]",
+        r#"ROW(U&'a\00A0b', E'tab\there', E'v\x0bt')"#,
+        "'a:1D b:2C,3'::tsvector",
+        r#"ROW($$it's$$::tsvector, ARRAY[[1, 2], [3, 4]])"#,
     ];
     for expr in cases {
         // format('%s') writes the type's own output, as psql shows it
@@ -271,13 +278,15 @@ async fn postgres_decodes_dates_uuid_numeric() {
     session_execute(
         &session,
         "CREATE TYPE pg_temp.it_mood AS ENUM ('ok', 'not ok'); \
-         CREATE TYPE pg_temp.it_address AS (street text, zip int, mood pg_temp.it_mood, open int4range)",
+         CREATE TYPE pg_temp.it_address AS (street text, zip int, mood pg_temp.it_mood, open int4range); \
+         CREATE DOMAIN pg_temp.it_real AS real",
     )
     .await
     .expect("types");
     for expr in [
         "ROW('1 Main St', 12345, 'not ok', '[9,17)')::pg_temp.it_address",
         "ARRAY[ROW('x', NULL, 'ok', NULL)::pg_temp.it_address]",
+        "ARRAY[0.1::pg_temp.it_real]",
     ] {
         let sql = format!("SELECT {expr} AS v, format('%s', {expr}) AS t");
         let mut got = None;

@@ -789,8 +789,10 @@ fn holds_money(ty: &Type) -> bool {
     use tokio_postgres::types::Kind;
     match ty.kind() {
         Kind::Array(element) | Kind::Domain(element) => holds_money(element),
+        Kind::Range(element) | Kind::Multirange(element) => holds_money(element),
         Kind::Composite(fields) => fields.iter().any(|f| holds_money(f.type_())),
-        _ => *ty == Type::MONEY,
+        // An anonymous record's fields are known only row by row.
+        _ => matches!(*ty, Type::MONEY | Type::RECORD | Type::RECORD_ARRAY),
     }
 }
 
@@ -943,7 +945,9 @@ where
     }
 
     let money_shown = session.money_shown.load(Ordering::SeqCst);
-    let zone = session.zone.current();
+    // Read at the first row, not now: a `SET TIME ZONE` just before has
+    // surely been followed by then (`drive_connection`).
+    let mut zone = None;
     futures::pin_mut!(stream);
     // From the statement, not the first row: a result with no rows still
     // has its columns.
@@ -972,6 +976,7 @@ where
         let row: Row = row;
         if first_row.is_none() {
             first_row = Some(started.elapsed());
+            zone = session.zone.current();
         }
         if full(total_rows) {
             total_rows += 1;
@@ -2478,17 +2483,30 @@ fn decode_raw(ty: &Type, b: &[u8], zone: Zone) -> Option<Value> {
     }
 }
 
-/// Postgres's text output of a float (`Infinity`, not Rust's `inf`).
+/// Postgres's text output of a float (`Infinity`, not Rust's `inf`): the
+/// shortest digits that read back, with an exponent (`1e+20`, `1.5e-05`)
+/// below 1e-4 and from 1e15 (1e6 for a `real`), as `float8out` writes it.
 fn format_pg_float(f: f64, as_f32: bool) -> String {
     if f.is_nan() {
-        "NaN".into()
-    } else if f.is_infinite() {
-        if f > 0.0 { "Infinity" } else { "-Infinity" }.into()
-    } else if as_f32 {
-        (f as f32).to_string()
-    } else {
-        f.to_string()
+        return "NaN".into();
     }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    let (plain, sci) = if as_f32 {
+        ((f as f32).to_string(), format!("{:e}", f as f32))
+    } else {
+        (f.to_string(), format!("{f:e}"))
+    };
+    let Some((digits, exp)) = sci.split_once('e') else {
+        return plain;
+    };
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if f == 0.0 || (-4..if as_f32 { 6 } else { 15 }).contains(&exp) {
+        return plain;
+    }
+    let sign = if exp < 0 { '-' } else { '+' };
+    format!("{digits}e{sign}{:02}", exp.abs())
 }
 
 /// One array element as Postgres's array output writes it: in double
@@ -2526,7 +2544,7 @@ fn quote_doubled(text: &str, specials: &[char]) -> String {
     if !(text.is_empty()
         || text
             .chars()
-            .any(|c| c.is_whitespace() || specials.contains(&c)))
+            .any(|c| c.is_ascii_whitespace() || c == '\x0b' || specials.contains(&c)))
     {
         return text.to_string();
     }
@@ -2545,10 +2563,27 @@ fn quote_doubled(text: &str, specials: &[char]) -> String {
 /// One value inside an array, a range or a record, as Postgres's text
 /// output writes it. `None` for a type not decoded.
 fn element_text(ty: &Type, raw: &[u8], zone: Zone) -> Option<String> {
-    Some(match decode_raw(ty, raw, zone)? {
+    use tokio_postgres::types::Kind;
+    thread_local! {
+        /// How deep arrays, ranges and records nest here: a server can't send
+        /// one deeper than this, and a hostile one mustn't use up the stack.
+        static DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    }
+    let depth = DEPTH.get();
+    if depth >= 32 {
+        return None;
+    }
+    DEPTH.set(depth + 1);
+    let value = decode_raw(ty, raw, zone);
+    DEPTH.set(depth);
+    let mut base = ty;
+    while let Kind::Domain(inner) = base.kind() {
+        base = inner;
+    }
+    Some(match value? {
         Value::Text(s) => s,
         Value::Int(n) => n.to_string(),
-        Value::Float(f) => format_pg_float(f, *ty == Type::FLOAT4),
+        Value::Float(f) => format_pg_float(f, *base == Type::FLOAT4),
         Value::Bool(v) => if v { "t" } else { "f" }.to_string(),
         Value::Bytes(b) => {
             let mut hex = String::with_capacity(2 + b.len() * 2);
@@ -2574,11 +2609,15 @@ fn read_array(
 ) -> Option<(Vec<(usize, i32)>, Vec<Option<String>>)> {
     let mut w = text_types::Wire(b);
     let ndim = usize::try_from(w.i32()?).ok()?;
+    // Postgres's own limit; an empty array has no dimensions at all.
+    if ndim > 6 {
+        return None;
+    }
     w.take(8)?;
-    let mut dims = Vec::with_capacity(ndim.min(6));
+    let mut dims = Vec::with_capacity(ndim);
     let mut count = 1usize;
     for _ in 0..ndim {
-        let len = usize::try_from(w.i32()?).ok()?;
+        let len = usize::try_from(w.i32()?).ok().filter(|&len| len > 0)?;
         count = count.checked_mul(len)?;
         dims.push((len, w.i32()?));
     }
@@ -2891,6 +2930,60 @@ mod decode_tests {
         assert!(holds_money(&Type::MONEY_ARRAY));
         assert!(!holds_money(&Type::NUMERIC));
         assert!(!holds_money(&Type::TEXT_ARRAY));
+        // An anonymous record may hold money in any row.
+        assert!(holds_money(&Type::RECORD));
+    }
+
+    #[test]
+    fn floats_switch_to_an_exponent_where_postgres_does() {
+        assert_eq!(format_pg_float(1e15, false), "1e+15");
+        assert_eq!(format_pg_float(1e14, false), "100000000000000");
+        assert_eq!(format_pg_float(1.5e-7, false), "1.5e-07");
+        assert_eq!(format_pg_float(0.0001, false), "0.0001");
+        assert_eq!(format_pg_float(1.25e300, false), "1.25e+300");
+        assert_eq!(format_pg_float(-0.0, false), "-0");
+        assert_eq!(format_pg_float(1234567.0, true), "1.234567e+06");
+        assert_eq!(format_pg_float(123456.0, true), "123456");
+    }
+
+    /// A hostile server's arrays are refused, never walked: a dimension of
+    /// two billion with nothing in it, more dimensions than Postgres allows.
+    #[test]
+    fn hostile_arrays_are_refused() {
+        let header = |dims: &[(i32, i32)]| {
+            let mut b = Vec::new();
+            b.extend((dims.len() as i32).to_be_bytes());
+            b.extend(0i32.to_be_bytes());
+            b.extend(23u32.to_be_bytes());
+            for &(len, lower) in dims {
+                b.extend(len.to_be_bytes());
+                b.extend(lower.to_be_bytes());
+            }
+            b
+        };
+        assert_eq!(
+            decode_array(&Type::INT4, &header(&[(2_000_000_000, 1), (0, 1)]), None),
+            None
+        );
+        assert_eq!(decode_array(&Type::INT4, &header(&[(1, 1); 7]), None), None);
+        assert_eq!(
+            decode_array(&Type::INT4, &header(&[(1_000_000, 1)]), None),
+            None
+        );
+        assert_eq!(
+            decode_array(&Type::INT4, &header(&[]), None).as_deref(),
+            Some("{}")
+        );
+        // Records nested past any real one stop, without using up the stack.
+        let mut record = Vec::new();
+        for _ in 0..10_000 {
+            let mut outer = 1i32.to_be_bytes().to_vec();
+            outer.extend(Type::RECORD.oid().to_be_bytes());
+            outer.extend((record.len() as i32).to_be_bytes());
+            outer.extend(&record);
+            record = outer;
+        }
+        assert_eq!(decode_record(None, &record, None), None);
     }
 
     #[test]
