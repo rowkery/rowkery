@@ -34,6 +34,7 @@ use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 mod activity;
 mod health;
 mod text_types;
+mod zone;
 pub use activity::{
     rowkery_tag, session_activity, session_cancel_tagged, session_locks_held, session_stop,
     HeldLock, ServerSession, StopKind,
@@ -141,6 +142,11 @@ pub struct PostgresSession {
     /// Whether the session writes money as `text_types::money` does, as of
     /// the last result with money in it ([`query_prepared`]).
     money_shown: AtomicBool,
+    /// The session's `TimeZone`, which timestamptz shows in.
+    zone: zone::SessionZone,
+    /// The database stores bytes unchecked (`SQL_ASCII`), so a value need
+    /// not be UTF-8, and the server refuses to send one that isn't.
+    sql_ascii: bool,
 }
 
 /// Prepared statements kept per session: a re-run, and every cursor
@@ -327,6 +333,7 @@ pub async fn open_session_via(
     };
     let txn_warnings = Arc::new(AtomicU64::new(0));
     let warnings = Warnings::default();
+    let session_zone = zone::SessionZone::default();
     let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
     // The outer error is the Cloud SQL connector's (no Postgres error to
     // retry on); the inner one is Postgres's.
@@ -335,6 +342,7 @@ pub async fn open_session_via(
         let dialer = dialer.clone();
         let txn_warnings = txn_warnings.clone();
         let warnings = warnings.clone();
+        let session_zone = session_zone.clone();
         let late = no_answer(&config.host, config.port);
         async move {
             if let Some(dialer) = dialer {
@@ -364,7 +372,15 @@ pub async fn open_session_via(
                         }
                         started => {
                             return Ok(started.map(|(client, connection)| {
-                                (client, drive_connection(connection, txn_warnings, warnings))
+                                (
+                                    client,
+                                    drive_connection(
+                                        connection,
+                                        txn_warnings,
+                                        warnings,
+                                        session_zone,
+                                    ),
+                                )
                             }));
                         }
                     }
@@ -375,10 +391,16 @@ pub async fn open_session_via(
             let started = tokio::time::timeout_at(deadline, async {
                 match tls {
                     Some(tls) => pg_config.connect(tls).await.map(|(client, connection)| {
-                        (client, drive_connection(connection, txn_warnings, warnings))
+                        (
+                            client,
+                            drive_connection(connection, txn_warnings, warnings, session_zone),
+                        )
                     }),
                     None => pg_config.connect(NoTls).await.map(|(client, connection)| {
-                        (client, drive_connection(connection, txn_warnings, warnings))
+                        (
+                            client,
+                            drive_connection(connection, txn_warnings, warnings, session_zone),
+                        )
                     }),
                 }
             })
@@ -387,7 +409,7 @@ pub async fn open_session_via(
             Ok::<_, DriverError>(started)
         }
     };
-    let (client, connection_task) = match connect(pg_config.clone()).await? {
+    let (client, (connection_task, sql_ascii)) = match connect(pg_config.clone()).await? {
         Ok(connected) => connected,
         // A long-lived process (the MCP server) remembers the password it
         // read first; the app may have saved a new one since. Read it again
@@ -457,6 +479,8 @@ pub async fn open_session_via(
         cancel_aborted: false,
         guard: None,
         money_shown: AtomicBool::new(false),
+        zone: session_zone,
+        sql_ascii,
     })
 }
 
@@ -474,18 +498,29 @@ fn no_answer(host: &str, port: u16) -> DriverError {
 /// progress" warnings and keeping every warning's text. A notice is handled
 /// before the messages after it, so both are current when the batch that
 /// caused it returns.
+/// Also says whether the database is `SQL_ASCII`, read from what the
+/// server reported at startup.
 fn drive_connection<S, T>(
     mut connection: tokio_postgres::Connection<S, T>,
     txn_warnings: Arc<AtomicU64>,
     warnings: Warnings,
-) -> tokio::task::JoinHandle<()>
+    session_zone: zone::SessionZone,
+) -> (tokio::task::JoinHandle<()>, bool)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    let sql_ascii = connection.parameter("server_encoding") == Some("SQL_ASCII");
+    let task = tokio::spawn(async move {
         loop {
-            match futures::future::poll_fn(|cx| connection.poll_message(cx)).await {
+            let message = futures::future::poll_fn(|cx| {
+                let polled = connection.poll_message(cx);
+                // Reported at login and by each `SET TIME ZONE`, before the
+                // rows that follow it.
+                session_zone.follow(connection.parameter("TimeZone"));
+                polled
+            });
+            match message.await {
                 Some(Ok(AsyncMessage::Notice(notice))) => {
                     if notice.code() == &SqlState::ACTIVE_SQL_TRANSACTION {
                         txn_warnings.fetch_add(1, Ordering::SeqCst);
@@ -506,7 +541,8 @@ where
                 None => break,
             }
         }
-    })
+    });
+    (task, sql_ascii)
 }
 
 impl PostgresSession {
@@ -567,11 +603,14 @@ pub async fn session_server_version(session: &PostgresSession) -> Result<String,
         .to_string())
 }
 
-fn map_query_error(err: &tokio_postgres::Error, username: &str) -> DriverError {
+fn map_query_error(err: &tokio_postgres::Error, username: &str, sql_ascii: bool) -> DriverError {
     if err.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
         return DriverError::Cancelled;
     }
-    let message = humanize_postgres_error(err, username);
+    let mut message = humanize_postgres_error(err, username);
+    if sql_ascii && err.code() == Some(&SqlState::CHARACTER_NOT_IN_REPERTOIRE) {
+        message = sql_ascii_message(&message);
+    }
     match err.as_db_error() {
         Some(db) => DriverError::Server {
             message,
@@ -580,9 +619,19 @@ fn map_query_error(err: &tokio_postgres::Error, username: &str) -> DriverError {
                 Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p),
                 _ => None,
             },
+            detail: detail_lines(db),
         },
         None => DriverError::Message(message),
     }
+}
+
+/// psql's `DETAIL:` and `HINT:` lines under an error (rowkery/reports#43).
+fn detail_lines(db: &tokio_postgres::error::DbError) -> Option<String> {
+    let lines: Vec<String> = [("DETAIL", db.detail()), ("HINT", db.hint())]
+        .into_iter()
+        .filter_map(|(label, text)| text.map(|t| format!("{label}:  {t}")))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// How `session_query_stream_with` batches rows.
@@ -751,7 +800,10 @@ fn holds_money(ty: &Type) -> bool {
     use tokio_postgres::types::Kind;
     match ty.kind() {
         Kind::Array(element) | Kind::Domain(element) => holds_money(element),
-        _ => *ty == Type::MONEY,
+        Kind::Range(element) | Kind::Multirange(element) => holds_money(element),
+        Kind::Composite(fields) => fields.iter().any(|f| holds_money(f.type_())),
+        // An anonymous record's fields are known only row by row.
+        _ => matches!(*ty, Type::MONEY | Type::RECORD | Type::RECORD_ARRAY),
     }
 }
 
@@ -762,7 +814,7 @@ pub async fn session_execute(session: &PostgresSession, sql: &str) -> Result<(),
         .client
         .batch_execute(sql)
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))
 }
 
 /// What makes a read-only connection's sessions read-only at the server.
@@ -809,13 +861,13 @@ pub async fn session_run_file_statement(
         .client
         .simple_query_raw(sql)
         .await
-        .map_err(|e| map_query_error(&e, username))?;
+        .map_err(|e| map_query_error(&e, username, false))?;
     let mut stream = std::pin::pin!(stream);
     let mut rows = 0;
     while let Some(message) = stream
         .try_next()
         .await
-        .map_err(|e| map_query_error(&e, username))?
+        .map_err(|e| map_query_error(&e, username, false))?
     {
         if let tokio_postgres::SimpleQueryMessage::CommandComplete(n) = message {
             rows += n;
@@ -835,12 +887,14 @@ pub async fn session_copy_in(
         .client
         .copy_in(sql)
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))
+        .map_err(|e| map_query_error(&e, &session.config.username, false))
 }
 
 /// The message to show for a COPY's failure.
+/// A SQL file sends its statements and COPY rows as they are, so a 22021
+/// there is the file's own bytes, never a value the server can't show.
 pub fn copy_error(session: &PostgresSession, err: &tokio_postgres::Error) -> DriverError {
-    map_query_error(err, &session.config.username)
+    map_query_error(err, &session.config.username, false)
 }
 
 pub async fn session_query_stream<F>(
@@ -883,10 +937,11 @@ where
 {
     let started = std::time::Instant::now();
     let username = session.config.username.clone();
+    let sql_ascii = session.sql_ascii;
     let trimmed = sql.trim();
     let (st, stream) = start_query(session, trimmed, ahead)
         .await
-        .map_err(|e| map_query_error(&e, &username))?;
+        .map_err(|e| map_query_error(&e, &username, sql_ascii))?;
     // The prepared statement says whether rows come back, whatever the SQL
     // starts with (a comment, a bracket, `INSERT … RETURNING`, `CALL`).
     if st.columns().is_empty() {
@@ -894,7 +949,7 @@ where
         while stream
             .try_next()
             .await
-            .map_err(|e| map_query_error(&e, &username))?
+            .map_err(|e| map_query_error(&e, &username, sql_ascii))?
             .is_some()
         {}
         return Ok(StreamStats {
@@ -904,6 +959,9 @@ where
     }
 
     let money_shown = session.money_shown.load(Ordering::SeqCst);
+    // Read at the first row, not now: a `SET TIME ZONE` just before has
+    // surely been followed by then (`drive_connection`).
+    let mut zone = None;
     futures::pin_mut!(stream);
     // From the statement, not the first row: a result with no rows still
     // has its columns.
@@ -927,11 +985,12 @@ where
     while let Some(row) = stream
         .try_next()
         .await
-        .map_err(|e| map_query_error(&e, &username))?
+        .map_err(|e| map_query_error(&e, &username, sql_ascii))?
     {
         let row: Row = row;
         if first_row.is_none() {
             first_row = Some(started.elapsed());
+            zone = session.zone.current();
         }
         if full(total_rows) {
             total_rows += 1;
@@ -939,7 +998,7 @@ where
         }
         let mut values = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
-            let value = postgres_value_to_core(&row, i, money_shown);
+            let value = postgres_value_to_core(&row, i, money_shown, zone.as_ref());
             batch_bytes += value.heap_bytes();
             values.push(value);
         }
@@ -1019,14 +1078,24 @@ where
         );
         ahead = false;
         if let Err(err) = set {
-            return Err(map_query_error(&err, &session.config.username));
+            return Err(map_query_error(
+                &err,
+                &session.config.username,
+                session.sql_ascii,
+            ));
         }
         match begun {
             Err(err) if err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => {
                 session.txn = TxnState::Users;
                 return Ok(None);
             }
-            Err(err) => return Err(map_query_error(&err, &session.config.username)),
+            Err(err) => {
+                return Err(map_query_error(
+                    &err,
+                    &session.config.username,
+                    session.sql_ascii,
+                ))
+            }
             Ok(()) if session.txn_warnings.load(Ordering::SeqCst) != before => {
                 // Our BEGIN's warning, not the user's.
                 session_take_warnings(session);
@@ -1116,7 +1185,7 @@ pub async fn session_declare_cursor(
         .query_typed(&declare_sql(cursor, sql), &[])
         .await
         .map(drop)
-        .map_err(|e| map_query_error(&e, &session.config.username))
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))
 }
 
 /// The server's warnings since the last call (`there is no transaction in
@@ -1289,7 +1358,9 @@ pub async fn session_apply_changes_within(
         )
     };
     let username = session.config.username.clone();
-    let message = |e: &tokio_postgres::Error| map_query_error(e, &username).into_message();
+    let sql_ascii = session.sql_ascii;
+    let message =
+        |e: &tokio_postgres::Error| map_query_error(e, &username, sql_ascii).into_full_message();
     session_close_cursor(session).await;
     let users = || {
         ApplyFailure::other(
@@ -1352,9 +1423,51 @@ pub async fn session_apply_changes_within(
         }
     };
     let mut counts = ApplyCounts::default();
+    // Every statement is sent at once, in order, and its answer awaited in
+    // turn: one round trip for the batch, not two per row. Each is still its
+    // own single statement (extended protocol). Once one fails the rest are
+    // refused (the transaction is aborted), and the rollback undoes any that
+    // ran after a statement that changed the wrong number of rows.
+    let client = &session.client;
+    let mut runs: Vec<_> = statements
+        .iter()
+        .map(|statement| Box::pin(futures::future::maybe_done(run_one(client, &statement.sql))))
+        .collect();
+    futures::future::poll_fn(|cx| {
+        for run in runs.iter_mut() {
+            let _ = std::future::Future::poll(run.as_mut(), cx);
+        }
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let mut answers = Vec::with_capacity(runs.len());
+    let mut late_at = None;
+    for (index, run) in runs.iter_mut().enumerate() {
+        // Each gets `step` from the answer before it.
+        if tokio::time::timeout(limit, run.as_mut()).await.is_err() {
+            late_at = Some(index);
+            break;
+        }
+        let answer = run.as_mut().take_output().expect("answered");
+        let done = !matches!(answer, Ok(1));
+        answers.push(answer);
+        if done {
+            break;
+        }
+    }
+    drop(runs);
     for (index, statement) in statements.iter().enumerate() {
-        let ran =
-            tokio::time::timeout(limit, session.client.execute(statement.sql.as_str(), &[])).await;
+        let ran = match answers.get(index) {
+            Some(answer) => Ok(answer.as_ref().map(|n| *n)),
+            None if late_at == Some(index) => Err(()),
+            // Every statement up to a stop has an answer: never here.
+            None => {
+                abandon_apply(session, limit).await;
+                return Err(ApplyFailure::other(
+                    "Rowkery lost track of the batch; nothing was saved.",
+                ));
+            }
+        };
         let Ok(ran) = ran else {
             abandon_apply(session, limit).await;
             let named = statement.describe();
@@ -1370,12 +1483,20 @@ pub async fn session_apply_changes_within(
         match ran {
             Ok(1) => counts.add(statement.verb, 1),
             Ok(rows) => {
-                rollback(&session.client).await;
+                // The statements after it were sent too, and run: one may
+                // be waiting on a lock, so the rollback is bounded.
+                let bound = limit.min(Duration::from_secs(5));
+                if tokio::time::timeout(bound, rollback(&session.client))
+                    .await
+                    .is_err()
+                {
+                    abandon_apply(session, limit).await;
+                }
                 return Err(ApplyFailure::count(index, statement, rows));
             }
             Err(err) => {
                 rollback(&session.client).await;
-                return Err(ApplyFailure::error(index, statement, message(&err)));
+                return Err(ApplyFailure::error(index, statement, message(err)));
             }
         }
     }
@@ -1442,7 +1563,9 @@ async fn reach_beyond(
         .client
         .batch_execute("SET CONSTRAINTS ALL IMMEDIATE")
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username).into_message())?;
+        .map_err(|e| {
+            map_query_error(&e, &session.config.username, session.sql_ascii).into_message()
+        })?;
     let Some(after) = reach::pg_counts(session).await? else {
         return Ok(Reach::default());
     };
@@ -1455,6 +1578,20 @@ async fn reach_beyond(
 
 async fn rollback(client: &Client) {
     let _ = client.batch_execute("ROLLBACK").await;
+}
+
+/// One staged statement, parsed, bound and run in a single message (sent on
+/// the future's first poll), and the rows it changed.
+async fn run_one(client: &Client, sql: &str) -> Result<u64, tokio_postgres::Error> {
+    let rows = client
+        .query_typed_raw(
+            sql,
+            std::iter::empty::<(&(dyn tokio_postgres::types::ToSql + Sync), Type)>(),
+        )
+        .await?;
+    let mut rows = std::pin::pin!(rows);
+    while rows.try_next().await?.is_some() {}
+    Ok(rows.rows_affected().unwrap_or(0))
 }
 
 /// A step of an apply timed out: cancel it and roll back, both bounded. If
@@ -1548,7 +1685,7 @@ pub async fn session_list_databases(
             &[],
         )
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username))?;
+        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))?;
     Ok(rows
         .iter()
         .map(|row| DatabaseInfo {
@@ -1576,11 +1713,13 @@ pub async fn session_catalog_fingerprint(session: &PostgresSession) -> Result<St
                        ',' ORDER BY k.oid))
                      FROM pg_catalog.pg_constraint k
                      JOIN pg_catalog.pg_namespace kn ON kn.oid = k.connamespace
-                     WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')), '')
+                     WHERE kn.nspname NOT IN ('pg_catalog', 'information_schema')
+                       AND NOT pg_catalog.pg_is_other_temp_schema(kn.oid)), '')
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
               AND n.nspname NOT LIKE 'pg_toast%'
             ",
             &[],
@@ -1620,6 +1759,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
                ON parent.oid = inh.inhparent AND parent.relnamespace = c.relnamespace
         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2
         ",
         &[],
@@ -1649,6 +1789,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
           AND a.attnum > 0
           AND NOT a.attisdropped
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2, a.attnum
         ",
         &[],
@@ -1667,6 +1808,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
         WHERE ix.indisprimary
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
           AND n.nspname NOT LIKE 'pg_toast%'
         ORDER BY 1, 2, k.ord
         ",
@@ -1685,6 +1827,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
         WHERE t.typtype = 'e'
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2
         ",
         &[],
@@ -1698,6 +1841,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE p.prokind IN ('f', 'a', 'w')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
           AND n.nspname NOT LIKE 'pg_toast%'
           AND NOT EXISTS (
             SELECT 1 FROM pg_catalog.pg_depend dep
@@ -1733,6 +1877,7 @@ pub async fn session_introspect(session: &PostgresSession) -> Result<SchemaCatal
         WHERE con.contype = 'f'
           AND con.conparentid = 0
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
         ORDER BY 1, 2, 3
         ",
         &[],
@@ -1912,7 +2057,10 @@ pub async fn session_table_indexes(
         .query(
             r"
             SELECT t.relname, i.relname,
-                   pg_catalog.pg_get_indexdef(ix.indexrelid),
+                   -- Each key column or expression on its own, without the
+                   -- WHERE, INCLUDE or operator class the whole definition has.
+                   ARRAY(SELECT pg_catalog.pg_get_indexdef(ix.indexrelid, k, true)
+                         FROM generate_series(1, ix.indnkeyatts) k ORDER BY k),
                    ix.indisunique, ix.indisprimary, am.amname,
                    i.relpages::bigint * current_setting('block_size')::bigint,
                    s.idx_scan
@@ -1941,7 +2089,8 @@ pub async fn session_table_indexes(
         .collect();
     for row in rows {
         let table: String = row.get(0);
-        let indexdef: String = row.get(2);
+        // An index dropped while this reads has NULLs here.
+        let columns: Vec<Option<String>> = row.try_get(2).unwrap_or_default();
         let size_bytes: Option<i64> = row.get(6);
         let Some(entry) = out.iter_mut().find(|t| t.table == table) else {
             continue;
@@ -1951,7 +2100,7 @@ pub async fn session_table_indexes(
         }
         entry.indexes.push(IndexNode {
             name: row.get(1),
-            columns: parse_index_columns(&indexdef),
+            columns: columns.iter().flatten().map(|c| unquote_ident(c)).collect(),
             unique: row.get(3),
             primary: row.get(4),
             method: Some(row.get(5)),
@@ -2021,17 +2170,12 @@ pub async fn session_plan_facts(
     facts
 }
 
-fn parse_index_columns(indexdef: &str) -> Vec<String> {
-    let upper = indexdef.to_uppercase();
-    let start = upper.find('(').map(|i| i + 1);
-    let end = upper.rfind(')');
-    match (start, end) {
-        (Some(s), Some(e)) if e > s => indexdef[s..e]
-            .split(',')
-            .map(|c| c.trim().trim_matches('"').to_string())
-            .filter(|c| !c.is_empty())
-            .collect(),
-        _ => Vec::new(),
+/// A quoted identifier's name (`"Odd ""Col"""` is `Odd "Col"`); anything
+/// else, an expression, as written.
+fn unquote_ident(text: &str) -> String {
+    match text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(inner) if !inner.replace(r#""""#, "").contains('"') => inner.replace(r#""""#, r#"""#),
+        _ => text.to_string(),
     }
 }
 
@@ -2214,6 +2358,17 @@ pub fn humanize_postgres_error(err: &tokio_postgres::Error, username: &str) -> S
     text
 }
 
+/// A value the server won't send because the database is `SQL_ASCII` and
+/// the value isn't UTF-8 (Latin-1 bytes, usually). Rowkery reads UTF-8
+/// only; showing the bytes another way would let an edit write them back
+/// changed.
+fn sql_ascii_message(server: &str) -> String {
+    format!(
+        "This database uses the SQL_ASCII encoding, and a value here isn't valid UTF-8, \
+         so Rowkery can't show it ({server}). To see its bytes, select the column as column_name::bytea."
+    )
+}
+
 /// The error with its causes, since tokio-postgres keeps TLS and IO details
 /// in the source chain.
 fn error_chain(err: &tokio_postgres::Error) -> String {
@@ -2266,7 +2421,7 @@ pub fn map_postgres_error_to_fields(message: &str) -> crate::connections::Postgr
 /// (`decode_raw`), else through tokio-postgres's own conversions, else
 /// `<type name>`. Money only `money_shown` ([`query_prepared`]): written
 /// wrong, a key or an edit sent back would fail or mean another amount.
-fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool) -> Value {
+fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool, zone: Zone) -> Value {
     let ty = row.columns().get(index).map(|c| c.type_().clone());
     if let Some(ty) = ty.as_ref() {
         if !money_shown && holds_money(ty) {
@@ -2275,7 +2430,7 @@ fn postgres_value_to_core(row: &Row, index: usize, money_shown: bool) -> Value {
                 _ => Value::Text(format!("<{}>", ty.name())),
             };
         }
-        if let Some(v) = decode_known_type(row, index, ty) {
+        if let Some(v) = decode_known_type(row, index, ty, zone) {
             return v;
         }
     }
@@ -2337,23 +2492,51 @@ impl<'a> tokio_postgres::types::FromSql<'a> for RawValue<'a> {
     }
 }
 
-fn decode_known_type(row: &Row, index: usize, ty: &Type) -> Option<Value> {
+/// The session's time zone, which timestamptz shows in (`None`: UTC).
+type Zone<'a> = Option<&'a jiff::tz::TimeZone>;
+
+fn decode_known_type(row: &Row, index: usize, ty: &Type, zone: Zone) -> Option<Value> {
     match row.try_get::<_, Option<RawValue>>(index) {
         Ok(None) => Some(Value::Null),
-        Ok(Some(RawValue(bytes))) => decode_raw(ty, bytes),
+        Ok(Some(RawValue(bytes))) => decode_raw(ty, bytes, zone),
         Err(_) => None,
     }
 }
 
 /// A binary wire value of type `ty`, or `None` for a type decoded no
 /// other way than the generic `FromSql` paths (and then a placeholder).
-fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
+fn decode_raw(ty: &Type, b: &[u8], zone: Zone) -> Option<Value> {
     use tokio_postgres::types::Kind;
+    let text = |s: Option<String>| s.map(Value::Text);
     match ty.kind() {
         // An enum's binary value is its label.
         Kind::Enum(_) => return std::str::from_utf8(b).ok().map(|s| Value::Text(s.into())),
-        Kind::Domain(base) => return decode_raw(base, b),
-        Kind::Array(element) => return decode_array(element, b).map(Value::Text),
+        Kind::Domain(base) => return decode_raw(base, b, zone),
+        // Arrays on the wire, but written with spaces (`1 2 3`).
+        Kind::Array(element) if matches!(*ty, Type::OID_VECTOR | Type::INT2_VECTOR) => {
+            let (_, items) = read_array(element, b, zone)?;
+            return text(
+                items
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .map(|v| v.join(" ")),
+            );
+        }
+        Kind::Array(element) => return text(decode_array(element, b, zone)),
+        Kind::Range(element) => return text(decode_range(element, b, zone)),
+        Kind::Multirange(element) => return text(decode_multirange(element, b, zone)),
+        Kind::Composite(fields) => {
+            let types: Vec<Type> = fields.iter().map(|f| f.type_().clone()).collect();
+            return text(decode_record(Some(&types), b, zone));
+        }
+        _ => {}
+    }
+    match ty.name() {
+        name @ ("point" | "lseg" | "box" | "path" | "polygon" | "line" | "circle")
+            if ty.schema() == "pg_catalog" =>
+        {
+            return text(text_types::geometric(name, b));
+        }
         _ => {}
     }
     match *ty {
@@ -2364,7 +2547,9 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
         Type::INT2 => Some(Value::Int(i16::from_be_bytes(b.try_into().ok()?) as i64)),
         Type::INT4 => Some(Value::Int(i32::from_be_bytes(b.try_into().ok()?) as i64)),
         Type::INT8 => Some(Value::Int(i64::from_be_bytes(b.try_into().ok()?))),
-        Type::FLOAT4 => Some(Value::Float(f32::from_be_bytes(b.try_into().ok()?) as f64)),
+        Type::FLOAT4 => Some(Value::Float(widen_f32(f32::from_be_bytes(
+            b.try_into().ok()?,
+        )))),
         Type::FLOAT8 => Some(Value::Float(f64::from_be_bytes(b.try_into().ok()?))),
         Type::OID => Some(Value::Int(u32::from_be_bytes(b.try_into().ok()?) as i64)),
         Type::NUMERIC => decode_numeric(b).map(Value::Text),
@@ -2372,7 +2557,18 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
         Type::DATE => decode_date(b).map(Value::Text),
         Type::TIME => decode_time(b).map(Value::Text),
         Type::TIMESTAMP => decode_timestamp(b).map(Value::Text),
-        Type::TIMESTAMPTZ => decode_timestamp(b).map(|s| Value::Text(format!("{s}+00"))),
+        Type::TIMESTAMPTZ => decode_timestamptz(b, zone).map(Value::Text),
+        Type::RECORD => text(decode_record(None, b, zone)),
+        // A pseudo-type to tokio-postgres, but a plain array on the wire.
+        Type::RECORD_ARRAY => text(decode_array(&Type::RECORD, b, zone)),
+        Type::TID => text(text_types::tid(b)),
+        Type::XID | Type::CID => Some(Value::Int(u32::from_be_bytes(b.try_into().ok()?).into())),
+        Type::XID8 => Some(Value::Text(
+            u64::from_be_bytes(b.try_into().ok()?).to_string(),
+        )),
+        Type::PG_LSN => text(text_types::lsn(b)),
+        Type::TXID_SNAPSHOT | Type::PG_SNAPSHOT => text(text_types::snapshot(b)),
+        Type::TS_VECTOR => text(text_types::tsvector(b)),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
             std::str::from_utf8(b).ok().map(|s| Value::Text(s.into()))
         }
@@ -2400,68 +2596,57 @@ fn decode_raw(ty: &Type, b: &[u8]) -> Option<Value> {
     }
 }
 
-/// Whether arrays of `element` are shown as text (else a placeholder).
-fn array_element_shown(element: &Type) -> bool {
-    use tokio_postgres::types::Kind;
-    matches!(element.kind(), Kind::Enum(_))
-        || matches!(
-            *element,
-            Type::TEXT
-                | Type::VARCHAR
-                | Type::BPCHAR
-                | Type::NAME
-                | Type::INT2
-                | Type::INT4
-                | Type::INT8
-                | Type::FLOAT4
-                | Type::FLOAT8
-                | Type::BOOL
-                | Type::NUMERIC
-                | Type::UUID
-                | Type::DATE
-                | Type::TIME
-                | Type::TIMESTAMP
-                | Type::TIMESTAMPTZ
-                | Type::JSON
-                | Type::JSONB
-                | Type::XML
-                | Type::INTERVAL
-                | Type::INET
-                | Type::CIDR
-                | Type::MACADDR
-                | Type::MACADDR8
-                | Type::MONEY
-                | Type::BIT
-                | Type::VARBIT
-                | Type::TIMETZ
-                | Type::CHAR
-        )
+/// The f64 nearest the digits a real prints (`0.1`, not the
+/// `0.10000000149011612` a plain widening shows). A literal of it for a
+/// real column is quoted (`'0.1'`), as `0.1` reads as a double that no
+/// real equals. Kept whole in the rare case those digits don't narrow back
+/// to the same real.
+fn widen_f32(f: f32) -> f64 {
+    f.to_string()
+        .parse()
+        .ok()
+        .filter(|w: &f64| *w as f32 == f && f.is_finite())
+        .unwrap_or(f as f64)
 }
 
-/// Postgres's text output of a float (`Infinity`, not Rust's `inf`).
+/// Postgres's text output of a float (`Infinity`, not Rust's `inf`): the
+/// shortest digits that read back, with an exponent (`1e+20`, `1.5e-05`)
+/// below 1e-4 and from 1e15 (1e6 for a `real`), as `float8out` writes it.
 fn format_pg_float(f: f64, as_f32: bool) -> String {
     if f.is_nan() {
-        "NaN".into()
-    } else if f.is_infinite() {
-        if f > 0.0 { "Infinity" } else { "-Infinity" }.into()
-    } else if as_f32 {
-        (f as f32).to_string()
-    } else {
-        f.to_string()
+        return "NaN".into();
     }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    let (plain, sci) = if as_f32 {
+        ((f as f32).to_string(), format!("{:e}", f as f32))
+    } else {
+        (f.to_string(), format!("{f:e}"))
+    };
+    let Some((digits, exp)) = sci.split_once('e') else {
+        return plain;
+    };
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if f == 0.0 || (-4..if as_f32 { 6 } else { 15 }).contains(&exp) {
+        return plain;
+    }
+    let sign = if exp < 0 { '-' } else { '+' };
+    format!("{digits}e{sign}{:02}", exp.abs())
 }
 
 /// One array element as Postgres's array output writes it: in double
 /// quotes (with `"` and `\` escaped) when it is empty, reads as NULL, or
-/// holds a brace, comma, quote, backslash or white space.
-fn quote_array_element(text: &str) -> String {
+/// holds a brace, the delimiter, quote, backslash or white space.
+fn quote_array_element(text: &str, delim: char) -> String {
     let needs = text.is_empty()
         || text.eq_ignore_ascii_case("null")
         || text.chars().any(|c| {
-            matches!(
-                c,
-                '{' | '}' | ',' | '"' | '\\' | ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'
-            )
+            c == delim
+                || matches!(
+                    c,
+                    '{' | '}' | '"' | '\\' | ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'
+                )
         });
     if !needs {
         return text.to_string();
@@ -2478,50 +2663,213 @@ fn quote_array_element(text: &str) -> String {
     out
 }
 
-/// A one-dimensional binary array (`ndim`, has-null flag, element oid, then
-/// per dimension its length and lower bound, then per element a length,
-/// -1 for NULL, and the bytes) as Postgres's text output: `{a,NULL,"c d"}`,
-/// `[0:1]={a,b}` when it doesn't start at 1. `None` for more dimensions or
-/// an element type not shown.
-fn decode_array(element: &Type, b: &[u8]) -> Option<String> {
-    if !array_element_shown(element) {
+/// Inside a range or a record, a bound or field goes in double quotes
+/// (with `"` and `\` doubled) when it is empty or holds one of `specials`
+/// or white space, as `range_out` and `record_out` write it.
+fn quote_doubled(text: &str, specials: &[char]) -> String {
+    if !(text.is_empty()
+        || text
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c == '\x0b' || specials.contains(&c)))
+    {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        if c == '"' || c == '\\' {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// One value inside an array, a range or a record, as Postgres's text
+/// output writes it. `None` for a type not decoded.
+fn element_text(ty: &Type, raw: &[u8], zone: Zone) -> Option<String> {
+    use tokio_postgres::types::Kind;
+    thread_local! {
+        /// How deep arrays, ranges and records nest here: a server can't send
+        /// one deeper than this, and a hostile one mustn't use up the stack.
+        static DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    }
+    let depth = DEPTH.get();
+    if depth >= 32 {
         return None;
     }
-    let int =
-        |i: usize| -> Option<i32> { Some(i32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?)) };
-    match int(0)? {
-        0 => return Some("{}".into()),
-        1 => {}
-        _ => return None,
+    DEPTH.set(depth + 1);
+    let value = decode_raw(ty, raw, zone);
+    DEPTH.set(depth);
+    let mut base = ty;
+    while let Kind::Domain(inner) = base.kind() {
+        base = inner;
     }
-    let len = usize::try_from(int(12)?).ok()?;
-    let lower = int(16)?;
-    let mut pos = 20;
-    let mut parts = Vec::with_capacity(len.min(4096));
-    for _ in 0..len {
-        let n = int(pos)?;
-        pos += 4;
-        let Ok(n) = usize::try_from(n) else {
-            parts.push("NULL".to_string());
-            continue;
-        };
-        let raw = b.get(pos..pos + n)?;
-        pos += n;
-        let text = match decode_raw(element, raw)? {
-            Value::Text(s) => s,
-            Value::Int(n) => n.to_string(),
-            Value::Float(f) => format_pg_float(f, *element == Type::FLOAT4),
-            Value::Bool(v) => if v { "t" } else { "f" }.to_string(),
-            _ => return None,
-        };
-        parts.push(quote_array_element(&text));
+    Some(match value? {
+        Value::Text(s) => s,
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => format_pg_float(f, *base == Type::FLOAT4),
+        Value::Bool(v) => if v { "t" } else { "f" }.to_string(),
+        Value::Bytes(b) => {
+            let mut hex = String::with_capacity(2 + b.len() * 2);
+            hex.push_str("\\x");
+            for byte in b {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            hex
+        }
+        Value::Null => return None,
+    })
+}
+
+/// A binary array (`ndim`, has-null flag, element oid, then per dimension
+/// its length and lower bound, then per element a length, -1 for NULL, and
+/// the bytes): its dimensions and its elements as text, `None` for NULL.
+/// `None` when an element's type isn't decoded.
+#[allow(clippy::type_complexity)]
+fn read_array(
+    element: &Type,
+    b: &[u8],
+    zone: Zone,
+) -> Option<(Vec<(usize, i32)>, Vec<Option<String>>)> {
+    let mut w = text_types::Wire(b);
+    let ndim = usize::try_from(w.i32()?).ok()?;
+    // Postgres's own limit; an empty array has no dimensions at all.
+    if ndim > 6 {
+        return None;
     }
-    let body = format!("{{{}}}", parts.join(","));
-    Some(if lower == 1 {
+    w.take(8)?;
+    let mut dims = Vec::with_capacity(ndim);
+    let mut count = 1usize;
+    for _ in 0..ndim {
+        let len = usize::try_from(w.i32()?).ok().filter(|&len| len > 0)?;
+        count = count.checked_mul(len)?;
+        dims.push((len, w.i32()?));
+    }
+    if ndim == 0 {
+        count = 0;
+    }
+    // Each element takes at least its 4-byte length.
+    if count > w.0.len() / 4 {
+        return None;
+    }
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        items.push(match w.value()? {
+            None => None,
+            Some(raw) => Some(element_text(element, raw, zone)?),
+        });
+    }
+    w.done().then_some((dims, items))
+}
+
+/// A binary array as Postgres's text output: `{a,NULL,"c d"}`,
+/// `{{1,2},{3,4}}`, `[0:1]={a,b}` when a dimension doesn't start at 1.
+fn decode_array(element: &Type, b: &[u8], zone: Zone) -> Option<String> {
+    let (dims, items) = read_array(element, b, zone)?;
+    if dims.is_empty() {
+        return Some("{}".into());
+    }
+    // `box` is the one built-in type whose arrays use `;`.
+    let delim = if *element == Type::BOX { ';' } else { ',' };
+    let mut items = items.into_iter().map(|item| match item {
+        None => "NULL".to_string(),
+        Some(text) => quote_array_element(&text, delim),
+    });
+    fn nest(dims: &[(usize, i32)], delim: char, items: &mut dyn Iterator<Item = String>) -> String {
+        let (len, _) = dims[0];
+        let parts: Vec<String> = (0..len)
+            .map(|_| {
+                if dims.len() == 1 {
+                    items.next().unwrap_or_default()
+                } else {
+                    nest(&dims[1..], delim, items)
+                }
+            })
+            .collect();
+        format!("{{{}}}", parts.join(&delim.to_string()))
+    }
+    let body = nest(&dims, delim, &mut items);
+    Some(if dims.iter().all(|&(_, lower)| lower == 1) {
         body
     } else {
-        format!("[{}:{}]={body}", lower, i64::from(lower) + len as i64 - 1)
+        let bounds: String = dims
+            .iter()
+            .map(|&(len, lower)| format!("[{lower}:{}]", i64::from(lower) + len as i64 - 1))
+            .collect();
+        format!("{bounds}={body}")
     })
+}
+
+/// A binary range (a flags byte, then each bound present as a length and
+/// its bytes) as `range_out` writes it: `[1,5)`, `(,"2026-01-01 00:00:00+00"]`,
+/// `empty`.
+fn decode_range(element: &Type, b: &[u8], zone: Zone) -> Option<String> {
+    const EMPTY: u8 = 0x01;
+    const LB_INC: u8 = 0x02;
+    const UB_INC: u8 = 0x04;
+    const LB_INF: u8 = 0x08;
+    const UB_INF: u8 = 0x10;
+    let mut w = text_types::Wire(b);
+    let flags = w.u8()?;
+    if flags & EMPTY != 0 {
+        return w.done().then(|| "empty".to_string());
+    }
+    let specials = ['"', '\\', '(', ')', '[', ']', ','];
+    let mut bound = |infinite: bool| -> Option<String> {
+        if infinite {
+            return Some(String::new());
+        }
+        let raw = w.value()??;
+        Some(quote_doubled(&element_text(element, raw, zone)?, &specials))
+    };
+    let lower = bound(flags & LB_INF != 0)?;
+    let upper = bound(flags & UB_INF != 0)?;
+    let open = if flags & LB_INC != 0 { '[' } else { '(' };
+    let close = if flags & UB_INC != 0 { ']' } else { ')' };
+    w.done().then(|| format!("{open}{lower},{upper}{close}"))
+}
+
+/// A binary multirange (a count, then each range as a length and its bytes)
+/// as `{[1,3),[5,7)}`.
+fn decode_multirange(element: &Type, b: &[u8], zone: Zone) -> Option<String> {
+    let mut w = text_types::Wire(b);
+    let n = usize::try_from(w.i32()?).ok()?;
+    if n > w.0.len() / 4 {
+        return None;
+    }
+    let ranges: Vec<String> = (0..n)
+        .map(|_| decode_range(element, w.value()??, zone))
+        .collect::<Option<_>>()?;
+    w.done().then(|| format!("{{{}}}", ranges.join(",")))
+}
+
+/// A binary record (a field count, then per field its type oid, a length,
+/// -1 for NULL, and the bytes) as `record_out` writes it: `(1,"a b",)`.
+/// `types` are a composite type's own fields; an anonymous record's come
+/// from their oids (built-in types only).
+fn decode_record(types: Option<&[Type]>, b: &[u8], zone: Zone) -> Option<String> {
+    let mut w = text_types::Wire(b);
+    let n = usize::try_from(w.i32()?).ok()?;
+    if n > w.0.len() / 8 || types.is_some_and(|t| t.len() != n) {
+        return None;
+    }
+    let specials = ['"', '\\', '(', ')', ','];
+    let mut fields = Vec::with_capacity(n);
+    for i in 0..n {
+        let oid = w.u32()?;
+        let raw = w.value()?;
+        let ty = match types {
+            Some(types) => types[i].clone(),
+            None => Type::from_oid(oid)?,
+        };
+        fields.push(match raw {
+            None => String::new(),
+            Some(raw) => quote_doubled(&element_text(&ty, raw, zone)?, &specials),
+        });
+    }
+    w.done().then(|| format!("({})", fields.join(",")))
 }
 
 fn decode_uuid(b: &[u8]) -> Option<String> {
@@ -2576,6 +2924,23 @@ fn decode_date(b: &[u8]) -> Option<String> {
 
 fn decode_time(b: &[u8]) -> Option<String> {
     Some(format_time_of_day(i64::from_be_bytes(b.try_into().ok()?)))
+}
+
+/// A timestamptz in the session's time zone with its offset, as psql shows
+/// it (`2026-01-15 17:30:00+05:30`); in UTC (`+00`) when the zone isn't
+/// known or the value is outside the years its rules cover.
+fn decode_timestamptz(b: &[u8], zone: Zone) -> Option<String> {
+    let micros = i64::from_be_bytes(b.try_into().ok()?);
+    if matches!(micros, i64::MAX | i64::MIN) {
+        return decode_timestamp(b);
+    }
+    if let Some((local, offset)) = zone.and_then(|zone| zone::localize(micros, zone)) {
+        return Some(format!(
+            "{}{offset}",
+            decode_timestamp(&local.to_be_bytes())?
+        ));
+    }
+    Some(format!("{}+00", decode_timestamp(b)?))
 }
 
 fn decode_timestamp(b: &[u8]) -> Option<String> {
@@ -2674,15 +3039,15 @@ mod decode_tests {
         let mut jsonb = vec![1];
         jsonb.extend_from_slice(text.as_bytes());
         assert_eq!(
-            decode_raw(&Type::JSONB, &jsonb),
+            decode_raw(&Type::JSONB, &jsonb, None),
             Some(Value::Text(text.into()))
         );
         assert_eq!(
-            decode_raw(&Type::JSON, text.as_bytes()),
+            decode_raw(&Type::JSON, text.as_bytes(), None),
             Some(Value::Text(text.into()))
         );
         // An unknown jsonb version isn't guessed at.
-        assert_eq!(decode_raw(&Type::JSONB, &[2, b'1']), None);
+        assert_eq!(decode_raw(&Type::JSONB, &[2, b'1'], None), None);
     }
 
     #[test]
@@ -2691,6 +3056,60 @@ mod decode_tests {
         assert!(holds_money(&Type::MONEY_ARRAY));
         assert!(!holds_money(&Type::NUMERIC));
         assert!(!holds_money(&Type::TEXT_ARRAY));
+        // An anonymous record may hold money in any row.
+        assert!(holds_money(&Type::RECORD));
+    }
+
+    #[test]
+    fn floats_switch_to_an_exponent_where_postgres_does() {
+        assert_eq!(format_pg_float(1e15, false), "1e+15");
+        assert_eq!(format_pg_float(1e14, false), "100000000000000");
+        assert_eq!(format_pg_float(1.5e-7, false), "1.5e-07");
+        assert_eq!(format_pg_float(0.0001, false), "0.0001");
+        assert_eq!(format_pg_float(1.25e300, false), "1.25e+300");
+        assert_eq!(format_pg_float(-0.0, false), "-0");
+        assert_eq!(format_pg_float(1234567.0, true), "1.234567e+06");
+        assert_eq!(format_pg_float(123456.0, true), "123456");
+    }
+
+    /// A hostile server's arrays are refused, never walked: a dimension of
+    /// two billion with nothing in it, more dimensions than Postgres allows.
+    #[test]
+    fn hostile_arrays_are_refused() {
+        let header = |dims: &[(i32, i32)]| {
+            let mut b = Vec::new();
+            b.extend((dims.len() as i32).to_be_bytes());
+            b.extend(0i32.to_be_bytes());
+            b.extend(23u32.to_be_bytes());
+            for &(len, lower) in dims {
+                b.extend(len.to_be_bytes());
+                b.extend(lower.to_be_bytes());
+            }
+            b
+        };
+        assert_eq!(
+            decode_array(&Type::INT4, &header(&[(2_000_000_000, 1), (0, 1)]), None),
+            None
+        );
+        assert_eq!(decode_array(&Type::INT4, &header(&[(1, 1); 7]), None), None);
+        assert_eq!(
+            decode_array(&Type::INT4, &header(&[(1_000_000, 1)]), None),
+            None
+        );
+        assert_eq!(
+            decode_array(&Type::INT4, &header(&[]), None).as_deref(),
+            Some("{}")
+        );
+        // Records nested past any real one stop, without using up the stack.
+        let mut record = Vec::new();
+        for _ in 0..10_000 {
+            let mut outer = 1i32.to_be_bytes().to_vec();
+            outer.extend(Type::RECORD.oid().to_be_bytes());
+            outer.extend((record.len() as i32).to_be_bytes());
+            outer.extend(&record);
+            record = outer;
+        }
+        assert_eq!(decode_record(None, &record, None), None);
     }
 
     #[test]

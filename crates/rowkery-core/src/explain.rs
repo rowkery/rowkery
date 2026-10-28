@@ -8,7 +8,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectExplanation {
     /// `refused`, `timeout`, `dns`, `tls`, `auth`, `database`, `role`,
-    /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`, a Cloud SQL
+    /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`,
+    /// `ssh_key_passphrase`, `keychain`, a Cloud SQL
     /// class (`cloudsql_login`, `cloudsql_role`, `cloudsql_instance`,
     /// `cloudsql_api`, `cloudsql_ip`, `cloudsql_google`, `cloudsql_unreachable`,
     /// `cloudsql_tls`, `cloudsql`) or `unknown`.
@@ -19,6 +20,36 @@ pub struct ConnectExplanation {
     /// `password`, `ssl`, `sshHost`, `sshPassword`, `account`, `instance`,
     /// `ipType`.
     pub field: Option<&'static str>,
+    /// `ssh_changed`: the bastion and both fingerprints, for the panel to
+    /// show and for Forget saved key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_keys: Option<HostKeys>,
+}
+
+/// A changed SSH host key: the saved fingerprint and the one offered now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostKeys {
+    pub host: String,
+    pub port: u16,
+    pub saved: String,
+    pub offered: String,
+}
+
+/// Reads the tunnel's own refusal: "SSH host key for {host}:{port} has
+/// CHANGED; nothing was sent (saved {saved}, offered now {offered})".
+fn host_keys(raw: &str) -> Option<HostKeys> {
+    let rest = raw.split_once("SSH host key for ")?.1;
+    let (host_port, rest) = rest.split_once(" has CHANGED")?;
+    let (host, port) = host_port.rsplit_once(':')?;
+    let rest = rest.split_once("(saved ")?.1;
+    let (saved, rest) = rest.split_once(", offered now ")?;
+    let offered = rest.split(')').next()?;
+    Some(HostKeys {
+        host: host.to_string(),
+        port: port.parse().ok()?,
+        saved: saved.to_string(),
+        offered: offered.to_string(),
+    })
 }
 
 /// What the panel needs to say about the connection, beyond the raw text.
@@ -59,25 +90,36 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
         class,
         cause,
         field,
+        host_keys: None,
     };
 
     if let Some(x) = explain_cloud_sql(raw, t) {
         return x;
     }
     if has("has CHANGED") {
-        return e(
-            "ssh_changed",
-            Some(format!(
-                "The SSH host key for {bastion} has CHANGED. Nothing was sent."
-            )),
-            Some("sshHost"),
-        );
+        return ConnectExplanation {
+            host_keys: host_keys(raw),
+            ..e(
+                "ssh_changed",
+                Some(format!(
+                    "The SSH host key for {bastion} has CHANGED. Nothing was sent. If the server was rebuilt, check the new key with whoever runs it."
+                )),
+                Some("sshHost"),
+            )
+        };
     }
     if says("unknown ssh host key") || has("Unknown host key") || has("Unknown server key") {
         return e(
             "ssh_unknown",
             Some(format!("The SSH host {bastion} is new to this Mac.")),
             Some("sshHost"),
+        );
+    }
+    if has("The keychain didn't answer") {
+        return e(
+            "keychain",
+            Some("The keychain didn't answer. Allow Rowkery in its prompt, then retry.".into()),
+            None,
         );
     }
     if t.ssh_host.is_some()
@@ -90,12 +132,28 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
             Some("sshHost"),
         );
     }
+    if has("SSH: The key file") {
+        return e(
+            "ssh_key_passphrase",
+            Some(if has("passphrase is wrong") {
+                "The SSH key file's passphrase is wrong.".into()
+            } else {
+                "The SSH key file is encrypted. Enter its passphrase.".into()
+            }),
+            Some("sshPassword"),
+        );
+    }
     if has("SSH: Permission denied") || (has("tunnel") && says("authentication failed")) {
+        let what = if has("(password)") {
+            "password"
+        } else if has("(publickey)") {
+            "key"
+        } else {
+            "key or password"
+        };
         return e(
             "ssh_auth",
-            Some(format!(
-                "The SSH host {bastion} refused the key or password."
-            )),
+            Some(format!("The SSH host {bastion} refused the {what}.")),
             Some("sshPassword"),
         );
     }
@@ -201,6 +259,7 @@ fn explain_cloud_sql(raw: &str, t: &Target) -> Option<ConnectExplanation> {
             class,
             cause: Some(cause),
             field,
+            host_keys: None,
         })
     };
     let name = t.cloud_sql.and_then(crate::cloudsql::InstanceName::parse);
@@ -396,6 +455,14 @@ mod tests {
 
     #[test]
     fn ssh_causes_beat_the_tunnel_wrapper() {
+        // rowkery/reports#36: a keychain prompt left waiting isn't the bastion's fault.
+        let late = crate::ssh::humanize_ssh_error(
+            &crate::ssh::SshError::Message(
+                "SSH: The keychain didn't answer in 2 minutes. Allow Rowkery in the keychain prompt, then retry.".into(),
+            ),
+            "bastion.internal",
+        );
+        assert_eq!(class(&late, &S).0, "keychain");
         assert_eq!(
             class(
                 "Could not open tunnel to bastion.internal: timed out after 15 s",
@@ -411,13 +478,50 @@ mod tests {
             class("Could not open tunnel to bastion.internal: SSH host key for bastion.internal:22 has CHANGED; nothing was sent", &S).0,
             "ssh_changed"
         );
+        // Both fingerprints, read from the tunnel's own words.
+        let x = explain_connect_error(
+            "Could not open tunnel to bastion.internal: SSH host key for bastion.internal:2222 has CHANGED; nothing was sent (saved SHA256:old+/=, offered now SHA256:new/+=)",
+            &S,
+        );
+        assert_eq!(
+            x.host_keys,
+            Some(HostKeys {
+                host: "bastion.internal".into(),
+                port: 2222,
+                saved: "SHA256:old+/=".into(),
+                offered: "SHA256:new/+=".into(),
+            })
+        );
         assert_eq!(
             class("Could not open tunnel to bastion.internal: Unknown SSH host key for bastion.internal:22", &S),
             ("ssh_unknown", Some("The SSH host bastion.internal is new to this Mac.".into()), Some("sshHost"))
         );
         assert_eq!(
-            class("SSH: Permission denied (publickey)", &S).0,
-            "ssh_auth"
+            class("SSH: Permission denied (publickey)", &S),
+            (
+                "ssh_auth",
+                Some("The SSH host bastion.internal refused the key.".into()),
+                Some("sshPassword")
+            )
+        );
+        assert_eq!(
+            class("SSH: Permission denied (password)", &S).1,
+            Some("The SSH host bastion.internal refused the password.".into())
+        );
+        assert_eq!(
+            class(
+                "SSH: The key file is encrypted, and no passphrase is saved for it.",
+                &S
+            ),
+            (
+                "ssh_key_passphrase",
+                Some("The SSH key file is encrypted. Enter its passphrase.".into()),
+                Some("sshPassword")
+            )
+        );
+        assert_eq!(
+            class("SSH: The key file's passphrase is wrong.", &S).1,
+            Some("The SSH key file's passphrase is wrong.".into())
         );
         // A Postgres refusal behind a working tunnel is still Postgres's.
         assert_eq!(class("Postgres rejected password for 'app'", &S).0, "auth");

@@ -15,11 +15,12 @@ import {
   saveConnection,
   sqliteFileExists,
   takeOpenLink,
+  takeTrustedHostKey,
   TEST_PG_CONNECTION,
   TEST_PG_SECRETS,
   type LocalServer,
 } from "./api";
-import { parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, parsePostgresUrl } from "./connectionUrl";
 import { CatalogUpdates, type CatalogUpdate } from "./catalogUpdates";
 import { applyTableCounts } from "./rowCounts";
 import { ConnectionSwitcher } from "./ConnectionSwitcher";
@@ -62,6 +63,7 @@ import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
 import { forgetHistory } from "./queryHistory";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
+import { changeCount, savedBuffer, savedParked } from "./editBuffer";
 import { Workspace } from "./Workspace";
 import type { WindowActions, WindowSession } from "./windowSession";
 import "./App.css";
@@ -452,6 +454,13 @@ function App() {
         if (opened.cached)
           applyCatalogUpdate(catalogUpdates.current.expect(windowId, opened.open_seq));
         void fillCountsRef.current(windowId, connectionId, seq);
+        // This window's bastion, trusted on a first connect: say which key was saved.
+        const conn = connectionsRef.current.find((c) => c.id === connectionId);
+        const ssh = conn?.kind === "postgres" ? conn.ssh : null;
+        if (ssh)
+          void takeTrustedHostKey(ssh.host, ssh.port)
+            .then((fingerprint) => fingerprint && showToast(`Trusted ${ssh.host}'s SSH key`, fingerprint))
+            .catch(() => {});
       } catch (e) {
         if (openSeq.current.get(windowId) !== seq) return;
         mark("socket-failed", { window: windowId, error: String(e) });
@@ -587,7 +596,13 @@ function App() {
         });
         setActiveWindowId(back);
       };
-      showUndoToast(`Closed ${name}${closing.database ? ` / ${closing.database}` : ""}`, undefined, { undo: restore });
+      // Its tabs' unsaved work is named like a tab's close names it, and its
+      // Undo outlasts the next plain toast: it is the only copy of that work.
+      const unsaved = unsavedWork(closedTabs?.tabs ?? []);
+      showUndoToast(`Closed ${name}${closing.database ? ` / ${closing.database}` : ""}${unsaved}`, undefined, {
+        undo: restore,
+        lasting: !!unsaved,
+      });
     }
     void closeWindow(id);
     openSeq.current.delete(id);
@@ -1138,7 +1153,8 @@ function App() {
   /** ⌘V outside a text field: a connection string fills the sheet; anything else does nothing. */
   const pasteConnection = async (text?: string, openAnyway = false) => {
     const t = text ?? (await readClipboardText().catch(() => ""));
-    if (parsePostgresUrl(t)) openSheet({ url: t.trim() });
+    // One it can't read opens too, to say why.
+    if (parsePostgresUrl(t) || connectionUrlProblem(t)) openSheet({ url: t.trim() });
     else if (openAnyway) openSheet(null);
   };
   const editConnection = (id: string, mark?: { field: string; message: string }) => {
@@ -1309,7 +1325,7 @@ function App() {
       pasteSeen.current = true;
       if (newConnOpen || report || isTextField(e.target)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (!parsePostgresUrl(text)) return;
+      if (!parsePostgresUrl(text) && !connectionUrlProblem(text)) return;
       e.preventDefault();
       actionsRef.current.pasteConnection(text);
     };
@@ -1747,3 +1763,14 @@ function App() {
 }
 
 export default App;
+
+/** " with 3 unsaved changes" (staged edits, shown or parked), " with unsaved SQL", or "". */
+function unsavedWork(tabs: SavedTab[]): string {
+  let edits = 0;
+  for (const t of tabs) {
+    edits += changeCount(savedBuffer(t.edits));
+    for (const b of Object.values(savedParked(t.parked) ?? {})) edits += changeCount(b);
+  }
+  if (edits) return ` with ${edits} unsaved ${edits === 1 ? "change" : "changes"}`;
+  return tabs.some((t) => t.kind === "query" && t.sql.trim()) ? " with unsaved SQL" : "";
+}

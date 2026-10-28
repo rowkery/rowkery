@@ -3,6 +3,9 @@
 <plist version="1.0">
 <dict>
   <!-- Rowkery Dev's own rowkery-dev:// links (src/open_link.rs), so a link never lands in the release app. tauri.dev.conf.json merges this in place of url-scheme.plist. -->
+  <!-- macOS 15 asks before a connection to a database on the local network, with this line as the reason. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Rowkery connects to databases on your network.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

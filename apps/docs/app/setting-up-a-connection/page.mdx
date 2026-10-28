@@ -28,6 +28,8 @@ psql -h db.arcade.internal -U maya arcade
 DATABASE_URL=postgres://maya@db.arcade.internal/arcade
 ```
 
+A password in the URL fills the Password field, and the URL box shows it as `•••`. As with `psql`, a password may hold `#`, `?` or `@` as typed, but a `/` must be written as `%2F`.
+
 ## The form
 
 <Shot side src="/img/new-connection.webp" width={620} height={845} alt="The New connection form: a box to paste a URL, then name, host, port, database, user and password, which is kept in the keychain." />

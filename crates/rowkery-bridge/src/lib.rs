@@ -500,6 +500,8 @@ struct QueryFailure {
     message: String,
     sqlstate: Option<String>,
     position: Option<u32>,
+    /// The server's DETAIL and HINT lines.
+    detail: Option<String>,
 }
 
 impl From<String> for QueryFailure {
@@ -518,10 +520,12 @@ impl From<DriverError> for QueryFailure {
                 message,
                 sqlstate,
                 position,
+                detail,
             } => Self {
                 message,
                 sqlstate: Some(sqlstate),
                 position,
+                detail,
             },
             other => other.into_message().into(),
         }
@@ -659,6 +663,9 @@ struct CoreState {
 #[derive(Default)]
 struct CancelState {
     requested: bool,
+    /// When the first cancel came: a second one counts as a force stop only
+    /// [`FORCE_ASK_AFTER`] later, so a quick double Esc is one cancel.
+    requested_at: Option<std::time::Instant>,
     handle: Option<CancelHandle>,
     stop: Arc<tokio::sync::Notify>,
     /// The run is waiting for a free connection: nothing to ask the server,
@@ -692,6 +699,10 @@ pub const COUNT_TAB: u64 = u64::MAX - 1;
 /// a dead socket (sleep, a network change, a dropped SSH tunnel) never
 /// answers a cancel, and the query sent into it never returns.
 const FORCE_STOP_AFTER: Duration = Duration::from_secs(3);
+
+/// How long after a cancel a second one stops the run outright (Force
+/// stop), which drops its session and rolls back an open transaction.
+const FORCE_ASK_AFTER: Duration = Duration::from_secs(1);
 
 type CancelSlot = Arc<Mutex<CancelState>>;
 
@@ -1418,6 +1429,16 @@ enum PgWork {
     },
 }
 
+/// A timed plan runs inside a savepoint, keeping the user's transaction as
+/// it was, unless the tab surely has none. When the server didn't say, a
+/// `BEGIN … ROLLBACK` could roll back the user's open transaction, so the
+/// savepoint form is used; with none open it fails ([`PLAN_TXN_UNKNOWN`]).
+fn plan_in_savepoint(state: TxnState) -> bool {
+    state != TxnState::None
+}
+
+const PLAN_TXN_UNKNOWN: &str = "The server didn't say whether this tab has a transaction open, so the timed plan didn't run (it could have rolled one back). Run it again.";
+
 /// Runs the work on `session`, streaming batches. Returns the outcome and
 /// whether any rows were sent.
 async fn stream_on_session(
@@ -1503,15 +1524,13 @@ async fn stream_on_session(
             side,
         } => {
             session_close_cursor(session).await;
-            // In the user's own transaction a savepoint keeps it as it was.
-            let within_users = *rollback
-                && match session.txn_state() {
-                    TxnState::Users => true,
-                    TxnState::None => false,
-                    TxnState::Unknown => {
-                        session_probe_txn(session, Duration::from_secs(5)).await == TxnState::Users
-                    }
-                };
+            let state = match session.txn_state() {
+                TxnState::Unknown if *rollback => {
+                    session_probe_txn(session, Duration::from_secs(5)).await
+                }
+                known => known,
+            };
+            let within_users = *rollback && plan_in_savepoint(state);
             let (begin, end) = if within_users {
                 (
                     "SAVEPOINT rowkery_explain",
@@ -1522,6 +1541,15 @@ async fn stream_on_session(
             };
             if *rollback {
                 if let Err(err) = session_execute(session, begin).await {
+                    // Unknown, and there was none (25P01): nothing ran, nothing was lost.
+                    let none_open =
+                        matches!(&err, DriverError::Server { sqlstate, .. } if sqlstate == "25P01");
+                    let err = match state {
+                        TxnState::Unknown if none_open => {
+                            DriverError::Message(PLAN_TXN_UNKNOWN.into())
+                        }
+                        _ => err,
+                    };
                     return (fwd.outcome(Err(err)), false);
                 }
             }
@@ -1611,18 +1639,20 @@ fn run_postgres_query_on_runtime(
     let stopped_generation = pooled.generation;
     let run = async move {
         let mut attempt = 0;
-        // Every connection the saved connection may hold is busy: the tab
-        // says it is waiting for one, and a cancel stops the wait at once.
-        let on_wait = |waiting: bool| {
+        // Every connection the saved connection may hold is busy, or the
+        // tab's own still is: the tab says what it is waiting for, and a
+        // cancel stops the wait at once.
+        let on_wait = |wait: Option<pool::WaitFor>| {
             if let Ok(mut state) = interrupt_slot.lock() {
-                state.waiting = waiting;
+                state.waiting = wait.is_some();
             }
             push_event(
                 &events,
                 CoreEvent::QueryWaiting {
                     query_id,
                     tab_id,
-                    waiting,
+                    waiting: wait.is_some(),
+                    tab: wait == Some(pool::WaitFor::Tab),
                 },
             );
         };
@@ -2059,8 +2089,8 @@ fn apply_changes_now(
                         generation,
                         connection_id,
                         config,
-                        &|waiting| {
-                            if waiting {
+                        &|wait| {
+                            if wait == Some(pool::WaitFor::Place) {
                                 no_room.store(true, Ordering::SeqCst);
                             }
                         },
@@ -2223,6 +2253,7 @@ fn finish_query_worker<S: EventSink + ?Sized>(
             detail: QueryDetail {
                 sqlstate: failure.sqlstate,
                 error_position: failure.position,
+                error_detail: failure.detail,
                 ..QueryDetail::default()
             },
         },
@@ -2591,11 +2622,19 @@ fn spawn_open_window(
 /// Marks a query cancelled and interrupts it if its worker is running.
 /// Asks the run to stop: SQLite is interrupted; Postgres gets a cancel
 /// request, and if the run hasn't ended `FORCE_STOP_AFTER` later (or this is
-/// the second ask) it is stopped outright.
+/// a second ask, `FORCE_ASK_AFTER` after the first) it is stopped outright.
+/// A second ask sooner does nothing.
 fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
     if let Ok(mut guard) = slot.lock() {
-        let again = guard.requested;
+        let again = match guard.requested_at {
+            Some(at) if at.elapsed() < FORCE_ASK_AFTER => return,
+            Some(_) => true,
+            None => false,
+        };
         guard.requested = true;
+        guard
+            .requested_at
+            .get_or_insert_with(std::time::Instant::now);
         let stop = guard.stop.clone();
         match guard.handle.take() {
             Some(CancelHandle::Sqlite(handle)) => {
@@ -3126,7 +3165,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         // older batch has it, this waits (that one is cancelling),
                         // so Quick Look never runs on two backends at once.
                         let Lease {
-                            session, out: _out, ..
+                            mut session, out: _out, ..
                         } = pool::lease(
                             &pool,
                             &window_id,
@@ -3174,10 +3213,13 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             }));
                             futures::join!(set, lookups).1
                         };
-                        let (rows, cancelled) = {
+                        let (rows, cancelled, cancels_done) = {
                         let mut all = std::pin::pin!(all);
                         let started = Instant::now();
                         let mut cancelled = false;
+                        // Every cancel finished sending: one cut off by its
+                        // timeout may still land later, on the next batch.
+                        let mut cancels_done = true;
                         let rows = loop {
                             tokio::select! {
                                 rows = &mut all => break Some(rows),
@@ -3187,11 +3229,12 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                                     // pipeline drains (a cancel ends one statement).
                                     if superseded() || started.elapsed() > QUICK_LOOK_LIMIT {
                                         cancelled = true;
-                                        let _ = tokio::time::timeout(
+                                        cancels_done &= tokio::time::timeout(
                                             Duration::from_secs(1),
                                             cancel_with_token(token.clone(), tls.clone()),
                                         )
-                                        .await;
+                                        .await
+                                        .is_ok();
                                     }
                                     // A dead link drains nothing: give up on it.
                                     if started.elapsed() > QUICK_LOOK_LIMIT * 2 {
@@ -3200,12 +3243,28 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                                 }
                             }
                         };
-                        (rows, cancelled)
+                        (rows, cancelled, cancels_done)
                         };
+                        let settled = rows.is_some() && cancels_done;
                         let rows = rows.unwrap_or_else(|| lookups.iter().map(|_| None).collect());
                         // After a cancel, one may still be on its way to this
-                        // backend: the session goes rather than meet the next batch.
-                        if !cancelled {
+                        // backend: once it has landed, a probe that answers
+                        // keeps the session (walking rows fast would otherwise
+                        // reconnect on every step); one that doesn't, it goes.
+                        let keep = !cancelled
+                            || (settled && {
+                                tokio::time::sleep(CANCEL_SETTLE).await;
+                                !session.is_closed()
+                                    && matches!(
+                                    tokio::time::timeout(
+                                        pool::PROBE_TIMEOUT * 2,
+                                        session_probe_after_cancel(&mut session, pool::PROBE_TIMEOUT),
+                                    )
+                                    .await,
+                                    Ok(TxnState::None)
+                                )
+                            });
+                        if keep {
                             pool::give_back(&pool, &window_id, Slot::QuickLook, generation, session);
                         }
                         Ok::<_, String>(rows)

@@ -101,8 +101,11 @@ async fn guards_hold_against_a_real_postgres() {
          DROP VIEW IF EXISTS mcp_e2e_secret_view;
          DROP FUNCTION IF EXISTS mcp_e2e_bump();
          DROP VIEW IF EXISTS mcp_e2e_peek_view;
+         DROP TYPE IF EXISTS mcp_e2e_comp;
+         DROP DOMAIN IF EXISTS mcp_e2e_dom2;
          DROP DOMAIN IF EXISTS mcp_e2e_dom;
          DROP FUNCTION IF EXISTS mcp_e2e_peek(), mcp_e2e_peek_folded(), mcp_e2e_eq(int, int) CASCADE;
+         DROP FUNCTION IF EXISTS mcp_e2e_step(text, int) CASCADE;
          DROP TABLE IF EXISTS mcp_e2e_events;
          CREATE TABLE mcp_e2e_secret (id int PRIMARY KEY, ssn text);
          INSERT INTO mcp_e2e_secret VALUES (1, '123-45-6789');
@@ -122,7 +125,14 @@ async fn guards_hold_against_a_real_postgres() {
          CREATE FUNCTION mcp_e2e_eq(int, int) RETURNS bool LANGUAGE plpgsql IMMUTABLE AS
            $$ BEGIN RETURN (SELECT count(*) FROM mcp_e2e_secret) > $1; END $$;
          CREATE OPERATOR === (FUNCTION = mcp_e2e_eq, LEFTARG = int, RIGHTARG = int);
+         CREATE FUNCTION mcp_e2e_step(text, int) RETURNS text LANGUAGE plpgsql IMMUTABLE AS
+           $$ BEGIN RETURN (SELECT ssn FROM mcp_e2e_secret LIMIT 1); END $$;
+         CREATE AGGREGATE mcp_e2e_agg(int) (SFUNC = mcp_e2e_step, STYPE = text);
+         DROP AGGREGATE IF EXISTS public.every(int);
+         CREATE AGGREGATE public.every(int) (SFUNC = mcp_e2e_step, STYPE = text);
          CREATE DOMAIN mcp_e2e_dom AS int CHECK (mcp_e2e_eq(VALUE, 0));
+         CREATE DOMAIN mcp_e2e_dom2 AS mcp_e2e_dom;
+         CREATE TYPE mcp_e2e_comp AS (x mcp_e2e_dom);
          CREATE TABLE mcp_e2e_events (id int PRIMARY KEY, kind text, amount numeric,
            at timestamptz, doc jsonb);
          INSERT INTO mcp_e2e_events VALUES
@@ -259,7 +269,21 @@ async fn guards_hold_against_a_real_postgres() {
         ("SELECT public.mcp_e2e_peek_folded()", "public.mcp_e2e_peek_folded() is defined"),
         ("SELECT x FROM mcp_e2e_peek_view", "public.mcp_e2e_peek_view is a view"),
         ("SELECT 1 === 0", "operator ==="),
+        // An aggregate's own row is `internal`; its step is database code.
+        (
+            "SELECT mcp_e2e_agg(n) FROM mcp_e2e_visible",
+            "public.mcp_e2e_agg() is defined",
+        ),
+        // Named like a built-in one, it wins on its argument type.
+        (
+            "SELECT every(n) FROM mcp_e2e_visible",
+            "public.every(), which is defined in the database",
+        ),
         ("SELECT 1::mcp_e2e_dom", "public.mcp_e2e_dom"),
+        // Its check runs for a type built on it too.
+        ("SELECT 1::mcp_e2e_dom2", "public.mcp_e2e_dom2"),
+        ("SELECT ARRAY[1]::mcp_e2e_dom[]", "public.mcp_e2e_dom"),
+        ("SELECT ROW(1)::mcp_e2e_comp", "public.mcp_e2e_comp"),
         ("SELECT pg_sleep(1)", "pg_sleep() only waits"),
         ("SELECT nextval('mcp_e2e_nope')", "nextval() changes"),
         // Caught in the plan: a system view over functions not on the list.
@@ -705,6 +729,153 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
     assert_eq!(next["rows"], json!([[42]]));
 
     let _ = session_execute(&setup, cleanup).await;
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A generated column built from a marked one is masked with it
+/// (rowkery/reports#30): returned as a stand-in, refused as a filter, and
+/// listed as masked. One built from other columns is left alone.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_generated_column_from_a_masked_one_is_masked() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-gen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_gen_customers, mcp_gen_people, mcp_gen_pp CASCADE;
+         CREATE TABLE mcp_gen_people (id int, email text);
+         CREATE TABLE mcp_gen_staff (low text GENERATED ALWAYS AS (lower(email)) STORED)
+           INHERITS (mcp_gen_people);
+         INSERT INTO mcp_gen_staff (id, email) VALUES (2, 'Tomas@Ibarra.dev');
+         CREATE TABLE mcp_gen_customers (id int PRIMARY KEY, \"Email\" text, total int,
+           email_lower text GENERATED ALWAYS AS (lower(\"Email\")) STORED,
+           doubled int GENERATED ALWAYS AS (total * 2) STORED);
+         CREATE INDEX mcp_gen_lower ON mcp_gen_customers (email_lower);
+         INSERT INTO mcp_gen_customers (id, \"Email\", total) VALUES (1, 'Mara@Fjord.se', 20);",
+    )
+    .await
+    .expect("fixtures");
+    // A partition with an expression of its own (Postgres 16 allows one
+    // that differs from its parent's; a later server may not).
+    let own_expression = session_execute(
+        &setup,
+        "CREATE TABLE mcp_gen_pp (id int, email text, g text GENERATED ALWAYS AS ('x') STORED)
+           PARTITION BY LIST (id);
+         CREATE TABLE mcp_gen_pp1 PARTITION OF mcp_gen_pp (g GENERATED ALWAYS AS (lower(email)) STORED)
+           FOR VALUES IN (1);
+         INSERT INTO mcp_gen_pp (id, email) VALUES (1, 'Kim@X.io');",
+    )
+    .await
+    .is_ok();
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::All,
+                tables: Vec::new(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    pg.masked_columns = [(
+        pg.database.clone(),
+        vec![
+            "public.mcp_gen_customers.Email".to_string(),
+            "public.mcp_gen_people.email".to_string(),
+            "public.mcp_gen_pp.email".to_string(),
+        ],
+    )]
+    .into_iter()
+    .collect();
+    save(pg);
+    let mcp = RowkeryMcp::default();
+
+    let out = query(
+        &mcp,
+        "SELECT id, email_lower, doubled FROM mcp_gen_customers",
+    )
+    .await
+    .expect("returned");
+    let text = out["rows"].to_string();
+    assert!(!text.contains('@') && text.contains("masked:"), "{text}");
+    assert_eq!(out["rows"][0][2], json!(40));
+    for sql in [
+        "SELECT id FROM mcp_gen_customers WHERE email_lower LIKE 'm%'",
+        "SELECT upper(email_lower) FROM mcp_gen_customers",
+        "SELECT email_lower FROM mcp_gen_customers ORDER BY email_lower",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused"), "{sql}: {err}");
+    }
+    query(&mcp, "SELECT id FROM mcp_gen_customers WHERE doubled > 10")
+        .await
+        .expect("an unmarked generated column filters");
+    let described = call(
+        &mcp,
+        "describe_table",
+        json!({ "connection": ID, "table": "mcp_gen_customers" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        described["masked"],
+        json!(["Email", "email_lower"]),
+        "{described}"
+    );
+
+    // A child table's or partition's own generated column, under the
+    // marked table.
+    let mut reads = vec![
+        "SELECT low FROM mcp_gen_staff",
+        "SELECT * FROM mcp_gen_people",
+    ];
+    if own_expression {
+        reads.extend(["SELECT g FROM mcp_gen_pp", "SELECT g FROM mcp_gen_pp1"]);
+    }
+    for sql in reads {
+        let out = query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let text = out["rows"].to_string().to_lowercase();
+        assert!(
+            !text.contains("ibarra") && !text.contains("x.io"),
+            "{sql}: {text}"
+        );
+    }
+    let err = query(&mcp, "SELECT id FROM mcp_gen_staff WHERE low LIKE 't%'")
+        .await
+        .expect_err("filter on a child's generated column");
+    assert!(err.starts_with("Refused"), "{err}");
+
+    // One added after the catalog was read: masked, and the table's other
+    // columns still read (no "masked column no longer in the table").
+    session_execute(
+        &setup,
+        "ALTER TABLE mcp_gen_customers ADD COLUMN el text GENERATED ALWAYS AS (upper(\"Email\")) STORED",
+    )
+    .await
+    .expect("add a generated column");
+    query(&mcp, "SELECT id FROM mcp_gen_customers")
+        .await
+        .expect("the other columns still read");
+    let out = query(&mcp, "SELECT el FROM mcp_gen_customers")
+        .await
+        .expect("the new column, masked");
+    assert!(!out["rows"].to_string().contains('@'), "{out}");
+
+    let _ = session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_gen_customers, mcp_gen_people, mcp_gen_pp CASCADE",
+    )
+    .await;
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
@@ -1214,12 +1385,14 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     session_execute(
         &setup,
         "DROP TABLE IF EXISTS mcp_p_orders, mcp_p_customers, mcp_p_hidden, mcp_p_log, mcp_p_serial, mcp_p_ident,
-           mcp_p_peeks, mcp_p_other CASCADE;
+           mcp_p_peeks, mcp_p_other, mcp_p_pair CASCADE;
          DROP FUNCTION IF EXISTS mcp_p_peek() CASCADE;
          DROP SEQUENCE IF EXISTS mcp_p_other_seq;
          CREATE TABLE mcp_p_serial (id serial PRIMARY KEY, note text, at timestamptz DEFAULT now(),
            pid int DEFAULT pg_backend_pid());
          CREATE TABLE mcp_p_ident (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note text);
+         CREATE TABLE mcp_p_pair (a int, b int, n int, PRIMARY KEY (b, a));
+         INSERT INTO mcp_p_pair VALUES (1, 1, 0), (1, 2, 0), (2, 1, 0);
          DROP FUNCTION IF EXISTS mcp_p_fn(int);
          DROP FUNCTION IF EXISTS mcp_p_trg() CASCADE;
          CREATE TABLE mcp_p_customers (id int PRIMARY KEY, email text, plan text, seats int);
@@ -1259,6 +1432,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
                     "public.mcp_p_ident".into(),
                     "public.mcp_p_peeks".into(),
                     "public.mcp_p_other".into(),
+                    "public.mcp_p_pair".into(),
                 ],
             },
         )]
@@ -1371,6 +1545,44 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     let run = proposals::dry_run(serial).await.expect("serial dry run");
     assert_eq!(run.statements[0].rows, 1);
     proposals::reject(serial, None).expect("reject");
+    // Several rows from an INSERT, or from a table without a key, have no
+    // digest and still dry-run.
+    let rows = propose("INSERT INTO mcp_p_serial (note) VALUES ('e'), ('f')")
+        .await
+        .expect("insert rows");
+    let rows = rows["id"].as_str().unwrap();
+    let run = proposals::dry_run(rows).await.expect("insert rows dry run");
+    assert_eq!(
+        (run.statements[0].rows, run.statements[0].digest.clone()),
+        (2, None)
+    );
+    proposals::reject(rows, None).expect("reject");
+    // An UPDATE that sets the key could land on any rows with the keys the
+    // dry run saw (`SET id = -1 WHERE id = (… random() …)`): refused.
+    let rekey = propose("UPDATE mcp_p_orders SET id = -1 WHERE id = 1")
+        .await
+        .expect("rekey");
+    let rekey = rekey["id"].as_str().unwrap();
+    let refused = proposals::dry_run(rekey).await.expect_err("sets the key");
+    assert!(refused.contains("sets the primary key (id)"), "{refused}");
+    proposals::reject(rekey, None).expect("reject");
+    // A key in another order than its columns: the dry run and the commit
+    // digest the same row(b, a).
+    let pair = propose("UPDATE mcp_p_pair SET n = 1 WHERE a = 1")
+        .await
+        .expect("pair");
+    let pair = pair["id"].as_str().unwrap();
+    let run = proposals::dry_run(pair).await.expect("pair dry run");
+    assert!(run.statements[0].digest.is_some());
+    let saw = proposals::Seen {
+        rows: vec![2],
+        digests: vec![run.statements[0].digest.clone()],
+        ..Default::default()
+    };
+    match proposals::commit(pair, &saw).await.unwrap() {
+        CommitOutcome::Committed { rows } => assert_eq!(rows, vec![2]),
+        other => panic!("{other:?}"),
+    }
     // A blank reason is asked for, not reported as a missing argument.
     let blank = call(
         &mcp,
@@ -1454,6 +1666,27 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     .await
     .unwrap();
     assert_eq!(still["rows"], json!([[2]]), "the dry run saved nothing");
+
+    // As many rows, but other ones (3 is pending, 2 is paid): their keys
+    // differ, so nothing is saved.
+    assert!(orders.digest.is_some());
+    let saw = proposals::Seen {
+        rows: vec![2, 2],
+        digests: run.statements.iter().map(|s| s.digest.clone()).collect(),
+        ..Default::default()
+    };
+    let swap = "UPDATE mcp_p_orders SET status = CASE id WHEN 2 THEN 'paid' ELSE 'pending' END WHERE id IN (2, 3)";
+    session_execute(&setup, swap).await.unwrap();
+    match proposals::commit(&id, &saw).await.unwrap() {
+        CommitOutcome::Moved { dry_run } => {
+            assert_eq!(dry_run.statements[0].rows, 2);
+            assert_ne!(dry_run.statements[0].digest, orders.digest);
+            assert_eq!(dry_run.statements[1].digest, customers.digest);
+        }
+        other => panic!("{other:?}"),
+    }
+    let back = "UPDATE mcp_p_orders SET status = CASE id WHEN 2 THEN 'pending' ELSE 'paid' END WHERE id IN (2, 3)";
+    session_execute(&setup, back).await.unwrap();
 
     // The data moves: nothing is saved and a fresh dry run comes back.
     session_execute(
@@ -1643,6 +1876,7 @@ async fn a_proposal_counts_what_its_cascades_and_triggers_write() {
         rows: vec![run.statements[0].rows],
         reach: vec![run.statements[0].reach.clone()],
         at_commit: run.at_commit.clone(),
+        digests: vec![run.statements[0].digest.clone()],
     };
 
     // A payment lands in another partition: one customer still, but the

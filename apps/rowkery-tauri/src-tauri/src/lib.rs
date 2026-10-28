@@ -47,11 +47,13 @@ pub enum Frame {
         query_id: u64,
         columns: Vec<Column>,
     },
-    /// Every connection the saved connection may hold is busy: the run waits
-    /// for one (`waiting` false once it has one).
+    /// Every connection the saved connection may hold is busy, or (`tab`)
+    /// the tab's own still is: the run waits for one (`waiting` false once
+    /// it has one).
     Waiting {
         query_id: u64,
         waiting: bool,
+        tab: bool,
     },
     Done(Box<DoneFrame>),
 }
@@ -76,6 +78,8 @@ pub struct DoneFrame {
     pub sqlstate: Option<String>,
     /// 1-based character offset of the error in the statement.
     pub error_position: Option<u32>,
+    /// The server's DETAIL and HINT lines, as psql prints them.
+    pub error_detail: Option<String>,
     /// Set when safe mode stopped the query before it ran.
     pub hold: Option<SafetyHold>,
     /// The rows are a cursor page; `more` while it has rows for `fetch_more`.
@@ -284,6 +288,7 @@ impl EventSink for ChannelSink {
                     error,
                     sqlstate: detail.sqlstate,
                     error_position: detail.error_position,
+                    error_detail: detail.error_detail,
                     hold: None,
                     paged: detail.paged,
                     more: detail.more,
@@ -294,8 +299,18 @@ impl EventSink for ChannelSink {
                 Self::send_json(&self.channel, &Frame::Done(Box::new(done)));
             }
             CoreEvent::QueryWaiting {
-                query_id, waiting, ..
-            } => Self::send_json(&self.channel, &Frame::Waiting { query_id, waiting }),
+                query_id,
+                waiting,
+                tab,
+                ..
+            } => Self::send_json(
+                &self.channel,
+                &Frame::Waiting {
+                    query_id,
+                    waiting,
+                    tab,
+                },
+            ),
             CoreEvent::QueryHeld { query_id, hold, .. } => {
                 let done = DoneFrame {
                     query_id,
@@ -309,6 +324,7 @@ impl EventSink for ChannelSink {
                     error: None,
                     sqlstate: None,
                     error_position: None,
+                    error_detail: None,
                     hold: Some(hold),
                     paged: false,
                     more: false,
@@ -1199,6 +1215,26 @@ fn explain_connect_error(
             cloud_sql: cloud_sql.as_deref(),
         },
     )
+}
+
+/// Forget saved key on a changed SSH host key: removes the key saved for
+/// `host:port` while it is still `fingerprint`, the one the panel showed.
+#[tauri::command]
+fn forget_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<bool, String> {
+    rowkery_core::ssh::forget_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
+}
+
+/// Its Undo: puts the key back, unless the host has one again by now.
+#[tauri::command]
+fn restore_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<bool, String> {
+    rowkery_core::ssh::restore_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
+}
+
+/// The key trusted on a first connect to this bastion since the last call,
+/// for the connect toast to name.
+#[tauri::command]
+fn take_trusted_host_key(host: String, port: u16) -> Option<String> {
+    rowkery_core::ssh::take_newly_trusted(&host, port)
 }
 
 /// Cancels the tab's query, if any, and closes its connection.
@@ -2311,6 +2347,9 @@ pub fn run(mut timings: Timings) {
             browse_table_sql,
             fetch_more,
             explain_connect_error,
+            forget_ssh_host_key,
+            restore_ssh_host_key,
+            take_trusted_host_key,
             app_ready,
             get_theme_preference,
             set_theme_preference,

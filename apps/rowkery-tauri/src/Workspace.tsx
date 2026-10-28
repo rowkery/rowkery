@@ -30,6 +30,10 @@ import {
   type ConnectExplanation,
   type CsvPreview,
   type FollowLookup,
+  type HostKeys,
+  forgetSshHostKey,
+  restoreSshHostKey,
+  type WaitingFor,
 } from "./api";
 import { PlanView, copy as copyPlanText, planText } from "./PlanView";
 import { CommandPalette, type PickMode } from "./CommandPalette";
@@ -111,11 +115,13 @@ import {
   chipsToWhere,
   defaultOp,
   parseFragment,
+  readsAsNull,
   renameFragmentColumn,
   savedChips,
   textColumns,
   unknownColumn,
   type FilterChip,
+  type PredicateChip,
 } from "./filterChips";
 import { flushPersist, readKey, writeKey } from "./persist";
 import type { SelectionStats } from "./selectionStats";
@@ -245,6 +251,12 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 const NOTICE_MS = 2400;
 /** Force stop: how long core's stop has to report back before the tab lets the run go. */
 const FORCE_STOP_GRACE_MS = 2000;
+/**
+ * How long after Cancel a second one is a Force stop, so a quick double Esc
+ * is one cancel: core's `FORCE_ASK_AFTER` (1 s, from when core takes the
+ * first cancel) and a margin, or core would ignore it.
+ */
+const FORCE_READY_MS = 1200;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -539,6 +551,7 @@ export function Workspace({
   const renderError = activeRun.error;
   const runStartedAt = activeRun.startedAt;
   const cancelling = activeRun.cancelling;
+  const forceReady = cancelling && !!activeRun.forceReady;
   /** When the shown tab last stopped running: an Esc just after it was meant for the run (`escMayDiscard`). */
   const runEnd = useRef<{ running: boolean; endedAt: number | null }>({ running: false, endedAt: null });
   if (runEnd.current.running !== (runStartedAt !== null)) {
@@ -684,6 +697,15 @@ export function Workspace({
    * and a query tab waits for ⌘↵.
    */
   const closedTabs = useRef<ClosedTab[]>([]);
+  /** Tabs closed in this window (ids are never reused): a Run All on one stops, as it does once the window closes. */
+  const closedTabIds = useRef(new Set<number>());
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+    };
+  }, []);
   const releaseClosedRows = (entries: ClosedTab[]) => {
     // Only those still in Recently closed: one reopened meanwhile has its rows in `runs`.
     for (const entry of entries) if (closedTabs.current.includes(entry)) entry.run = undefined;
@@ -709,7 +731,8 @@ export function Workspace({
       return;
     }
     void closeQueryTab(windowId, id).catch(() => {});
-    const run = runsRef.current[id];
+    closedTabIds.current.add(id);
+    const run = closedRun(runsRef.current[id]);
     const worthKeeping = tab.kind === "table" || !!tab.sql.trim() || !!run?.result;
     const entry: ClosedTab = { tab, run, index };
     if (worthKeeping) {
@@ -760,7 +783,8 @@ export function Workspace({
       // The import tab closes as its Cancel does, not into Recently closed.
       if (tab.kind === "import") return closeImportRef.current(true);
       void closeQueryTab(windowId, tab.id).catch(() => {});
-      entries.push({ tab, run: runsRef.current[tab.id], index });
+      closedTabIds.current.add(tab.id);
+      entries.push({ tab, run: closedRun(runsRef.current[tab.id]), index });
     });
     if (!entries.length) return;
     closedTabs.current = [...closedTabs.current, ...entries].slice(-MAX_CLOSED_TABS);
@@ -1042,6 +1066,36 @@ export function Workspace({
     // The sheet calls the SSH password field sshSecret.
     const field = explained?.field === "sshPassword" ? "sshSecret" : explained?.field;
     actions.editConnection(activeId, field ? { field, message: explained?.cause ?? session.error ?? "" } : undefined);
+  };
+  // Forget saved key: the key shown goes, so Retry (a separate press) meets
+  // the host as new; Undo puts it back.
+  const [forgot, setForgot] = useState<string | null>(null);
+  // Only this connection's own bastion (core forgets only a key its tunnel refused, too).
+  const tunnel = activeConnection?.kind === "postgres" ? activeConnection.ssh : null;
+  const shownKeys =
+    explained?.host_keys && tunnel && explained.host_keys.host === tunnel.host && explained.host_keys.port === tunnel.port
+      ? explained.host_keys
+      : null;
+  const forgetHostKey = async (keys: HostKeys) => {
+    const gone = await forgetSshHostKey(keys.host, keys.port, keys.saved).catch((e) => {
+      showToast("Couldn't forget the saved key", String(e), "error");
+      return null;
+    });
+    if (gone === null) return;
+    if (!gone) return showToast("Nothing was forgotten: the saved key isn't the one shown", "Retry to see it again", "error");
+    setForgot(keys.saved);
+    const trusts = !!tunnel?.trust_host;
+    showUndoToast(
+      `Forgot the saved key for ${keys.host}`,
+      trusts ? "Retry trusts its new key" : "Turn on Trust the host key on first connect in Edit…, then Retry",
+      {
+        undo: () =>
+          void restoreSshHostKey(keys.host, keys.port, keys.saved).then(
+            (back) => (back ? setForgot(null) : showToast(`Can't undo: ${keys.host} has a saved key again`)),
+            (e) => showToast("Couldn't put the saved key back", String(e), "error"),
+          ),
+      },
+    );
   };
   const failedRef = useRef(false);
   failedRef.current = connState === "error";
@@ -2243,15 +2297,27 @@ export function Workspace({
   // Elapsed times tick in `Elapsed` alone (the run clock, TabStatus.tsx): a running
   // query never re-renders the workspace or the grid.
 
-  // Cancel asks the server; pressed again (Force stop, or Esc twice) core
-  // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel. A run whose end never reaches
-  // the tab even then is let go, so the tab is never stuck on Running.
+  // Cancel asks the server; pressed again a second later (Force stop, or
+  // Esc again) core stops the run outright, which rolls back an open
+  // transaction, so a quick double Esc is one cancel. Core also stops it by
+  // itself after 3 s, since a dead connection never answers a cancel. A run
+  // whose end never reaches the tab even then is let go, so the tab is never
+  // stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
-    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
-    patchRun(tabId, { cancelling: true });
+    const run = runsRef.current[tabId];
+    if (run?.cancelling && !run.forceReady) return;
+    const giveUp = run?.cancelling ? abandonRun(windowId, tabId) : undefined;
+    if (!run?.cancelling) {
+      patchRun(tabId, { cancelling: true, forceReady: false });
+      // This run's, not a later one cancelled in the same tab.
+      const startedAt = run?.startedAt;
+      setTimeout(() => {
+        const now = runsRef.current[tabId];
+        if (now?.cancelling && now.startedAt === startedAt) patchRun(tabId, { forceReady: true });
+      }, FORCE_READY_MS);
+    }
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
@@ -2308,7 +2374,7 @@ export function Workspace({
     patchRun(tabId, (prev) => ({
       error: null,
       cancelling: false,
-      waiting: false,
+      waiting: null,
       outcome: null,
       elapsedMs: null,
       held: null,
@@ -2346,8 +2412,8 @@ export function Workspace({
               streamed = true;
               patchRun(tabId, { result: partial, streaming: true });
           };
-      // Every connection is busy: the tab says it waits, rather than look stuck.
-      const onWaiting = (waiting: boolean) => {
+      // Every connection, or the tab's own, is busy: the tab says it waits, rather than look stuck.
+      const onWaiting = (waiting: WaitingFor | null) => {
         if (tableRun && !tableRun.current()) return;
         patchRun(tabId, { waiting });
       };
@@ -2471,7 +2537,7 @@ export function Workspace({
         startedAt: null,
         appending: false,
         cancelling: false,
-        waiting: false,
+        waiting: null,
         streaming: false,
         outcome,
         elapsedMs: elapsedMs ?? Math.round(performance.now() - started),
@@ -2512,6 +2578,11 @@ export function Workspace({
       if (end !== "done") break;
       // onRun refuses while the tab shows a run: wait for the render that ends this one.
       while (runsRef.current[tabId]?.startedAt != null) await new Promise((r) => setTimeout(r, 16));
+      // Closed (or its window) between two statements: the rest never run.
+      if (closedTabIds.current.has(tabId) || unmounted.current) {
+        end = "skipped";
+        break;
+      }
     }
     if (end === "done" || (end === "error" && !runsRef.current[tabId]?.cancelling)) {
       const ms = performance.now() - started;
@@ -3097,13 +3168,14 @@ export function Workspace({
     const t = db ? findTable(schemaTree, tableKey(db, target.schema, target.table)) : undefined;
     if (!t || sqlLiteral(value) === null) return;
     const v = value as Record<string, unknown>;
-    const chip: FilterChip = {
+    const chip: PredicateChip = {
       kind: "pred",
       column: target.column,
       type: t.table.columns?.find((c) => c.name === target.column)?.type_name ?? "",
       op: "=",
       value: "Text" in v ? String(v.Text) : "BigInt" in v ? String(v.BigInt) : safeFormatCell(value),
     };
+    if (readsAsNull(chip.value)) chip.text = true;
     lookOnLand.current = { tableKey: t.key, stale: result ?? null };
     openTable(t, {
       keep: own,
@@ -3282,7 +3354,16 @@ export function Workspace({
 
   /** The grid's cell menu, profile segments and histogram drags add chips. */
   const gridFilter = useStableCallback((column: string, op: ChipDraft["op"], value: string = "", value2?: string) =>
-    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 }),
+    addChip({
+      kind: "pred",
+      column,
+      type: chipType(column),
+      op,
+      value,
+      value2,
+      // A cell's text is itself, even the word null (rowkery/reports#44).
+      ...(readsAsNull(value) && (op === "=" || op === "IS DISTINCT FROM") ? { text: true as const } : {}),
+    }),
   );
 
   /**
@@ -3678,9 +3759,9 @@ export function Workspace({
                     {activeRun.exporting.rows.toLocaleString()} rows
                   </span>
                 ) : activeRun.waiting && !cancelling ? (
-                  // Every connection is busy: say so, rather than look stuck.
-                  <span data-waiting="connection">
-                    Waiting for a free connection ·{" "}
+                  // Every connection, or the tab's own, is busy: say which, rather than look stuck.
+                  <span data-waiting={activeRun.waiting}>
+                    {activeRun.waiting === "tab" ? "Waiting for this tab's connection" : "Waiting for a free connection"} ·{" "}
                     {runStartedAt !== null && <Elapsed since={runStartedAt} active={active} format={formatMs} />}
                   </span>
                 ) : (
@@ -3693,11 +3774,12 @@ export function Workspace({
                 <button
                   type="button"
                   className="cancel-btn"
-                  data-cancel={cancelling ? "force" : "cancel"}
-                  title={cancelling ? "Stop it now, without waiting for the server" : undefined}
+                  data-cancel={forceReady ? "force" : "cancel"}
+                  title={forceReady ? "Stop it now, without waiting for the server" : undefined}
+                  disabled={cancelling && !forceReady}
                   onClick={() => void onCancel()}
                 >
-                  {cancelling ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
+                  {forceReady ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
                 </button>
               </span>
   );
@@ -4411,6 +4493,8 @@ export function Workspace({
             onRetry={connState === "error" ? actions.retryConnect : undefined}
             onEdit={connState === "error" && activeId ? editFailed : undefined}
             onReport={() => reportIssue(true)}
+            hostKeys={shownKeys}
+            onForgetKey={shownKeys && forgot !== shownKeys.saved ? () => void forgetHostKey(shownKeys) : undefined}
           />
         )}
         <div
@@ -4647,8 +4731,8 @@ export function Workspace({
                 className={`run-btn${running ? " running" : ""}`}
                 disabled={busy || connState !== "connected"}
                 onClick={() => void onRun()}
-                data-waiting={running && activeRun.waiting ? "connection" : undefined}
-                title={running && activeRun.waiting ? "Waiting for a free connection" : undefined}
+                data-waiting={(running && activeRun.waiting) || undefined}
+                title={running && activeRun.waiting ? (activeRun.waiting === "tab" ? "Waiting for this tab's connection" : "Waiting for a free connection") : undefined}
               >
                 <PlayIcon size={10} />
                 {/* Run counts the time while its query runs; says when it waits for a connection. */}
@@ -4902,6 +4986,7 @@ export function Workspace({
                   sqlstate={result.sqlstate ?? null}
                   sql={activeRun.ranSql ?? null}
                   position={result.error_position ?? null}
+                  detail={result.error_detail ?? null}
                   suggestion={activeRun.errorMark?.suggestion ?? null}
                   onReplace={applySuggestion}
                   onReport={() => reportIssue(true)}
@@ -5167,4 +5252,14 @@ export function Workspace({
       </Presence>
     </div>
   );
+}
+
+/**
+ * A closed tab's run as Undo brings it back: closed while its rows streamed,
+ * those rows are marked cancelled, not a finished result. Rows shown while
+ * a re-run, export, plan or next page was on its way stay as they were.
+ */
+function closedRun(run: TabRun | undefined): TabRun | undefined {
+  if (run?.startedAt == null || !run.result || !run.streaming || run.appending || run.exporting) return run;
+  return { ...run, result: { ...run.result, cancelled: true, elapsed_ms: Date.now() - run.startedAt } };
 }

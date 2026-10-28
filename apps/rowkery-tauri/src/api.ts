@@ -177,6 +177,31 @@ export interface ConnectExplanation {
   class: string;
   cause: string | null;
   field: string | null;
+  /** `ssh_changed`: the bastion and both fingerprints. */
+  host_keys?: HostKeys;
+}
+
+/** A changed SSH host key: the saved fingerprint and the one offered now. */
+export interface HostKeys {
+  host: string;
+  port: number;
+  saved: string;
+  offered: string;
+}
+
+/** Forget saved key: true when the key shown was still the one saved (and is gone now). */
+export async function forgetSshHostKey(host: string, port: number, fingerprint: string): Promise<boolean> {
+  return invoke("forget_ssh_host_key", { host, port, fingerprint });
+}
+
+/** Undo of Forget saved key: false when the host has a key again by now. */
+export async function restoreSshHostKey(host: string, port: number, fingerprint: string): Promise<boolean> {
+  return invoke("restore_ssh_host_key", { host, port, fingerprint });
+}
+
+/** The key a first connect to this bastion trusted since the last call, if any. */
+export async function takeTrustedHostKey(host: string, port: number): Promise<string | null> {
+  return (await invoke<string | null>("take_trusted_host_key", { host, port })) ?? null;
 }
 
 export async function explainConnectError(
@@ -278,9 +303,12 @@ export async function reloadWindowSchema(windowId: string): Promise<SchemaCatalo
  * `Frame`), and binary rows frames (an ArrayBuffer, `resultStore.ts`). JSON
  * `rows` frames are accepted too (tests, proofs' stubs).
  */
+/** What a run waits for before it starts (`onWaiting`). */
+export type WaitingFor = "connection" | "tab";
+
 export type Frame =
   | { t: "columns"; query_id: number; columns: Column[] }
-  | { t: "waiting"; query_id: number; waiting: boolean }
+  | { t: "waiting"; query_id: number; waiting: boolean; tab?: boolean }
   | { t: "rows"; query_id: number; seq: number; rows: (Value | null)[][] }
   | ({ t: "done" } & DoneFrame);
 
@@ -296,6 +324,8 @@ export interface DoneFrame {
   error: string | null;
   sqlstate: string | null;
   error_position: number | null;
+  /** The server's DETAIL and HINT lines, as psql prints them. */
+  error_detail?: string | null;
   hold: SafetyHold | null;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
@@ -316,10 +346,11 @@ export interface RunOptions {
    */
   onProgress?: (partial: QueryResultDto) => void;
   /**
-   * Called with `true` when every connection the saved connection may hold
-   * is busy and the run waits for one, and `false` once it has one.
+   * Called with what the run waits for: "connection" when every connection
+   * the saved connection may hold is busy, "tab" when the tab's own still is
+   * (an earlier run, or a check after a sleep); `null` once it has one.
    */
-  onWaiting?: (waiting: boolean) => void;
+  onWaiting?: (waiting: WaitingFor | null) => void;
 }
 
 const NULL_CELL: Value = { Null: null };
@@ -515,7 +546,7 @@ function stream<Started>(
           result.columns = frame.columns;
           return;
         case "waiting":
-          onWaiting?.(frame.waiting);
+          onWaiting?.(frame.waiting ? (frame.tab ? "tab" : "connection") : null);
           return;
         case "rows":
           jsonRows = true;
@@ -541,6 +572,7 @@ function stream<Started>(
             frames: frame.frames,
             sqlstate: frame.sqlstate,
             error_position: frame.error_position,
+            error_detail: frame.error_detail ?? null,
             capped: frame.capped ?? false,
             warning: frame.warning ?? null,
             forced: frame.forced ?? false,
