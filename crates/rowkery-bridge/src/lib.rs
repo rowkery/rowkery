@@ -3146,7 +3146,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         // older batch has it, this waits (that one is cancelling),
                         // so Quick Look never runs on two backends at once.
                         let Lease {
-                            session, out: _out, ..
+                            mut session, out: _out, ..
                         } = pool::lease(
                             &pool,
                             &window_id,
@@ -3222,10 +3222,26 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         };
                         (rows, cancelled)
                         };
+                        let drained = rows.is_some();
                         let rows = rows.unwrap_or_else(|| lookups.iter().map(|_| None).collect());
                         // After a cancel, one may still be on its way to this
-                        // backend: the session goes rather than meet the next batch.
-                        if !cancelled {
+                        // backend: once it has landed, a probe that answers
+                        // keeps the session (walking rows fast would otherwise
+                        // reconnect on every step); one that doesn't, it goes.
+                        let keep = !cancelled
+                            || (drained && {
+                                tokio::time::sleep(CANCEL_SETTLE).await;
+                                !session.is_closed()
+                                    && matches!(
+                                    tokio::time::timeout(
+                                        pool::PROBE_TIMEOUT * 2,
+                                        session_probe_after_cancel(&mut session, pool::PROBE_TIMEOUT),
+                                    )
+                                    .await,
+                                    Ok(TxnState::None)
+                                )
+                            });
+                        if keep {
                             pool::give_back(&pool, &window_id, Slot::QuickLook, generation, session);
                         }
                         Ok::<_, String>(rows)
