@@ -740,7 +740,7 @@ fn pg_hint(plan: &Plan, facts: &PlanFacts) -> Option<Hint> {
             let index = t.indexes.iter().find(|ix| {
                 ix.columns
                     .first()
-                    .is_some_and(|c| unquote(c).eq_ignore_ascii_case(&r.column))
+                    .is_some_and(|c| c.eq_ignore_ascii_case(&r.column))
             })?;
             let expr = format!("{f}({})", r.column);
             let call = format!("{}(", f.to_ascii_lowercase());
@@ -805,15 +805,11 @@ fn removed_per_loop(s: &PlanStep) -> f64 {
     total / s.loops.unwrap_or(1.0).max(1.0)
 }
 
-fn unquote(s: &str) -> &str {
-    s.trim().trim_matches('"')
-}
-
 fn leads_index(t: &TableFacts, column: &str) -> bool {
     t.indexes.iter().any(|ix| {
         ix.columns
             .first()
-            .is_some_and(|c| unquote(c).eq_ignore_ascii_case(column))
+            .is_some_and(|c| c.eq_ignore_ascii_case(column))
     })
 }
 

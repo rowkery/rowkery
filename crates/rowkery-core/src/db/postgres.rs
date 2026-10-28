@@ -1951,7 +1951,8 @@ pub async fn session_table_indexes(
         .collect();
     for row in rows {
         let table: String = row.get(0);
-        let columns: Vec<String> = row.get(2);
+        // An index dropped while this reads has NULLs here.
+        let columns: Vec<Option<String>> = row.try_get(2).unwrap_or_default();
         let size_bytes: Option<i64> = row.get(6);
         let Some(entry) = out.iter_mut().find(|t| t.table == table) else {
             continue;
@@ -1961,7 +1962,7 @@ pub async fn session_table_indexes(
         }
         entry.indexes.push(IndexNode {
             name: row.get(1),
-            columns: columns.iter().map(|c| unquote_ident(c)).collect(),
+            columns: columns.iter().flatten().map(|c| unquote_ident(c)).collect(),
             unique: row.get(3),
             primary: row.get(4),
             method: Some(row.get(5)),
