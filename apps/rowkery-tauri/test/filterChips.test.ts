@@ -2,7 +2,9 @@ import { describe, expect, test } from "vitest";
 import {
   FILTER_OPS,
   chipIdent,
+  chipWords,
   isNumberType,
+  readsAsNull,
   joinList,
   splitList,
   chipFragments,
@@ -15,6 +17,7 @@ import {
   unknownColumn,
   type FilterChip,
   type FilterOp,
+  type PredicateChip,
 } from "../src/filterChips";
 import { sqlLineParts } from "../src/sqlLineParts";
 
@@ -63,6 +66,36 @@ describe("chipsToWhere", () => {
   test("NULL goes through IS NULL, never = NULL", () => {
     expect(chipsToWhere([pred("note", "text", "=", "NULL")])).toBe("note IS NULL");
     expect(chipsToWhere([pred("note", "text", "<>", "null")])).toBe("note IS NOT NULL");
+  });
+
+  test("a quoted 'null' is the text, a bare null is NULL (rowkery/reports#44)", () => {
+    expect(chipsToWhere([pred("note", "text", "=", "'null'")])).toBe("note = 'null'");
+    expect(chipsToWhere([pred("note", "text", "IS DISTINCT FROM", "'NULL'")])).toBe("note IS DISTINCT FROM 'NULL'");
+    expect(chipsToWhere([pred("note", "text", "IN", "'null', a")])).toBe("note IN ('null', 'a')");
+    expect(chipsToWhere([pred("note", "text", "IN", "null")])).toBe("note IN (NULL)");
+    expect(parseFragment("note = 'null'", COLUMNS)).toMatchObject({ op: "=", value: "'null'" });
+    expect(parseFragment("note = null", COLUMNS)).toMatchObject({ op: "=", value: "null" });
+    expect(parseFragment("note in ('null', 'x')", COLUMNS)).toMatchObject({ op: "IN", value: "'null', x" });
+    expect(splitList(joinList(["'null'", "a, b"]))).toEqual(["'null'", "a, b"]);
+  });
+
+  test("a cell's text is itself, even null or 'null' (the cell menu, follow key)", () => {
+    const cell = (value: string, op: FilterOp = "="): FilterChip => ({ ...(pred("note", "text", op, value) as PredicateChip), text: true });
+    expect(chipsToWhere([cell("null")])).toBe("note = 'null'");
+    expect(chipsToWhere([cell("NULL", "IS DISTINCT FROM")])).toBe("note IS DISTINCT FROM 'NULL'");
+    expect(chipsToWhere([cell("'null'")])).toBe("note = '''null'''");
+    expect(chipWords(cell("null"))).toBe("note is 'null'");
+    expect(readsAsNull("null") && readsAsNull("'NULL'") && !readsAsNull("nullx")).toBe(true);
+  });
+
+  test("contains on a non-text column searches its text on Postgres (rowkery/reports#56)", () => {
+    expect(chipsToWhere([pred("id", "integer", "ILIKE", "2024")])).toBe("CAST(id AS TEXT) ILIKE '%2024%'");
+    expect(chipsToWhere([pred("at", "timestamp with time zone", "ILIKE", "2024")])).toBe("CAST(at AS TEXT) ILIKE '%2024%'");
+    expect(chipsToWhere([pred("note", "text", "ILIKE", "a")])).toBe("note ILIKE '%a%'");
+    expect(chipsToWhere([pred("id", "INTEGER", "ILIKE", "20")], "sqlite")).toBe("id LIKE '%20%'");
+    // An enum whose name starts like a text type is not text.
+    expect(chipsToWhere([pred("kind", "name_kind", "ILIKE", "a")])).toBe("CAST(kind AS TEXT) ILIKE '%a%'");
+    expect(chipsToWhere([pred("n", "character varying(80)", "ILIKE", "a")])).toBe("n ILIKE '%a%'");
   });
 
   test("quotes are doubled", () => {
