@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rowkery_core::config::config_dir;
+use rowkery_core::config::{config_dir, create_private_dir, open_private, write_private};
 use serde::{Deserialize, Serialize};
 
 const LOG_FILE: &str = "mcp-log.jsonl";
@@ -128,7 +128,7 @@ fn log_path() -> PathBuf {
 /// Best effort: a log that can't be written never fails the call.
 pub fn append(entry: &Entry) {
     let dir = config_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    if create_private_dir(&dir).is_err() {
         return;
     }
     let Ok(mut line) = serde_json::to_string(entry) else {
@@ -145,7 +145,7 @@ pub fn append(entry: &Entry) {
             }
         });
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = open_private(&path, OpenOptions::new().create(true).append(true)) {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -250,7 +250,7 @@ pub fn clear() -> std::io::Result<()> {
     crate::samples::locked(|| {
         crate::samples::remove_all()?;
         let _ = std::fs::remove_file(config_dir().join("mcp-log.1.jsonl"));
-        match File::create(log_path()) {
+        match write_private(&log_path(), "") {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),

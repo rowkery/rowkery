@@ -137,6 +137,8 @@ function stubTauri() {
     sql: "WITH stale AS (SELECT id FROM orders WHERE total = 0) DELETE FROM orders WHERE id IN (SELECT id FROM stale)",
     reason: "Clear the zero-total orders.",
     client: "claude-code",
+    // Rowkery closed while committing it (reports#49).
+    commit_started_ms: now - 5 * 60_000,
   };
   const plans = {
     [P1.id]: { connection_name: "Platform API", statements: [{ verb: "UPDATE", target: "customers", sql: P1.sql, destructive: false, triggers: [{ name: "customers_audit", event: "UPDATE" }] }] },
@@ -339,9 +341,11 @@ check((await page.textContent('[data-testid="pp-dry-line"]')) === "Couldn't read
 check((await page.getAttribute('[data-testid="pp-card"][aria-current="true"]', "data-proposal-id")) === "p_000000000003", "↓ moved to its card");
 // Text on purpose: a card for SQL the lexer can't read shows the SQL itself.
 check((await page.textContent('[data-proposal-id="p_000000000003"] [data-testid="pp-card-head"]')).startsWith("WITH stale AS"), "its card shows the SQL's start");
+check((await page.textContent('[data-testid="pp-cut-short"]'))?.includes("may already be saved"), "a commit cut short says it may be saved");
 await shot("6-unread");
 await page.keyboard.press("ArrowUp");
 await page.waitForSelector('[data-proposal="p_000000000001"] [data-testid="pp-dry-run"]');
+check(!(await page.$('[data-testid="pp-cut-short"]')), "the others don't");
 
 // 9. Dry run, then Commit ⇧⌘↵: the rows moved, so nothing is saved and the fresh dry run shows.
 await page.click('[data-testid="pp-dry-run"]');

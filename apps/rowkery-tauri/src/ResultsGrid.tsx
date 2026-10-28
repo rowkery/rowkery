@@ -27,7 +27,7 @@ import type { CommandState } from "./commands";
 import { noteTrigger, useTip } from "./Tips";
 import { rowToJson, type QuickLookLinks } from "./QuickLook";
 import { binEdge, columnProfiles, profileCaption, profileSample } from "./columnProfile";
-import { chipLiteral } from "./filterChips";
+import { chipLiteral, readsAsNull } from "./filterChips";
 import { ResultRows, useResultRows, valueText } from "./resultStore";
 import type { SortKey } from "./tableSort";
 import { ProfileBar } from "./GridProfileBar";
@@ -350,7 +350,7 @@ function ResultsGridView({
       isNull: filterCell.isNull,
       nullable: !keyColumns?.notNull?.has(filterCell.column.name),
       shown: (() => {
-        const lit = chipLiteral(filterCell.text, filterCell.column.type_name);
+        const lit = chipLiteral(filterCell.text, filterCell.column.type_name, undefined, readsAsNull(filterCell.text));
         return lit.length > 28 ? `${lit.slice(0, 26)}…'` : lit;
       })(),
     };

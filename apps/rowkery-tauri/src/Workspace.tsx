@@ -95,7 +95,7 @@ import type { CompletionResult } from "./sqlComplete";
 import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } from "./doneNotify";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
-import { forgetTabTitles, noteTabTitles } from "./openTransactions";
+import { forgetTabTitles, noteTabTitles, transactionBlocksClose } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -111,11 +111,13 @@ import {
   chipsToWhere,
   defaultOp,
   parseFragment,
+  readsAsNull,
   renameFragmentColumn,
   savedChips,
   textColumns,
   unknownColumn,
   type FilterChip,
+  type PredicateChip,
 } from "./filterChips";
 import { flushPersist, readKey, writeKey } from "./persist";
 import type { SelectionStats } from "./selectionStats";
@@ -245,6 +247,12 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 const NOTICE_MS = 2400;
 /** Force stop: how long core's stop has to report back before the tab lets the run go. */
 const FORCE_STOP_GRACE_MS = 2000;
+/**
+ * How long after Cancel a second one is a Force stop, so a quick double Esc
+ * is one cancel: core's `FORCE_ASK_AFTER` (1 s, from when core takes the
+ * first cancel) and a margin, or core would ignore it.
+ */
+const FORCE_READY_MS = 1200;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -539,6 +547,7 @@ export function Workspace({
   const renderError = activeRun.error;
   const runStartedAt = activeRun.startedAt;
   const cancelling = activeRun.cancelling;
+  const forceReady = cancelling && !!activeRun.forceReady;
   /** When the shown tab last stopped running: an Esc just after it was meant for the run (`escMayDiscard`). */
   const runEnd = useRef<{ running: boolean; endedAt: number | null }>({ running: false, endedAt: null });
   if (runEnd.current.running !== (runStartedAt !== null)) {
@@ -689,7 +698,12 @@ export function Workspace({
     for (const entry of entries) if (closedTabs.current.includes(entry)) entry.run = undefined;
   };
   const [closedCount, setClosedCount] = useState(0);
-  const closeTab = (id: number) => {
+  // Closing ends the tab's session: never over its open transaction.
+  const closeTab = async (id: number) => {
+    if (await transactionBlocksClose([windowId], [id])) return;
+    closeTabNowRef.current(id);
+  };
+  const closeTabNow = (id: number) => {
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
     const tab = tabs[index];
@@ -739,8 +753,16 @@ export function Workspace({
     }
   };
 
+  const closeTabNowRef = useRef(closeTabNow);
+  closeTabNowRef.current = closeTabNow;
+
   /** The tab menu's Close other tabs: each goes to Recently closed; Undo puts them all back. */
-  const closeOtherTabs = (keepId: number) => {
+  const closeOtherTabs = async (keepId: number) => {
+    const others = tabsRef.current.filter((t) => t.id !== keepId).map((t) => t.id);
+    if (await transactionBlocksClose([windowId], others)) return;
+    closeOtherTabsNowRef.current(keepId);
+  };
+  const closeOtherTabsNow = (keepId: number) => {
     const entries: ClosedTab[] = [];
     tabs.forEach((tab, index) => {
       if (tab.id === keepId) return;
@@ -760,6 +782,9 @@ export function Workspace({
       commit: () => releaseClosedRows(entries),
     });
   };
+
+  const closeOtherTabsNowRef = useRef(closeOtherTabsNow);
+  closeOtherTabsNowRef.current = closeOtherTabsNow;
 
   /** Puts a closed tab back where it was, as it was (a new id; no query running). */
   const reopenTab = (entry: ClosedTab) => {
@@ -2227,15 +2252,27 @@ export function Workspace({
   // Elapsed times tick in `Elapsed` alone (the run clock, TabStatus.tsx): a running
   // query never re-renders the workspace or the grid.
 
-  // Cancel asks the server; pressed again (Force stop, or Esc twice) core
-  // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel. A run whose end never reaches
-  // the tab even then is let go, so the tab is never stuck on Running.
+  // Cancel asks the server; pressed again a second later (Force stop, or
+  // Esc again) core stops the run outright, which rolls back an open
+  // transaction, so a quick double Esc is one cancel. Core also stops it by
+  // itself after 3 s, since a dead connection never answers a cancel. A run
+  // whose end never reaches the tab even then is let go, so the tab is never
+  // stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
-    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
-    patchRun(tabId, { cancelling: true });
+    const run = runsRef.current[tabId];
+    if (run?.cancelling && !run.forceReady) return;
+    const giveUp = run?.cancelling ? abandonRun(windowId, tabId) : undefined;
+    if (!run?.cancelling) {
+      patchRun(tabId, { cancelling: true, forceReady: false });
+      // This run's, not a later one cancelled in the same tab.
+      const startedAt = run?.startedAt;
+      setTimeout(() => {
+        const now = runsRef.current[tabId];
+        if (now?.cancelling && now.startedAt === startedAt) patchRun(tabId, { forceReady: true });
+      }, FORCE_READY_MS);
+    }
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
@@ -3081,13 +3118,14 @@ export function Workspace({
     const t = db ? findTable(schemaTree, tableKey(db, target.schema, target.table)) : undefined;
     if (!t || sqlLiteral(value) === null) return;
     const v = value as Record<string, unknown>;
-    const chip: FilterChip = {
+    const chip: PredicateChip = {
       kind: "pred",
       column: target.column,
       type: t.table.columns?.find((c) => c.name === target.column)?.type_name ?? "",
       op: "=",
       value: "Text" in v ? String(v.Text) : "BigInt" in v ? String(v.BigInt) : safeFormatCell(value),
     };
+    if (readsAsNull(chip.value)) chip.text = true;
     lookOnLand.current = { tableKey: t.key, stale: result ?? null };
     openTable(t, {
       keep: own,
@@ -3266,7 +3304,16 @@ export function Workspace({
 
   /** The grid's cell menu, profile segments and histogram drags add chips. */
   const gridFilter = useStableCallback((column: string, op: ChipDraft["op"], value: string = "", value2?: string) =>
-    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 }),
+    addChip({
+      kind: "pred",
+      column,
+      type: chipType(column),
+      op,
+      value,
+      value2,
+      // A cell's text is itself, even the word null (rowkery/reports#44).
+      ...(readsAsNull(value) && (op === "=" || op === "IS DISTINCT FROM") ? { text: true as const } : {}),
+    }),
   );
 
   /**
@@ -3677,11 +3724,12 @@ export function Workspace({
                 <button
                   type="button"
                   className="cancel-btn"
-                  data-cancel={cancelling ? "force" : "cancel"}
-                  title={cancelling ? "Stop it now, without waiting for the server" : undefined}
+                  data-cancel={forceReady ? "force" : "cancel"}
+                  title={forceReady ? "Stop it now, without waiting for the server" : undefined}
+                  disabled={cancelling && !forceReady}
                   onClick={() => void onCancel()}
                 >
-                  {cancelling ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
+                  {forceReady ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
                 </button>
               </span>
   );
@@ -4886,6 +4934,7 @@ export function Workspace({
                   sqlstate={result.sqlstate ?? null}
                   sql={activeRun.ranSql ?? null}
                   position={result.error_position ?? null}
+                  detail={result.error_detail ?? null}
                   suggestion={activeRun.errorMark?.suggestion ?? null}
                   onReplace={applySuggestion}
                   onReport={() => reportIssue(true)}

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::config_dir;
+use crate::config::{config_dir, create_private_dir, write_private};
 use crate::db::SchemaCatalog;
 
 const FORMAT: u32 = 1;
@@ -78,12 +78,12 @@ pub fn store(connection_id: &str, database: &str, cached: &CachedCatalog) {
     let Some(parent) = target.parent() else {
         return;
     };
-    if fs::create_dir_all(parent).is_err() {
+    if create_private_dir(parent).is_err() {
         return;
     }
     let tmp = target.with_extension("json.tmp");
     if let Ok(bytes) = serde_json::to_vec(cached) {
-        if fs::write(&tmp, bytes).is_ok() {
+        if write_private(&tmp, bytes).is_ok() {
             let _ = fs::rename(&tmp, &target);
         }
     }

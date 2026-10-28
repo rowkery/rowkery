@@ -106,7 +106,7 @@ fn load_fallback_key() -> Result<[u8; 32], SecretError> {
 /// Replaces `path` with `bytes` whole: a reader in another process never
 /// sees half.
 fn replace_whole(path: &std::path::Path, bytes: &[u8]) -> Result<(), SecretError> {
-    fs::create_dir_all(config_dir())?;
+    crate::config::create_private_dir(&config_dir())?;
     let tmp = path.with_extension(format!("tmp.{}", random_hex(8)));
     let placed = write_whole(&tmp, bytes).and_then(|()| Ok(fs::rename(&tmp, path)?));
     if placed.is_err() {
@@ -391,8 +391,10 @@ fn cache_forget(account: &str) {
 /// Why a connection's keychain item couldn't be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unread {
-    /// A denied or unanswerable prompt, or a value that isn't our JSON.
+    /// A denied or unanswerable prompt: a save then saves nothing.
     Refused,
+    /// A value that isn't our JSON: left alone, the file holds what is saved.
+    Unparseable,
     /// No keychain to ask: the file holds everything.
     NoKeychain,
     /// A keychain this machine answered before can't be reached now (a
@@ -496,7 +498,7 @@ fn finish_fold(connection_id: &str) {
 /// connection's item and deleted (macOS asks once for each, one last time).
 fn read_item(connection_id: &str) -> Result<Item, Unread> {
     // A value that isn't our JSON is left alone rather than overwritten.
-    let parse = |json: String| serde_json::from_str::<Item>(&json).map_err(|_| Unread::Refused);
+    let parse = |json: String| serde_json::from_str::<Item>(&json).map_err(|_| Unread::Unparseable);
     let unread = |err: SecretError| match err {
         SecretError::NoKeychain(_) if keychain_used() => Unread::Outage,
         SecretError::NoKeychain(_) => Unread::NoKeychain,
@@ -593,14 +595,16 @@ fn locked<T>(change: impl FnOnce() -> Result<T, SecretError>) -> Result<T, Secre
     if HELD.get() {
         return change();
     }
-    let file = fs::create_dir_all(config_dir()).ok().and_then(|_| {
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(config_dir().join(LOCK_FILE))
-            .ok()
-    });
+    let file = crate::config::create_private_dir(&config_dir())
+        .ok()
+        .and_then(|_| {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(config_dir().join(LOCK_FILE))
+                .ok()
+        });
     let started = std::time::Instant::now();
     let _held = match file {
         Some(file) => loop {
@@ -687,11 +691,12 @@ fn store_secrets(connection_id: &str, secrets: &[(SecretKind, &str)]) -> Result<
 /// Stores `set` and removes `remove` with one read and one write of the
 /// connection's keychain item, made from the item as it is now.
 ///
-/// Where the item can't take a secret (no keychain, a refused read, too big
-/// for it), the encrypted file does. Reads look in the file first, and
-/// every save into the item drops the file's copy, so the newer of the two
-/// is always the one read, and an item that couldn't be read is never
-/// saved from an older copy.
+/// Where the item can't take a secret (no keychain, a keychain that can't
+/// be reached, a value that isn't ours, too big for it), the encrypted file
+/// does. A denied prompt saves nothing, and the next save asks again.
+/// Reads look in the file first, and every save into the item drops the
+/// file's copy, so the newer of the two is always the one read, and an item
+/// that couldn't be read is never saved from an older copy.
 fn change_secrets(
     connection_id: &str,
     set: &[(SecretKind, &str)],
@@ -703,7 +708,17 @@ fn change_secrets(
                 Ok(read) => Some(read),
                 // No keychain: the file holds everything.
                 Err(unread) if none_here(unread) => None,
-                // A secret left in the item can't be removed from the file.
+                // A denied prompt: the password isn't put anywhere else.
+                Err(Unread::Refused) => {
+                    if let Ok(mut c) = item_cache().lock() {
+                        c.remove(&cache_key(connection_id));
+                    }
+                    return Err(SecretError::Message(
+                        "The keychain prompt was denied or couldn't be shown, so nothing was \
+                         saved. Save again and click Always Allow."
+                            .into(),
+                    ));
+                }
                 Err(_) if !remove.is_empty() => {
                     // Ask again on the next try.
                     if let Ok(mut c) = item_cache().lock() {
@@ -1473,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_fresh_read_saves_to_the_file_and_reads_find_it_first() {
+    fn a_denied_prompt_saves_nothing_and_asks_again_next_save() {
         let _guard = test_guard();
         let _mock = mock_on(&[], false);
         put_item(
@@ -1487,37 +1502,50 @@ mod tests {
             Some("old")
         );
         // Another process adds the mask key; then the prompt for the fresh
-        // read is dismissed. A save from this run's copy would drop the key.
+        // read is denied. Nothing is saved, in the item or the file, so the
+        // key isn't dropped by a save from this run's copy either.
         put_item(
             "k10",
             r#"{"db-password":"old","ssh-password":"sshpw","gcp-key":"g","mask-key":"K"}"#,
         );
         set_deny(true);
-        store_secret("k10", SecretKind::DbPassword, "new").unwrap();
-        // A removal needs the item: refused, and asked again next time.
+        let err = store_secret("k10", SecretKind::DbPassword, "new").unwrap_err();
+        assert!(err.to_string().contains("Always Allow"), "{err}");
+        assert_eq!(
+            file_copy(&entry_account("k10", SecretKind::DbPassword)).unwrap(),
+            None
+        );
+        // A removal needs the item: refused too, and asked again next time.
         assert!(delete_secret("k10", SecretKind::GcpKey).is_err());
         assert!(!keychain_refused("k10"));
         let item: Item = mock_state(|k| serde_json::from_str(&k.items["k10"]).unwrap());
         assert_eq!(item["db-password"], "old");
         assert_eq!(item["mask-key"], "K");
-        // The next run reads the file's newer copy, and it moves in.
+        // Allowed on the next save, it goes into the item.
         set_deny(false);
-        forget_cached("k10");
+        store_secret("k10", SecretKind::DbPassword, "new").unwrap();
+        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k10"]).unwrap());
+        assert_eq!(item["db-password"], "new");
+        assert_eq!(item["mask-key"], "K");
         assert_eq!(
             get_secret("k10", SecretKind::DbPassword)
                 .unwrap()
                 .as_deref(),
             Some("new")
         );
-        let item: Item = mock_state(|k| serde_json::from_str(&k.items["k10"]).unwrap());
-        assert_eq!(item["db-password"], "new");
-        assert_eq!(item["mask-key"], "K");
-        assert_eq!(
-            file_copy(&entry_account("k10", SecretKind::DbPassword)).unwrap(),
-            None
-        );
         delete_secret("k10", SecretKind::GcpKey).unwrap();
         assert_eq!(get_secret("k10", SecretKind::GcpKey).unwrap(), None);
+        // An item holding something that isn't ours is left alone; the
+        // save goes to the file.
+        put_item("k91", "not ours");
+        store_secret("k91", SecretKind::DbPassword, "pw").unwrap();
+        assert_eq!(mock_state(|k| k.items["k91"].clone()), "not ours");
+        assert_eq!(
+            get_secret("k91", SecretKind::DbPassword)
+                .unwrap()
+                .as_deref(),
+            Some("pw")
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 
@@ -1551,15 +1579,19 @@ mod tests {
         let before = reads();
         store_secret("k16", SecretKind::DbPassword, "b").unwrap();
         assert_eq!(reads() - before, 1);
-        // After a denied read this run, writes ask nothing more and go to
-        // the file. No mask key is made: the item may hold one already.
+        // After a denied read this run, a write asks nothing more and saves
+        // nothing. No mask key is made: the item may hold one already.
         set_deny(true);
         put_item("k12", r#"{"db-password":"pw","mask-key":"K"}"#);
         assert!(get_secret("k12", SecretKind::DbPassword).is_ok());
         let before = reads();
-        store_secret("k12", SecretKind::DbPassword, "x").unwrap();
         assert!(mask_key("k12").is_err());
+        assert!(store_secret("k12", SecretKind::DbPassword, "x").is_err());
         assert_eq!(reads() - before, 0);
+        assert_eq!(
+            file_copy(&entry_account("k12", SecretKind::DbPassword)).unwrap(),
+            None
+        );
         std::env::remove_var("ROWKERY_CONFIG_DIR");
     }
 

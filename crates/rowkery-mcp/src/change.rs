@@ -33,7 +33,7 @@ pub async fn check(
         ));
     }
     let changes = safety::row_changes(sql)?;
-    let marks = mask::parse(target.record.masked_columns(&target.database));
+    let marks = crate::masked_marks(store, target).await?;
     match &target.record {
         ConnectionRecord::Postgres(_) => {
             for change in &changes {

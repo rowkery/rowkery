@@ -421,10 +421,16 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
     }
     format!(
         "WITH RECURSIVE \
+        stepped AS (SELECT a.aggfnoid::oid AS oid FROM pg_aggregate a JOIN pg_proc f \
+          ON f.oid IN (a.aggtransfn, a.aggfinalfn, a.aggcombinefn, a.aggserialfn, \
+            a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn, a.aggmfinalfn) \
+          JOIN pg_language fl ON fl.oid = f.prolang \
+          WHERE NOT (fl.lanname IN ('c', 'internal') AND f.provolatile = 'i')), \
         code AS (SELECT p.oid FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace \
           JOIN pg_language l ON l.oid = p.prolang \
           WHERE s.nspname NOT IN ('pg_catalog', 'information_schema') \
-          AND NOT (l.lanname IN ('c', 'internal') AND p.provolatile = 'i')), \
+          AND NOT (l.lanname IN ('c', 'internal') AND p.provolatile = 'i' \
+            AND p.oid NOT IN (SELECT oid FROM stepped))), \
         bad_ops AS (SELECT o.oid FROM pg_operator o WHERE o.oprcode IN (SELECT oid FROM code)), \
         bad_types AS (SELECT t.oid FROM pg_type t \
           WHERE t.typnamespace <> 'pg_catalog'::regnamespace AND (\
@@ -444,7 +450,8 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
           JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid \
           JOIN tainted t ON d.refclassid = 'pg_class'::regclass AND d.refobjid = t.oid) \
         SELECT 'f', s.nspname::text, p.proname::text, p.provolatile::text, \
-          (l.lanname IN ('c', 'internal') AND p.provolatile = 'i')::text, p.pronargs::text \
+          (l.lanname IN ('c', 'internal') AND p.provolatile = 'i' \
+            AND p.oid NOT IN (SELECT oid FROM stepped))::text, p.pronargs::text \
           FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang \
           WHERE p.proname::text = ANY ({names}) \
         UNION ALL SELECT 'o', s.nspname::text, o.oprname::text, '', '', '' \

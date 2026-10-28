@@ -214,8 +214,10 @@ enum Command {
     CountTransactions {
         respond_to: oneshot::Sender<Option<usize>>,
     },
-    /// Each window's query tabs that may hold the user's open transaction.
+    /// Each window's query tabs that may hold the user's open transaction
+    /// (`held`: as a quit counts them, see `window_transactions`).
     OpenTransactions {
+        held: bool,
         respond_to: oneshot::Sender<Vec<(String, u64)>>,
     },
     ListDatabases {
@@ -498,6 +500,8 @@ struct QueryFailure {
     message: String,
     sqlstate: Option<String>,
     position: Option<u32>,
+    /// The server's DETAIL and HINT lines.
+    detail: Option<String>,
 }
 
 impl From<String> for QueryFailure {
@@ -516,10 +520,12 @@ impl From<DriverError> for QueryFailure {
                 message,
                 sqlstate,
                 position,
+                detail,
             } => Self {
                 message,
                 sqlstate: Some(sqlstate),
                 position,
+                detail,
             },
             other => other.into_message().into(),
         }
@@ -657,6 +663,9 @@ struct CoreState {
 #[derive(Default)]
 struct CancelState {
     requested: bool,
+    /// When the first cancel came: a second one counts as a force stop only
+    /// [`FORCE_ASK_AFTER`] later, so a quick double Esc is one cancel.
+    requested_at: Option<std::time::Instant>,
     handle: Option<CancelHandle>,
     stop: Arc<tokio::sync::Notify>,
     /// The run is waiting for a free connection: nothing to ask the server,
@@ -690,6 +699,10 @@ pub const COUNT_TAB: u64 = u64::MAX - 1;
 /// a dead socket (sleep, a network change, a dropped SSH tunnel) never
 /// answers a cancel, and the query sent into it never returns.
 const FORCE_STOP_AFTER: Duration = Duration::from_secs(3);
+
+/// How long after a cancel a second one stops the run outright (Force
+/// stop), which drops its session and rolls back an open transaction.
+const FORCE_ASK_AFTER: Duration = Duration::from_secs(1);
 
 type CancelSlot = Arc<Mutex<CancelState>>;
 
@@ -2221,6 +2234,7 @@ fn finish_query_worker<S: EventSink + ?Sized>(
             detail: QueryDetail {
                 sqlstate: failure.sqlstate,
                 error_position: failure.position,
+                error_detail: failure.detail,
                 ..QueryDetail::default()
             },
         },
@@ -2589,11 +2603,19 @@ fn spawn_open_window(
 /// Marks a query cancelled and interrupts it if its worker is running.
 /// Asks the run to stop: SQLite is interrupted; Postgres gets a cancel
 /// request, and if the run hasn't ended `FORCE_STOP_AFTER` later (or this is
-/// the second ask) it is stopped outright.
+/// a second ask, `FORCE_ASK_AFTER` after the first) it is stopped outright.
+/// A second ask sooner does nothing.
 fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
     if let Ok(mut guard) = slot.lock() {
-        let again = guard.requested;
+        let again = match guard.requested_at {
+            Some(at) if at.elapsed() < FORCE_ASK_AFTER => return,
+            Some(_) => true,
+            None => false,
+        };
         guard.requested = true;
+        guard
+            .requested_at
+            .get_or_insert_with(std::time::Instant::now);
         let stop = guard.stop.clone();
         match guard.handle.take() {
             Some(CancelHandle::Sqlite(handle)) => {
@@ -3687,12 +3709,12 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 force_stop(&state.runtime, slot);
             }
         }
-        Command::OpenTransactions { respond_to } => {
+        Command::OpenTransactions { held, respond_to } => {
             let mut open: Vec<(String, u64)> = state
                 .windows
                 .keys()
                 .flat_map(|w| {
-                    let tabs = window_transactions(state, w, false);
+                    let tabs = window_transactions(state, w, held);
                     tabs.into_iter().map(move |t| (w.clone(), t))
                 })
                 .collect();
@@ -4659,8 +4681,22 @@ impl CoreBridge {
     /// Each window's query tabs (window id, tab id) whose session may hold
     /// the user's open transaction.
     pub fn open_transactions(&self) -> Vec<(String, u64)> {
-        self.send_command(|respond_to| Command::OpenTransactions { respond_to })
-            .unwrap_or_default()
+        self.send_command(|respond_to| Command::OpenTransactions {
+            held: false,
+            respond_to,
+        })
+        .unwrap_or_default()
+    }
+
+    /// As [`Self::open_transactions`], but a tab out on a run counts only
+    /// when the run started inside the user's transaction: closing the tab
+    /// cancels a running write as it always did.
+    pub fn held_transactions(&self) -> Vec<(String, u64)> {
+        self.send_command(|respond_to| Command::OpenTransactions {
+            held: true,
+            respond_to,
+        })
+        .unwrap_or_default()
     }
 
     /// Databases on the window's server; empty for SQLite.
