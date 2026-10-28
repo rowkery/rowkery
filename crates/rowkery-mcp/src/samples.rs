@@ -8,7 +8,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
-use rowkery_core::config::config_dir;
+use rowkery_core::config::{config_dir, create_private_dir, open_private, write_private};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
@@ -89,7 +89,7 @@ fn rewrite(list: &[Sample]) {
         .map(|l| l + "\n")
         .collect();
     let tmp = tmp_path();
-    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, path()).is_err() {
+    if write_private(&tmp, text).is_ok() && std::fs::rename(&tmp, path()).is_err() {
         let _ = std::fs::remove_file(tmp);
     }
 }
@@ -105,7 +105,7 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// read-only lock file, a network volume without locks) `change` runs
 /// unlocked, as it did before there was a lock.
 pub(crate) fn locked<T>(change: impl FnOnce() -> T) -> Option<T> {
-    std::fs::create_dir_all(config_dir()).ok()?;
+    create_private_dir(&config_dir()).ok()?;
     let Ok(file) = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -165,7 +165,7 @@ pub fn save(sample: &Sample, now: u64) {
             rewrite(&list);
             return;
         }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path()) {
+        if let Ok(mut file) = open_private(&path(), OpenOptions::new().create(true).append(true)) {
             let _ = file.write_all(format!("{line}\n").as_bytes());
         }
     });

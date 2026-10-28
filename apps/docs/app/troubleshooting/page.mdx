@@ -68,7 +68,10 @@ When a connection fails, the window shows **Couldn't connect** in place of the e
 | `The SSH host key for HOST has CHANGED. Nothing was sent.` | See [SSH host key changed](#ssh-host-key-changed) |
 | `The SSH host HOST is new to this Mac.` | Rowkery hasn't seen this SSH server before and **Trust the host key on first connect** is off. Turn it on under Advanced, SSH tunnel, or check the key with the server's owner first |
 | `The SSH host HOST did not answer.` | The SSH server didn't answer within 15 seconds, or refused the connection. Check the SSH host and port |
-| `The SSH host HOST refused the key or password.` | The SSH user, key file or password is wrong |
+| `The SSH host HOST refused the key.` | The SSH user is wrong, or the server doesn't accept that key file |
+| `The SSH host HOST refused the password.` | The SSH user or password is wrong, or the server only takes keys |
+| `The SSH key file is encrypted. Enter its passphrase.` | The key file has a passphrase and none is saved. Enter it in the field under the key file |
+| `The SSH key file's passphrase is wrong.` | The saved passphrase doesn't open the key file |
 
 A Google Cloud SQL connection has causes of its own, such as a missing gcloud login or the Cloud SQL Client role. [When it can't connect](/google-cloud-sql/#when-it-cant-connect) lists them.
 
@@ -144,7 +147,7 @@ Every message an agent can get, with what it means, is on [MCP tools](/mcp-tools
 
 Press <kbd>Esc</kbd> or <kbd>⌘.</kbd>, or click **Cancel** beside the running time. Rowkery asks the server to cancel the query.
 
-If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop**. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
+If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop** a second after you cancel. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
 
 ## A table won't show on an old database
 

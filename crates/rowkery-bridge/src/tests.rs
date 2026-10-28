@@ -2033,12 +2033,33 @@ fn postgres_cancel_stops_a_run_on_a_dead_connection() {
         "the cancel got its chance first"
     );
 
-    // Cancel twice: stopped at once.
+    // Cancel twice at once (a quick double Esc): one cancel, which gets its
+    // chance before the run is stopped.
     let queue = bridge
         .run_window_query("w", 1, "SELECT 2".into(), None, false)
         .expect("run");
     thread::sleep(std::time::Duration::from_millis(300));
     bridge.cancel_window_query("w", 1);
+    bridge.cancel_window_query("w", 1);
+    let (cancelled, _, waited) =
+        wait_stopped(&queue, std::time::Duration::from_secs(8)).expect("stopped");
+    assert!(
+        cancelled && waited >= std::time::Duration::from_secs(2),
+        "{waited:?}"
+    );
+
+    // Cancel, and again a second later (Force stop): stopped at once.
+    let queue = bridge
+        .run_window_query("w", 1, "SELECT 2".into(), None, false)
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w", 1);
+    thread::sleep(std::time::Duration::from_millis(1100));
+    let early = wait_stopped(&queue, std::time::Duration::from_millis(10));
+    assert!(
+        early.is_none(),
+        "still waiting on the cancel, but got {early:?}"
+    );
     bridge.cancel_window_query("w", 1);
     let (cancelled, _, waited) =
         wait_stopped(&queue, std::time::Duration::from_secs(2)).expect("stopped");

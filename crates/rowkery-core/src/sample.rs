@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::config::{config_dir, AppConfig};
+use crate::config::{config_dir, create_private_dir, AppConfig};
 use crate::connections::{ConnectionRecord, SqliteConnection};
 
 /// Built into the binary; deterministic, so every copy is the same.
@@ -25,7 +25,7 @@ pub fn sample_path() -> PathBuf {
 /// either the old file or the new one, never half of one.
 pub fn write_sample() -> Result<PathBuf, String> {
     let dir = config_dir();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    create_private_dir(&dir).map_err(|e| e.to_string())?;
     let path = sample_path();
     let tmp = dir.join(format!("{SAMPLE_FILE}.tmp"));
     let _ = fs::remove_file(&tmp);

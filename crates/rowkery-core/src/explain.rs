@@ -8,7 +8,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectExplanation {
     /// `refused`, `timeout`, `dns`, `tls`, `auth`, `database`, `role`,
-    /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`, a Cloud SQL
+    /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`,
+    /// `ssh_key_passphrase`, a Cloud SQL
     /// class (`cloudsql_login`, `cloudsql_role`, `cloudsql_instance`,
     /// `cloudsql_api`, `cloudsql_ip`, `cloudsql_google`, `cloudsql_unreachable`,
     /// `cloudsql_tls`, `cloudsql`) or `unknown`.
@@ -90,12 +91,28 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
             Some("sshHost"),
         );
     }
+    if has("SSH: The key file") {
+        return e(
+            "ssh_key_passphrase",
+            Some(if has("passphrase is wrong") {
+                "The SSH key file's passphrase is wrong.".into()
+            } else {
+                "The SSH key file is encrypted. Enter its passphrase.".into()
+            }),
+            Some("sshPassword"),
+        );
+    }
     if has("SSH: Permission denied") || (has("tunnel") && says("authentication failed")) {
+        let what = if has("(password)") {
+            "password"
+        } else if has("(publickey)") {
+            "key"
+        } else {
+            "key or password"
+        };
         return e(
             "ssh_auth",
-            Some(format!(
-                "The SSH host {bastion} refused the key or password."
-            )),
+            Some(format!("The SSH host {bastion} refused the {what}.")),
             Some("sshPassword"),
         );
     }
@@ -416,8 +433,31 @@ mod tests {
             ("ssh_unknown", Some("The SSH host bastion.internal is new to this Mac.".into()), Some("sshHost"))
         );
         assert_eq!(
-            class("SSH: Permission denied (publickey)", &S).0,
-            "ssh_auth"
+            class("SSH: Permission denied (publickey)", &S),
+            (
+                "ssh_auth",
+                Some("The SSH host bastion.internal refused the key.".into()),
+                Some("sshPassword")
+            )
+        );
+        assert_eq!(
+            class("SSH: Permission denied (password)", &S).1,
+            Some("The SSH host bastion.internal refused the password.".into())
+        );
+        assert_eq!(
+            class(
+                "SSH: The key file is encrypted, and no passphrase is saved for it.",
+                &S
+            ),
+            (
+                "ssh_key_passphrase",
+                Some("The SSH key file is encrypted. Enter its passphrase.".into()),
+                Some("sshPassword")
+            )
+        );
+        assert_eq!(
+            class("SSH: The key file's passphrase is wrong.", &S).1,
+            Some("The SSH key file's passphrase is wrong.".into())
         );
         // A Postgres refusal behind a working tunnel is still Postgres's.
         assert_eq!(class("Postgres rejected password for 'app'", &S).0, "auth");

@@ -62,10 +62,13 @@ An agent never gets a marked column's real value. In its place it gets a stand-i
 | `UNION ALL` with a value or another column in that position, such as `SELECT email … UNION ALL SELECT 'a@x.com'` | No: the agent's value would get a stand-in too, and matching stand-ins would show the guess was right |
 | `UNION ALL` of masked columns of different types, such as `varchar` in one table and `text` in another | No: select the column from each table in a query of its own |
 | The table's partitions or child tables (`INHERITS`), in any schema | Masked as the table itself |
+| A generated column built from it, such as `email_lower GENERATED ALWAYS AS (lower(email))` | Masked as the column itself, and listed as masked |
 | A whole row of the table, such as `row_to_json(c)` | No: the agent names the columns it needs |
 | A plan that walks an index on it | No, since the index order would give the values away |
 
 On SQLite the rule is stricter: a masked column can only be returned as it is, from the main SELECT, with no sorting, grouping, subqueries or combined results in the same query.
+
+On SQLite, every generated column of a table with a masked column is masked too, since SQLite keeps the expression only in the table's definition.
 
 Filtering counts as reading: `WHERE email LIKE 'a%'`, then `'ab%'`, would spell out a value one character per call. That's why anything beyond returning or counting is refused. When it is, the agent is told why, such as "customers.email is masked. You can return it as it is or count it, but not filter, sort, group or join on it, or use it in an expression."
 

@@ -62,7 +62,7 @@ When ⌘K, a picker, a sheet, New connection or the Agents page is open, <kbd>�
 
 ### Running queries
 
-<kbd>Esc</kbd> or <kbd>⌘.</kbd> cancels the shown tab's query. The **Cancel** button then reads **Force stop**: press it, or <kbd>Esc</kbd> again, to stop the run outright without waiting for the server. If the server hasn't answered a cancel within three seconds, Rowkery stops the run by itself, since a dead connection never answers. <kbd>⌘.</kbd> does nothing but cancel, so use it when something else is open that would take <kbd>Esc</kbd> first.
+<kbd>Esc</kbd> or <kbd>⌘.</kbd> cancels the shown tab's query. A second later the **Cancel** button reads **Force stop**: press it, or <kbd>Esc</kbd> again, to stop the run outright without waiting for the server. That closes the run's connection, which rolls back an open transaction, so a quick double <kbd>Esc</kbd> counts as one cancel. If the server hasn't answered a cancel within three seconds, Rowkery stops the run by itself, since a dead connection never answers. <kbd>⌘.</kbd> does nothing but cancel, so use it when something else is open that would take <kbd>Esc</kbd> first.
 
 ### In the grid
 
