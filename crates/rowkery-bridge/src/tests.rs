@@ -3497,6 +3497,161 @@ fn postgres_dead_sessions_are_replaced_off_the_query_path() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A TCP proxy to Postgres that holds each new connection (accepted,
+/// nothing passed) while `hold` is set, like a laptop whose network is
+/// still coming back. Returns its port, the switch, and how many it holds.
+fn holding_proxy(
+    upstream: String,
+) -> (
+    u16,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let hold = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (switch, count) = (hold.clone(), held.clone());
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let (hold, held, upstream) = (switch.clone(), count.clone(), upstream.clone());
+            thread::spawn(move || {
+                if hold.load(Ordering::SeqCst) {
+                    held.fetch_add(1, Ordering::SeqCst);
+                    while hold.load(Ordering::SeqCst) {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    held.fetch_sub(1, Ordering::SeqCst);
+                }
+                let Ok(server) = TcpStream::connect(&upstream) else {
+                    return;
+                };
+                let (mut c, mut s) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                thread::spawn(move || {
+                    let _ = std::io::copy(&mut c, &mut s);
+                });
+                let (mut s, mut c) = (server, client);
+                let _ = std::io::copy(&mut s, &mut c);
+            });
+        }
+    });
+    (port, hold, held)
+}
+
+/// After a sleep, the window's dead sessions are replaced side by side, and
+/// a run never waits for its own tab's replacement: it opens its own session
+/// (the replacement is dropped), and a tab closed meanwhile keeps none.
+#[test]
+fn postgres_a_run_never_waits_for_its_sessions_replacement() {
+    let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+        eprintln!(
+            "skip postgres_a_run_never_waits_for_its_sessions_replacement (set ROWKERY_PG_HOST)"
+        );
+        return;
+    };
+    let pg_port = std::env::var("ROWKERY_PG_PORT").unwrap_or_else(|_| "54329".into());
+    let (port, hold, held) = holding_proxy(format!("{host}:{pg_port}"));
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "postgres-replacing";
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Postgres(PostgresConnection {
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_timeout_s: None,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            environment: None,
+            safe_mode: Default::default(),
+            id: id.into(),
+            name: id.into(),
+            host: "127.0.0.1".into(),
+            port,
+            database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+            username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+            ssl_mode: PostgresSslMode::Disable,
+            ssl_root_cert: None,
+            ssh: None,
+            cloud_sql: None,
+        }),
+        ConnectionSecrets {
+            db_password: Some(
+                std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("save");
+    bridge.open_window("w", id, None).expect("open");
+    let pid = |tab| match window_query(&bridge, "w", tab, "SELECT pg_backend_pid()").0 {
+        Some(Value::Int(p)) => p,
+        other => panic!("pid: {other:?}"),
+    };
+    let pids: Vec<i64> = [1, 2, 3].into_iter().map(pid).collect();
+    for victim in &pids {
+        let (_, err, ..) = window_query(
+            &bridge,
+            "w",
+            9,
+            &format!("SELECT pg_terminate_backend({victim})"),
+        );
+        assert_eq!(err, None);
+    }
+    thread::sleep(std::time::Duration::from_millis(300));
+
+    // The network is still coming back: replacements can't open yet.
+    hold.store(true, Ordering::SeqCst);
+    thread::scope(|scope| {
+        let ping = scope.spawn(|| bridge.ping_idle_blocking("w", std::time::Duration::ZERO));
+        // Pings of the dead may each take their whole 3 s.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while held.load(Ordering::SeqCst) < 3 {
+            assert!(Instant::now() < deadline, "three replacements open at once");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Tab 2 closes while its replacement opens.
+        bridge.close_window_tab("w", 2);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Tab 1 runs: it doesn't wait for its replacement but opens its own,
+        // which is held too until the network is back.
+        let queue = bridge
+            .run_window_query("w", 1, "SELECT 1::int8".into(), None, false)
+            .expect("run");
+        while held.load(Ordering::SeqCst) < 4 {
+            assert!(Instant::now() < deadline, "tab 1 opens its own session");
+            thread::sleep(Duration::from_millis(10));
+        }
+        hold.store(false, Ordering::SeqCst);
+        let events = loop {
+            let events = queue.lock().unwrap().clone();
+            if events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::QueryFinished { .. }))
+            {
+                break events;
+            }
+            assert!(Instant::now() < deadline, "tab 1 ran");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::QueryWaiting { .. })),
+            "no wait: {events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::QueryFinished { error: None, .. })));
+        // Only tab 3's replacement is kept: tab 1 has its own, tab 2 closed.
+        assert_eq!(ping.join().unwrap(), 1);
+    });
+}
+
 /// A window's sessions share one SSH tunnel: three tabs running at once
 /// open one SSH connection, not three; closing the window closes it.
 #[test]
@@ -5082,6 +5237,7 @@ fn postgres_an_eleventh_tab_waits_for_a_free_connection() {
                 e,
                 CoreEvent::QueryWaiting {
                     waiting: true,
+                    tab: false,
                     tab_id: 11,
                     ..
                 }
@@ -6582,17 +6738,17 @@ fn postgres_a_run_behind_the_tabs_busy_session_says_it_waits() {
         assert!(Instant::now() < deadline, "the second run ended");
         thread::sleep(Duration::from_millis(5));
     };
-    let waits: Vec<bool> = events
+    let waits: Vec<(bool, bool)> = events
         .iter()
         .filter_map(|e| match e {
-            CoreEvent::QueryWaiting { waiting, .. } => Some(*waiting),
+            CoreEvent::QueryWaiting { waiting, tab, .. } => Some((*waiting, *tab)),
             _ => None,
         })
         .collect();
     assert_eq!(
         waits,
-        vec![true, false],
-        "said it waited, then that it has one"
+        vec![(true, true), (false, false)],
+        "said it waited for the tab's own session, then that it has one"
     );
     let error = events.iter().find_map(|e| match e {
         CoreEvent::QueryFinished { error, .. } => Some(error.clone()),

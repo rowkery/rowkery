@@ -2,7 +2,8 @@
 // Every connection a saved connection may hold (10) is busy: core sends the
 // run a `waiting` frame (stubbed `invoke`), and the tab says so in plain
 // words instead of looking stuck: Run reads "Waiting" and the results header
-// "Waiting for a free connection", with the time and Cancel. Esc (and Ctrl+.) cancels the
+// "Waiting for a free connection", with the time and Cancel ("Waiting for
+// this tab's connection" when it is the tab's own that is still busy). Esc (and Ctrl+.) cancels the
 // wait at once; Cancel does too; once a connection frees, the run goes on as
 // usual and its rows show. Core's side (the cap, the wait, closing idle
 // sessions, a cancel that ends the wait) is
@@ -47,7 +48,8 @@ function stubTauri() {
         case "run_query": {
           const channel = args.onFrame;
           // All ten connections are busy: core says the run waits.
-          channel?.onmessage({ t: "waiting", query_id: 0, waiting: true });
+          // (Or, with __WAIT_TAB__, the tab's own connection still is.)
+          channel?.onmessage({ t: "waiting", query_id: 0, waiting: true, tab: !!window.__WAIT_TAB__ });
           const ended = await new Promise((resolve) => {
             window.__RUN__ = { resolve, channel };
           });
@@ -89,12 +91,12 @@ await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 const run = async () => {
   await page.click(`${ws} textarea[data-testid="sql-editor"]`);
   await page.keyboard.press("Control+Enter");
-  await page.waitForSelector(`${ws} [data-testid="run-btn"][data-waiting="connection"]`);
+  await page.waitForSelector(`${ws} [data-testid="run-btn"][data-waiting]`);
 };
 const waitingNow = () =>
   page.evaluate((sel) => {
     const btn = document.querySelector(`${sel} [data-testid="run-btn"]`);
-    const meta = document.querySelector(`${sel} [data-testid="card-meta"][data-state="running"] [data-waiting="connection"]`);
+    const meta = document.querySelector(`${sel} [data-testid="card-meta"][data-state="running"] [data-waiting]`);
     return {
       btn: btn?.dataset.waiting ?? null,
       label: btn?.querySelector('[data-testid="run-label"]')?.textContent ?? "",
@@ -143,4 +145,15 @@ await page.evaluate(() => window.__RUN__.resolve("free"));
 await page.waitForSelector(`${ws} [data-row-count="3"]`);
 check((await page.$(`${ws} [data-testid="run-btn"][data-waiting]`)) === null, "its 3 rows show, nothing says waiting");
 await page.screenshot({ path: `${OUT}/4-rows.png` });
+
+// 5. The tab's own connection is still busy (an earlier run, or a check
+// after a sleep): it says that, not that every connection is busy.
+await page.evaluate(() => (window.__WAIT_TAB__ = true));
+await run();
+await page.waitForTimeout(300);
+w = await waitingNow();
+check(w.btn === "tab" && w.label === "Waiting" && w.title === "Waiting for this tab's connection", `Run reads "${w.label}" (title "${w.title}")`);
+check(!!w.meta && w.meta.startsWith("Waiting for this tab's connection"), `the results header reads "${w.meta}"`);
+await page.screenshot({ path: `${OUT}/5-waiting-for-the-tab.png` });
+await page.evaluate(() => window.__RUN__.resolve("free"));
 await browser.close();

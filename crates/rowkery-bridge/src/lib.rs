@@ -1639,18 +1639,20 @@ fn run_postgres_query_on_runtime(
     let stopped_generation = pooled.generation;
     let run = async move {
         let mut attempt = 0;
-        // Every connection the saved connection may hold is busy: the tab
-        // says it is waiting for one, and a cancel stops the wait at once.
-        let on_wait = |waiting: bool| {
+        // Every connection the saved connection may hold is busy, or the
+        // tab's own still is: the tab says what it is waiting for, and a
+        // cancel stops the wait at once.
+        let on_wait = |wait: Option<pool::WaitFor>| {
             if let Ok(mut state) = interrupt_slot.lock() {
-                state.waiting = waiting;
+                state.waiting = wait.is_some();
             }
             push_event(
                 &events,
                 CoreEvent::QueryWaiting {
                     query_id,
                     tab_id,
-                    waiting,
+                    waiting: wait.is_some(),
+                    tab: wait == Some(pool::WaitFor::Tab),
                 },
             );
         };
@@ -2087,8 +2089,8 @@ fn apply_changes_now(
                         generation,
                         connection_id,
                         config,
-                        &|waiting| {
-                            if waiting {
+                        &|wait| {
+                            if wait == Some(pool::WaitFor::Place) {
                                 no_room.store(true, Ordering::SeqCst);
                             }
                         },
