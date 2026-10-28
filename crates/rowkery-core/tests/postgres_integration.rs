@@ -1166,3 +1166,71 @@ async fn postgres_sql_ascii_rows_say_why_they_cannot_show() {
         .expect("the bytes read");
     assert_eq!(bytes, 2);
 }
+
+/// rowkery/reports#52: another session's temporary tables are neither listed
+/// (they can't be opened from here) nor counted in the catalog fingerprint,
+/// so an application's temp tables don't make every window reload its
+/// schema. The window's own temp tables still show.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn postgres_other_sessions_temp_tables_stay_out_of_the_catalog() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use rowkery_core::db::postgres::{
+        session_catalog_fingerprint, session_execute, session_introspect,
+    };
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-temp-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let ours = open_session(config.id.clone(), config.clone())
+        .await
+        .expect("open");
+    let other = open_session(config.id.clone(), config).await.expect("open");
+    let names = |catalog: &rowkery_core::db::SchemaCatalog| -> Vec<String> {
+        catalog
+            .databases
+            .iter()
+            .flat_map(|d| &d.schemas)
+            .flat_map(|s| {
+                s.tables
+                    .iter()
+                    .map(move |t| format!("{}.{}", s.name, t.name))
+            })
+            .collect()
+    };
+
+    let before = session_catalog_fingerprint(&ours)
+        .await
+        .expect("fingerprint");
+    session_execute(
+        &other,
+        "CREATE TEMP TABLE it_their_scratch (id int PRIMARY KEY, n int)",
+    )
+    .await
+    .expect("their temp table");
+    let after = session_catalog_fingerprint(&ours)
+        .await
+        .expect("fingerprint");
+    assert_eq!(before, after, "another session's temp table moves nothing");
+    let listed = names(&session_introspect(&ours).await.expect("introspect"));
+    assert!(
+        !listed.iter().any(|n| n.ends_with(".it_their_scratch")),
+        "{listed:?}"
+    );
+
+    session_execute(&ours, "CREATE TEMP TABLE it_our_scratch (id int)")
+        .await
+        .expect("our temp table");
+    let listed = names(&session_introspect(&ours).await.expect("introspect"));
+    assert!(
+        listed.iter().any(|n| n.ends_with(".it_our_scratch")),
+        "{listed:?}"
+    );
+}
