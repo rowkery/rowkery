@@ -919,3 +919,62 @@ async fn postgres_health_finds_each_problem_and_its_fix_clears_it() {
     }
     run("DROP SCHEMA it_health CASCADE").await;
 }
+
+/// Whether rows come back is the statement's, not its first word's: a
+/// leading comment, a bracket or `… RETURNING` still shows its rows.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn postgres_rows_from_any_statement_that_returns_them() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-rows-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let session = open_session(config.id.clone(), config)
+        .await
+        .expect("open session");
+    session_query_stream(
+        &session,
+        "CREATE TEMP TABLE returning_rows (id serial PRIMARY KEY, v text)",
+        |_, _| Ok(()),
+    )
+    .await
+    .expect("create");
+    for (sql, columns, rows) in [
+        ("-- why\nSELECT 1 AS a", 1, 1),
+        ("/* why */ select 1 AS a, 2 AS b", 2, 1),
+        ("(SELECT 1 AS a) UNION ALL (SELECT 2)", 1, 2),
+        (
+            "INSERT INTO returning_rows (v) VALUES ('x'), ('y') RETURNING id, v",
+            2,
+            2,
+        ),
+        ("UPDATE returning_rows SET v = 'z' RETURNING id", 1, 2),
+    ] {
+        let mut got = (0, 0);
+        let n = session_query_stream(&session, sql, |batch, _| {
+            got.0 = batch.columns.len();
+            got.1 += batch.rows.len();
+            Ok(())
+        })
+        .await
+        .expect(sql);
+        assert_eq!(got, (columns, rows), "{sql}");
+        assert_eq!(n, rows as u64, "{sql}");
+    }
+    // Without RETURNING it's a count of rows changed, and no result.
+    let mut batches = 0;
+    let n = session_query_stream(&session, "DELETE FROM returning_rows", |_, _| {
+        batches += 1;
+        Ok(())
+    })
+    .await
+    .expect("delete");
+    assert_eq!((n, batches), (2, 0));
+}

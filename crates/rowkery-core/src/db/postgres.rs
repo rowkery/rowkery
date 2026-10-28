@@ -884,16 +884,12 @@ where
     let started = std::time::Instant::now();
     let username = session.config.username.clone();
     let trimmed = sql.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    let returns_rows = [
-        "select", "with", "show", "explain", "values", "table", "fetch",
-    ]
-    .iter()
-    .any(|kw| lower.starts_with(kw));
-    if !returns_rows {
-        let (_st, stream) = start_query(session, trimmed, ahead)
-            .await
-            .map_err(|e| map_query_error(&e, &username))?;
+    let (st, stream) = start_query(session, trimmed, ahead)
+        .await
+        .map_err(|e| map_query_error(&e, &username))?;
+    // The prepared statement says whether rows come back, whatever the SQL
+    // starts with (a comment, a bracket, `INSERT … RETURNING`, `CALL`).
+    if st.columns().is_empty() {
         futures::pin_mut!(stream);
         while stream
             .try_next()
@@ -907,9 +903,6 @@ where
         });
     }
 
-    let (st, stream) = start_query(session, trimmed, ahead)
-        .await
-        .map_err(|e| map_query_error(&e, &username))?;
     let money_shown = session.money_shown.load(Ordering::SeqCst);
     futures::pin_mut!(stream);
     // From the statement, not the first row: a result with no rows still
