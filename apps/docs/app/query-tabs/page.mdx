@@ -47,7 +47,7 @@ Press <kbd>Esc</kbd> or <kbd>⌘.</kbd> (**Cancel query**), or click **Cancel** 
 
 <Shot src="/img/query-tabs-status.webp" width={1016} height={436} alt="Three query tabs: Query 1 with a green dot and 4ms, Query 2 with a red dot and 3ms, and Query 3 with a spinner and 7.6s. The results header reads Cancelling · 7.60 s with a Force stop button, and the Run button shows the running time." />
 
-After you cancel, the header reads **Cancelling** and the button becomes **Force stop** ("Stop it now, without waiting for the server"). Press it, or <kbd>Esc</kbd> again, to stop the run at once. If the server hasn't answered the cancel within 3 seconds, Rowkery stops the run by itself. A cancelled run shows **Query cancelled** with its time.
+After you cancel, the header reads **Cancelling**, and a second later the button becomes **Force stop** ("Stop it now, without waiting for the server"). Press it, or <kbd>Esc</kbd> again, to stop the run at once. Force stop closes the run's connection, so an open transaction in the tab is rolled back. A quick double <kbd>Esc</kbd> counts as one cancel. If the server hasn't answered the cancel within 3 seconds, Rowkery stops the run by itself. A cancelled run shows **Query cancelled** with its time.
 
 <kbd>⌘.</kbd> only ever cancels, so use it when something else is open that would take <kbd>Esc</kbd> first, such as the completion list.
 

@@ -245,6 +245,8 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 const NOTICE_MS = 2400;
 /** Force stop: how long core's stop has to report back before the tab lets the run go. */
 const FORCE_STOP_GRACE_MS = 2000;
+/** How long after Cancel a second one is a Force stop (core's `FORCE_ASK_AFTER`), so a quick double Esc is one cancel. */
+const FORCE_READY_MS = 1000;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -539,6 +541,7 @@ export function Workspace({
   const renderError = activeRun.error;
   const runStartedAt = activeRun.startedAt;
   const cancelling = activeRun.cancelling;
+  const forceReady = cancelling && !!activeRun.forceReady;
   /** When the shown tab last stopped running: an Esc just after it was meant for the run (`escMayDiscard`). */
   const runEnd = useRef<{ running: boolean; endedAt: number | null }>({ running: false, endedAt: null });
   if (runEnd.current.running !== (runStartedAt !== null)) {
@@ -2227,15 +2230,24 @@ export function Workspace({
   // Elapsed times tick in `Elapsed` alone (the run clock, TabStatus.tsx): a running
   // query never re-renders the workspace or the grid.
 
-  // Cancel asks the server; pressed again (Force stop, or Esc twice) core
-  // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel. A run whose end never reaches
-  // the tab even then is let go, so the tab is never stuck on Running.
+  // Cancel asks the server; pressed again a second later (Force stop, or
+  // Esc again) core stops the run outright, which rolls back an open
+  // transaction, so a quick double Esc is one cancel. Core also stops it by
+  // itself after 3 s, since a dead connection never answers a cancel. A run
+  // whose end never reaches the tab even then is let go, so the tab is never
+  // stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
-    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
-    patchRun(tabId, { cancelling: true });
+    const run = runsRef.current[tabId];
+    if (run?.cancelling && !run.forceReady) return;
+    const giveUp = run?.cancelling ? abandonRun(windowId, tabId) : undefined;
+    if (!run?.cancelling) {
+      patchRun(tabId, { cancelling: true, forceReady: false });
+      setTimeout(() => {
+        if (runsRef.current[tabId]?.cancelling) patchRun(tabId, { forceReady: true });
+      }, FORCE_READY_MS);
+    }
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
@@ -3677,11 +3689,12 @@ export function Workspace({
                 <button
                   type="button"
                   className="cancel-btn"
-                  data-cancel={cancelling ? "force" : "cancel"}
-                  title={cancelling ? "Stop it now, without waiting for the server" : undefined}
+                  data-cancel={forceReady ? "force" : "cancel"}
+                  title={forceReady ? "Stop it now, without waiting for the server" : undefined}
+                  disabled={cancelling && !forceReady}
                   onClick={() => void onCancel()}
                 >
-                  {cancelling ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
+                  {forceReady ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
                 </button>
               </span>
   );
