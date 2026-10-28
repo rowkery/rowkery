@@ -103,6 +103,9 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'NaN'::numeric",
         "(-7)::int2",
         "1.5::float4",
+        // A real shows the digits it holds, as psql does.
+        "0.1::real",
+        "3.14::real",
         // Every digit survives: no trip through an f64.
         r#"'{"id": 9007199254740993, "amount": 0.1000000000000000055}'::jsonb"#,
         r#"'{"id":9007199254740993,  "amount":0.1000000000000000055}'::json"#,
@@ -149,6 +152,53 @@ async fn postgres_decodes_dates_uuid_numeric() {
         "'a'::\"char\"",
         "''::\"char\"",
         "ARRAY['a', 'b']::\"char\"[]",
+        // rowkery/reports#42: shown as psql shows them, not as `<tstzrange>`.
+        "'[1,5)'::int4range",
+        "'empty'::int4range",
+        "'(,10]'::int8range",
+        "numrange(1.5, 2.25, '[]')",
+        "'[2026-01-01,2026-02-01)'::daterange",
+        "tstzrange('2026-01-01 00:00+00', '2026-01-02 00:00+00')",
+        "tsrange(NULL, '2026-01-02 10:00')",
+        "'{[1,3),[5,7)}'::int4multirange",
+        "'{}'::int4multirange",
+        r#"ROW(1, 'a b', NULL, 'x"y\z', '', 2.5::float8)"#,
+        "ROW(ROW(1, 'a'), ARRAY[1, 2], int4range(1, 3))",
+        "'(1.5,2)'::point",
+        "'[(0,0),(1,1)]'::lseg",
+        "'(1,1),(0,0)'::box",
+        "'((0,0),(1,0),(1,1))'::path",
+        "'[(0,0),(1,1)]'::path",
+        "'((0,0),(1,0),(1,1))'::polygon",
+        "'{1,-1,0}'::line",
+        "'<(1,2),3>'::circle",
+        "'(0,1)'::tid",
+        "'(4294967295,65535)'::tid",
+        "'16/B374D848'::pg_lsn",
+        "'18446744073709551615'::xid8",
+        "'a fat cat:3A sat:2,4B mat:1C rat:5D'::tsvector",
+        "to_tsvector('english', 'The fat cats sat on the mat')",
+        r#"$$'it''s' 'back\\slash' 'two words'$$::tsvector"#,
+        "''::tsvector",
+        "'10:20:10,14,15'::txid_snapshot",
+        "'10:20:'::pg_snapshot",
+        "'1 2 3'::int2vector",
+        "'1 23'::oidvector",
+        "ARRAY[[1, 2], [3, 4]]",
+        "'[0:1][1:2]={{1,2},{3,4}}'::int[]",
+        "ARRAY[[NULL, 'a b'], ['c', 'd']]::text[]",
+        "ARRAY['(1,1),(0,0)'::box, '(2,2),(1,1)'::box]",
+        "ARRAY[int4range(1, 2), 'empty']",
+        "ARRAY['\\x00ff'::bytea]",
+        "ARRAY[ROW(1, 'a b'), ROW(2, NULL)]",
+        "ARRAY['(1,2)'::point]",
+        "ROW(1e20::float8, 1e-5::float8, '-0'::float8, 'NaN'::float8, '-Infinity'::float8, 1e15::float8, 1e14::float8)",
+        "'(1e-5,1e20)'::point",
+        "ARRAY[1234567::float4, 123456::float4, 0.00001::float4, 0.1::float4]",
+        "ARRAY[1.2345678901234568e+17::float8, 0.0001::float8]",
+        r#"ROW(U&'a\00A0b', E'tab\there', E'v\x0bt')"#,
+        "'a:1D b:2C,3'::tsvector",
+        r#"ROW($$it's$$::tsvector, ARRAY[[1, 2], [3, 4]])"#,
     ];
     for expr in cases {
         // format('%s') writes the type's own output, as psql shows it
@@ -188,6 +238,104 @@ async fn postgres_decodes_dates_uuid_numeric() {
     let row = got.expect("row");
     assert_eq!(row[0], Value::Text("2026-09-26 14:43:23+00".into()));
     assert_eq!(row[1], Value::Null);
+
+    // rowkery/reports#53: timestamptz in the session's time zone, as psql
+    // shows it, following `SET TIME ZONE`.
+    use rowkery_core::db::postgres::session_execute;
+    for zone in [
+        "Asia/Kolkata",
+        "America/New_York",
+        "+05:30",
+        "UTC+3",
+        "<+05:30>-05:30",
+        "Etc/UTC",
+    ] {
+        session_execute(&session, &format!("SET TIME ZONE '{zone}'"))
+            .await
+            .expect("set zone");
+        for expr in [
+            "'2026-01-15 12:00:00+00'::timestamptz",
+            "'2026-07-15 12:00:00.5+00'::timestamptz",
+            "'1850-01-01 00:00+00'::timestamptz",
+            "'infinity'::timestamptz",
+            "tstzrange('2026-01-01 00:00+00', NULL)",
+            "ARRAY['2026-03-08 07:00+00'::timestamptz]",
+        ] {
+            let sql = format!("SELECT {expr} AS v, format('%s', {expr}) AS t");
+            let mut got = None;
+            session_query_stream(&session, &sql, |batch, _| {
+                got = batch.rows.into_iter().next();
+                Ok(())
+            })
+            .await
+            .expect("query");
+            let row = got.expect("row");
+            assert_eq!(row[0], row[1], "{expr} in {zone}");
+        }
+    }
+    session_execute(&session, "RESET TIME ZONE")
+        .await
+        .expect("reset zone");
+
+    // A composite type of the user's own, with an enum and a range in it.
+    session_execute(
+        &session,
+        "CREATE TYPE pg_temp.it_mood AS ENUM ('ok', 'not ok'); \
+         CREATE TYPE pg_temp.it_address AS (street text, zip int, mood pg_temp.it_mood, open int4range); \
+         CREATE DOMAIN pg_temp.it_real AS real",
+    )
+    .await
+    .expect("types");
+    for expr in [
+        "ROW('1 Main St', 12345, 'not ok', '[9,17)')::pg_temp.it_address",
+        "ARRAY[ROW('x', NULL, 'ok', NULL)::pg_temp.it_address]",
+        "ARRAY[0.1::pg_temp.it_real]",
+    ] {
+        let sql = format!("SELECT {expr} AS v, format('%s', {expr}) AS t");
+        let mut got = None;
+        session_query_stream(&session, &sql, |batch, _| {
+            got = batch.rows.into_iter().next();
+            Ok(())
+        })
+        .await
+        .expect("query");
+        let row = got.expect("row");
+        assert_eq!(row[0], row[1], "{expr}");
+    }
+
+    // A real read back names its row again: as an edit's key, and as the
+    // literal a lookup writes.
+    let mut got = None;
+    session_query_stream(&session, "SELECT 0.1::real AS r", |batch, _| {
+        got = batch.rows.into_iter().next();
+        Ok(())
+    })
+    .await
+    .expect("query");
+    let real = got.expect("row").remove(0);
+    for lit in [
+        rowkery_core::edits::literal(rowkery_core::db::EngineKind::Postgres, "real", &real)
+            .expect("literal"),
+        rowkery_core::query_util::sql_literal(rowkery_core::db::EngineKind::Postgres, &real)
+            .expect("literal"),
+    ] {
+        let mut got = None;
+        session_query_stream(
+            &session,
+            &format!("SELECT 0.1::real = {lit}, 0.1::float8 = {lit}"),
+            |batch, _| {
+                got = batch.rows.into_iter().next();
+                Ok(())
+            },
+        )
+        .await
+        .expect("compare");
+        assert_eq!(
+            got.expect("row"),
+            vec![Value::Bool(true), Value::Bool(true)],
+            "{lit}"
+        );
+    }
 }
 
 /// int8 at the edges of its range reaches the webview exact: as a BigInt
@@ -254,6 +402,7 @@ async fn postgres_errors_and_slow_streams() {
 
     let err = session_query_stream(&session, "SELECT id FROM no_such_table", |_, _| Ok(()))
         .await
+        .map(|_| ())
         .expect_err("missing table");
     match err {
         DriverError::Server {
@@ -587,6 +736,7 @@ async fn postgres_read_only_session_refuses_writes() {
         |_, _| Ok(()),
     )
     .await
+    .map(|_| ())
     .expect_err("read-only session");
     assert!(err.to_string().contains("read-only transaction"), "{err}");
     let rows = session_query_stream(&session, "SELECT 1", |_, _| Ok(()))
@@ -795,8 +945,8 @@ async fn postgres_rereads_a_password_saved_since() {
     };
     let err = open_session(empty.id.clone(), empty)
         .await
-        .err()
-        .expect("no password saved");
+        .map(|_| ())
+        .expect_err("no password saved");
     assert!(err.to_string().contains("none is saved"), "{err}");
 }
 
@@ -1037,4 +1187,161 @@ async fn postgres_rows_from_any_statement_that_returns_them() {
     .await
     .expect("delete");
     assert_eq!((n, batches), (2, 0));
+}
+
+/// rowkery/reports#61: on a SQL_ASCII database a Latin-1 byte stops the
+/// page; the error says why and how to see the bytes, and rows without one
+/// still read.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn postgres_sql_ascii_rows_say_why_they_cannot_show() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use rowkery_core::db::postgres::{session_execute, session_query_cursor, StreamOptions};
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-ascii-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let admin = open_session(config.id.clone(), config.clone())
+        .await
+        .expect("open session");
+    // A UTF-8 database's own encoding error stays as Postgres said it.
+    let utf8 = session_query_stream(
+        &admin,
+        "SELECT convert_from('\\xe9'::bytea, 'UTF8')",
+        |_, _| Ok(()),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("not UTF-8")
+    .into_message();
+    assert!(utf8.starts_with("invalid byte sequence"), "{utf8}");
+    // Left from an earlier run, or made now.
+    let _ = session_execute(
+        &admin,
+        "CREATE DATABASE rowkery_sql_ascii ENCODING 'SQL_ASCII' \
+         LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0",
+    )
+    .await;
+
+    let ascii = PostgresConnection {
+        database: "rowkery_sql_ascii".into(),
+        ..config
+    };
+    let mut session = open_session(ascii.id.clone(), ascii)
+        .await
+        .expect("open the SQL_ASCII database");
+    session_execute(
+        &session,
+        "DROP TABLE IF EXISTS people; \
+         CREATE TABLE people (id int PRIMARY KEY, name text); \
+         INSERT INTO people VALUES (1, 'plain'), \
+           (2, convert_from('\\x4ae972f46d65'::bytea, 'SQL_ASCII'))",
+    )
+    .await
+    .expect("setup");
+
+    let plain = session_query_stream(&session, "SELECT name FROM people WHERE id = 1", |_, _| {
+        Ok(())
+    })
+    .await
+    .expect("an ASCII row reads");
+    assert_eq!(plain, 1);
+
+    let browse = session_query_cursor(
+        &mut session,
+        "SELECT * FROM people ORDER BY id",
+        100,
+        StreamOptions::default(),
+        |_, _| Ok(()),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("the Latin-1 row stops the page")
+    .into_message();
+    assert!(
+        browse.starts_with("This database uses the SQL_ASCII encoding"),
+        "{browse}"
+    );
+    assert!(browse.contains("invalid byte sequence"), "{browse}");
+    assert!(browse.contains("::bytea"), "{browse}");
+
+    let bytes = session_query_stream(&session, "SELECT name::bytea FROM people", |_, _| Ok(()))
+        .await
+        .expect("the bytes read");
+    assert_eq!(bytes, 2);
+}
+
+/// rowkery/reports#52: another session's temporary tables are neither listed
+/// (they can't be opened from here) nor counted in the catalog fingerprint,
+/// so an application's temp tables don't make every window reload its
+/// schema. The window's own temp tables still show.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn postgres_other_sessions_temp_tables_stay_out_of_the_catalog() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use rowkery_core::db::postgres::{
+        session_catalog_fingerprint, session_execute, session_introspect,
+    };
+
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    std::env::set_var(
+        "ROWKERY_CONFIG_DIR",
+        std::env::temp_dir()
+            .join(format!("rowkery-pg-it-temp-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string(),
+    );
+    store_secret("integration-pg", SecretKind::DbPassword, &password).expect("store password");
+    let config = pg_config();
+    let ours = open_session(config.id.clone(), config.clone())
+        .await
+        .expect("open");
+    let other = open_session(config.id.clone(), config).await.expect("open");
+    let names = |catalog: &rowkery_core::db::SchemaCatalog| -> Vec<String> {
+        catalog
+            .databases
+            .iter()
+            .flat_map(|d| &d.schemas)
+            .flat_map(|s| {
+                s.tables
+                    .iter()
+                    .map(move |t| format!("{}.{}", s.name, t.name))
+            })
+            .collect()
+    };
+
+    let before = session_catalog_fingerprint(&ours)
+        .await
+        .expect("fingerprint");
+    session_execute(
+        &other,
+        "CREATE TEMP TABLE it_their_scratch (id int PRIMARY KEY, n int)",
+    )
+    .await
+    .expect("their temp table");
+    let after = session_catalog_fingerprint(&ours)
+        .await
+        .expect("fingerprint");
+    assert_eq!(before, after, "another session's temp table moves nothing");
+    let listed = names(&session_introspect(&ours).await.expect("introspect"));
+    assert!(
+        !listed.iter().any(|n| n.ends_with(".it_their_scratch")),
+        "{listed:?}"
+    );
+
+    session_execute(&ours, "CREATE TEMP TABLE it_our_scratch (id int)")
+        .await
+        .expect("our temp table");
+    let listed = names(&session_introspect(&ours).await.expect("introspect"));
+    assert!(
+        listed.iter().any(|n| n.ends_with(".it_our_scratch")),
+        "{listed:?}"
+    );
 }

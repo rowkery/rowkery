@@ -298,11 +298,11 @@ async fn postgres_decodes_enums_domains_arrays() {
             vec![Value::Int(2), Value::Text("happy days".into()), Value::Null],
         ]
     );
-    // A two-dimensional array keeps its placeholder.
+    // A two-dimensional array reads as psql writes it (rowkery/reports#42).
     let got = plain(&s, "SELECT '{{1,2},{3,4}}'::int4[] AS v")
         .await
         .unwrap();
-    assert_eq!(got.rows[0][0], Value::Text("<_int4>".into()));
+    assert_eq!(got.rows[0][0], Value::Text("{{1,2},{3,4}}".into()));
     session_execute(&s, "DROP SCHEMA it_types CASCADE")
         .await
         .unwrap();

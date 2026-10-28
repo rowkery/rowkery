@@ -1429,6 +1429,16 @@ enum PgWork {
     },
 }
 
+/// A timed plan runs inside a savepoint, keeping the user's transaction as
+/// it was, unless the tab surely has none. When the server didn't say, a
+/// `BEGIN … ROLLBACK` could roll back the user's open transaction, so the
+/// savepoint form is used; with none open it fails ([`PLAN_TXN_UNKNOWN`]).
+fn plan_in_savepoint(state: TxnState) -> bool {
+    state != TxnState::None
+}
+
+const PLAN_TXN_UNKNOWN: &str = "The server didn't say whether this tab has a transaction open, so the timed plan didn't run (it could have rolled one back). Run it again.";
+
 /// Runs the work on `session`, streaming batches. Returns the outcome and
 /// whether any rows were sent.
 async fn stream_on_session(
@@ -1514,15 +1524,13 @@ async fn stream_on_session(
             side,
         } => {
             session_close_cursor(session).await;
-            // In the user's own transaction a savepoint keeps it as it was.
-            let within_users = *rollback
-                && match session.txn_state() {
-                    TxnState::Users => true,
-                    TxnState::None => false,
-                    TxnState::Unknown => {
-                        session_probe_txn(session, Duration::from_secs(5)).await == TxnState::Users
-                    }
-                };
+            let state = match session.txn_state() {
+                TxnState::Unknown if *rollback => {
+                    session_probe_txn(session, Duration::from_secs(5)).await
+                }
+                known => known,
+            };
+            let within_users = *rollback && plan_in_savepoint(state);
             let (begin, end) = if within_users {
                 (
                     "SAVEPOINT rowkery_explain",
@@ -1533,6 +1541,15 @@ async fn stream_on_session(
             };
             if *rollback {
                 if let Err(err) = session_execute(session, begin).await {
+                    // Unknown, and there was none (25P01): nothing ran, nothing was lost.
+                    let none_open =
+                        matches!(&err, DriverError::Server { sqlstate, .. } if sqlstate == "25P01");
+                    let err = match state {
+                        TxnState::Unknown if none_open => {
+                            DriverError::Message(PLAN_TXN_UNKNOWN.into())
+                        }
+                        _ => err,
+                    };
                     return (fwd.outcome(Err(err)), false);
                 }
             }
@@ -1622,18 +1639,20 @@ fn run_postgres_query_on_runtime(
     let stopped_generation = pooled.generation;
     let run = async move {
         let mut attempt = 0;
-        // Every connection the saved connection may hold is busy: the tab
-        // says it is waiting for one, and a cancel stops the wait at once.
-        let on_wait = |waiting: bool| {
+        // Every connection the saved connection may hold is busy, or the
+        // tab's own still is: the tab says what it is waiting for, and a
+        // cancel stops the wait at once.
+        let on_wait = |wait: Option<pool::WaitFor>| {
             if let Ok(mut state) = interrupt_slot.lock() {
-                state.waiting = waiting;
+                state.waiting = wait.is_some();
             }
             push_event(
                 &events,
                 CoreEvent::QueryWaiting {
                     query_id,
                     tab_id,
-                    waiting,
+                    waiting: wait.is_some(),
+                    tab: wait == Some(pool::WaitFor::Tab),
                 },
             );
         };
@@ -2070,8 +2089,8 @@ fn apply_changes_now(
                         generation,
                         connection_id,
                         config,
-                        &|waiting| {
-                            if waiting {
+                        &|wait| {
+                            if wait == Some(pool::WaitFor::Place) {
                                 no_room.store(true, Ordering::SeqCst);
                             }
                         },

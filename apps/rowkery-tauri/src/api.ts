@@ -303,9 +303,12 @@ export async function reloadWindowSchema(windowId: string): Promise<SchemaCatalo
  * `Frame`), and binary rows frames (an ArrayBuffer, `resultStore.ts`). JSON
  * `rows` frames are accepted too (tests, proofs' stubs).
  */
+/** What a run waits for before it starts (`onWaiting`). */
+export type WaitingFor = "connection" | "tab";
+
 export type Frame =
   | { t: "columns"; query_id: number; columns: Column[] }
-  | { t: "waiting"; query_id: number; waiting: boolean }
+  | { t: "waiting"; query_id: number; waiting: boolean; tab?: boolean }
   | { t: "rows"; query_id: number; seq: number; rows: (Value | null)[][] }
   | ({ t: "done" } & DoneFrame);
 
@@ -343,10 +346,11 @@ export interface RunOptions {
    */
   onProgress?: (partial: QueryResultDto) => void;
   /**
-   * Called with `true` when every connection the saved connection may hold
-   * is busy and the run waits for one, and `false` once it has one.
+   * Called with what the run waits for: "connection" when every connection
+   * the saved connection may hold is busy, "tab" when the tab's own still is
+   * (an earlier run, or a check after a sleep); `null` once it has one.
    */
-  onWaiting?: (waiting: boolean) => void;
+  onWaiting?: (waiting: WaitingFor | null) => void;
 }
 
 const NULL_CELL: Value = { Null: null };
@@ -542,7 +546,7 @@ function stream<Started>(
           result.columns = frame.columns;
           return;
         case "waiting":
-          onWaiting?.(frame.waiting);
+          onWaiting?.(frame.waiting ? (frame.tab ? "tab" : "connection") : null);
           return;
         case "rows":
           jsonRows = true;

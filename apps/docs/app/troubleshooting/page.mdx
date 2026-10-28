@@ -113,6 +113,8 @@ The panel shows both fingerprints: **Saved**, the key Rowkery remembered, and **
 
 Each saved connection holds at most 10 sessions to the server, shared by its windows and tabs. When all of them are busy, a new run says **Waiting for a free connection** with the time, and starts as soon as one frees. <kbd>Esc</kbd> cancels the wait.
 
+A run that says **Waiting for this tab's connection** is waiting for its own tab's session: an earlier run on that tab is still ending (after a Cancel, say), or Rowkery is checking the session after your Mac woke. The check gives up after 3 seconds. If the session turns out to be dead, the run opens a new one and doesn't wait for Rowkery's replacement.
+
 ## The agent can't see Rowkery
 
 Work through these in order.
@@ -148,6 +150,12 @@ Every message an agent can get, with what it means, is on [MCP tools](/mcp-tools
 Press <kbd>Esc</kbd> or <kbd>⌘.</kbd>, or click **Cancel** beside the running time. Rowkery asks the server to cancel the query.
 
 If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop** a second after you cancel. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
+
+## A table won't show on an old database
+
+If a page of rows fails with `This database uses the SQL_ASCII encoding, and a value here isn't valid UTF-8`, the database was created with `SQL_ASCII`, which stores bytes without checking them. A row holds bytes that aren't UTF-8 (often Latin-1 accents), and Postgres refuses to send it to a UTF-8 client like Rowkery. Pages without such a row still show.
+
+To see the bytes, select the column as `column_name::bytea` in a query tab. Rowkery doesn't decode the bytes another way.
 
 ## Rowkery feels slow
 

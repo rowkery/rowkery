@@ -46,11 +46,13 @@ pub enum Frame {
         query_id: u64,
         columns: Vec<Column>,
     },
-    /// Every connection the saved connection may hold is busy: the run waits
-    /// for one (`waiting` false once it has one).
+    /// Every connection the saved connection may hold is busy, or (`tab`)
+    /// the tab's own still is: the run waits for one (`waiting` false once
+    /// it has one).
     Waiting {
         query_id: u64,
         waiting: bool,
+        tab: bool,
     },
     Done(Box<DoneFrame>),
 }
@@ -296,8 +298,18 @@ impl EventSink for ChannelSink {
                 Self::send_json(&self.channel, &Frame::Done(Box::new(done)));
             }
             CoreEvent::QueryWaiting {
-                query_id, waiting, ..
-            } => Self::send_json(&self.channel, &Frame::Waiting { query_id, waiting }),
+                query_id,
+                waiting,
+                tab,
+                ..
+            } => Self::send_json(
+                &self.channel,
+                &Frame::Waiting {
+                    query_id,
+                    waiting,
+                    tab,
+                },
+            ),
             CoreEvent::QueryHeld { query_id, hold, .. } => {
                 let done = DoneFrame {
                     query_id,

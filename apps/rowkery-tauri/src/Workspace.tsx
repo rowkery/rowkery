@@ -33,6 +33,7 @@ import {
   type HostKeys,
   forgetSshHostKey,
   restoreSshHostKey,
+  type WaitingFor,
 } from "./api";
 import { PlanView, copy as copyPlanText, planText } from "./PlanView";
 import { CommandPalette, type PickMode } from "./CommandPalette";
@@ -2362,7 +2363,7 @@ export function Workspace({
     patchRun(tabId, (prev) => ({
       error: null,
       cancelling: false,
-      waiting: false,
+      waiting: null,
       outcome: null,
       elapsedMs: null,
       held: null,
@@ -2400,8 +2401,8 @@ export function Workspace({
               streamed = true;
               patchRun(tabId, { result: partial, streaming: true });
           };
-      // Every connection is busy: the tab says it waits, rather than look stuck.
-      const onWaiting = (waiting: boolean) => {
+      // Every connection, or the tab's own, is busy: the tab says it waits, rather than look stuck.
+      const onWaiting = (waiting: WaitingFor | null) => {
         if (tableRun && !tableRun.current()) return;
         patchRun(tabId, { waiting });
       };
@@ -2525,7 +2526,7 @@ export function Workspace({
         startedAt: null,
         appending: false,
         cancelling: false,
-        waiting: false,
+        waiting: null,
         streaming: false,
         outcome,
         elapsedMs: elapsedMs ?? Math.round(performance.now() - started),
@@ -3742,9 +3743,9 @@ export function Workspace({
                     {activeRun.exporting.rows.toLocaleString()} rows
                   </span>
                 ) : activeRun.waiting && !cancelling ? (
-                  // Every connection is busy: say so, rather than look stuck.
-                  <span data-waiting="connection">
-                    Waiting for a free connection ·{" "}
+                  // Every connection, or the tab's own, is busy: say which, rather than look stuck.
+                  <span data-waiting={activeRun.waiting}>
+                    {activeRun.waiting === "tab" ? "Waiting for this tab's connection" : "Waiting for a free connection"} ·{" "}
                     {runStartedAt !== null && <Elapsed since={runStartedAt} active={active} format={formatMs} />}
                   </span>
                 ) : (
@@ -4714,8 +4715,8 @@ export function Workspace({
                 className={`run-btn${running ? " running" : ""}`}
                 disabled={busy || connState !== "connected"}
                 onClick={() => void onRun()}
-                data-waiting={running && activeRun.waiting ? "connection" : undefined}
-                title={running && activeRun.waiting ? "Waiting for a free connection" : undefined}
+                data-waiting={(running && activeRun.waiting) || undefined}
+                title={running && activeRun.waiting ? (activeRun.waiting === "tab" ? "Waiting for this tab's connection" : "Waiting for a free connection") : undefined}
               >
                 <PlayIcon size={10} />
                 {/* Run counts the time while its query runs; says when it waits for a connection. */}

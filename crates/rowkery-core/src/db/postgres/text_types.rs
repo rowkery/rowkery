@@ -210,6 +210,178 @@ pub(super) fn char(b: &[u8]) -> Option<String> {
     }
 }
 
+/// Reads a binary value front to back; every read is bounds-checked.
+pub(super) struct Wire<'a>(pub(super) &'a [u8]);
+
+impl<'a> Wire<'a> {
+    pub(super) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        if self.0.len() < n {
+            return None;
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Some(head)
+    }
+    pub(super) fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+    pub(super) fn i16(&mut self) -> Option<i16> {
+        Some(i16::from_be_bytes(self.take(2)?.try_into().ok()?))
+    }
+    pub(super) fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+    pub(super) fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+    pub(super) fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn f64(&mut self) -> Option<f64> {
+        Some(f64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+    /// A length-prefixed value: `None` inside for SQL NULL (-1).
+    pub(super) fn value(&mut self) -> Option<Option<&'a [u8]>> {
+        match self.i32()? {
+            -1 => Some(None),
+            n => Some(Some(self.take(usize::try_from(n).ok()?)?)),
+        }
+    }
+    pub(super) fn done(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn point(&mut self) -> Option<String> {
+        let (x, y) = (self.f64()?, self.f64()?);
+        Some(format!("({},{})", float(x), float(y)))
+    }
+    fn points(&mut self, n: i32) -> Option<String> {
+        let n = usize::try_from(n).ok()?;
+        if n > self.0.len() / 16 {
+            return None;
+        }
+        Some(
+            (0..n)
+                .map(|_| self.point())
+                .collect::<Option<Vec<_>>>()?
+                .join(","),
+        )
+    }
+}
+
+fn float(f: f64) -> String {
+    super::format_pg_float(f, false)
+}
+
+/// Once the whole value was read: trailing bytes mean a misread.
+fn whole(w: Wire<'_>, text: String) -> Option<String> {
+    w.done().then_some(text)
+}
+
+/// The geometric types: `point`, `lseg`, `box`, `path`, `polygon`, `line`,
+/// `circle`, as their own output functions write them.
+pub(super) fn geometric(name: &str, b: &[u8]) -> Option<String> {
+    let mut w = Wire(b);
+    let text = match name {
+        "point" => w.point()?,
+        "lseg" => format!("[{},{}]", w.point()?, w.point()?),
+        "box" => format!("{},{}", w.point()?, w.point()?),
+        "path" => {
+            let closed = w.u8()? != 0;
+            let n = w.i32()?;
+            let points = w.points(n)?;
+            if closed {
+                format!("({points})")
+            } else {
+                format!("[{points}]")
+            }
+        }
+        "polygon" => {
+            let n = w.i32()?;
+            format!("({})", w.points(n)?)
+        }
+        "line" => format!(
+            "{{{},{},{}}}",
+            float(w.f64()?),
+            float(w.f64()?),
+            float(w.f64()?)
+        ),
+        "circle" => {
+            let center = w.point()?;
+            format!("<{center},{}>", float(w.f64()?))
+        }
+        _ => return None,
+    };
+    whole(w, text)
+}
+
+/// `tid` (`ctid`): block and line number, `(0,1)`.
+pub(super) fn tid(b: &[u8]) -> Option<String> {
+    let mut w = Wire(b);
+    let text = format!(
+        "({},{})",
+        w.u32()?,
+        u16::from_be_bytes(w.take(2)?.try_into().ok()?)
+    );
+    whole(w, text)
+}
+
+/// `pg_lsn`: the high and low halves in hex, `16/B374D848`.
+pub(super) fn lsn(b: &[u8]) -> Option<String> {
+    let n = u64::from_be_bytes(b.try_into().ok()?);
+    Some(format!("{:X}/{:X}", n >> 32, n & 0xffff_ffff))
+}
+
+/// `txid_snapshot` and `pg_snapshot`: `xmin:xmax:xip,xip`.
+pub(super) fn snapshot(b: &[u8]) -> Option<String> {
+    let mut w = Wire(b);
+    let n = usize::try_from(w.i32()?).ok()?;
+    let (xmin, xmax) = (w.u64()?, w.u64()?);
+    if n > w.0.len() / 8 {
+        return None;
+    }
+    let xips: Vec<String> = (0..n)
+        .map(|_| w.u64().map(|x| x.to_string()))
+        .collect::<Option<_>>()?;
+    whole(w, format!("{xmin}:{xmax}:{}", xips.join(",")))
+}
+
+/// `tsvector`: each lexeme quoted (`'` and `\` doubled), then its positions
+/// with their weight (`A`-`C`; `D` unwritten): `'cat':3 'fat':2A,4`.
+pub(super) fn tsvector(b: &[u8]) -> Option<String> {
+    let mut w = Wire(b);
+    let n = usize::try_from(w.i32()?).ok()?;
+    let mut out = String::new();
+    for i in 0..n {
+        let end = w.0.iter().position(|&c| c == 0)?;
+        let lexeme = std::str::from_utf8(w.take(end)?).ok()?;
+        w.take(1)?;
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push('\'');
+        for c in lexeme.chars() {
+            if c == '\'' || c == '\\' {
+                out.push(c);
+            }
+            out.push(c);
+        }
+        out.push('\'');
+        let positions = u16::try_from(w.i16()?).ok()?;
+        for p in 0..positions {
+            let pos = w.i16()? as u16;
+            out.push(if p == 0 { ':' } else { ',' });
+            out.push_str(&(pos & 0x3fff).to_string());
+            match pos >> 14 {
+                3 => out.push('A'),
+                2 => out.push('B'),
+                1 => out.push('C'),
+                _ => {}
+            }
+        }
+    }
+    whole(w, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
