@@ -65,6 +65,24 @@ describe("chipsToWhere", () => {
     expect(chipsToWhere([pred("note", "text", "<>", "null")])).toBe("note IS NOT NULL");
   });
 
+  test("a quoted 'null' is the text, a bare null is NULL (rowkery/reports#44)", () => {
+    expect(chipsToWhere([pred("note", "text", "=", "'null'")])).toBe("note = 'null'");
+    expect(chipsToWhere([pred("note", "text", "IS DISTINCT FROM", "'NULL'")])).toBe("note IS DISTINCT FROM 'NULL'");
+    expect(chipsToWhere([pred("note", "text", "IN", "'null', a")])).toBe("note IN ('null', 'a')");
+    expect(chipsToWhere([pred("note", "text", "IN", "null")])).toBe("note IN (NULL)");
+    expect(parseFragment("note = 'null'", COLUMNS)).toMatchObject({ op: "=", value: "'null'" });
+    expect(parseFragment("note = null", COLUMNS)).toMatchObject({ op: "=", value: "null" });
+    expect(parseFragment("note in ('null', 'x')", COLUMNS)).toMatchObject({ op: "IN", value: "'null', x" });
+    expect(splitList(joinList(["'null'", "a, b"]))).toEqual(["'null'", "a, b"]);
+  });
+
+  test("contains on a non-text column searches its text on Postgres (rowkery/reports#56)", () => {
+    expect(chipsToWhere([pred("id", "integer", "ILIKE", "2024")])).toBe("CAST(id AS TEXT) ILIKE '%2024%'");
+    expect(chipsToWhere([pred("at", "timestamp with time zone", "ILIKE", "2024")])).toBe("CAST(at AS TEXT) ILIKE '%2024%'");
+    expect(chipsToWhere([pred("note", "text", "ILIKE", "a")])).toBe("note ILIKE '%a%'");
+    expect(chipsToWhere([pred("id", "INTEGER", "ILIKE", "20")], "sqlite")).toBe("id LIKE '%20%'");
+  });
+
   test("quotes are doubled", () => {
     expect(chipsToWhere([pred("note", "text", "=", "it's")])).toBe("note = 'it''s'");
     expect(chipsToWhere([pred("note", "text", "ILIKE", "it's")])).toBe("note ILIKE '%it''s%'");

@@ -149,10 +149,18 @@ export function quoteText(v: string, engine: ChipEngine = "postgres"): string {
   return `'${v.replace(/'/g, "''")}'`;
 }
 
+/**
+ * `'null'`, quoted: the text "null", which a bare `null` (SQL's NULL) can't
+ * say. A chip keeps the quotes so its value stays text (rowkery/reports#44).
+ */
+const QUOTED_NULL = /^'null'$/i;
+const isNull = (v: string) => /^null$/i.test(v.trim());
+
 /** A value as a literal for a column of `type`: numbers and booleans bare, the rest quoted. */
 export function chipLiteral(value: string, type: string, engine: ChipEngine = "postgres"): string {
   const v = value.trim();
-  if (/^null$/i.test(v)) return "NULL";
+  if (isNull(v)) return "NULL";
+  if (QUOTED_NULL.test(v)) return quoteText(v.slice(1, -1), engine);
   if (isNumberType(type) && NUMBER_TEXT.test(v)) return v;
   if (BOOL_TYPE.test(type) && /^(true|false)$/i.test(v)) return v.toUpperCase();
   return quoteText(value, engine);
@@ -221,7 +229,9 @@ export function splitList(v: string): string[] {
       // Anything after the closing quote, up to the comma, stays with it.
       let tail = "";
       while (i < v.length && v[i] !== ",") tail += v[i++];
-      out.push(item + tail.trimEnd());
+      const quoted = item + tail.trimEnd();
+      // A quoted null is the text, kept quoted (see QUOTED_NULL).
+      out.push(tail.trim() === "" && isNull(item) ? `'${item}'` : quoted);
     } else {
       while (i < v.length && v[i] !== ",") item += v[i++];
       item = item.trim();
@@ -235,11 +245,12 @@ export function splitList(v: string): string[] {
 /** IN's values as a chip keeps them: bare, or quoted when an item holds a comma or starts with a quote. */
 export function joinList(items: string[]): string {
   // The chip's own text (read back by splitList), not SQL: plain quotes.
-  return items.map((s) => (/,|^'|^\s|\s$/.test(s) ? `'${s.replace(/'/g, "''")}'` : s)).join(", ");
+  return items.map((s) => (!QUOTED_NULL.test(s) && /,|^'|^\s|\s$/.test(s) ? `'${s.replace(/'/g, "''")}'` : s)).join(", ");
 }
 
-/** `'it''s'` → `it's`; anything else as is. */
+/** `'it''s'` → `it's`; anything else as is, and `'null'` (see QUOTED_NULL). */
 function unquote(v: string): string {
+  if (QUOTED_NULL.test(v)) return v;
   const m = /^'((?:[^']|'')*)'$/.exec(v);
   return m ? m[1].replace(/''/g, "'") : v;
 }
@@ -258,19 +269,23 @@ export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): stri
     case "IS NULL":
     case "IS NOT NULL":
       return `${col} ${chip.op}`;
-    case "ILIKE":
-      return `${col} ${like(engine)} ${containsPattern(chip.value, engine)}`;
+    case "ILIKE": {
+      // Postgres has no ILIKE for numbers, times or booleans: their text
+      // form is searched, as the foreign-key picker does (rowkery/reports#56).
+      const target = engine === "postgres" && !isTextType(chip.type) ? `CAST(${col} AS TEXT)` : col;
+      return `${target} ${like(engine)} ${containsPattern(chip.value, engine)}`;
+    }
     case "IN":
       return `${col} IN (${splitList(chip.value).map(lit).join(", ")})`;
     case "BETWEEN":
       return `${col} BETWEEN ${lit(chip.value)} AND ${lit(chip.value2 ?? "")}`;
     case "IS DISTINCT FROM":
       // Not equal, keeping the rows where it is NULL ("Hide rows where col = v").
-      if (/^null$/i.test(chip.value.trim())) return `${col} IS NOT NULL`;
+      if (isNull(chip.value)) return `${col} IS NOT NULL`;
       return `${col} ${engine === "sqlite" ? "IS NOT" : "IS DISTINCT FROM"} ${lit(chip.value)}`;
     default: {
       // NULL never equals anything: = NULL means IS NULL.
-      if (/^null$/i.test(chip.value.trim())) return `${col} ${chip.op === "<>" ? "IS NOT NULL" : "IS NULL"}`;
+      if (isNull(chip.value)) return `${col} ${chip.op === "<>" ? "IS NOT NULL" : "IS NULL"}`;
       return `${col} ${chip.op} ${lit(chip.value)}`;
     }
   }
