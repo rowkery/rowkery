@@ -1001,6 +1001,17 @@ async fn postgres_sql_ascii_rows_say_why_they_cannot_show() {
     let admin = open_session(config.id.clone(), config.clone())
         .await
         .expect("open session");
+    // A UTF-8 database's own encoding error stays as Postgres said it.
+    let utf8 = session_query_stream(
+        &admin,
+        "SELECT convert_from('\\xe9'::bytea, 'UTF8')",
+        |_, _| Ok(()),
+    )
+    .await
+    .err()
+    .expect("not UTF-8")
+    .into_message();
+    assert!(utf8.starts_with("invalid byte sequence"), "{utf8}");
     // Left from an earlier run, or made now.
     let _ = session_execute(
         &admin,

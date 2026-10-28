@@ -150,7 +150,7 @@ If the server doesn't answer, for example because the connection dropped while y
 
 If a page of rows fails with `This database uses the SQL_ASCII encoding, and a value here isn't valid UTF-8`, the database was created with `SQL_ASCII`, which stores bytes without checking them. A row holds bytes that aren't UTF-8 (often Latin-1 accents), and Postgres refuses to send it to a UTF-8 client like Rowkery. Pages without such a row still show.
 
-To see the bytes, select the column as `column_name::bytea` in a query tab. Rowkery doesn't guess another encoding, so an edit never writes changed bytes back.
+To see the bytes, select the column as `column_name::bytea` in a query tab. Rowkery doesn't decode the bytes another way.
 
 ## Rowkery feels slow
 

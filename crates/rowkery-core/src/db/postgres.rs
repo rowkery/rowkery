@@ -820,13 +820,13 @@ pub async fn session_run_file_statement(
         .client
         .simple_query_raw(sql)
         .await
-        .map_err(|e| map_query_error(&e, username, session.sql_ascii))?;
+        .map_err(|e| map_query_error(&e, username, false))?;
     let mut stream = std::pin::pin!(stream);
     let mut rows = 0;
     while let Some(message) = stream
         .try_next()
         .await
-        .map_err(|e| map_query_error(&e, username, session.sql_ascii))?
+        .map_err(|e| map_query_error(&e, username, false))?
     {
         if let tokio_postgres::SimpleQueryMessage::CommandComplete(n) = message {
             rows += n;
@@ -846,12 +846,14 @@ pub async fn session_copy_in(
         .client
         .copy_in(sql)
         .await
-        .map_err(|e| map_query_error(&e, &session.config.username, session.sql_ascii))
+        .map_err(|e| map_query_error(&e, &session.config.username, false))
 }
 
 /// The message to show for a COPY's failure.
+/// A SQL file sends its statements and COPY rows as they are, so a 22021
+/// there is the file's own bytes, never a value the server can't show.
 pub fn copy_error(session: &PostgresSession, err: &tokio_postgres::Error) -> DriverError {
-    map_query_error(err, &session.config.username, session.sql_ascii)
+    map_query_error(err, &session.config.username, false)
 }
 
 pub async fn session_query_stream<F>(
