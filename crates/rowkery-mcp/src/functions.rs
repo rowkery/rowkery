@@ -421,7 +421,7 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
     }
     format!(
         "WITH RECURSIVE \
-        stepped AS MATERIALIZED (SELECT DISTINCT a.aggfnoid::oid AS oid FROM pg_aggregate a \
+        stepped AS (SELECT DISTINCT a.aggfnoid::oid AS oid FROM pg_aggregate a \
           CROSS JOIN LATERAL unnest(ARRAY[a.aggtransfn, a.aggfinalfn, a.aggcombinefn, \
             a.aggserialfn, a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn, \
             a.aggmfinalfn]::oid[]) AS step(oid) \
@@ -434,7 +434,7 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
           AND NOT (l.lanname IN ('c', 'internal') AND p.provolatile = 'i' \
             AND p.oid NOT IN (SELECT oid FROM stepped))), \
         bad_ops AS (SELECT o.oid FROM pg_operator o WHERE o.oprcode IN (SELECT oid FROM code)), \
-        built_on(child, parent) AS MATERIALIZED (\
+        built_on(child, parent) AS (\
           SELECT oid, typbasetype FROM pg_type WHERE typbasetype <> 0 \
           UNION ALL SELECT oid, typelem FROM pg_type WHERE typelem <> 0 \
           UNION ALL SELECT rngtypid, rngsubtype FROM pg_range \
