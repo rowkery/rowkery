@@ -201,6 +201,7 @@ Agents can call Postgres's own functions that only compute on their arguments (e
 | `Refused: SCHEMA.VIEW is a view that calls a function defined in the database, whose body isn't in the plan. Query the tables under it instead.` | A view over your own code, or over another such view |
 | `Refused: casting to or checking SCHEMA.TYPE runs a function defined in the database, whose body isn't in the plan. Leave it out of the query.` | A domain or type whose check or cast runs your own code |
 | `Refused: names written with Unicode escapes (U&"…") can't be checked here. Write the name plainly.` | A `U&"…"` name |
+| `Postgres would read some tables here without naming them in its plan (a join or aggregate pushed down to a foreign server, or a custom scan), so Rowkery can't check them against the hidden tables and masked columns. Query each foreign table on its own.` | With tables hidden or columns masked: a join or aggregate of foreign tables that `postgres_fdw` sends to the remote server whole |
 
 The reasons a function is refused by name:
 
