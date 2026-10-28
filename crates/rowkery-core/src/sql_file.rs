@@ -663,10 +663,17 @@ pub fn scan(
         let Some((mut check, role)) = check_file_statement(head, engine.into()) else {
             continue;
         };
-        // What comes after the head is unread: a long `WITH … UPDATE` or a
-        // SELECT calling a writing function there counts as a write.
-        if cut && !check.changes_data() {
+        // What comes after the head is unread. A long INSERT (a dump's rows)
+        // adds rows; anything else, a long `WITH … DELETE` or a SELECT calling
+        // a writing function, may change anything, so it is listed in red.
+        let unread = cut && !starts_insert(head);
+        if cut {
             check.kind = StatementKind::Write;
+            if unread {
+                check.destructive = true;
+            } else {
+                check.verb = "INSERT".into();
+            }
         }
         scan.statements += 1;
         scan.writes |= check.changes_data() || check.unlocks_writes;
@@ -701,6 +708,7 @@ pub fn scan(
             continue;
         }
         let label = match check.verb.as_str() {
+            _ if unread => format!("{} (not fully read)", check.verb),
             "DELETE" | "UPDATE" if check.destructive => format!("{} without WHERE", check.verb),
             _ => check.verb.clone(),
         };
@@ -1046,6 +1054,26 @@ fn classified(sql: &str) -> (&str, bool) {
         end -= 1;
     }
     (&sql[..end], true)
+}
+
+/// Whether `sql` is an INSERT, after any leading space and comments.
+fn starts_insert(sql: &str) -> bool {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.find('\n').map_or("", |n| &after[n..]).trim_start();
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after
+                .find("*/")
+                .map_or("", |n| &after[n + 2..])
+                .trim_start();
+        } else {
+            break;
+        }
+    }
+    rest.get(..6)
+        .is_some_and(|w| w.eq_ignore_ascii_case("INSERT"))
+        && !rest[6..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Runs `sql`, one statement of a file, on SQLite: exactly one statement
@@ -1724,8 +1752,19 @@ mod tests {
             sql.push_str(", (1, 'a')");
         }
         sql.push_str(") UPDATE t SET v = fixes.v FROM fixes WHERE t.id = fixes.id");
+        // The panel lists it in red, since what it changes is unread.
+        let unread = |scan: &Scan| {
+            scan.writes
+                && scan
+                    .kinds
+                    .iter()
+                    .any(|k| k.destructive && k.label.ends_with("(not fully read)"))
+        };
         for engine in [EngineKind::Postgres, EngineKind::Sqlite] {
-            assert!(scan_text(&format!("{sql};\n"), engine).writes, "{engine:?}");
+            assert!(
+                unread(&scan_text(&format!("{sql};\n"), engine)),
+                "{engine:?}"
+            );
         }
         // A short one is read whole, and a long read-only SELECT still reads
         // as a write: what follows its head is unknown.
@@ -1740,7 +1779,22 @@ mod tests {
         while select.len() < 70 * 1024 {
             select.push_str(", 1");
         }
-        assert!(scan_text(&format!("{select};\n"), EngineKind::Postgres).writes);
+        assert!(unread(&scan_text(
+            &format!("{select};\n"),
+            EngineKind::Postgres
+        )));
+        // A long INSERT, a dump's rows cut mid-string, is an INSERT.
+        let mut insert = String::from("-- rows\nINSERT INTO t VALUES (1, 'a')");
+        while insert.len() < 70 * 1024 {
+            insert.push_str(", (1, 'a')");
+        }
+        let scan = scan_text(&format!("{insert};\n"), EngineKind::Postgres);
+        assert!(scan.writes);
+        assert_eq!(scan.kinds.len(), 1);
+        assert_eq!(
+            (scan.kinds[0].label.as_str(), scan.kinds[0].destructive),
+            ("INSERT", false)
+        );
     }
 
     #[test]
