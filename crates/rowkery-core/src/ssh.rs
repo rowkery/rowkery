@@ -71,10 +71,14 @@ fn key_error(e: &russh::keys::Error, key_text: &str, had_passphrase: bool) -> St
 }
 
 /// What `check_server_key` found wrong, for the error after the handshake.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum KeyProblem {
     Unknown,
-    Changed,
+    /// The fingerprint saved for the host, and the one it offers now.
+    Changed {
+        saved: String,
+        offered: String,
+    },
 }
 
 fn known_hosts_path() -> PathBuf {
@@ -104,17 +108,45 @@ fn load_known_hosts() -> HashMap<String, String> {
 }
 
 fn persist_known_host(host: &str, fingerprint: &str) -> Result<(), SshError> {
-    crate::config::create_private_dir(&config_dir())
-        .map_err(|e| SshError::Message(e.to_string()))?;
     let mut map = load_known_hosts();
     map.insert(host.to_string(), fingerprint.to_string());
-    let mut lines = Vec::new();
-    for (h, fp) in map {
-        lines.push(format!("{h} {fp}"));
-    }
-    crate::config::write_private(&known_hosts_path(), lines.join("\n"))
+    write_known_hosts(map)
+}
+
+fn write_known_hosts(map: HashMap<String, String>) -> Result<(), SshError> {
+    crate::config::create_private_dir(&config_dir())
         .map_err(|e| SshError::Message(e.to_string()))?;
-    Ok(())
+    let mut lines: Vec<String> = map.into_iter().map(|(h, fp)| format!("{h} {fp}")).collect();
+    lines.sort();
+    crate::config::write_private(&known_hosts_path(), lines.join("\n"))
+        .map_err(|e| SshError::Message(e.to_string()))
+}
+
+/// Forgets the key saved for `host:port`, only while it is still
+/// `fingerprint` (the one the user was shown), so the next connect treats
+/// the host as new. False when that key wasn't saved.
+pub fn forget_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bool, SshError> {
+    let host_key = format!("{host}:{port}");
+    let mut map = load_known_hosts();
+    if map.get(&host_key).map(String::as_str) != Some(fingerprint) {
+        return Ok(false);
+    }
+    map.remove(&host_key);
+    write_known_hosts(map)?;
+    Ok(true)
+}
+
+/// Puts back a key [`forget_known_host`] forgot (its Undo), unless the host
+/// has a key again by now.
+pub fn restore_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bool, SshError> {
+    let host_key = format!("{host}:{port}");
+    let mut map = load_known_hosts();
+    if map.contains_key(&host_key) {
+        return Ok(false);
+    }
+    map.insert(host_key, fingerprint.to_string());
+    write_known_hosts(map)?;
+    Ok(true)
 }
 
 /// SHA-256 of the key's SSH wire encoding, base64 with its padding: the
@@ -164,7 +196,10 @@ impl Handler for ClientHandler {
             if expected == &fingerprint {
                 return Ok(true);
             }
-            note(KeyProblem::Changed);
+            note(KeyProblem::Changed {
+                saved: expected.clone(),
+                offered: fingerprint,
+            });
             return Err(russh::Error::UnknownKey);
         }
         if self.trust_host
@@ -290,10 +325,11 @@ impl SshTunnel {
         };
         let addr = format!("{}:{}", ssh.host, ssh.port);
         let mut handle = client::connect(config, &addr, handler).await.map_err(|e| {
-            let why = match problem.lock().ok().and_then(|p| *p) {
-                Some(KeyProblem::Changed) => {
-                    format!("SSH host key for {host_key} has CHANGED; nothing was sent")
-                }
+            let why = match problem.lock().ok().and_then(|p| p.clone()) {
+                Some(KeyProblem::Changed { saved, offered }) => format!(
+                    "SSH host key for {host_key} has CHANGED; nothing was sent \
+                     (saved {saved}, offered now {offered})"
+                ),
                 Some(KeyProblem::Unknown) => format!("Unknown SSH host key for {host_key}"),
                 None => e.to_string(),
             };
@@ -462,6 +498,36 @@ impl Drop for SshTunnel {
 #[cfg(test)]
 mod key_file_tests {
     use super::*;
+
+    /// rowkery/reports#35: forgetting a changed key takes only the key the
+    /// user was shown, and Undo puts it back.
+    #[test]
+    fn a_saved_host_key_is_forgotten_and_restored() {
+        let _guard = crate::config::test_dir_guard("known-hosts");
+        persist_known_host("bastion:22", "SHA256:old").unwrap();
+        persist_known_host("other:22", "SHA256:keep").unwrap();
+        assert!(!forget_known_host("bastion", 22, "SHA256:not-shown").unwrap());
+        assert!(forget_known_host("bastion", 22, "SHA256:old").unwrap());
+        let left = load_known_hosts();
+        assert_eq!(left.get("bastion:22"), None);
+        assert_eq!(
+            left.get("other:22").map(String::as_str),
+            Some("SHA256:keep")
+        );
+        assert!(restore_known_host("bastion", 22, "SHA256:old").unwrap());
+        assert_eq!(
+            load_known_hosts().get("bastion:22").map(String::as_str),
+            Some("SHA256:old")
+        );
+        // A key saved again since isn't replaced by the Undo.
+        assert!(forget_known_host("bastion", 22, "SHA256:old").unwrap());
+        persist_known_host("bastion:22", "SHA256:new").unwrap();
+        assert!(!restore_known_host("bastion", 22, "SHA256:old").unwrap());
+        assert_eq!(
+            load_known_hosts().get("bastion:22").map(String::as_str),
+            Some("SHA256:new")
+        );
+    }
 
     /// rowkery/reports#51: an encrypted key says what it needs.
     #[test]
