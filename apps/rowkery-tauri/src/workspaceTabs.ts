@@ -120,6 +120,8 @@ export interface TabRun {
   /** The running fetch appends a page to the rows shown (they, and their edits, stay). */
   appending?: boolean;
   cancelling: boolean;
+  /** A second cancel now is a Force stop: a second after the first (core's `FORCE_ASK_AFTER`). */
+  forceReady?: boolean;
   /**
    * The run waits for a free connection: every one the saved connection may
    * hold (10) is busy running something or holding a transaction.
