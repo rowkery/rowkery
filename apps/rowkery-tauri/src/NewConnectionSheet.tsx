@@ -359,7 +359,11 @@ export function NewConnectionSheet({
     probeSeq.current++;
     onClose();
   };
-  // Closed some other way (the app took the sheet down): the same.
+  // Closed some other way (the app's own Esc, ⌘W, the Agents link): the
+  // sheet plays its exit under Presence's data-closing, then unmounts.
+  // Either counts.
+  const overlay = useRef<HTMLDivElement>(null);
+  const gone = () => closed.current || !!overlay.current?.closest("[data-closing]");
   useEffect(() => {
     closed.current = false;
     return () => {
@@ -670,7 +674,7 @@ export function NewConnectionSheet({
       window.clearTimeout(autoProbe.current);
       setSaveProbing(true);
       const ok = await runProbe();
-      if (closed.current) return;
+      if (gone()) return;
       setSaveProbing(false);
       if (ok === null) return;
       if (!ok) {
@@ -679,7 +683,7 @@ export function NewConnectionSheet({
       }
     }
     if (beforeChange && !(await beforeChange(false))) return;
-    if (closed.current) return;
+    if (gone()) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -892,7 +896,7 @@ export function NewConnectionSheet({
   return (
     // The inspector column at the window's right (Paper, 2026-10-10; it
     // was a modal sheet): the window stays in view and usable beside it.
-    <div data-testid="nc-overlay" className="nc-overlay">
+    <div ref={overlay} data-testid="nc-overlay" className="nc-overlay">
       <Inspector
         kind="connect"
         data-testid="nc-sheet"

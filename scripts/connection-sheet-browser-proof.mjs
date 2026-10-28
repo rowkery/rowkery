@@ -218,6 +218,18 @@ await page.waitForFunction(() => !document.querySelector('[data-testid="nc-sheet
 await page.waitForTimeout(2600);
 check((await page.evaluate(() => window.__SAVED__.length)) === savedSoFar && (await page.evaluate(() => window.__OPENED__)) === openedSoFar, "Cancel during Save's probe: nothing saved, no window opened");
 
+// Closed by the app instead (its Esc with focus outside the sheet): the
+// same, even when the probe answers while the sheet is still leaving.
+await fillSlow("dropped-too", 800);
+await page.waitForTimeout(1900);
+await page.evaluate(() => {
+  document.activeElement?.blur();
+  document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+});
+await page.waitForFunction(() => !document.querySelector('[data-testid="nc-sheet"]'));
+await page.waitForTimeout(800);
+check((await page.evaluate(() => window.__SAVED__.length)) === savedSoFar && (await page.evaluate(() => window.__OPENED__)) === openedSoFar, "closed by the app mid-probe: nothing saved, no window opened");
+
 // The auto-probe's timer no longer supersedes a Save pressed before it.
 await fillSlow("kept");
 await page.waitForFunction(() => window.__SAVED__.some((c) => c.name === "kept"), null, { timeout: 5000 }).catch(() => {});
