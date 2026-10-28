@@ -214,8 +214,10 @@ enum Command {
     CountTransactions {
         respond_to: oneshot::Sender<Option<usize>>,
     },
-    /// Each window's query tabs that may hold the user's open transaction.
+    /// Each window's query tabs that may hold the user's open transaction
+    /// (`held`: as a quit counts them, see `window_transactions`).
     OpenTransactions {
+        held: bool,
         respond_to: oneshot::Sender<Vec<(String, u64)>>,
     },
     ListDatabases {
@@ -3687,12 +3689,12 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 force_stop(&state.runtime, slot);
             }
         }
-        Command::OpenTransactions { respond_to } => {
+        Command::OpenTransactions { held, respond_to } => {
             let mut open: Vec<(String, u64)> = state
                 .windows
                 .keys()
                 .flat_map(|w| {
-                    let tabs = window_transactions(state, w, false);
+                    let tabs = window_transactions(state, w, held);
                     tabs.into_iter().map(move |t| (w.clone(), t))
                 })
                 .collect();
@@ -4659,8 +4661,22 @@ impl CoreBridge {
     /// Each window's query tabs (window id, tab id) whose session may hold
     /// the user's open transaction.
     pub fn open_transactions(&self) -> Vec<(String, u64)> {
-        self.send_command(|respond_to| Command::OpenTransactions { respond_to })
-            .unwrap_or_default()
+        self.send_command(|respond_to| Command::OpenTransactions {
+            held: false,
+            respond_to,
+        })
+        .unwrap_or_default()
+    }
+
+    /// As [`Self::open_transactions`], but a tab out on a run counts only
+    /// when the run started inside the user's transaction: closing the tab
+    /// cancels a running write as it always did.
+    pub fn held_transactions(&self) -> Vec<(String, u64)> {
+        self.send_command(|respond_to| Command::OpenTransactions {
+            held: true,
+            respond_to,
+        })
+        .unwrap_or_default()
     }
 
     /// Databases on the window's server; empty for SQLite.

@@ -40,7 +40,7 @@ import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
 import { hasPendingUndo, liveOffer, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
 import { RenderErrorBoundary } from "./ErrorBoundary";
-import { transactionInTheWay } from "./openTransactions";
+import { transactionBlocksClose, transactionInTheWay } from "./openTransactions";
 import { persistNotice, readKey, takeConfigNotice, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
@@ -561,12 +561,18 @@ function App() {
   const newWindowRef = useRef(newWindow);
   newWindowRef.current = newWindow;
 
-  const closeWindowById = (id: string) => {
-    const closing = windowsRef.current.find((w) => w.id === id);
-    const closedIndex = windowsRef.current.findIndex((w) => w.id === id);
+  const closeWindowById = async (id: string) => {
+    // Closing ends the window's sessions: never over a tab's open transaction.
+    if (await transactionBlocksClose([id])) return;
+    // Read after the check: the list may have moved meanwhile, or a second
+    // close of the same window got here first.
+    const list = windowsRef.current;
+    const closing = list.find((w) => w.id === id);
+    if (!closing) return;
+    const closedIndex = list.indexOf(closing);
     const closedTabs = tabsByWindow.current.get(id);
-    if (closing?.connectionId) {
-      const name = connections.find((c) => c.id === closing.connectionId)?.name ?? "window";
+    if (closing.connectionId) {
+      const name = connectionsRef.current.find((c) => c.id === closing.connectionId)?.name ?? "window";
       // Undo brings it back where it was, with its tabs; it reconnects when shown.
       const restore = () => {
         const back = `w${nextWindowNo.current++}`;
@@ -584,8 +590,8 @@ function App() {
     void closeWindow(id);
     openSeq.current.delete(id);
     catalogUpdates.current.forget(id);
-    const index = windows.findIndex((w) => w.id === id);
-    const rest = windows.filter((w) => w.id !== id);
+    const index = closedIndex;
+    const rest = list.filter((w) => w.id !== id);
     if (rest.length === 0) {
       // Like query tabs, closing the last window leaves an empty one.
       const fresh = `w${nextWindowNo.current++}`;
@@ -594,7 +600,7 @@ function App() {
       return;
     }
     setWindows(rest);
-    if (id === activeWindowId) {
+    if (id === activeWindowIdRef.current) {
       setActiveWindowId(rest[Math.min(index, rest.length - 1)].id);
     }
   };
@@ -1638,11 +1644,12 @@ function App() {
             openAgents(tab);
           }}
           onClose={() => setNewConnOpen(false)}
-          beforeSave={async () => {
-            // Saving an edit reconnects its windows: never over a tab's open transaction.
+          beforeChange={async (deleting) => {
+            // Saving an edit reconnects its windows, deleting empties them:
+            // never over a tab's open transaction.
             if (!editingId) return true;
             const on = windowsRef.current.filter((w) => w.connectionId === editingId && w.state === "connected");
-            return !(await transactionInTheWay(on.map((w) => w.id)));
+            return !(await (deleting ? transactionBlocksClose : transactionInTheWay)(on.map((w) => w.id)));
           }}
           onDeleted={(id) => {
             setNewConnOpen(false);
