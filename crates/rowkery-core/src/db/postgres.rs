@@ -2448,13 +2448,16 @@ fn array_element_shown(element: &Type) -> bool {
 }
 
 /// The f64 nearest the digits a real prints (`0.1`, not the
-/// `0.10000000149011612` a plain widening shows).
+/// `0.10000000149011612` a plain widening shows). A literal of it for a
+/// real column is quoted (`'0.1'`), as `0.1` reads as a double that no
+/// real equals. Kept whole in the rare case those digits don't narrow back
+/// to the same real.
 fn widen_f32(f: f32) -> f64 {
-    if f.is_finite() {
-        f.to_string().parse().unwrap_or(f as f64)
-    } else {
-        f as f64
-    }
+    f.to_string()
+        .parse()
+        .ok()
+        .filter(|w: &f64| *w as f32 == f && f.is_finite())
+        .unwrap_or(f as f64)
 }
 
 /// Postgres's text output of a float (`Infinity`, not Rust's `inf`).

@@ -463,7 +463,9 @@ fn pg_literal(kind: Kind, value: &Value) -> Result<String, String> {
         Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         Value::Int(n) if quoted_kind => cast(quote(&n.to_string())?),
         Value::Int(n) => n.to_string(),
-        Value::Float(f) if quoted_kind && f.is_finite() => cast(quote(&float(*f))?),
+        // Quoted, so it takes the column's own type: a bare `0.1` is a
+        // double, and the real `0.1` doesn't equal it.
+        Value::Float(f) if f.is_finite() => cast(quote(&float(*f))?),
         Value::Float(f) => float(*f),
         Value::Bytes(b) => format!("'\\x{}'::bytea", hex(b)),
         Value::Text(t) => {
@@ -652,10 +654,10 @@ mod tests {
         assert!(pg("numeric", text(".")).is_err());
         assert!(pg("numeric", text("1e")).is_err());
         assert!(pg("numeric", text("12 OR 1=1")).is_err());
-        assert_eq!(pg("float8", Value::Float(1.5)).unwrap(), "1.5");
+        assert_eq!(pg("float8", Value::Float(1.5)).unwrap(), "'1.5'");
         assert_eq!(
             pg("real", Value::Float(1e21)).unwrap(),
-            "1000000000000000000000"
+            "'1000000000000000000000'"
         );
         assert_eq!(pg("float8", Value::Float(f64::NAN)).unwrap(), "'NaN'");
         assert_eq!(
