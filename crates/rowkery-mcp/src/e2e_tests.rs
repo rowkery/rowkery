@@ -708,6 +708,153 @@ async fn hidden_tables_hold_through_partitions_and_child_tables() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A generated column built from a marked one is masked with it
+/// (rowkery/reports#30): returned as a stand-in, refused as a filter, and
+/// listed as masked. One built from other columns is left alone.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_generated_column_from_a_masked_one_is_masked() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-gen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_gen_customers, mcp_gen_people, mcp_gen_pp CASCADE;
+         CREATE TABLE mcp_gen_people (id int, email text);
+         CREATE TABLE mcp_gen_staff (low text GENERATED ALWAYS AS (lower(email)) STORED)
+           INHERITS (mcp_gen_people);
+         INSERT INTO mcp_gen_staff (id, email) VALUES (2, 'Tomas@Ibarra.dev');
+         CREATE TABLE mcp_gen_customers (id int PRIMARY KEY, \"Email\" text, total int,
+           email_lower text GENERATED ALWAYS AS (lower(\"Email\")) STORED,
+           doubled int GENERATED ALWAYS AS (total * 2) STORED);
+         CREATE INDEX mcp_gen_lower ON mcp_gen_customers (email_lower);
+         INSERT INTO mcp_gen_customers (id, \"Email\", total) VALUES (1, 'Mara@Fjord.se', 20);",
+    )
+    .await
+    .expect("fixtures");
+    // A partition with an expression of its own (Postgres 16 allows one
+    // that differs from its parent's; a later server may not).
+    let own_expression = session_execute(
+        &setup,
+        "CREATE TABLE mcp_gen_pp (id int, email text, g text GENERATED ALWAYS AS ('x') STORED)
+           PARTITION BY LIST (id);
+         CREATE TABLE mcp_gen_pp1 PARTITION OF mcp_gen_pp (g GENERATED ALWAYS AS (lower(email)) STORED)
+           FOR VALUES IN (1);
+         INSERT INTO mcp_gen_pp (id, email) VALUES (1, 'Kim@X.io');",
+    )
+    .await
+    .is_ok();
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::All,
+                tables: Vec::new(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    pg.masked_columns = [(
+        pg.database.clone(),
+        vec![
+            "public.mcp_gen_customers.Email".to_string(),
+            "public.mcp_gen_people.email".to_string(),
+            "public.mcp_gen_pp.email".to_string(),
+        ],
+    )]
+    .into_iter()
+    .collect();
+    save(pg);
+    let mcp = RowkeryMcp::default();
+
+    let out = query(
+        &mcp,
+        "SELECT id, email_lower, doubled FROM mcp_gen_customers",
+    )
+    .await
+    .expect("returned");
+    let text = out["rows"].to_string();
+    assert!(!text.contains('@') && text.contains("masked:"), "{text}");
+    assert_eq!(out["rows"][0][2], json!(40));
+    for sql in [
+        "SELECT id FROM mcp_gen_customers WHERE email_lower LIKE 'm%'",
+        "SELECT upper(email_lower) FROM mcp_gen_customers",
+        "SELECT email_lower FROM mcp_gen_customers ORDER BY email_lower",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused"), "{sql}: {err}");
+    }
+    query(&mcp, "SELECT id FROM mcp_gen_customers WHERE doubled > 10")
+        .await
+        .expect("an unmarked generated column filters");
+    let described = call(
+        &mcp,
+        "describe_table",
+        json!({ "connection": ID, "table": "mcp_gen_customers" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        described["masked"],
+        json!(["Email", "email_lower"]),
+        "{described}"
+    );
+
+    // A child table's or partition's own generated column, under the
+    // marked table.
+    let mut reads = vec![
+        "SELECT low FROM mcp_gen_staff",
+        "SELECT * FROM mcp_gen_people",
+    ];
+    if own_expression {
+        reads.extend(["SELECT g FROM mcp_gen_pp", "SELECT g FROM mcp_gen_pp1"]);
+    }
+    for sql in reads {
+        let out = query(&mcp, sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let text = out["rows"].to_string().to_lowercase();
+        assert!(
+            !text.contains("ibarra") && !text.contains("x.io"),
+            "{sql}: {text}"
+        );
+    }
+    let err = query(&mcp, "SELECT id FROM mcp_gen_staff WHERE low LIKE 't%'")
+        .await
+        .expect_err("filter on a child's generated column");
+    assert!(err.starts_with("Refused"), "{err}");
+
+    // One added after the catalog was read: masked, and the table's other
+    // columns still read (no "masked column no longer in the table").
+    session_execute(
+        &setup,
+        "ALTER TABLE mcp_gen_customers ADD COLUMN el text GENERATED ALWAYS AS (upper(\"Email\")) STORED",
+    )
+    .await
+    .expect("add a generated column");
+    query(&mcp, "SELECT id FROM mcp_gen_customers")
+        .await
+        .expect("the other columns still read");
+    let out = query(&mcp, "SELECT el FROM mcp_gen_customers")
+        .await
+        .expect("the new column, masked");
+    assert!(!out["rows"].to_string().contains('@'), "{out}");
+
+    let _ = session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_gen_customers, mcp_gen_people, mcp_gen_pp CASCADE",
+    )
+    .await;
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 /// The leak table of the sensitive-columns proposal, row by row: a marked
 /// column comes back as a stand-in when returned or counted, and every
 /// other way of reading it is refused before anything runs.
