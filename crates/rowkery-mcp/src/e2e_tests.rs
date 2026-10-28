@@ -1967,7 +1967,7 @@ async fn a_longer_query_limit_lets_a_read_run_past_the_default() {
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn a_join_pushed_down_to_a_foreign_server_is_refused() {
+async fn a_join_pushed_down_to_a_foreign_server_is_checked() {
     let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-fdw-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2022,9 +2022,44 @@ async fn a_join_pushed_down_to_a_foreign_server_is_refused() {
     pg.mcp_hidden_tables = vec!["mcp_fdw.people".into()];
     save(pg);
     let mcp = RowkeryMcp::default();
+    // The plan Postgres gives, as text: what postgres_fdw pushed down.
+    let plan = |sql: String| {
+        let setup = &setup;
+        async move {
+            let mut text = String::new();
+            rowkery_core::db::postgres::session_query_stream(
+                setup,
+                &format!("EXPLAIN (FORMAT JSON) {sql}"),
+                |batch, _| {
+                    text.push_str(&format!("{:?}", batch.rows));
+                    Ok(())
+                },
+            )
+            .await
+            .expect("explain");
+            text
+        }
+    };
+    // A join pushed down names its tables only in `Relations`: the hidden
+    // one among them is refused like any other.
     let join = "SELECT p.email FROM mcp_fdw.people p JOIN mcp_fdw.accounts a ON a.pid = p.id";
+    assert!(
+        plan(join.into()).await.contains("INNER JOIN"),
+        "pushed down"
+    );
     let err = query(&mcp, join).await.expect_err("pushed-down join");
-    assert_eq!(err, crate::guard::UNNAMED_SCAN_REFUSAL, "{join}");
+    assert!(
+        err.starts_with("Refused") && err != crate::guard::UNNAMED_SCAN_REFUSAL,
+        "{err}"
+    );
+    // An aggregate over the shared one, pushed down too, is fine.
+    let count = "SELECT count(*) FROM mcp_fdw.accounts";
+    assert!(
+        plan(count.into()).await.contains("Aggregate on"),
+        "pushed down"
+    );
+    let counted = query(&mcp, count).await.expect("aggregate");
+    assert_eq!(counted["rows"], json!([[1]]));
     // The shared foreign table on its own is named in the plan, and fine.
     let own = query(&mcp, "SELECT plan FROM mcp_fdw.accounts")
         .await

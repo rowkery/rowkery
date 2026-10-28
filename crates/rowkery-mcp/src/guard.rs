@@ -237,6 +237,8 @@ pub fn pg_relations(explain_json: &Json) -> Vec<(Option<String>, String)> {
                 .and_then(Json::as_str)
                 .map(str::to_string);
             out.push((schema, rel.to_string()));
+        } else if let Some(pushed) = pushed_down(node) {
+            out.extend(pushed);
         }
         if let Some(children) = node.get("Plans").and_then(Json::as_array) {
             for child in children {
@@ -255,17 +257,84 @@ pub fn pg_relations(explain_json: &Json) -> Vec<(Option<String>, String)> {
 
 /// Why a plan that reads tables it doesn't name is refused when tables are
 /// hidden or columns masked.
-pub const UNNAMED_SCAN_REFUSAL: &str = "Postgres would read some tables here without naming them in its plan (a join or aggregate pushed down to a foreign server, or a custom scan), so Rowkery can't check them against the hidden tables and masked columns. Query each foreign table on its own.";
+pub const UNNAMED_SCAN_REFUSAL: &str = "Postgres would read some tables here without naming them in its plan (a custom scan, or a foreign server's scan Rowkery can't read), so Rowkery can't check them against the hidden tables and masked columns. Query the tables another way, for example each foreign table on its own.";
 
-/// Whether a Postgres plan has a scan that reads relations without a
-/// `Relation Name`: a Foreign Scan whose join or aggregate postgres_fdw
-/// pushed down (it lists them only as text in `Relations`), or a Custom
-/// Scan. `pg_relations` can't see what those read.
+/// The foreign tables a Foreign Scan with no `Relation Name` reads: a join
+/// or aggregate postgres_fdw pushed down lists them only as text in
+/// `Relations`, as `(schema.table alias)` between JOIN words or after
+/// `Aggregate on`. None when that text isn't only those.
+fn pushed_down(node: &Json) -> Option<Vec<(Option<String>, String)>> {
+    if node.get("Node Type").and_then(Json::as_str) != Some("Foreign Scan") {
+        return None;
+    }
+    let text = node.get("Relations").and_then(Json::as_str)?;
+    // An identifier as quote_identifier writes it: bare, or "…" with "".
+    fn ident(s: &str) -> Option<(String, &str)> {
+        if let Some(rest) = s.strip_prefix('"') {
+            let mut out = String::new();
+            let mut chars = rest.char_indices();
+            while let Some((i, c)) = chars.next() {
+                if c == '"' {
+                    if rest[i + 1..].starts_with('"') {
+                        out.push('"');
+                        chars.next();
+                    } else {
+                        return Some((out, &rest[i + 1..]));
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            return None;
+        }
+        let end = s
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .unwrap_or(s.len());
+        (end > 0).then(|| (s[..end].to_string(), &s[end..]))
+    }
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('(') {
+            // A leaf: (schema.table) or (schema.table alias).
+            if let Some((schema, r)) = ident(after) {
+                let (table, r) = ident(r.strip_prefix('.')?)?;
+                let r = match r.strip_prefix(' ') {
+                    Some(alias) => ident(alias)?.1,
+                    None => r,
+                };
+                rest = r.strip_prefix(')')?;
+                out.push((Some(schema), table));
+            } else {
+                rest = after;
+            }
+            continue;
+        }
+        let word_end = rest.find(['(', ')', ' ']).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if !(word.is_empty()
+            || matches!(
+                word,
+                "INNER" | "LEFT" | "RIGHT" | "FULL" | "SEMI" | "ANTI" | "JOIN" | "Aggregate" | "on"
+            ))
+        {
+            return None;
+        }
+        rest = &rest[word_end.max(1)..];
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Whether a Postgres plan has a scan that reads relations it doesn't name
+/// in a way Rowkery can read: a Custom Scan, or a Foreign Scan with no
+/// `Relation Name` whose `Relations` isn't postgres_fdw's plain list.
+/// `pg_relations` can't see what those read.
 pub fn pg_unnamed_scan(explain_json: &Json) -> bool {
     fn walk(node: &Json) -> bool {
         let kind = node.get("Node Type").and_then(Json::as_str);
         (matches!(kind, Some("Foreign Scan" | "Custom Scan"))
-            && node.get("Relation Name").is_none())
+            && node.get("Relation Name").is_none()
+            && pushed_down(node).is_none())
             || node
                 .get("Plans")
                 .and_then(Json::as_array)
@@ -577,16 +646,40 @@ mod tests {
         assert!(!pg_pruned(&none));
     }
 
-    /// postgres_fdw with `use_remote_estimate` pushes a join of two foreign
-    /// tables down as one Foreign Scan that names them only in `Relations`
-    /// (the plan as Postgres 16 gave it).
+    /// postgres_fdw pushes a join of foreign tables, or an aggregate over
+    /// one, down as one Foreign Scan that names them only in `Relations`
+    /// (the plans as Postgres 16 gave them).
     #[test]
     fn a_scan_that_names_no_relation_is_seen() {
-        let pushed = json!([{ "Plan": { "Node Type": "Foreign Scan", "Operation": "Select",
-            "Relations": "(crm.people p) INNER JOIN (crm.accounts a)",
-            "Remote SQL": "SELECT r1.email FROM (crm.people r1 INNER JOIN crm.accounts r2 ON (((r2.pid = r1.id))))" } }]);
-        assert!(pg_unnamed_scan(&pushed));
-        assert!(pg_relations(&pushed).is_empty());
+        let rels = |text: &str| {
+            let plan = json!([{ "Plan": { "Node Type": "Foreign Scan", "Operation": "Select",
+                "Relations": text } }]);
+            (pg_unnamed_scan(&plan), pg_relations(&plan))
+        };
+        let rel = |s: &str, t: &str| (Some(s.to_string()), t.to_string());
+        assert_eq!(
+            rels("(crm.people p) INNER JOIN (crm.accounts a)"),
+            (false, vec![rel("crm", "people"), rel("crm", "accounts")])
+        );
+        assert_eq!(
+            rels("((crm.people p) LEFT JOIN (\"Crm\".\"Odd \"\"name\"\"\")) INNER JOIN (crm.x)"),
+            (
+                false,
+                vec![
+                    rel("crm", "people"),
+                    rel("Crm", "Odd \"name\""),
+                    rel("crm", "x")
+                ]
+            )
+        );
+        assert_eq!(
+            rels("Aggregate on (rv_fdw.accounts)"),
+            (false, vec![rel("rv_fdw", "accounts")])
+        );
+        // Text that isn't only that list is refused.
+        assert!(rels("(crm.people p) UNION (crm.x)").0);
+        assert!(rels("something else").0);
+        assert!(rels("").0);
         let custom = json!([{ "Plan": { "Node Type": "Limit", "Plans": [
             { "Node Type": "Custom Scan", "Custom Plan Provider": "x" }
         ] } }]);

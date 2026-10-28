@@ -152,6 +152,9 @@ pub(crate) async fn pg_read_relations(
     if guard::pg_pruned(plan) {
         let found = store.read_unpruned(target, explain).await?;
         let (whole, _) = guard::pg_plan_json(found.rows)?;
+        if guard::pg_unnamed_scan(&whole) {
+            return Err(guard::UNNAMED_SCAN_REFUSAL.into());
+        }
         for rel in guard::pg_relations(&whole) {
             if !touched.contains(&rel) {
                 touched.push(rel);
