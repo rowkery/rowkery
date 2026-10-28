@@ -3598,13 +3598,15 @@ fn postgres_a_run_never_waits_for_its_sessions_replacement() {
     hold.store(true, Ordering::SeqCst);
     thread::scope(|scope| {
         let ping = scope.spawn(|| bridge.ping_idle_blocking("w", std::time::Duration::ZERO));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Pings of the dead may each take their whole 3 s.
+        let deadline = Instant::now() + Duration::from_secs(20);
         while held.load(Ordering::SeqCst) < 3 {
             assert!(Instant::now() < deadline, "three replacements open at once");
             thread::sleep(Duration::from_millis(10));
         }
         // Tab 2 closes while its replacement opens.
         bridge.close_window_tab("w", 2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         // Tab 1 runs: it doesn't wait for its replacement but opens its own,
         // which is held too until the network is back.
         let queue = bridge

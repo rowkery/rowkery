@@ -730,7 +730,7 @@ pub(crate) async fn lease_or_wait(
             Ok(mut p) => {
                 // A replacement being opened for a dead session isn't waited
                 // for: the run opens its own, and the replacement is dropped.
-                if p.replacing.remove(&key) {
+                if p.generation(window_id) == generation && p.replacing.remove(&key) {
                     p.out.remove(&key);
                 }
                 if waits(slot) && p.out.contains_key(&key) && p.generation(window_id) == generation
@@ -909,19 +909,21 @@ pub(crate) async fn ping_idle(
             session,
         } = parked;
         drop(session);
-        // The dead one's place, unless a waiting run took it first.
-        let (tunnel, place) = pool
-            .lock()
-            .map(|mut p| {
-                let key = (window_id.to_string(), slot);
-                if p.out.get(&key) == Some(&id) {
-                    p.replacing.insert(key);
-                    p.returned.notify_waiters();
-                }
-                let place = p.cap(&connection_id).try_acquire_owned().ok();
-                (p.tunnel(window_id, generation), place)
-            })
-            .unwrap_or((None, None));
+        // The dead one's place, unless a waiting run took it first. Nothing
+        // to replace once the slot isn't ours (the window was re-pointed).
+        let taken = pool.lock().map(|mut p| {
+            let key = (window_id.to_string(), slot);
+            if p.out.get(&key) != Some(&id) {
+                return None;
+            }
+            p.replacing.insert(key);
+            p.returned.notify_waiters();
+            let place = p.cap(&connection_id).try_acquire_owned().ok();
+            Some((p.tunnel(window_id, generation), place))
+        });
+        let Ok(Some((tunnel, place))) = taken else {
+            continue;
+        };
         let (connection_id, config) = (connection_id.clone(), config.clone());
         opens.push(async move {
             let opened = match place {
