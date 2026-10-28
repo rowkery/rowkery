@@ -12,7 +12,7 @@ import "./McpConnectSheet.css";
  */
 export type AgentClient = "claude-code" | "claude-desktop";
 
-type CheckState = "missing" | "ready" | "connected" | "other" | "unreadable";
+type CheckState = "missing" | "ready" | "connected" | "other" | "unreadable" | "misplaced";
 
 interface ConnectCheck {
   client: AgentClient;
@@ -279,6 +279,17 @@ export function McpConnectSheet({
         {retryBtn}
       </>
     );
+  } else if (check.state === "misplaced") {
+    // No Term or Copy: the path they'd show is the one that won't last.
+    body = <Note kind="warn" title="Move Rowkery to Applications first." text={check.problem ?? ""} />;
+    foot = (
+      <>
+        <span className="mcp-grow" />
+        <button type="button" className="mcp-btn" onClick={onClose}>
+          Close
+        </button>
+      </>
+    );
   } else if (check.state === "connected") {
     body = (
       <>
@@ -308,7 +319,7 @@ export function McpConnectSheet({
             title={`${name} already has a Rowkery MCP server.`}
             text={
               <>
-                It runs <code>{check.existing}</code>. Replace it with this copy of Rowkery?
+                It runs <code>{check.existing}</code>. {check.problem ? `${check.problem} ` : ""}Replace it with this copy of Rowkery?
               </>
             }
           />

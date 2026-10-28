@@ -244,6 +244,24 @@ check(!(await page.$('[data-mc-primary="run"]')), "never offers to overwrite an 
 await shot("10-desktop-unreadable");
 await close();
 
+// 5b. rowkery/reports#33: run from the disk image, Run is refused; a stored
+// command that's gone says so.
+const DMG = "Rowkery is running from the disk image. Move it to Applications, open it from there, and try again.";
+await page.evaluate((dmg) => {
+  window.__MC__.state = {
+    "claude-code": ["other", { existing: "/Volumes/Rowkery/Rowkery.app/Contents/MacOS/Rowkery --mcp", problem: "That copy of Rowkery isn't there any more, so the agent can't start it." }],
+    "claude-desktop": ["misplaced", { problem: dmg }],
+  };
+}, DMG);
+await open();
+await stateIs("other");
+check((await page.textContent(sheet)).includes("isn't there any more"), "a stored command that's gone says so, with Replace");
+await page.click('[data-mc-client="claude-desktop"]');
+await stateIs("misplaced");
+check((await page.textContent(sheet)).includes(DMG) && !(await page.$('[data-mc-primary="run"]')), "from the disk image: why, and no Run");
+await shot("10b-desktop-misplaced");
+await close();
+
 // 6. The connection sheet offers it over itself; Esc goes back to the sheet.
 await set(() => {
   window.__MC__.state = { "claude-code": ["ready"], "claude-desktop": ["ready"] };
