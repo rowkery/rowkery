@@ -9,7 +9,8 @@ import { INCOMING_CAP, type FollowLookup } from "./api";
 import type { KeyColumns, RowEditState } from "./gridTypes";
 import type { Column, QueryResultDto, Value } from "./types";
 import { safeFormatCell } from "./types";
-import { jsonEditorText } from "./editBuffer";
+import { jsonShownText } from "./editBuffer";
+import { clipText } from "./gridLayout";
 import { Keys } from "./Keys";
 
 /** Reads the row a foreign key points at, as a short label (`Kiosk Bangsar · KL`). */
@@ -87,6 +88,10 @@ function isNull(cell: unknown) {
 }
 
 const TITLE_COLUMN = /^(name|title|label|display_name|full_name|username|email|code|slug)$|_name$/i;
+/** A value shows this much here (about 1,500 lines); Copy takes all of it. */
+export const QL_SHOWN_CHARS = 100_000;
+/** The title, in its large type: a long value is cut well before this. */
+const QL_TITLE_CHARS = 200;
 const NOT_A_TITLE = /^(uuid|json|jsonb|timestamp|date|time|numeric|decimal|money|real|double|float|int|bigint|smallint|serial|bool)/i;
 
 /**
@@ -99,9 +104,9 @@ export function quickLookTitle(columns: Column[], row: unknown[], pkIndex: numbe
     .map((c, i) => ({ c, v: row[i] as Record<string, unknown> | null }))
     .filter(({ c, v }) => v && typeof v === "object" && "Text" in v && String(v.Text).trim() !== "" && !NOT_A_TITLE.test(c.type_name));
   const named = texts.find(({ c }) => TITLE_COLUMN.test(c.name));
-  if (named) return String(named.v!.Text);
+  if (named) return clipText(String(named.v!.Text), QL_TITLE_CHARS);
   if (pkIndex >= 0 && !isNull(row[pkIndex])) return `#${safeFormatCell(row[pkIndex])}`;
-  return texts[0] ? String(texts[0].v!.Text) : `Row ${rowNumber.toLocaleString()}`;
+  return texts[0] ? clipText(String(texts[0].v!.Text), QL_TITLE_CHARS) : `Row ${rowNumber.toLocaleString()}`;
 }
 
 /** A focusable line: an outgoing key (by column) or an Incoming table (by index). */
@@ -333,7 +338,9 @@ export function QuickLook({
                   <CopyIcon size={12} />
                 </button>
                 <dd className={nul || text === "" ? "ql-null" : json ? "ql-json" : undefined}>
-                  <span className="ql-value">{nul ? "NULL" : json ? jsonEditorText(text) : text === "" ? "—" : text}</span>
+                  <span className="ql-value">
+                    {nul ? "NULL" : text === "" ? "—" : clipText(json ? jsonShownText(text) : text, QL_SHOWN_CHARS)}
+                  </span>
                   {(label !== undefined || target) && (
                     <span className="ql-follow-line">
                       {target && label !== null && (
