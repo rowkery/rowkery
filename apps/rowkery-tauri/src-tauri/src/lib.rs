@@ -1204,6 +1204,26 @@ fn explain_connect_error(
     )
 }
 
+/// Forget saved key on a changed SSH host key: removes the key saved for
+/// `host:port` while it is still `fingerprint`, the one the panel showed.
+#[tauri::command]
+fn forget_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<bool, String> {
+    rowkery_core::ssh::forget_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
+}
+
+/// Its Undo: puts the key back, unless the host has one again by now.
+#[tauri::command]
+fn restore_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<bool, String> {
+    rowkery_core::ssh::restore_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
+}
+
+/// SSH host keys trusted on a first connect since the last call, as
+/// (`host:port`, fingerprint), for the connect toast to name.
+#[tauri::command]
+fn take_trusted_host_keys() -> Vec<(String, String)> {
+    rowkery_core::ssh::take_newly_trusted()
+}
+
 /// Cancels the tab's query, if any, and closes its connection.
 #[tauri::command]
 fn close_query_tab(bridge: State<'_, CoreBridge>, window_id: String, tab_id: u64) {
@@ -2314,6 +2334,9 @@ pub fn run(mut timings: Timings) {
             browse_table_sql,
             fetch_more,
             explain_connect_error,
+            forget_ssh_host_key,
+            restore_ssh_host_key,
+            take_trusted_host_keys,
             app_ready,
             get_theme_preference,
             set_theme_preference,

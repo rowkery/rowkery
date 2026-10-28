@@ -359,6 +359,30 @@
   user-select: text;
 }
 
+.ew-host-keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--hover);
+  font: 11.5px/1.5 var(--mono);
+}
+
+.ew-host-keys dt {
+  color: var(--mute);
+  font-family: var(--sans);
+}
+
+.ew-host-keys dd {
+  margin: 0;
+  color: var(--text2);
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .ew-error-actions {
   display: flex;
   align-items: center;

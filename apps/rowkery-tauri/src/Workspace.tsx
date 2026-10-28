@@ -30,6 +30,9 @@ import {
   type ConnectExplanation,
   type CsvPreview,
   type FollowLookup,
+  type HostKeys,
+  forgetSshHostKey,
+  restoreSshHostKey,
 } from "./api";
 import { PlanView, copy as copyPlanText, planText } from "./PlanView";
 import { CommandPalette, type PickMode } from "./CommandPalette";
@@ -1051,6 +1054,28 @@ export function Workspace({
     // The sheet calls the SSH password field sshSecret.
     const field = explained?.field === "sshPassword" ? "sshSecret" : explained?.field;
     actions.editConnection(activeId, field ? { field, message: explained?.cause ?? session.error ?? "" } : undefined);
+  };
+  // Forget saved key: the key shown goes, so Retry (a separate press) meets
+  // the host as new; Undo puts it back.
+  const forgetHostKey = async (keys: HostKeys) => {
+    const gone = await forgetSshHostKey(keys.host, keys.port, keys.saved).catch((e) => {
+      showToast("Couldn't forget the saved key", String(e), "error");
+      return null;
+    });
+    if (gone === null) return;
+    if (!gone) return showToast("The saved key changed since; nothing was forgotten", "Retry to see it", "error");
+    const trusts = activeConnection?.kind === "postgres" && !!activeConnection.ssh?.trust_host;
+    showUndoToast(
+      `Forgot the saved key for ${keys.host}`,
+      trusts ? "Retry trusts its new key" : "Turn on Trust the host key on first connect in Edit…, then Retry",
+      {
+        undo: () =>
+          void restoreSshHostKey(keys.host, keys.port, keys.saved).then(
+            (back) => !back && showToast(`Can't undo: ${keys.host} has a saved key again`),
+            (e) => showToast("Couldn't put the saved key back", String(e), "error"),
+          ),
+      },
+    );
   };
   const failedRef = useRef(false);
   failedRef.current = connState === "error";
@@ -4443,6 +4468,8 @@ export function Workspace({
             onRetry={connState === "error" ? actions.retryConnect : undefined}
             onEdit={connState === "error" && activeId ? editFailed : undefined}
             onReport={() => reportIssue(true)}
+            hostKeys={explained?.host_keys ?? null}
+            onForgetKey={explained?.host_keys ? () => void forgetHostKey(explained.host_keys!) : undefined}
           />
         )}
         <div

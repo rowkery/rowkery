@@ -356,11 +356,16 @@ export function ConnectFailed({
   onRetry,
   onEdit,
   onReport,
+  hostKeys,
+  onForgetKey,
 }: {
   failure: { failed: ConnectFailure; retrying: boolean; pose: PenguinPose | null };
   onRetry?: () => void;
   onEdit?: () => void;
   onReport?: () => void;
+  /** A changed SSH host key: the saved fingerprint and the one offered now. */
+  hostKeys?: { saved: string; offered: string } | null;
+  onForgetKey?: () => void;
 }) {
   const { failed, retrying, pose: failedPose } = failure;
   return (
@@ -377,8 +382,22 @@ export function ConnectFailed({
             )}
           </div>
         </div>
-        <pre data-testid="sb-error-text" className="ew-error-text">{failed.error}</pre>
+        {hostKeys ? (
+          <dl className="ew-host-keys" data-host-keys>
+            <dt>Saved</dt>
+            <dd>{hostKeys.saved}</dd>
+            <dt>Now</dt>
+            <dd>{hostKeys.offered}</dd>
+          </dl>
+        ) : (
+          <pre data-testid="sb-error-text" className="ew-error-text">{failed.error}</pre>
+        )}
         <div className="ew-error-actions">
+          {hostKeys && onForgetKey && (
+            <button type="button" className="ew-btn" data-action="forget-key" disabled={retrying} onClick={onForgetKey}>
+              Forget saved key
+            </button>
+          )}
           {(onRetry || retrying) && (
             <button
               type="button"

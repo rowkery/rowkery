@@ -15,6 +15,7 @@ import {
   saveConnection,
   sqliteFileExists,
   takeOpenLink,
+  takeTrustedHostKeys,
   TEST_PG_CONNECTION,
   TEST_PG_SECRETS,
   type LocalServer,
@@ -450,6 +451,13 @@ function App() {
         if (opened.cached)
           applyCatalogUpdate(catalogUpdates.current.expect(windowId, opened.open_seq));
         void fillCountsRef.current(windowId, connectionId, seq);
+        // A bastion trusted on this first connect: say which key was saved.
+        void takeTrustedHostKeys()
+          .then((keys) => {
+            const [hostPort, fingerprint] = keys[keys.length - 1] ?? [];
+            if (hostPort) showToast(`Trusted ${hostPort.replace(/:22$/, "")}'s SSH key`, fingerprint);
+          })
+          .catch(() => {});
       } catch (e) {
         if (openSeq.current.get(windowId) !== seq) return;
         mark("socket-failed", { window: windowId, error: String(e) });

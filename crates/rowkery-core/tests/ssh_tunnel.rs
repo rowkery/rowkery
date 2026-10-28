@@ -189,6 +189,12 @@ async fn tunnel_checks_host_keys_and_carries_bytes() {
     let saved = std::fs::read_to_string(dir.path().join("ssh_known_hosts")).unwrap();
     let fingerprint = format!("{}=", key(1).public_key().fingerprint(HashAlg::Sha256));
     assert_eq!(saved.trim(), format!("127.0.0.1:{port} {fingerprint}"));
+    // The app is told which key it trusted, once.
+    assert_eq!(
+        rowkery_core::ssh::take_newly_trusted(),
+        vec![(format!("127.0.0.1:{port}"), fingerprint.clone())]
+    );
+    assert!(rowkery_core::ssh::take_newly_trusted().is_empty());
 
     // Saved: opens without trusting again.
     let tunnel = open(
@@ -247,4 +253,46 @@ async fn tunnel_checks_host_keys_and_carries_bytes() {
     .err()
     .expect("a changed host key must be refused");
     assert!(err.contains("CHANGED"), "{err}");
+    assert!(
+        rowkery_core::ssh::take_newly_trusted().is_empty(),
+        "nothing trusted"
+    );
+
+    // The panel names both keys; Forget saved key lets a trusting Retry in.
+    let keys = rowkery_core::explain::explain_connect_error(
+        &err,
+        &rowkery_core::explain::Target {
+            host: "db",
+            port: 5432,
+            username: "u",
+            ssh_host: Some("127.0.0.1"),
+            cloud_sql: None,
+        },
+    )
+    .host_keys
+    .expect("both keys");
+    let offered = format!("{}=", key(2).public_key().fingerprint(HashAlg::Sha256));
+    assert_eq!(
+        (
+            keys.host.as_str(),
+            keys.port,
+            keys.saved.as_str(),
+            keys.offered.as_str()
+        ),
+        ("127.0.0.1", other, fingerprint.as_str(), offered.as_str())
+    );
+    assert!(rowkery_core::ssh::forget_known_host(&keys.host, keys.port, &keys.saved).unwrap());
+    let tunnel = open(
+        &ssh(other, SshAuthMethod::Password, None, true),
+        &password(PASSWORD),
+        db,
+    )
+    .await
+    .unwrap();
+    round_trip(&tunnel).await;
+    drop(tunnel);
+    assert_eq!(
+        rowkery_core::ssh::take_newly_trusted(),
+        vec![(format!("127.0.0.1:{other}"), offered)]
+    );
 }

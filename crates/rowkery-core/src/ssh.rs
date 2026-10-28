@@ -149,6 +149,18 @@ pub fn restore_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bo
     Ok(true)
 }
 
+/// Host keys trusted on a first connect (`host:port`, fingerprint), until
+/// [`take_newly_trusted`] hands them to the app to show.
+static NEWLY_TRUSTED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The host keys trusted on a first connect since the last call.
+pub fn take_newly_trusted() -> Vec<(String, String)> {
+    NEWLY_TRUSTED
+        .lock()
+        .map(|mut t| std::mem::take(&mut *t))
+        .unwrap_or_default()
+}
+
 /// SHA-256 of the key's SSH wire encoding, base64 with its padding: the
 /// form `ssh_known_hosts` has always stored, so saved hosts still match.
 fn host_key_fingerprint(key: &PublicKey) -> String {
@@ -208,6 +220,9 @@ impl Handler for ClientHandler {
                 .unwrap_or(false)
         {
             persist_known_host(&host_key, &fingerprint).map_err(|_| russh::Error::UnknownKey)?;
+            if let Ok(mut trusted) = NEWLY_TRUSTED.lock() {
+                trusted.push((host_key, fingerprint));
+            }
             return Ok(true);
         }
         note(KeyProblem::Unknown);
