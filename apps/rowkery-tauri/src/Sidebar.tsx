@@ -1,6 +1,8 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -41,6 +43,57 @@ import { showToast } from "./notify";
 import { setPresenting, usePresenting } from "./presenting";
 import { updateWaiting, useUpdatePref, useUpdateState, type UpdateState } from "./updates";
 import type { SettingsSection } from "./SettingsPage";
+import { useVirtualizer } from "@tanstack/react-virtual";
+
+/** A section with more rows than this renders only those in view. */
+export const WINDOW_ROWS = 200;
+/** `.sb-row`'s height (styles/schema-panel.css). */
+const ROW_HEIGHT = 30;
+
+/**
+ * A long section's rows: only those near the view are in the page, between
+ * two spacers, so a 2,000-table schema costs what a short one does to
+ * filter, select or re-render. A row's partitions, when shown, are measured.
+ */
+function WindowedRows({
+  rows,
+  scroll,
+  render,
+}: {
+  rows: SidebarTable[];
+  /** The scroll area, once it is in the page (state, so the list renders again when it is). */
+  scroll: HTMLDivElement | null;
+  render: (t: SidebarTable, index: number, measure: (el: HTMLLIElement | null) => void) => ReactNode;
+}) {
+  const listRef = useRef<HTMLUListElement>(null);
+  const [margin, setMargin] = useState(0);
+  // Where the list starts in the scroll area: sections above it fold and unfold.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list || !scroll) return;
+    const at = list.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+    if (Math.abs(at - margin) >= 1) setMargin(at);
+  });
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scroll,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 12,
+    scrollMargin: margin,
+    getItemKey: (i) => rows[i].key,
+    useAnimationFrameWithResizeObserver: true,
+  });
+  const items = virtualizer.getVirtualItems();
+  const top = items.length ? items[0].start - margin : 0;
+  const bottom = items.length ? virtualizer.getTotalSize() - (items[items.length - 1].end - margin) : 0;
+  return (
+    <ul ref={listRef} className="sb-list" data-windowed="">
+      {top > 0 && <li aria-hidden style={{ height: top }} />}
+      {items.map((item) => render(rows[item.index], item.index, virtualizer.measureElement))}
+      {bottom > 0 && <li aria-hidden style={{ height: bottom }} />}
+    </ul>
+  );
+}
 
 interface SidebarProps {
   connectionId: string | null;
@@ -120,8 +173,13 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [pins, setPins] = useState<string[]>(() => loadPins(connectionId));
     // One highlight glides between the rows under the pointer (motion.tsx).
-    const scrollRef = useRef<HTMLDivElement>(null);
+    const scrollRef = useRef<HTMLDivElement | null>(null);
     useGlideHover(scrollRef, ".sb-row");
+    const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+    const attachScroll = useCallback((el: HTMLDivElement | null) => {
+      scrollRef.current = el;
+      setScrollEl(el);
+    }, []);
 
     useEffect(() => {
       setPins(loadPins(connectionId));
@@ -192,12 +250,17 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
         );
     };
 
-    const renderRow = (t: SidebarTable, depth: number, inPinned: boolean) => {
+    const renderRow = (
+      t: SidebarTable,
+      depth: number,
+      inPinned: boolean,
+      measure?: { index: number; ref: (el: HTMLLIElement | null) => void },
+    ) => {
       const isParent = t.partitions.length > 0;
       const open = isParent && !inPinned && (filtering || expanded.has(t.key));
       const isPinned = pins.includes(t.key);
       return (
-        <li key={`${inPinned ? "pin:" : ""}${t.key}`}>
+        <li key={`${inPinned ? "pin:" : ""}${t.key}`} data-index={measure?.index} ref={measure?.ref}>
           <div
             data-table={t.key}
             className={`sb-row${t.key === selectedKey ? " selected" : ""}${isParent && !inPinned ? " has-disclosure" : ""}`}
@@ -297,11 +360,16 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
             <span data-testid="sb-section-label" className="sb-section-label">{label}</span>
             <span data-testid="sb-section-count" className="sb-section-count">{count}</span>
           </button>
-          {!isCollapsed && (
-            <ul className="sb-list">
-              {rows.map((t) => renderRow(t, 0, inPinned))}
-            </ul>
-          )}
+          {!isCollapsed &&
+            (rows.length > WINDOW_ROWS ? (
+              <WindowedRows
+                rows={rows}
+                scroll={scrollEl}
+                render={(t, index, ref) => renderRow(t, 0, inPinned, { index, ref })}
+              />
+            ) : (
+              <ul className="sb-list">{rows.map((t) => renderRow(t, 0, inPinned))}</ul>
+            ))}
         </section>
       );
     };
@@ -329,8 +397,9 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
           ])}
         </>
       ),
-      // `section` and `renderRow` read only these (and `openRef`, `insertRef`, `rowMenu.open`).
-      [pinned, visible, single, collapsed, expanded, pins, selectedKey, filtering],
+      // `section` and `renderRow` read only these (and `openRef`, `insertRef`, `rowMenu.open`;
+      // `scrollEl` for a long section's window).
+      [pinned, visible, single, collapsed, expanded, pins, selectedKey, filtering, scrollEl],
     );
 
     return (
@@ -391,7 +460,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
           {/* A new schema (connect, database change) remounts the list, which
               fades it in and starts it at the top. */}
           <div
-            ref={scrollRef}
+            ref={attachScroll}
             data-testid="sb-scroll"
             className="sb-scroll"
             key={`${connectionId}:${schemas[0]?.database ?? ""}:${schemas.length > 0}`}
