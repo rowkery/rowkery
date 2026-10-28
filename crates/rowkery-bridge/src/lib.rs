@@ -1525,7 +1525,9 @@ async fn stream_on_session(
         } => {
             session_close_cursor(session).await;
             let state = match session.txn_state() {
-                TxnState::Unknown => session_probe_txn(session, Duration::from_secs(5)).await,
+                TxnState::Unknown if *rollback => {
+                    session_probe_txn(session, Duration::from_secs(5)).await
+                }
                 known => known,
             };
             let within_users = *rollback && plan_in_savepoint(state);
@@ -1539,9 +1541,13 @@ async fn stream_on_session(
             };
             if *rollback {
                 if let Err(err) = session_execute(session, begin).await {
-                    // Unknown, and there was none: nothing ran, nothing was lost.
+                    // Unknown, and there was none (25P01): nothing ran, nothing was lost.
+                    let none_open =
+                        matches!(&err, DriverError::Server { sqlstate, .. } if sqlstate == "25P01");
                     let err = match state {
-                        TxnState::Unknown => DriverError::Message(PLAN_TXN_UNKNOWN.into()),
+                        TxnState::Unknown if none_open => {
+                            DriverError::Message(PLAN_TXN_UNKNOWN.into())
+                        }
                         _ => err,
                     };
                     return (fwd.outcome(Err(err)), false);
