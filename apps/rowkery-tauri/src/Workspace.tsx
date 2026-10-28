@@ -694,6 +694,15 @@ export function Workspace({
    * and a query tab waits for ⌘↵.
    */
   const closedTabs = useRef<ClosedTab[]>([]);
+  /** Tabs closed in this window (ids are never reused): a Run All on one stops, as it does once the window closes. */
+  const closedTabIds = useRef(new Set<number>());
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+    };
+  }, []);
   const releaseClosedRows = (entries: ClosedTab[]) => {
     // Only those still in Recently closed: one reopened meanwhile has its rows in `runs`.
     for (const entry of entries) if (closedTabs.current.includes(entry)) entry.run = undefined;
@@ -719,7 +728,8 @@ export function Workspace({
       return;
     }
     void closeQueryTab(windowId, id).catch(() => {});
-    const run = runsRef.current[id];
+    closedTabIds.current.add(id);
+    const run = closedRun(runsRef.current[id]);
     const worthKeeping = tab.kind === "table" || !!tab.sql.trim() || !!run?.result;
     const entry: ClosedTab = { tab, run, index };
     if (worthKeeping) {
@@ -770,7 +780,8 @@ export function Workspace({
       // The import tab closes as its Cancel does, not into Recently closed.
       if (tab.kind === "import") return closeImportRef.current(true);
       void closeQueryTab(windowId, tab.id).catch(() => {});
-      entries.push({ tab, run: runsRef.current[tab.id], index });
+      closedTabIds.current.add(tab.id);
+      entries.push({ tab, run: closedRun(runsRef.current[tab.id]), index });
     });
     if (!entries.length) return;
     closedTabs.current = [...closedTabs.current, ...entries].slice(-MAX_CLOSED_TABS);
@@ -2534,6 +2545,11 @@ export function Workspace({
       if (end !== "done") break;
       // onRun refuses while the tab shows a run: wait for the render that ends this one.
       while (runsRef.current[tabId]?.startedAt != null) await new Promise((r) => setTimeout(r, 16));
+      // Closed (or its window) between two statements: the rest never run.
+      if (closedTabIds.current.has(tabId) || unmounted.current) {
+        end = "skipped";
+        break;
+      }
     }
     if (end === "done" || (end === "error" && !runsRef.current[tabId]?.cancelling)) {
       const ms = performance.now() - started;
@@ -5201,4 +5217,14 @@ export function Workspace({
       </Presence>
     </div>
   );
+}
+
+/**
+ * A closed tab's run as Undo brings it back: closed while its rows streamed,
+ * those rows are marked cancelled, not a finished result. Rows shown while
+ * a re-run, export, plan or next page was on its way stay as they were.
+ */
+function closedRun(run: TabRun | undefined): TabRun | undefined {
+  if (run?.startedAt == null || !run.result || !run.streaming || run.appending || run.exporting) return run;
+  return { ...run, result: { ...run.result, cancelled: true, elapsed_ms: Date.now() - run.startedAt } };
 }
