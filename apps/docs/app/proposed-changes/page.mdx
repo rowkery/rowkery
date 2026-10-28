@@ -81,7 +81,7 @@ If another session holds the rows, the dry run waits 2 seconds, then stops: "Ano
 
 Click **Commit** <kbd>⇧⌘↵</kbd>. A single DELETE or UPDATE with no WHERE labels the button **Delete all rows** or **Update all rows**.
 
-Before anything runs, Rowkery checks the change again from the start: the connection must still be shared, its tables still shared, and the SQL must still pass every rule. Then it runs all the statements in one transaction and commits only if each statement changes the same number of rows the dry run showed, in its own table and in every other table it reaches. An update or delete on a table with a primary key must also change the same rows: if the dry run removed order 17 and the commit would remove order 42 instead, nothing is saved, even though both remove one row.
+Before anything runs, Rowkery checks the change again from the start: the connection must still be shared, its tables still shared, and the SQL must still pass every rule. Then it runs all the statements in one transaction and commits only if each statement changes the same number of rows the dry run showed, in its own table and in every other table it reaches. An update or delete on a table with a primary key must also change the same rows: if the dry run removed order 17 and the commit would remove order 42 instead, nothing is saved, even though both remove one row. For the same reason, an agent can't propose an update that changes a primary key: the dry run refuses it, and key changes stay with you.
 
 | What happens | What you see |
 | --- | --- |
