@@ -318,6 +318,37 @@ pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()
     .write_all(bytes.as_ref())
 }
 
+/// Puts `bytes` at `path` whole or not at all: written to a temp file of
+/// its own (two writers never share one), on disk, then renamed over it.
+pub fn replace_private(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(name);
+    let placed = open_private(
+        &tmp,
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )
+    .and_then(|mut file| {
+        file.write_all(bytes.as_ref())?;
+        file.sync_all()
+    })
+    .and_then(|()| fs::rename(&tmp, path));
+    if placed.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    placed
+}
+
 /// Directory for Rowkery app data (`ROWKERY_CONFIG_DIR` overrides for tests).
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ROWKERY_CONFIG_DIR") {
@@ -540,7 +571,6 @@ impl AppConfig {
         let dir = config_dir();
         create_private_dir(&dir)?;
         let path = config_path();
-        let tmp = dir.join(format!("{CONFIG_FILE}.tmp"));
         let mut value = serde_json::to_value(self)?;
         if let Some(object) = value.as_object_mut() {
             merge_missing(object, &self.unknown_fields.top);
@@ -549,8 +579,7 @@ impl AppConfig {
             }
         }
         let json = serde_json::to_vec_pretty(&value)?;
-        write_private(&tmp, json)?;
-        fs::rename(&tmp, &path)?;
+        replace_private(&path, json)?;
         Ok(())
     }
 
@@ -674,6 +703,37 @@ mod tests {
     fn test_guard() -> (MutexGuard<'static, ()>, PathBuf) {
         let guard = test_dir_guard("config");
         (guard, config_dir())
+    }
+
+    /// rowkery/reports#50: writers at once each leave a whole file, never
+    /// one's half over the other's, and no temp file behind.
+    #[test]
+    fn config_writes_land_whole() {
+        let (_guard, dir) = test_guard();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("whole.json");
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        replace_private(&path, vec![b'a' + i; 64 * 1024]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 64 * 1024);
+        assert!(bytes.iter().all(|b| *b == bytes[0]), "one writer's file");
+        let left: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// rowkery/reports#47: the folder and config.json are this user's only,
