@@ -1377,12 +1377,14 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     session_execute(
         &setup,
         "DROP TABLE IF EXISTS mcp_p_orders, mcp_p_customers, mcp_p_hidden, mcp_p_log, mcp_p_serial, mcp_p_ident,
-           mcp_p_peeks, mcp_p_other CASCADE;
+           mcp_p_peeks, mcp_p_other, mcp_p_pair CASCADE;
          DROP FUNCTION IF EXISTS mcp_p_peek() CASCADE;
          DROP SEQUENCE IF EXISTS mcp_p_other_seq;
          CREATE TABLE mcp_p_serial (id serial PRIMARY KEY, note text, at timestamptz DEFAULT now(),
            pid int DEFAULT pg_backend_pid());
          CREATE TABLE mcp_p_ident (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note text);
+         CREATE TABLE mcp_p_pair (a int, b int, n int, PRIMARY KEY (b, a));
+         INSERT INTO mcp_p_pair VALUES (1, 1, 0), (1, 2, 0), (2, 1, 0);
          DROP FUNCTION IF EXISTS mcp_p_fn(int);
          DROP FUNCTION IF EXISTS mcp_p_trg() CASCADE;
          CREATE TABLE mcp_p_customers (id int PRIMARY KEY, email text, plan text, seats int);
@@ -1422,6 +1424,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
                     "public.mcp_p_ident".into(),
                     "public.mcp_p_peeks".into(),
                     "public.mcp_p_other".into(),
+                    "public.mcp_p_pair".into(),
                 ],
             },
         )]
@@ -1534,6 +1537,44 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     let run = proposals::dry_run(serial).await.expect("serial dry run");
     assert_eq!(run.statements[0].rows, 1);
     proposals::reject(serial, None).expect("reject");
+    // Several rows from an INSERT, or from a table without a key, have no
+    // digest and still dry-run.
+    let rows = propose("INSERT INTO mcp_p_serial (note) VALUES ('e'), ('f')")
+        .await
+        .expect("insert rows");
+    let rows = rows["id"].as_str().unwrap();
+    let run = proposals::dry_run(rows).await.expect("insert rows dry run");
+    assert_eq!(
+        (run.statements[0].rows, run.statements[0].digest.clone()),
+        (2, None)
+    );
+    proposals::reject(rows, None).expect("reject");
+    // An UPDATE that sets the key could land on any rows with the keys the
+    // dry run saw (`SET id = -1 WHERE id = (… random() …)`): refused.
+    let rekey = propose("UPDATE mcp_p_orders SET id = -1 WHERE id = 1")
+        .await
+        .expect("rekey");
+    let rekey = rekey["id"].as_str().unwrap();
+    let refused = proposals::dry_run(rekey).await.expect_err("sets the key");
+    assert!(refused.contains("sets the primary key (id)"), "{refused}");
+    proposals::reject(rekey, None).expect("reject");
+    // A key in another order than its columns: the dry run and the commit
+    // digest the same row(b, a).
+    let pair = propose("UPDATE mcp_p_pair SET n = 1 WHERE a = 1")
+        .await
+        .expect("pair");
+    let pair = pair["id"].as_str().unwrap();
+    let run = proposals::dry_run(pair).await.expect("pair dry run");
+    assert!(run.statements[0].digest.is_some());
+    let saw = proposals::Seen {
+        rows: vec![2],
+        digests: vec![run.statements[0].digest.clone()],
+        ..Default::default()
+    };
+    match proposals::commit(pair, &saw).await.unwrap() {
+        CommitOutcome::Committed { rows } => assert_eq!(rows, vec![2]),
+        other => panic!("{other:?}"),
+    }
     // A blank reason is asked for, not reported as a missing argument.
     let blank = call(
         &mcp,
@@ -1617,6 +1658,27 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     .await
     .unwrap();
     assert_eq!(still["rows"], json!([[2]]), "the dry run saved nothing");
+
+    // As many rows, but other ones (3 is pending, 2 is paid): their keys
+    // differ, so nothing is saved.
+    assert!(orders.digest.is_some());
+    let saw = proposals::Seen {
+        rows: vec![2, 2],
+        digests: run.statements.iter().map(|s| s.digest.clone()).collect(),
+        ..Default::default()
+    };
+    let swap = "UPDATE mcp_p_orders SET status = CASE id WHEN 2 THEN 'paid' ELSE 'pending' END WHERE id IN (2, 3)";
+    session_execute(&setup, swap).await.unwrap();
+    match proposals::commit(&id, &saw).await.unwrap() {
+        CommitOutcome::Moved { dry_run } => {
+            assert_eq!(dry_run.statements[0].rows, 2);
+            assert_ne!(dry_run.statements[0].digest, orders.digest);
+            assert_eq!(dry_run.statements[1].digest, customers.digest);
+        }
+        other => panic!("{other:?}"),
+    }
+    let back = "UPDATE mcp_p_orders SET status = CASE id WHEN 2 THEN 'pending' ELSE 'paid' END WHERE id IN (2, 3)";
+    session_execute(&setup, back).await.unwrap();
 
     // The data moves: nothing is saved and a fresh dry run comes back.
     session_execute(
@@ -1806,6 +1868,7 @@ async fn a_proposal_counts_what_its_cascades_and_triggers_write() {
         rows: vec![run.statements[0].rows],
         reach: vec![run.statements[0].reach.clone()],
         at_commit: run.at_commit.clone(),
+        digests: vec![run.statements[0].digest.clone()],
     };
 
     // A payment lands in another partition: one customer still, but the
