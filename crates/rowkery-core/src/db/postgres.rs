@@ -1423,9 +1423,51 @@ pub async fn session_apply_changes_within(
         }
     };
     let mut counts = ApplyCounts::default();
+    // Every statement is sent at once, in order, and its answer awaited in
+    // turn: one round trip for the batch, not two per row. Each is still its
+    // own single statement (extended protocol). Once one fails the rest are
+    // refused (the transaction is aborted), and the rollback undoes any that
+    // ran after a statement that changed the wrong number of rows.
+    let client = &session.client;
+    let mut runs: Vec<_> = statements
+        .iter()
+        .map(|statement| Box::pin(futures::future::maybe_done(run_one(client, &statement.sql))))
+        .collect();
+    futures::future::poll_fn(|cx| {
+        for run in runs.iter_mut() {
+            let _ = std::future::Future::poll(run.as_mut(), cx);
+        }
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let mut answers = Vec::with_capacity(runs.len());
+    let mut late_at = None;
+    for (index, run) in runs.iter_mut().enumerate() {
+        // Each gets `step` from the answer before it.
+        if tokio::time::timeout(limit, run.as_mut()).await.is_err() {
+            late_at = Some(index);
+            break;
+        }
+        let answer = run.as_mut().take_output().expect("answered");
+        let done = !matches!(answer, Ok(1));
+        answers.push(answer);
+        if done {
+            break;
+        }
+    }
+    drop(runs);
     for (index, statement) in statements.iter().enumerate() {
-        let ran =
-            tokio::time::timeout(limit, session.client.execute(statement.sql.as_str(), &[])).await;
+        let ran = match answers.get(index) {
+            Some(answer) => Ok(answer.as_ref().map(|n| *n)),
+            None if late_at == Some(index) => Err(()),
+            // Every statement up to a stop has an answer: never here.
+            None => {
+                abandon_apply(session, limit).await;
+                return Err(ApplyFailure::other(
+                    "Rowkery lost track of the batch; nothing was saved.",
+                ));
+            }
+        };
         let Ok(ran) = ran else {
             abandon_apply(session, limit).await;
             let named = statement.describe();
@@ -1441,12 +1483,20 @@ pub async fn session_apply_changes_within(
         match ran {
             Ok(1) => counts.add(statement.verb, 1),
             Ok(rows) => {
-                rollback(&session.client).await;
+                // The statements after it were sent too, and run: one may
+                // be waiting on a lock, so the rollback is bounded.
+                let bound = limit.min(Duration::from_secs(5));
+                if tokio::time::timeout(bound, rollback(&session.client))
+                    .await
+                    .is_err()
+                {
+                    abandon_apply(session, limit).await;
+                }
                 return Err(ApplyFailure::count(index, statement, rows));
             }
             Err(err) => {
                 rollback(&session.client).await;
-                return Err(ApplyFailure::error(index, statement, message(&err)));
+                return Err(ApplyFailure::error(index, statement, message(err)));
             }
         }
     }
@@ -1528,6 +1578,20 @@ async fn reach_beyond(
 
 async fn rollback(client: &Client) {
     let _ = client.batch_execute("ROLLBACK").await;
+}
+
+/// One staged statement, parsed, bound and run in a single message (sent on
+/// the future's first poll), and the rows it changed.
+async fn run_one(client: &Client, sql: &str) -> Result<u64, tokio_postgres::Error> {
+    let rows = client
+        .query_typed_raw(
+            sql,
+            std::iter::empty::<(&(dyn tokio_postgres::types::ToSql + Sync), Type)>(),
+        )
+        .await?;
+    let mut rows = std::pin::pin!(rows);
+    while rows.try_next().await?.is_some() {}
+    Ok(rows.rows_affected().unwrap_or(0))
 }
 
 /// A step of an apply timed out: cancel it and roll back, both bounded. If

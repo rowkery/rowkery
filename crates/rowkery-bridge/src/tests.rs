@@ -5066,6 +5066,189 @@ fn count_window_rows_on_read_only_never_hangs() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A TCP proxy to Postgres whose answers each arrive `delay` late, like a
+/// database 40 ms away. Returns its port.
+fn slow_proxy(upstream: String, delay: std::time::Duration) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let Ok(server) = TcpStream::connect(&upstream) else {
+                continue;
+            };
+            let (mut c, mut s) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+            thread::spawn(move || {
+                let _ = std::io::copy(&mut c, &mut s);
+            });
+            // Each answer is passed on `delay` after it arrived, however
+            // many are on the way (latency, not a slow link).
+            let (mut s, mut c) = (server, client);
+            let (tx, rx) = std::sync::mpsc::channel::<(std::time::Instant, Vec<u8>)>();
+            thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                while let Ok(n) = s.read(&mut buf) {
+                    if n == 0
+                        || tx
+                            .send((std::time::Instant::now(), buf[..n].to_vec()))
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+            thread::spawn(move || {
+                for (at, bytes) in rx {
+                    if let Some(wait) =
+                        (at + delay).checked_duration_since(std::time::Instant::now())
+                    {
+                        thread::sleep(wait);
+                    }
+                    if c.write_all(&bytes).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// Staged edits are sent together: 200 of them against a database 40 ms
+/// away commit in a few round trips (one by one they took about 25 s),
+/// still in order, and a failure still names its own statement.
+#[test]
+fn postgres_staged_edits_commit_in_a_few_round_trips() {
+    let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+        eprintln!("skip postgres_staged_edits_commit_in_a_few_round_trips (set ROWKERY_PG_HOST)");
+        return;
+    };
+    let pg_port = std::env::var("ROWKERY_PG_PORT").unwrap_or_else(|_| "54329".into());
+    let port = slow_proxy(
+        format!("{host}:{pg_port}"),
+        std::time::Duration::from_millis(40),
+    );
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "postgres-far";
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Postgres(PostgresConnection {
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_timeout_s: None,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            environment: None,
+            safe_mode: SafeMode::Off,
+            id: id.into(),
+            name: id.into(),
+            host: "127.0.0.1".into(),
+            port,
+            database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+            username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+            ssl_mode: PostgresSslMode::Disable,
+            ssl_root_cert: None,
+            ssh: None,
+            cloud_sql: None,
+        }),
+        ConnectionSecrets {
+            db_password: Some(
+                std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("save");
+    bridge.open_window("w", id, None).expect("open");
+    let run = |sql: &str| window_query(&bridge, "w", 1, sql);
+    for sql in [
+        "DROP TABLE IF EXISTS public.it_far",
+        "CREATE TABLE public.it_far (id int PRIMARY KEY, name text NOT NULL)",
+        "INSERT INTO public.it_far SELECT g, 'row ' || g FROM generate_series(1, 200) g",
+    ] {
+        assert_eq!(run(sql).1, None, "{sql}");
+    }
+    let table = edit_table(
+        "public",
+        "it_far",
+        &[("id", "integer"), ("name", "text")],
+        &["id"],
+    );
+    let text = |s: &str| Value::Text(s.into());
+
+    // 200 updates, then an insert and an update of the row it adds: in order.
+    let mut changes: Vec<Change> = (1..=200)
+        .map(|i| update(i, "name", text(&format!("changed {i}"))))
+        .collect();
+    changes.push(Change::Insert {
+        values: vec![cell("id", Value::Int(201)), cell("name", text("new"))],
+    });
+    changes.push(update(201, "name", text("new, then changed")));
+    let started = Instant::now();
+    let out = bridge
+        .apply_changes("w", id, 1, table.clone(), changes, None, None)
+        .expect("apply");
+    let took = started.elapsed();
+    let ApplyOutcome::Committed { counts, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!((counts.inserted, counts.updated), (1, 201));
+    assert!(took < Duration::from_secs(5), "committed in {took:?}");
+    assert_eq!(
+        run("SELECT count(*)::int8 FROM public.it_far WHERE name LIKE 'changed %'").0,
+        Some(Value::Int(200))
+    );
+    assert_eq!(
+        run("SELECT name FROM public.it_far WHERE id = 201").0,
+        Some(text("new, then changed"))
+    );
+
+    // The 51st fails (NOT NULL): it is the one named, and nothing is kept,
+    // not even the statements after it that the server refused.
+    let mut changes: Vec<Change> = (1..=100)
+        .map(|i| update(i, "name", text("again")))
+        .collect();
+    changes[50] = update(51, "name", Value::Null);
+    let out = bridge
+        .apply_changes("w", id, 1, table.clone(), changes, None, None)
+        .expect("apply");
+    let ApplyOutcome::RolledBack { failure, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!(failure.index, Some(50), "{failure:?}");
+    assert!(failure.message.contains("null"), "{}", failure.message);
+    assert_eq!(
+        run("SELECT count(*)::int8 FROM public.it_far WHERE name = 'again'").0,
+        Some(Value::Int(0))
+    );
+    // A statement that changes no row stops the batch the same way.
+    let out = bridge
+        .apply_changes(
+            "w",
+            id,
+            1,
+            table,
+            vec![update(1, "name", text("x")), update(999, "name", text("x"))],
+            None,
+            None,
+        )
+        .expect("apply");
+    let ApplyOutcome::RolledBack { failure, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!((failure.index, failure.rows), (Some(1), Some(0)));
+    assert_eq!(
+        run("SELECT name FROM public.it_far WHERE id = 1").0,
+        Some(text("changed 1")),
+        "the statement before it was rolled back"
+    );
+    assert_eq!(run("DROP TABLE public.it_far").1, None);
+}
+
 /// Saving edits waits a bounded time for a row lock (or a dead link):
 /// it stops before COMMIT, rolls back, says so, and the tab still saves
 /// once the lock is gone.
