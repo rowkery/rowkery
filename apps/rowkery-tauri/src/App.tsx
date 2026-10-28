@@ -62,6 +62,7 @@ import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
 import { forgetHistory } from "./queryHistory";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
+import { changeCount, savedBuffer, savedParked } from "./editBuffer";
 import { Workspace } from "./Workspace";
 import type { WindowActions, WindowSession } from "./windowSession";
 import "./App.css";
@@ -585,7 +586,13 @@ function App() {
         });
         setActiveWindowId(back);
       };
-      showUndoToast(`Closed ${name}${closing.database ? ` / ${closing.database}` : ""}`, undefined, { undo: restore });
+      // Its tabs' unsaved work is named like a tab's close names it, and its
+      // Undo outlasts the next plain toast: it is the only copy of that work.
+      const unsaved = unsavedWork(closedTabs?.tabs ?? []);
+      showUndoToast(`Closed ${name}${closing.database ? ` / ${closing.database}` : ""}${unsaved}`, undefined, {
+        undo: restore,
+        lasting: !!unsaved,
+      });
     }
     void closeWindow(id);
     openSeq.current.delete(id);
@@ -1746,3 +1753,14 @@ function App() {
 }
 
 export default App;
+
+/** " with 3 unsaved changes" (staged edits, shown or parked), " with unsaved SQL", or "". */
+function unsavedWork(tabs: SavedTab[]): string {
+  let edits = 0;
+  for (const t of tabs) {
+    edits += changeCount(savedBuffer(t.edits));
+    for (const b of Object.values(savedParked(t.parked) ?? {})) edits += changeCount(b);
+  }
+  if (edits) return ` with ${edits} unsaved ${edits === 1 ? "change" : "changes"}`;
+  return tabs.some((t) => t.kind === "query" && t.sql.trim()) ? " with unsaved SQL" : "";
+}
