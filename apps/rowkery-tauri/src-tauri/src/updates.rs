@@ -224,7 +224,8 @@ fn install_ready(updates: &Updates) -> Result<bool, String> {
         return Ok(false);
     };
     if let Err(e) = ready.update.install(&ready.bytes) {
-        *updates.ready.lock().unwrap() = Some(ready);
+        // Unless a check downloaded another one meanwhile.
+        updates.ready.lock().unwrap().get_or_insert(ready);
         return Err(install_error(
             &e.to_string(),
             crate::app_location::misplaced(),
@@ -242,8 +243,8 @@ fn install_error(e: &str, misplaced: Option<&str>) -> String {
 /// Restart into the downloaded update. The page asks only when no query
 /// runs; work it can't see (a commit, an import, a SQL file, an open
 /// transaction) gets the quit dialog first. The answer comes before that
-/// dialog, so a failed install reaches the window that asked as
-/// `update-install-failed`.
+/// dialog, so a failed install is sent as `update-install-failed` to the
+/// window that asked (updates.ts listens for its own label only).
 #[tauri::command]
 pub fn restart_to_update(
     app: AppHandle,

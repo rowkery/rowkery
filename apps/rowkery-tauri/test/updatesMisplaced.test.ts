@@ -20,6 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({
     };
   }),
 }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ label: "main" }) }));
 vi.mock("../src/notify", () => ({
   showToast: (...args: unknown[]) => toasts.push(args),
   showOfferToast: (...args: unknown[]) => toasts.push(["offer", ...args]),

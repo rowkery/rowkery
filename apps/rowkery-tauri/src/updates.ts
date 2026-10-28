@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { showOfferToast, showToast } from "./notify";
 import { readKey, writeKey } from "./persist";
 
@@ -234,10 +235,15 @@ let installFailed = false;
 
 /** Says why a Restart didn't install (`update-install-failed`); the download is kept. Returns the cleanup. */
 export function watchInstallFailures(): () => void {
-  const off = listen<string>("update-install-failed", (e) => {
-    installFailed = true;
-    showToast("Couldn't install the update", e.payload, "error");
-  });
+  // Only the window whose Restart failed hears it (`emit_to` its label).
+  const off = listen<string>(
+    "update-install-failed",
+    (e) => {
+      installFailed = true;
+      showToast("Couldn't install the update", e.payload, "error");
+    },
+    { target: { kind: "WebviewWindow", label: getCurrentWebviewWindow().label } },
+  );
   return () => void off.then((f) => f());
 }
 
