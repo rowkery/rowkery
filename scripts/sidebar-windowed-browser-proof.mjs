@@ -3,7 +3,8 @@
 // than 200 rows keeps only the rows near the view in the page
 // (rowkery/reports#27), yet every table can still be reached by scrolling or
 // the filter, opened, and lines up under a section above it that folds,
-// unfolds or gains a pin. A short section renders every row, as before.
+// unfolds or gains a pin, and is one row per table again once partitions a
+// filter opened fold away. A short section renders every row, as before.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/sidebar-windowed-browser-proof.mjs [outDir]
@@ -36,8 +37,16 @@ function stubTauri() {
   });
   const schemas = [
     { name: "audit", tables: ["events", "logins", "trail"].map((n) => table(n, 10)) },
-    { name: "public", tables: Array.from({ length: 2000 }, (_, i) => table(`table_${String(i).padStart(4, "0")}`, i)) },
+    { name: "public", tables: [] },
   ];
+  // Tables 100-139 are partitioned, four partitions each.
+  for (let i = 0; i < 2000; i++) {
+    const name = `table_${String(i).padStart(4, "0")}`;
+    schemas[1].tables.push(table(name, i));
+    if (i >= 100 && i < 140) {
+      for (let k = 0; k < 4; k++) schemas[1].tables.push({ ...table(`${name}_p${k}`, 1), partition_of: name });
+    }
+  }
   const catalog = { databases: [{ name: "rowkery", schemas }] };
   const connections = [{ kind: "postgres", id: "pg", name: "big", host: "127.0.0.1", port: 5432, database: "rowkery", username: "rowkery" }];
   localStorage.setItem("rowkery.windows", JSON.stringify({ windows: [{ connectionId: "pg", database: "rowkery" }], active: 0 }));
@@ -143,5 +152,20 @@ const back = await rowsInPage();
 check(back > 0 && back < 120, `cleared, the list is windowed again (${back} rows)`);
 await page.screenshot({ path: `${OUT}/2-top.png` });
 console.log(`${OUT}/2-top.png`);
+
+// A filter opens every parent's partitions; scrolled past them and
+// cleared, the list is back to one row each, not the heights they had.
+const listHeight = () =>
+  page.evaluate((sel) => document.querySelector(`${sel} ul[data-windowed]`).getBoundingClientRect().height, visible);
+await page.fill(`${visible} [data-testid="sb-filter"] input`, "_0");
+await page.waitForTimeout(250);
+for (let at = 0; at < 14000; at += 250) {
+  await scroll.evaluate((e, at) => (e.scrollTop = at), at);
+  await page.waitForTimeout(40);
+}
+await page.fill(`${visible} [data-testid="sb-filter"] input`, "");
+await page.waitForTimeout(300);
+const height = Math.round(await listHeight());
+check(height === 2000 * 30, `cleared after partitions showed, the list is 2,000 rows tall (${height}px)`);
 
 await browser.close();

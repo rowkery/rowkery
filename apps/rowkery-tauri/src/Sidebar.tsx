@@ -57,10 +57,13 @@ const ROW_HEIGHT = 30;
  */
 function WindowedRows({
   rows,
+  open,
   scroll,
   render,
 }: {
   rows: SidebarTable[];
+  /** Which rows show their partitions: when it changes, rows out of view are no longer the height last measured. */
+  open: string;
   /** The scroll area, once it is in the page (state, so the list renders again when it is). */
   scroll: HTMLDivElement | null;
   render: (t: SidebarTable, index: number, measure: (el: HTMLLIElement | null) => void) => ReactNode;
@@ -83,6 +86,8 @@ function WindowedRows({
     getItemKey: (i) => rows[i].key,
     useAnimationFrameWithResizeObserver: true,
   });
+  // Sizes measured with partitions shown would outlast them for rows out of view.
+  useLayoutEffect(() => virtualizer.measure(), [virtualizer, open]);
   const items = virtualizer.getVirtualItems();
   const top = items.length ? items[0].start - margin : 0;
   const bottom = items.length ? virtualizer.getTotalSize() - (items[items.length - 1].end - margin) : 0;
@@ -364,6 +369,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
             (rows.length > WINDOW_ROWS ? (
               <WindowedRows
                 rows={rows}
+                open={filtering ? "*" : [...expanded].join("\n")}
                 scroll={scrollEl}
                 render={(t, index, ref) => renderRow(t, 0, inPinned, { index, ref })}
               />
