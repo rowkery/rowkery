@@ -268,16 +268,24 @@ pub const DEV_BUILD: bool = match option_env!("ROWKERY_CHANNEL") {
 pub const LINK_SCHEME: &str = if DEV_BUILD { "rowkery-dev" } else { "rowkery" };
 
 /// Creates `dir` and its parents for this user only: the app's files hold
-/// SQL and row values (rowkery/reports#47). A folder already there keeps its
-/// mode, since `ROWKERY_CONFIG_DIR` may name one the user shares.
+/// SQL and row values (rowkery/reports#47). The app's own folder, made
+/// readable by an older build, is narrowed too; one `ROWKERY_CONFIG_DIR`
+/// names keeps its mode, since the user may share it.
 pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         builder.mode(0o700);
+        builder.create(dir)?;
+        if std::env::var_os("ROWKERY_CONFIG_DIR").is_none() && dir == config_dir() {
+            // Best effort, as in `open_private`.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
     }
+    #[cfg(not(unix))]
     builder.create(dir)
 }
 

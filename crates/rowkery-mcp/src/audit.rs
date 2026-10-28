@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rowkery_core::config::{config_dir, create_private_dir, open_private};
+use rowkery_core::config::{config_dir, create_private_dir, open_private, write_private};
 use serde::{Deserialize, Serialize};
 
 const LOG_FILE: &str = "mcp-log.jsonl";
@@ -250,7 +250,7 @@ pub fn clear() -> std::io::Result<()> {
     crate::samples::locked(|| {
         crate::samples::remove_all()?;
         let _ = std::fs::remove_file(config_dir().join("mcp-log.1.jsonl"));
-        match File::create(log_path()) {
+        match write_private(&log_path(), "") {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
