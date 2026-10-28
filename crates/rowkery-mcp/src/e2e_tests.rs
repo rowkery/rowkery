@@ -101,6 +101,8 @@ async fn guards_hold_against_a_real_postgres() {
          DROP VIEW IF EXISTS mcp_e2e_secret_view;
          DROP FUNCTION IF EXISTS mcp_e2e_bump();
          DROP VIEW IF EXISTS mcp_e2e_peek_view;
+         DROP TYPE IF EXISTS mcp_e2e_comp;
+         DROP DOMAIN IF EXISTS mcp_e2e_dom2;
          DROP DOMAIN IF EXISTS mcp_e2e_dom;
          DROP FUNCTION IF EXISTS mcp_e2e_peek(), mcp_e2e_peek_folded(), mcp_e2e_eq(int, int) CASCADE;
          DROP FUNCTION IF EXISTS mcp_e2e_step(text, int) CASCADE;
@@ -129,6 +131,8 @@ async fn guards_hold_against_a_real_postgres() {
          DROP AGGREGATE IF EXISTS public.every(int);
          CREATE AGGREGATE public.every(int) (SFUNC = mcp_e2e_step, STYPE = text);
          CREATE DOMAIN mcp_e2e_dom AS int CHECK (mcp_e2e_eq(VALUE, 0));
+         CREATE DOMAIN mcp_e2e_dom2 AS mcp_e2e_dom;
+         CREATE TYPE mcp_e2e_comp AS (x mcp_e2e_dom);
          CREATE TABLE mcp_e2e_events (id int PRIMARY KEY, kind text, amount numeric,
            at timestamptz, doc jsonb);
          INSERT INTO mcp_e2e_events VALUES
@@ -276,6 +280,10 @@ async fn guards_hold_against_a_real_postgres() {
             "public.every(), which is defined in the database",
         ),
         ("SELECT 1::mcp_e2e_dom", "public.mcp_e2e_dom"),
+        // Its check runs for a type built on it too.
+        ("SELECT 1::mcp_e2e_dom2", "public.mcp_e2e_dom2"),
+        ("SELECT ARRAY[1]::mcp_e2e_dom[]", "public.mcp_e2e_dom"),
+        ("SELECT ROW(1)::mcp_e2e_comp", "public.mcp_e2e_comp"),
         ("SELECT pg_sleep(1)", "pg_sleep() only waits"),
         ("SELECT nextval('mcp_e2e_nope')", "nextval() changes"),
         // Caught in the plan: a system view over functions not on the list.

@@ -421,9 +421,11 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
     }
     format!(
         "WITH RECURSIVE \
-        stepped AS (SELECT a.aggfnoid::oid AS oid FROM pg_aggregate a JOIN pg_proc f \
-          ON f.oid IN (a.aggtransfn, a.aggfinalfn, a.aggcombinefn, a.aggserialfn, \
-            a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn, a.aggmfinalfn) \
+        stepped AS MATERIALIZED (SELECT DISTINCT a.aggfnoid::oid AS oid FROM pg_aggregate a \
+          CROSS JOIN LATERAL unnest(ARRAY[a.aggtransfn, a.aggfinalfn, a.aggcombinefn, \
+            a.aggserialfn, a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn, \
+            a.aggmfinalfn]::oid[]) AS step(oid) \
+          JOIN pg_proc f ON f.oid = step.oid \
           JOIN pg_language fl ON fl.oid = f.prolang \
           WHERE NOT (fl.lanname IN ('c', 'internal') AND f.provolatile = 'i')), \
         code AS (SELECT p.oid FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace \
@@ -432,13 +434,22 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
           AND NOT (l.lanname IN ('c', 'internal') AND p.provolatile = 'i' \
             AND p.oid NOT IN (SELECT oid FROM stepped))), \
         bad_ops AS (SELECT o.oid FROM pg_operator o WHERE o.oprcode IN (SELECT oid FROM code)), \
-        bad_types AS (SELECT t.oid FROM pg_type t \
-          WHERE t.typnamespace <> 'pg_catalog'::regnamespace AND (\
-          EXISTS (SELECT 1 FROM pg_cast k WHERE (k.castsource = t.oid OR k.casttarget = t.oid) \
-            AND k.castfunc IN (SELECT oid FROM code)) \
-          OR EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_depend d ON d.classid = 'pg_constraint'::regclass \
-            AND d.objid = c.oid AND d.refclassid = 'pg_proc'::regclass \
-            WHERE c.contypid = t.oid AND d.refobjid IN (SELECT oid FROM code)))), \
+        built_on(child, parent) AS MATERIALIZED (\
+          SELECT oid, typbasetype FROM pg_type WHERE typbasetype <> 0 \
+          UNION ALL SELECT oid, typelem FROM pg_type WHERE typelem <> 0 \
+          UNION ALL SELECT rngtypid, rngsubtype FROM pg_range \
+          UNION ALL SELECT k.reltype, a.atttypid FROM pg_class k JOIN pg_attribute a \
+            ON a.attrelid = k.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE k.relkind = 'c'), \
+        bad_types(oid) AS (SELECT t.oid FROM pg_type t JOIN (\
+            SELECT k.castsource AS oid FROM pg_cast k WHERE k.castfunc IN (SELECT oid FROM code) \
+            UNION SELECT k.casttarget FROM pg_cast k WHERE k.castfunc IN (SELECT oid FROM code) \
+            UNION SELECT c.contypid FROM pg_constraint c JOIN pg_depend d \
+              ON d.classid = 'pg_constraint'::regclass AND d.objid = c.oid \
+              AND d.refclassid = 'pg_proc'::regclass \
+              WHERE c.contypid <> 0 AND d.refobjid IN (SELECT oid FROM code)) x ON x.oid = t.oid \
+          WHERE t.typnamespace <> 'pg_catalog'::regnamespace \
+          UNION \
+          SELECT e.child FROM built_on e JOIN bad_types b ON b.oid = e.parent), \
         tainted(oid) AS (\
           SELECT r.ev_class FROM pg_rewrite r JOIN pg_class v ON v.oid = r.ev_class AND v.relkind = 'v' \
           JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid \
