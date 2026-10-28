@@ -1364,8 +1364,9 @@ impl KeyDigest {
         use sha2::{Digest, Sha256};
         self.n += 1;
         let hash = Sha256::digest(format!("{key:?}").as_bytes());
-        for (sum, lane) in self.sums.iter_mut().zip(hash.chunks_exact(8)) {
-            *sum = sum.wrapping_add(u64::from_be_bytes(lane.try_into().unwrap()));
+        for (i, sum) in self.sums.iter_mut().enumerate() {
+            let lane: [u8; 8] = hash[i * 8..i * 8 + 8].try_into().unwrap();
+            *sum = sum.wrapping_add(u64::from_be_bytes(lane));
         }
     }
 
