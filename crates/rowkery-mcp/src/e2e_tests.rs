@@ -2001,15 +2001,16 @@ async fn a_join_pushed_down_to_a_foreign_server_is_checked() {
     session_execute(
         &setup,
         &format!(
-            "CREATE SERVER mcp_fdw_loop FOREIGN DATA WRAPPER postgres_fdw
-               OPTIONS (host {}, port {}, dbname {}, use_remote_estimate 'true');
+            // The server's own address, not ours: in CI it runs in a
+            // container whose port is mapped.
+            "DO $$ BEGIN EXECUTE format(
+               'CREATE SERVER mcp_fdw_loop FOREIGN DATA WRAPPER postgres_fdw
+                  OPTIONS (host %L, port %L, dbname %L, use_remote_estimate %L)',
+               'localhost', current_setting('port'), current_database(), 'true'); END $$;
              CREATE USER MAPPING FOR CURRENT_USER SERVER mcp_fdw_loop
                OPTIONS (user {}, password {});
              CREATE SCHEMA mcp_fdw;
              IMPORT FOREIGN SCHEMA mcp_fdw_remote FROM SERVER mcp_fdw_loop INTO mcp_fdw;",
-            literal(&config.host),
-            literal(&config.port.to_string()),
-            literal(&config.database),
             literal(&config.username),
             literal(&password),
         ),
