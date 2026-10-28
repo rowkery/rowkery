@@ -192,8 +192,10 @@ fn remove_line() -> String {
     format!("claude mcp remove --scope user {NAME}")
 }
 
-/// `command arg…` of a config's `mcpServers.rowkery`, and whether it is this app.
-fn server_entry(config: &Value, exe: &str) -> Option<(String, bool)> {
+/// A config's `mcpServers.rowkery`: `command arg…`, whether it is this app,
+/// and whether it is a Rowkery (`<path> --mcp`) whose path is gone (a copy
+/// run from the disk image, then ejected, or since moved).
+fn server_entry(config: &Value, exe: &str) -> Option<(String, bool, bool)> {
     let entry = config.get("mcpServers")?.get(NAME)?;
     let command = entry.get("command").and_then(Value::as_str).unwrap_or("");
     let args: Vec<&str> = entry
@@ -206,7 +208,9 @@ fn server_entry(config: &Value, exe: &str) -> Option<(String, bool)> {
         shown.push(' ');
         shown.push_str(a);
     }
-    Some((shown, command == exe && args == ["--mcp"]))
+    let lone = args == ["--mcp"];
+    let gone = lone && Path::new(command).is_absolute() && !Path::new(command).exists();
+    Some((shown, command == exe && lone, gone))
 }
 
 fn read_json(path: &Path) -> Result<Option<Value>, String> {
@@ -235,17 +239,13 @@ pub fn check(client: Client, env: &Env) -> ConnectCheck {
     {
         out.state = State::Misplaced;
         out.problem = Some(reason.clone());
-    } else if out.state == State::Other {
-        out.problem = gone(out.existing.as_deref());
     }
     out
 }
 
-/// Says so when the command a client has now no longer exists (a copy run
-/// from the disk image, then ejected, or since moved).
-fn gone(existing: Option<&str>) -> Option<String> {
-    let command = existing?.strip_suffix(" --mcp")?;
-    (Path::new(command).is_absolute() && !Path::new(command).exists())
+/// The `problem` of an Other entry whose command is gone.
+fn gone(entry: &Option<(String, bool, bool)>) -> Option<String> {
+    matches!(entry, Some((_, false, true)))
         .then(|| "That copy of Rowkery isn't there any more, so the agent can't start it.".into())
 }
 
@@ -257,7 +257,7 @@ fn check_code(env: &Env, installed: bool) -> ConnectCheck {
     let add = add_line(&env.exe);
     let (state, preview) = match (&existing, installed) {
         (_, false) => (State::Missing, add.clone()),
-        (Some((_, true)), _) => (State::Connected, add.clone()),
+        (Some((_, true, _)), _) => (State::Connected, add.clone()),
         (Some(_), _) => (State::Other, format!("{}\n{add}", remove_line())),
         (None, _) => (State::Ready, add.clone()),
     };
@@ -266,9 +266,9 @@ fn check_code(env: &Env, installed: bool) -> ConnectCheck {
         state,
         preview,
         copy: add,
-        existing: existing.map(|(s, _)| s),
+        problem: gone(&existing),
+        existing: existing.map(|(s, _, _)| s),
         config_file: None,
-        problem: None,
     }
 }
 
@@ -299,11 +299,12 @@ fn check_desktop(env: &Env) -> ConnectCheck {
             let existing = config.as_ref().and_then(|c| server_entry(c, &env.exe));
             out.state = match (&existing, installed) {
                 (_, false) => State::Missing,
-                (Some((_, true)), _) => State::Connected,
+                (Some((_, true, _)), _) => State::Connected,
                 (Some(_), _) => State::Other,
                 (None, _) => State::Ready,
             };
-            out.existing = existing.map(|(s, _)| s);
+            out.problem = gone(&existing);
+            out.existing = existing.map(|(s, _, _)| s);
         }
     }
     out
@@ -596,6 +597,14 @@ mod tests {
         std::fs::write(
             &e.desktop_config,
             serde_json::json!({ "mcpServers": { NAME: { "command": here, "args": ["--mcp"] } } })
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(check(Client::ClaudeDesktop, &e).problem, None);
+        // Another server with more args is never read as a gone Rowkery.
+        std::fs::write(
+            &e.desktop_config,
+            serde_json::json!({ "mcpServers": { NAME: { "command": "/usr/bin/python3", "args": ["server.py", "--mcp"] } } })
                 .to_string(),
         )
         .unwrap();
