@@ -42,9 +42,6 @@ pub fn humanize_ssh_error(err: &SshError, bastion_host: &str) -> String {
     if msg.starts_with("SSH: Permission denied") || msg.starts_with("SSH: The key file") {
         return msg;
     }
-    if msg.contains("Permission denied") {
-        return "SSH: Permission denied".to_string();
-    }
     if msg.starts_with("Could not open tunnel") {
         return msg;
     }
@@ -55,13 +52,18 @@ pub fn humanize_ssh_error(err: &SshError, bastion_host: &str) -> String {
 }
 
 /// Why a key file didn't open: its passphrase first, as that's the usual cause.
-fn key_error(e: &russh::keys::Error, had_passphrase: bool) -> String {
+/// A crypto error only means a wrong passphrase on a key that parses as an
+/// encrypted OpenSSH key; a damaged or odd file raises the same error.
+fn key_error(e: &russh::keys::Error, key_text: &str, had_passphrase: bool) -> String {
     use russh::keys::{ssh_key, Error};
     match e {
         Error::KeyIsEncrypted => {
             "SSH: The key file is encrypted, and no passphrase is saved for it.".into()
         }
-        Error::SshKey(ssh_key::Error::Crypto) if had_passphrase => {
+        Error::SshKey(ssh_key::Error::Crypto)
+            if had_passphrase
+                && ssh_key::PrivateKey::from_openssh(key_text).is_ok_and(|k| k.is_encrypted()) =>
+        {
             "SSH: The key file's passphrase is wrong.".into()
         }
         e => format!("Invalid SSH key: {e}"),
@@ -324,8 +326,9 @@ impl SshTunnel {
                     Some(p) => Some(p),
                     None => secret_off_thread(connection_id, SecretKind::SshKeyPassphrase).await?,
                 };
-                let key = decode_secret_key(&key_text, passphrase.as_deref())
-                    .map_err(|e| SshError::Message(key_error(&e, passphrase.is_some())))?;
+                let key = decode_secret_key(&key_text, passphrase.as_deref()).map_err(|e| {
+                    SshError::Message(key_error(&e, &key_text, passphrase.is_some()))
+                })?;
                 // RSA keys sign with the best hash the server takes (SHA-2).
                 let hash = handle
                     .best_supported_rsa_hash()
@@ -472,7 +475,7 @@ mod key_file_tests {
         let opened = |p: Option<&str>| {
             decode_secret_key(&key, p)
                 .map(|_| ())
-                .map_err(|e| key_error(&e, p.is_some()))
+                .map_err(|e| key_error(&e, &key, p.is_some()))
         };
         assert_eq!(
             opened(None),
@@ -492,6 +495,44 @@ mod key_file_tests {
         assert_eq!(
             humanize_ssh_error(&refused, "bastion"),
             "SSH: Permission denied (password)"
+        );
+    }
+
+    /// A crypto error on a key that isn't encrypted is a bad file, not a
+    /// wrong passphrase, even with a stale passphrase saved.
+    #[test]
+    fn a_damaged_key_is_not_blamed_on_its_passphrase() {
+        let mut rng = rand_core_010::UnwrapErr(getrandom::SysRng);
+        let plain = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .unwrap()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap();
+        let crypto = russh::keys::Error::SshKey(russh::keys::ssh_key::Error::Crypto);
+        assert!(key_error(&crypto, &plain, true).starts_with("Invalid SSH key: "));
+        assert!(key_error(&crypto, "not a key", true).starts_with("Invalid SSH key: "));
+    }
+
+    /// A key file the app can't read says so, instead of reading as a
+    /// refused login.
+    #[test]
+    fn an_unreadable_key_file_is_not_a_refused_login() {
+        let err =
+            SshError::Message("Could not read key file: Permission denied (os error 13)".into());
+        let msg = humanize_ssh_error(&err, "bastion");
+        assert_eq!(
+            msg,
+            "SSH: Could not read key file: Permission denied (os error 13)"
+        );
+        let target = crate::explain::Target {
+            host: "db",
+            port: 5432,
+            username: "app",
+            ssh_host: Some("bastion"),
+            cloud_sql: None,
+        };
+        assert_ne!(
+            crate::explain::explain_connect_error(&msg, &target).class,
+            "ssh_auth"
         );
     }
 }
