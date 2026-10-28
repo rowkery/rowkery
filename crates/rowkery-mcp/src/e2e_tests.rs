@@ -103,6 +103,7 @@ async fn guards_hold_against_a_real_postgres() {
          DROP VIEW IF EXISTS mcp_e2e_peek_view;
          DROP DOMAIN IF EXISTS mcp_e2e_dom;
          DROP FUNCTION IF EXISTS mcp_e2e_peek(), mcp_e2e_peek_folded(), mcp_e2e_eq(int, int) CASCADE;
+         DROP FUNCTION IF EXISTS mcp_e2e_step(text, int) CASCADE;
          DROP TABLE IF EXISTS mcp_e2e_events;
          CREATE TABLE mcp_e2e_secret (id int PRIMARY KEY, ssn text);
          INSERT INTO mcp_e2e_secret VALUES (1, '123-45-6789');
@@ -122,6 +123,11 @@ async fn guards_hold_against_a_real_postgres() {
          CREATE FUNCTION mcp_e2e_eq(int, int) RETURNS bool LANGUAGE plpgsql IMMUTABLE AS
            $$ BEGIN RETURN (SELECT count(*) FROM mcp_e2e_secret) > $1; END $$;
          CREATE OPERATOR === (FUNCTION = mcp_e2e_eq, LEFTARG = int, RIGHTARG = int);
+         CREATE FUNCTION mcp_e2e_step(text, int) RETURNS text LANGUAGE plpgsql IMMUTABLE AS
+           $$ BEGIN RETURN (SELECT ssn FROM mcp_e2e_secret LIMIT 1); END $$;
+         CREATE AGGREGATE mcp_e2e_agg(int) (SFUNC = mcp_e2e_step, STYPE = text);
+         DROP AGGREGATE IF EXISTS public.every(int);
+         CREATE AGGREGATE public.every(int) (SFUNC = mcp_e2e_step, STYPE = text);
          CREATE DOMAIN mcp_e2e_dom AS int CHECK (mcp_e2e_eq(VALUE, 0));
          CREATE TABLE mcp_e2e_events (id int PRIMARY KEY, kind text, amount numeric,
            at timestamptz, doc jsonb);
@@ -259,6 +265,16 @@ async fn guards_hold_against_a_real_postgres() {
         ("SELECT public.mcp_e2e_peek_folded()", "public.mcp_e2e_peek_folded() is defined"),
         ("SELECT x FROM mcp_e2e_peek_view", "public.mcp_e2e_peek_view is a view"),
         ("SELECT 1 === 0", "operator ==="),
+        // An aggregate's own row is `internal`; its step is database code.
+        (
+            "SELECT mcp_e2e_agg(n) FROM mcp_e2e_visible",
+            "public.mcp_e2e_agg() is defined",
+        ),
+        // Named like a built-in one, it wins on its argument type.
+        (
+            "SELECT every(n) FROM mcp_e2e_visible",
+            "public.every(), which is defined in the database",
+        ),
         ("SELECT 1::mcp_e2e_dom", "public.mcp_e2e_dom"),
         ("SELECT pg_sleep(1)", "pg_sleep() only waits"),
         ("SELECT nextval('mcp_e2e_nope')", "nextval() changes"),
