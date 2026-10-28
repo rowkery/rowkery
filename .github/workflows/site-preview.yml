@@ -27,11 +27,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Which sites did this pull request change?
         id: changed
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-          HAS_SECRETS: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' }}
+          HAS_SECRETS: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID_WEB != '' && secrets.VERCEL_PROJECT_ID_DOCS != '' }}
         run: |
           sites=()
           if [ "$HAS_SECRETS" != "true" ]; then
@@ -57,12 +58,15 @@ jobs:
     environment:
       name: preview-${{ matrix.site }}
       url: ${{ steps.deploy.outputs.url }}
+    # The token goes on the command line only, so the site's own build and
+    # its npm install scripts never see it in their environment.
     env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ matrix.site == 'web' && secrets.VERCEL_PROJECT_ID_WEB || secrets.VERCEL_PROJECT_ID_DOCS }}
+      VERCEL_PROJECT_ID: ${{ secrets[format('VERCEL_PROJECT_ID_{0}', matrix.site == 'web' && 'WEB' || 'DOCS')] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
@@ -70,8 +74,9 @@ jobs:
       - name: Build and deploy the preview
         id: deploy
         run: |
-          npx --yes vercel@64.0.2 pull --yes --environment=preview --token="$VERCEL_TOKEN"
-          npx --yes vercel@64.0.2 build --token="$VERCEL_TOKEN"
-          url=$(npx --yes vercel@64.0.2 deploy --prebuilt --token="$VERCEL_TOKEN")
+          test -n "$VERCEL_PROJECT_ID"
+          npx --yes vercel@64.0.2 pull --yes --environment=preview --token="${{ secrets.VERCEL_TOKEN }}"
+          npx --yes vercel@64.0.2 build --token="${{ secrets.VERCEL_TOKEN }}"
+          url=$(npx --yes vercel@64.0.2 deploy --prebuilt --token="${{ secrets.VERCEL_TOKEN }}")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Preview: $url" >> "$GITHUB_STEP_SUMMARY"
