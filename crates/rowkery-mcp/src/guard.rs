@@ -253,6 +253,31 @@ pub fn pg_relations(explain_json: &Json) -> Vec<(Option<String>, String)> {
     out
 }
 
+/// Why a plan that reads tables it doesn't name is refused when tables are
+/// hidden or columns masked.
+pub const UNNAMED_SCAN_REFUSAL: &str = "Postgres would read some tables here without naming them in its plan (a join or aggregate pushed down to a foreign server, or a custom scan), so Rowkery can't check them against the hidden tables and masked columns. Query each foreign table on its own.";
+
+/// Whether a Postgres plan has a scan that reads relations without a
+/// `Relation Name`: a Foreign Scan whose join or aggregate postgres_fdw
+/// pushed down (it lists them only as text in `Relations`), or a Custom
+/// Scan. `pg_relations` can't see what those read.
+pub fn pg_unnamed_scan(explain_json: &Json) -> bool {
+    fn walk(node: &Json) -> bool {
+        let kind = node.get("Node Type").and_then(Json::as_str);
+        (matches!(kind, Some("Foreign Scan" | "Custom Scan"))
+            && node.get("Relation Name").is_none())
+            || node
+                .get("Plans")
+                .and_then(Json::as_array)
+                .is_some_and(|children| children.iter().any(walk))
+    }
+    let root = explain_json
+        .get(0)
+        .and_then(|p| p.get("Plan"))
+        .unwrap_or(explain_json);
+    walk(root)
+}
+
 /// Whether Postgres left partitions out of the plan as the executor
 /// started (`Subplans Removed`): pruning on values only known then, such as
 /// `now()`, which the run works out again and may land elsewhere.
@@ -550,6 +575,27 @@ mod tests {
             { "Node Type": "Seq Scan", "Relation Name": "ledger_1" }
         ] } }]);
         assert!(!pg_pruned(&none));
+    }
+
+    /// postgres_fdw with `use_remote_estimate` pushes a join of two foreign
+    /// tables down as one Foreign Scan that names them only in `Relations`
+    /// (the plan as Postgres 16 gave it).
+    #[test]
+    fn a_scan_that_names_no_relation_is_seen() {
+        let pushed = json!([{ "Plan": { "Node Type": "Foreign Scan", "Operation": "Select",
+            "Relations": "(crm.people p) INNER JOIN (crm.accounts a)",
+            "Remote SQL": "SELECT r1.email FROM (crm.people r1 INNER JOIN crm.accounts r2 ON (((r2.pid = r1.id))))" } }]);
+        assert!(pg_unnamed_scan(&pushed));
+        assert!(pg_relations(&pushed).is_empty());
+        let custom = json!([{ "Plan": { "Node Type": "Limit", "Plans": [
+            { "Node Type": "Custom Scan", "Custom Plan Provider": "x" }
+        ] } }]);
+        assert!(pg_unnamed_scan(&custom));
+        let named = json!([{ "Plan": { "Node Type": "Hash Join", "Plans": [
+            { "Node Type": "Foreign Scan", "Relation Name": "people", "Schema": "crm" },
+            { "Node Type": "Seq Scan", "Relation Name": "orders", "Schema": "public" }
+        ] } }]);
+        assert!(!pg_unnamed_scan(&named));
     }
 
     #[test]
