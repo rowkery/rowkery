@@ -348,12 +348,12 @@ export function QuickLook({
                           type="button"
                           className="ql-arrow"
                           data-follow-arrow={c.name}
-                          title={`Open ${target.table} where ${target.column} = ${text}`}
+                          title={`Open ${target.table} where ${target.column} = ${clipText(text, QL_TITLE_CHARS)}`}
                           tabIndex={-1}
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={(e) => followLine({ kind: "out", column: c.name }, e.metaKey || e.ctrlKey)}
                         >
-                          → {target.table} #{text}
+                          → {target.table} #{clipText(text, QL_TITLE_CHARS)}
                         </button>
                       )}
                       <span
