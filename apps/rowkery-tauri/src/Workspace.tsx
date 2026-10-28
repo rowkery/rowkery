@@ -4934,6 +4934,7 @@ export function Workspace({
                   sqlstate={result.sqlstate ?? null}
                   sql={activeRun.ranSql ?? null}
                   position={result.error_position ?? null}
+                  detail={result.error_detail ?? null}
                   suggestion={activeRun.errorMark?.suggestion ?? null}
                   onReplace={applySuggestion}
                   onReport={() => reportIssue(true)}

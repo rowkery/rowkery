@@ -152,7 +152,7 @@ The results show the server's message, with help to fix it where Rowkery can off
 
 - **Where it went wrong.** When the server gives a position, the caret moves there, the word gets a dotted underline and its line number turns red. Any edit clears the mark.
 - **Did you mean.** For a column or table that doesn't exist, Rowkery looks for a close name (up to two letters off) among the statement's tables or the schema, and offers it as **Did you mean customer_id?** Click **Replace and run**, or press <kbd>↵</kbd> with the caret in the underlined word, to fix it and run again.
-- **The full text.** The server's message as psql would print it, with the line and a caret under the spot, and the SQLSTATE code such as `42703`.
+- **The full text.** The server's message as psql would print it, with the line and a caret under the spot, the SQLSTATE code such as `42703`, and Postgres's DETAIL and HINT lines when it sends them (`DETAIL:  Key (email)=(a@b.c) already exists.`). A failed save of grid edits shows them too.
 - **Copy error** copies that text, and **Report…** lets you send the error with a note of your own.
 
 ## Recent queries

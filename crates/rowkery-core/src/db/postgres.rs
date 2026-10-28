@@ -580,9 +580,19 @@ fn map_query_error(err: &tokio_postgres::Error, username: &str) -> DriverError {
                 Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p),
                 _ => None,
             },
+            detail: detail_lines(db),
         },
         None => DriverError::Message(message),
     }
+}
+
+/// psql's `DETAIL:` and `HINT:` lines under an error (rowkery/reports#43).
+fn detail_lines(db: &tokio_postgres::error::DbError) -> Option<String> {
+    let lines: Vec<String> = [("DETAIL", db.detail()), ("HINT", db.hint())]
+        .into_iter()
+        .filter_map(|(label, text)| text.map(|t| format!("{label}:  {t}")))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// How `session_query_stream_with` batches rows.
@@ -1289,7 +1299,7 @@ pub async fn session_apply_changes_within(
         )
     };
     let username = session.config.username.clone();
-    let message = |e: &tokio_postgres::Error| map_query_error(e, &username).into_message();
+    let message = |e: &tokio_postgres::Error| map_query_error(e, &username).into_full_message();
     session_close_cursor(session).await;
     let users = || {
         ApplyFailure::other(

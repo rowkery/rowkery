@@ -296,6 +296,8 @@ export interface DoneFrame {
   error: string | null;
   sqlstate: string | null;
   error_position: number | null;
+  /** The server's DETAIL and HINT lines, as psql prints them. */
+  error_detail?: string | null;
   hold: SafetyHold | null;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
@@ -541,6 +543,7 @@ function stream<Started>(
             frames: frame.frames,
             sqlstate: frame.sqlstate,
             error_position: frame.error_position,
+            error_detail: frame.error_detail ?? null,
             capped: frame.capped ?? false,
             warning: frame.warning ?? null,
             forced: frame.forced ?? false,

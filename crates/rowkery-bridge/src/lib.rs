@@ -500,6 +500,8 @@ struct QueryFailure {
     message: String,
     sqlstate: Option<String>,
     position: Option<u32>,
+    /// The server's DETAIL and HINT lines.
+    detail: Option<String>,
 }
 
 impl From<String> for QueryFailure {
@@ -518,10 +520,12 @@ impl From<DriverError> for QueryFailure {
                 message,
                 sqlstate,
                 position,
+                detail,
             } => Self {
                 message,
                 sqlstate: Some(sqlstate),
                 position,
+                detail,
             },
             other => other.into_message().into(),
         }
@@ -2230,6 +2234,7 @@ fn finish_query_worker<S: EventSink + ?Sized>(
             detail: QueryDetail {
                 sqlstate: failure.sqlstate,
                 error_position: failure.position,
+                error_detail: failure.detail,
                 ..QueryDetail::default()
             },
         },
