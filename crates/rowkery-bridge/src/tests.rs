@@ -4794,22 +4794,26 @@ fn postgres_incoming_counts_are_bounded_and_one_at_a_time() {
         started.elapsed()
     );
 
-    // The window's other backends (Quick Look's among them), seen from tab 9.
+    // The window's other backends (Quick Look's among them), seen from tab 9:
+    // those started since tab 1, so an earlier test's leaving one can't count.
     let tab1 = int_of(window_query(&bridge, "w", 1, "SELECT pg_backend_pid()").0);
-    let others = |bridge: &super::CoreBridge| match window_query(
+    let others = |bridge: &super::CoreBridge| {
+        match window_query(
         bridge,
         "w",
         9,
         &format!(
             "SELECT string_agg(pid::text, ',' ORDER BY pid) FROM pg_stat_activity \
                  WHERE datname = current_database() AND backend_type = 'client backend' \
-                 AND pid NOT IN (pg_backend_pid(), {tab1})"
+                 AND pid NOT IN (pg_backend_pid(), {tab1}) \
+                 AND backend_start >= (SELECT backend_start FROM pg_stat_activity WHERE pid = {tab1})"
         ),
     )
     .0
     {
         Some(Value::Text(pids)) => pids,
         other => panic!("pids: {other:?}"),
+    }
     };
     let quick_look = others(&bridge);
 
