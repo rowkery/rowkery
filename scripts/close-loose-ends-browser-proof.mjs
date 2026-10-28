@@ -2,7 +2,8 @@
 // What a close takes with it, without a Tauri webview (stubbed `invoke`):
 // a Run All whose tab closes between statements runs none of the rest; a tab
 // closed while its rows stream comes back (⌘⇧T) with those rows marked
-// cancelled, not as a finished result; closing a window whose tabs hold
+// cancelled, not as a finished result (a finished one shown during a re-run
+// stays as it was); closing a window whose tabs hold
 // unsaved SQL says so in its Undo toast.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -122,6 +123,21 @@ const meta = await page.locator(visible + ' [data-testid="card-meta"]').first();
 check((await meta.getAttribute("data-state")) === "cancelled", `the reopened rows say "${(await meta.textContent()).trim()}"`);
 await page.screenshot({ path: `${OUT}/1-reopened-mid-run.png` });
 await page.evaluate(() => window.__END__?.());
+
+// A finished result shown while a re-run is on its way stays as it was.
+await type("SELECT 1");
+await page.keyboard.press("Control+Enter");
+await page.waitForFunction((sel) => document.querySelector(`${sel} [data-row="0"] [data-col="0"]`)?.textContent === "1", visible);
+await type("SELECT 7");
+await page.keyboard.press("Control+Enter");
+await page.waitForTimeout(200);
+await page.keyboard.press("Control+w");
+await page.waitForTimeout(200);
+await page.keyboard.press("Control+Shift+t");
+await page.waitForSelector(visible + ' [data-row="0"]');
+const kept = await page.locator(visible + ' [data-testid="card-meta"]').first().getAttribute("data-state");
+check(kept !== "cancelled", `a finished result reopened mid re-run isn't marked cancelled (${kept})`);
+await page.waitForTimeout(700);
 
 // 3. Closing the window: its toast names the unsaved SQL.
 await page.evaluate(() => window.dispatchEvent(new CustomEvent("rowkery:command", { detail: "close-window" })));
