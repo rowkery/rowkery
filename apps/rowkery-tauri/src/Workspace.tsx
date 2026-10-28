@@ -245,8 +245,12 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 const NOTICE_MS = 2400;
 /** Force stop: how long core's stop has to report back before the tab lets the run go. */
 const FORCE_STOP_GRACE_MS = 2000;
-/** How long after Cancel a second one is a Force stop (core's `FORCE_ASK_AFTER`), so a quick double Esc is one cancel. */
-const FORCE_READY_MS = 1000;
+/**
+ * How long after Cancel a second one is a Force stop, so a quick double Esc
+ * is one cancel: core's `FORCE_ASK_AFTER` (1 s, from when core takes the
+ * first cancel) and a margin, or core would ignore it.
+ */
+const FORCE_READY_MS = 1200;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -2244,8 +2248,11 @@ export function Workspace({
     const giveUp = run?.cancelling ? abandonRun(windowId, tabId) : undefined;
     if (!run?.cancelling) {
       patchRun(tabId, { cancelling: true, forceReady: false });
+      // This run's, not a later one cancelled in the same tab.
+      const startedAt = run?.startedAt;
       setTimeout(() => {
-        if (runsRef.current[tabId]?.cancelling) patchRun(tabId, { forceReady: true });
+        const now = runsRef.current[tabId];
+        if (now?.cancelling && now.startedAt === startedAt) patchRun(tabId, { forceReady: true });
       }, FORCE_READY_MS);
     }
     try {
