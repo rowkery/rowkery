@@ -1429,6 +1429,16 @@ enum PgWork {
     },
 }
 
+/// A timed plan runs inside a savepoint, keeping the user's transaction as
+/// it was, unless the tab surely has none. When the server didn't say, a
+/// `BEGIN … ROLLBACK` could roll back the user's open transaction, so the
+/// savepoint form is used; with none open it fails ([`PLAN_TXN_UNKNOWN`]).
+fn plan_in_savepoint(state: TxnState) -> bool {
+    state != TxnState::None
+}
+
+const PLAN_TXN_UNKNOWN: &str = "The server didn't say whether this tab has a transaction open, so the timed plan didn't run (it could have rolled one back). Run it again.";
+
 /// Runs the work on `session`, streaming batches. Returns the outcome and
 /// whether any rows were sent.
 async fn stream_on_session(
@@ -1514,15 +1524,11 @@ async fn stream_on_session(
             side,
         } => {
             session_close_cursor(session).await;
-            // In the user's own transaction a savepoint keeps it as it was.
-            let within_users = *rollback
-                && match session.txn_state() {
-                    TxnState::Users => true,
-                    TxnState::None => false,
-                    TxnState::Unknown => {
-                        session_probe_txn(session, Duration::from_secs(5)).await == TxnState::Users
-                    }
-                };
+            let state = match session.txn_state() {
+                TxnState::Unknown => session_probe_txn(session, Duration::from_secs(5)).await,
+                known => known,
+            };
+            let within_users = *rollback && plan_in_savepoint(state);
             let (begin, end) = if within_users {
                 (
                     "SAVEPOINT rowkery_explain",
@@ -1533,6 +1539,11 @@ async fn stream_on_session(
             };
             if *rollback {
                 if let Err(err) = session_execute(session, begin).await {
+                    // Unknown, and there was none: nothing ran, nothing was lost.
+                    let err = match state {
+                        TxnState::Unknown => DriverError::Message(PLAN_TXN_UNKNOWN.into()),
+                        _ => err,
+                    };
                     return (fwd.outcome(Err(err)), false);
                 }
             }
