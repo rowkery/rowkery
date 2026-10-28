@@ -1455,6 +1455,27 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     .unwrap();
     assert_eq!(still["rows"], json!([[2]]), "the dry run saved nothing");
 
+    // As many rows, but other ones (3 is pending, 2 is paid): their keys
+    // differ, so nothing is saved.
+    assert!(orders.digest.is_some());
+    let saw = proposals::Seen {
+        rows: vec![2, 2],
+        digests: run.statements.iter().map(|s| s.digest.clone()).collect(),
+        ..Default::default()
+    };
+    let swap = "UPDATE mcp_p_orders SET status = CASE id WHEN 2 THEN 'paid' ELSE 'pending' END WHERE id IN (2, 3)";
+    session_execute(&setup, swap).await.unwrap();
+    match proposals::commit(&id, &saw).await.unwrap() {
+        CommitOutcome::Moved { dry_run } => {
+            assert_eq!(dry_run.statements[0].rows, 2);
+            assert_ne!(dry_run.statements[0].digest, orders.digest);
+            assert_eq!(dry_run.statements[1].digest, customers.digest);
+        }
+        other => panic!("{other:?}"),
+    }
+    let back = "UPDATE mcp_p_orders SET status = CASE id WHEN 2 THEN 'pending' ELSE 'paid' END WHERE id IN (2, 3)";
+    session_execute(&setup, back).await.unwrap();
+
     // The data moves: nothing is saved and a fresh dry run comes back.
     session_execute(
         &setup,
@@ -1643,6 +1664,7 @@ async fn a_proposal_counts_what_its_cascades_and_triggers_write() {
         rows: vec![run.statements[0].rows],
         reach: vec![run.statements[0].reach.clone()],
         at_commit: run.at_commit.clone(),
+        digests: vec![run.statements[0].digest.clone()],
     };
 
     // A payment lands in another partition: one customer still, but the

@@ -43,6 +43,8 @@ export interface StatementPreview {
   reach: Reach | null;
   /** `[schema, table]` its own rows count under in `reach` (a partition's parent). */
   table: [string, string] | null;
+  /** Which rows an UPDATE / DELETE changed (a digest of their keys): Commit must change the same ones. */
+  digest: string | null;
 }
 
 /** Rows written in one table (Rust `rowkery_core::reach`). */
@@ -164,7 +166,12 @@ export const dryRunProposal = (id: string) => invoke<DryRun>("proposal_dry_run",
 export const commitProposal = (id: string, dry: DryRun) =>
   invoke<CommitOutcome>("proposal_commit", {
     id,
-    seen: { rows: dry.statements.map((s) => s.rows), reach: dry.statements.map((s) => s.reach), at_commit: dry.at_commit },
+    seen: {
+      rows: dry.statements.map((s) => s.rows),
+      reach: dry.statements.map((s) => s.reach),
+      at_commit: dry.at_commit,
+      digests: dry.statements.map((s) => s.digest ?? null),
+    },
   });
 
 export const rejectProposal = (id: string, note?: string) =>
