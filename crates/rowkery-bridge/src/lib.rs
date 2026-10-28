@@ -3165,7 +3165,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         // older batch has it, this waits (that one is cancelling),
                         // so Quick Look never runs on two backends at once.
                         let Lease {
-                            session, out: _out, ..
+                            mut session, out: _out, ..
                         } = pool::lease(
                             &pool,
                             &window_id,
@@ -3213,10 +3213,13 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                             }));
                             futures::join!(set, lookups).1
                         };
-                        let (rows, cancelled) = {
+                        let (rows, cancelled, cancels_done) = {
                         let mut all = std::pin::pin!(all);
                         let started = Instant::now();
                         let mut cancelled = false;
+                        // Every cancel finished sending: one cut off by its
+                        // timeout may still land later, on the next batch.
+                        let mut cancels_done = true;
                         let rows = loop {
                             tokio::select! {
                                 rows = &mut all => break Some(rows),
@@ -3226,11 +3229,12 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                                     // pipeline drains (a cancel ends one statement).
                                     if superseded() || started.elapsed() > QUICK_LOOK_LIMIT {
                                         cancelled = true;
-                                        let _ = tokio::time::timeout(
+                                        cancels_done &= tokio::time::timeout(
                                             Duration::from_secs(1),
                                             cancel_with_token(token.clone(), tls.clone()),
                                         )
-                                        .await;
+                                        .await
+                                        .is_ok();
                                     }
                                     // A dead link drains nothing: give up on it.
                                     if started.elapsed() > QUICK_LOOK_LIMIT * 2 {
@@ -3239,12 +3243,28 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                                 }
                             }
                         };
-                        (rows, cancelled)
+                        (rows, cancelled, cancels_done)
                         };
+                        let settled = rows.is_some() && cancels_done;
                         let rows = rows.unwrap_or_else(|| lookups.iter().map(|_| None).collect());
                         // After a cancel, one may still be on its way to this
-                        // backend: the session goes rather than meet the next batch.
-                        if !cancelled {
+                        // backend: once it has landed, a probe that answers
+                        // keeps the session (walking rows fast would otherwise
+                        // reconnect on every step); one that doesn't, it goes.
+                        let keep = !cancelled
+                            || (settled && {
+                                tokio::time::sleep(CANCEL_SETTLE).await;
+                                !session.is_closed()
+                                    && matches!(
+                                    tokio::time::timeout(
+                                        pool::PROBE_TIMEOUT * 2,
+                                        session_probe_after_cancel(&mut session, pool::PROBE_TIMEOUT),
+                                    )
+                                    .await,
+                                    Ok(TxnState::None)
+                                )
+                            });
+                        if keep {
                             pool::give_back(&pool, &window_id, Slot::QuickLook, generation, session);
                         }
                         Ok::<_, String>(rows)
