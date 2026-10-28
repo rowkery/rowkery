@@ -137,7 +137,7 @@ describe("the registry against what the app prints", () => {
 });
 
 describe("keymaps", () => {
-  const SHARED = ["refresh-schema,retry-connect", "filter-rows,find-results", "follow-key,run", "edit-failed-connection,open-in-query", "explain,open-in-query", "edit-failed-connection,explain", "delete-row,remove-filter", "connection-save,run", "format-sql,insert-row"];
+  const SHARED = ["refresh,retry-connect", "filter-rows,find-results", "follow-key,run", "edit-failed-connection,open-in-query", "explain,open-in-query", "edit-failed-connection,explain", "delete-row,remove-filter", "connection-save,run", "format-sql,insert-row"];
   test.each(keymapIds)("%s: no chord is a predefined macOS accelerator or bound twice", (keymap) => {
     const seen = new Map<string, string>();
     for (const c of COMMANDS) {
@@ -198,7 +198,7 @@ describe("matching a keydown", () => {
 
   test("a shared chord picks the command that can run (⌘R)", () => {
     const r = key("KeyR", { meta: true });
-    expect(matchCommand(r, base, true)?.id).toBe("refresh-schema");
+    expect(matchCommand(r, base, true)?.id).toBe("refresh");
     expect(matchCommand(r, { ...base, connected: false, failed: true }, true)?.id).toBe("retry-connect");
     expect(matchCommand(key("KeyT", { meta: true }), base, true)?.id).toBe("new-window");
     setKeymap("tableplus");

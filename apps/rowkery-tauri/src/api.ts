@@ -794,6 +794,11 @@ export type ApplyOutcome =
     };
 
 /** The statements staged edits become (`build_row_changes` in core). */
+/** The statement only reads (core's `plain_read`): ⌘R may run it again. */
+export async function readsOnly(engine: string, sql: string): Promise<boolean> {
+  return invoke("reads_only", { engine, sql });
+}
+
 export async function reviewChanges(engine: string, table: EditTable, changes: RowChange[]): Promise<ReviewedChanges> {
   return invoke("review_changes", { engine, table, changes });
 }

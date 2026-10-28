@@ -63,7 +63,7 @@ describe("chords", () => {
   // explains a query tab's statement and edits a table tab's SQL; ⌘I formats a
   // query tab's SQL and inserts a row in a table tab.
   const SHARED_CHORDS: Record<string, string> = {
-    "retry-connect": "refresh-schema",
+    "retry-connect": "refresh",
     "find-results": "filter-rows",
     "follow-key": "run",
     "edit-failed-connection": "open-in-query",
@@ -125,7 +125,7 @@ describe("chords", () => {
       "switch-connection": "⇧⌘O",
       "switch-database": "⇧⌘D",
       "new-window": "⌘T",
-      "refresh-schema": "⌘R",
+      refresh: "⌘R",
       "show-structure": "⌥⌘2",
     });
     expect(keys(false)).toMatchObject({
@@ -154,7 +154,7 @@ describe("availableCommands", () => {
       expect(new Set(titles).size, titles.join(", ")).toBe(titles.length);
     }
     expect(availableCommands({ ...base, tableTab: true }, true).filter((c) => c.title === "Refresh rows")).toEqual([
-      expect.objectContaining({ id: "refresh-rows", keys: "⇧⌘R" }),
+      expect.objectContaining({ id: "refresh-rows", keys: undefined }),
     ]);
   });
 

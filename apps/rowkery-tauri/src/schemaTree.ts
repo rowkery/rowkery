@@ -138,3 +138,33 @@ export function findTable(
   }
   return undefined;
 }
+
+/** A row count the window saw itself, and the catalog's count it was seen over. */
+export interface SeenCount {
+  rows: number;
+  over: number | null;
+}
+
+/**
+ * The tree with the row counts the window has seen itself (`seen`, by table
+ * key) over the catalog's: Postgres's estimate only moves at ANALYZE, so a
+ * table the grid just emptied would still read 2. A catalog count that has
+ * moved since (ANALYZE ran, SQLite counted again) is newer and wins. The
+ * same tree when no count differs.
+ */
+export function withSeenCounts(schemas: SidebarSchema[], seen: Record<string, SeenCount>): SidebarSchema[] {
+  const over = (t: SidebarTable): SidebarTable => {
+    const partitions = t.partitions.map(over);
+    const s = seen[t.key];
+    const rows = s && s.over === t.rows ? s.rows : t.rows;
+    return rows === t.rows && partitions.every((p, i) => p === t.partitions[i]) ? t : { ...t, rows, partitions };
+  };
+  let changed = false;
+  const out = schemas.map((s) => {
+    const tables = s.tables.map(over);
+    if (tables.every((t, i) => t === s.tables[i])) return s;
+    changed = true;
+    return { ...s, tables };
+  });
+  return changed ? out : schemas;
+}
