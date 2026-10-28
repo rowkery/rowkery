@@ -1413,21 +1413,30 @@ pub(crate) async fn masked_marks(
                 .iter()
                 .filter_map(|(s, t)| Some(format!("({}, {})", lit(s)?, lit(t)?)))
                 .collect();
+            // The marked tables and every partition or child table under
+            // them, in any schema: one may define a generated column of its
+            // own (or its own expression for one), read by the parent's
+            // marks. Each row names the marked table it's under.
             let sql = format!(
-                "SELECT n.nspname, c.relname, a.attname, pg_get_expr(d.adbin, d.adrelid) \
-                 FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
-                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                "WITH RECURSIVE under(rel, top) AS ( \
+                   SELECT c.oid, c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE (n.nspname, c.relname) IN (VALUES {}) \
+                   UNION SELECT i.inhrelid, u.top FROM under u JOIN pg_inherits i ON i.inhparent = u.rel) \
+                 SELECT n.nspname, c.relname, a.attname, pg_get_expr(d.adbin, d.adrelid), tn.nspname, t.relname \
+                 FROM under u JOIN pg_attribute a ON a.attrelid = u.rel \
+                   JOIN pg_class c ON c.oid = u.rel JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   JOIN pg_class t ON t.oid = u.top JOIN pg_namespace tn ON tn.oid = t.relnamespace \
                    JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-                 WHERE a.attgenerated <> '' AND NOT a.attisdropped \
-                   AND (n.nspname, c.relname) IN (VALUES {})",
+                 WHERE a.attgenerated <> '' AND NOT a.attisdropped",
                 names.join(", ")
             );
             for row in store.read(target, &sql).await?.rows {
                 let (schema, table) = (text(row.first()), text(row.get(1)));
+                let (top_schema, top) = (text(row.get(4)), text(row.get(5)));
                 let words = functions::scan_sql(&text(row.get(3))).words;
                 let from_marked = marks.iter().any(|m| {
-                    m.schema == schema
-                        && m.table == table
+                    m.schema == top_schema
+                        && m.table == top
                         && words.iter().any(|w| w.eq_ignore_ascii_case(&m.column))
                 });
                 if from_marked {
@@ -1455,6 +1464,19 @@ pub(crate) async fn masked_marks(
                     });
                 }
             }
+        }
+    }
+    // One added since the catalog was cached: read it again, or the
+    // checks that go by its columns would refuse the table.
+    if engine == EngineKind::Postgres && !more.is_empty() {
+        let catalog = &store.catalog(target, false).await?.catalog;
+        let stale = more.iter().any(|m| {
+            access::find_exact(catalog, &m.schema, &m.table).is_some_and(|t| {
+                !t.columns.is_empty() && !t.columns.iter().any(|c| c.name == m.column)
+            })
+        });
+        if stale {
+            store.catalog(target, true).await?;
         }
     }
     for m in more {
@@ -1556,7 +1578,9 @@ async fn pg_masked(
 
     let cached = store.catalog(target, false).await?;
     let catalog = &cached.catalog;
-    for m in marks {
+    // Only the user's own marks: a generated column `masked_marks` added
+    // may be newer than the cached catalog, and the user never marked it.
+    for m in &mask::parse(target.record.masked_columns(&target.database)) {
         let reads_it = touched.iter().any(|(s, t)| {
             lineage(s.as_deref().unwrap_or("public"), t)
                 .iter()
