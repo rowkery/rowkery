@@ -69,6 +69,11 @@ pub struct Proposal {
     /// The MCP client's name (`claude-ai`, `claude-code`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// When a commit of it was started that never finished (Rowkery closed
+    /// mid-COMMIT, rowkery/reports#49): it may already be saved. Never
+    /// written to the queue; `waiting` fills it in.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub commit_started_ms: Option<u64>,
 }
 
 /// What the user decided, or what became of the commit.
@@ -83,6 +88,19 @@ pub enum Decision {
     },
     /// The commit failed (nothing was saved, unless the error says otherwise).
     Failed { error: String },
+    /// Written just before COMMIT is sent, and followed by the outcome. Alone,
+    /// Rowkery closed in between: the change may or may not be saved.
+    Committing {},
+    /// The commit stopped with nothing saved (the server refused COMMIT):
+    /// waiting again, like a change never committed.
+    Uncommitted {},
+}
+
+impl Decision {
+    /// Still the user's to decide: a later line takes its place.
+    fn open(&self) -> bool {
+        matches!(self, Decision::Committing {} | Decision::Uncommitted {})
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,8 +161,14 @@ fn load() -> Vec<(Proposal, Option<DecisionLine>)> {
     let since = now_ms().saturating_sub(KEEP_MS);
     let mut decided: HashMap<String, DecisionLine> = HashMap::new();
     for line in read_lines::<DecisionLine>(OUTCOMES_FILE) {
-        // The first decision stands.
-        decided.entry(line.id.clone()).or_insert(line);
+        // The first decision stands; a commit that was started gives way
+        // to what became of it.
+        match decided.get(&line.id) {
+            Some(first) if !first.decision.open() => {}
+            _ => {
+                decided.insert(line.id.clone(), line);
+            }
+        }
     }
     let mut seen = std::collections::HashSet::new();
     read_lines::<Proposal>(QUEUE_FILE)
@@ -157,8 +181,49 @@ fn load() -> Vec<(Proposal, Option<DecisionLine>)> {
         .collect()
 }
 
+/// Undecided, or a commit was started and never finished: the user decides
+/// again, told it may already be saved.
 fn is_waiting(p: &Proposal, d: &Option<DecisionLine>, now: u64) -> bool {
-    d.is_none() && now.saturating_sub(p.ts) < EXPIRES_MS
+    let open = d.as_ref().is_none_or(|line| line.decision.open());
+    open && now.saturating_sub(p.ts) < EXPIRES_MS
+}
+
+/// The proposals this process is committing right now: their `Committing`
+/// line is no sign of a commit cut short.
+static IN_FLIGHT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn in_flight(id: &str) -> bool {
+    IN_FLIGHT
+        .lock()
+        .map(|l| l.iter().any(|i| i == id))
+        .unwrap_or(false)
+}
+
+/// Marks `id` in flight until dropped.
+struct Flight(String);
+
+impl Flight {
+    fn start(id: &str) -> Self {
+        if let Ok(mut l) = IN_FLIGHT.lock() {
+            l.push(id.to_string());
+        }
+        Self(id.to_string())
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        if let Ok(mut l) = IN_FLIGHT.lock() {
+            l.retain(|i| *i != self.0);
+        }
+    }
+}
+
+/// A commit started and never finished, by its line.
+fn cut_short(p: &Proposal, d: &Option<DecisionLine>) -> Option<u64> {
+    d.as_ref()
+        .filter(|line| matches!(line.decision, Decision::Committing {}) && !in_flight(&p.id))
+        .map(|line| line.ts)
 }
 
 /// Proposals nobody has decided on yet, oldest first.
@@ -167,7 +232,10 @@ pub fn waiting() -> Vec<Proposal> {
     load()
         .into_iter()
         .filter(|(p, d)| is_waiting(p, d, now))
-        .map(|(p, _)| p)
+        .map(|(mut p, d)| {
+            p.commit_started_ms = cut_short(&p, &d);
+            p
+        })
         .collect()
 }
 
@@ -199,6 +267,7 @@ pub fn submit(
         reason: reason.trim().to_string(),
         expect_rows,
         client,
+        commit_started_ms: None,
     };
     append_line(QUEUE_FILE, &proposal)?;
     Ok(proposal)
@@ -226,6 +295,16 @@ pub fn status(id: &str) -> Result<Json, String> {
         .find(|(p, _)| p.id == id.trim())
         .ok_or_else(|| format!("No proposal called \"{}\".", id.trim()))?;
     let mut out = match &d {
+        Some(line) if line.decision.open() => {
+            // Still the user's to decide; the agent waits, and proposes
+            // nothing new for it.
+            let mut v = json!({ "state": "waiting" });
+            if let Some(at) = cut_short(&p, &d) {
+                v["commit_started_ms"] = json!(at);
+                v["hint"] = json!("Rowkery closed while committing this change, so it may already be saved. The user will check. Don't send it again.");
+            }
+            v
+        }
         Some(line) => {
             let mut v = serde_json::to_value(&line.decision).unwrap_or(Json::Null);
             v["at_ms"] = json!(line.ts);
@@ -612,22 +691,26 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
     if seen.rows.len() != changes.len() {
         return Err("The change moved since you reviewed it. Review it again.".into());
     }
+    let _flight = Flight::start(id);
     let ran = match &record {
         ConnectionRecord::Postgres(pg) => {
             let target = Target {
                 record: record.clone(),
                 database: database.clone(),
             };
-            pg_commit(pg, &target, &proposal.sql, seen).await
+            pg_commit(pg, &target, &proposal.sql, seen, id).await
         }
         ConnectionRecord::Sqlite(c) => {
             let path = c.path.clone();
             let changes = changes.clone();
             let seen = seen.clone();
-            tokio::task::spawn_blocking(move || sqlite_run(&path, &changes, Some(&seen)))
-                .await
-                .map_err(|e| e.to_string())?
-                .map(|(_, ran)| ran.unwrap_or(RunResult::Moved))
+            let id = id.to_string();
+            tokio::task::spawn_blocking(move || {
+                sqlite_run(&path, &changes, Some((&seen, id.as_str())))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|(_, ran)| ran.unwrap_or(RunResult::Moved))
         }
     };
     match ran {
@@ -653,6 +736,10 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
                         error: error.clone(),
                     },
                 )?;
+            } else {
+                // Rolled back: no longer a commit cut short, if one was
+                // marked. Unwritten, the next review warns needlessly.
+                let _ = decide(id, Decision::Uncommitted {});
             }
             Ok(CommitOutcome::Failed { error })
         }
@@ -952,6 +1039,7 @@ async fn pg_commit(
     target: &Target,
     sql: &str,
     seen: &Seen,
+    id: &str,
 ) -> Result<RunResult, String> {
     let session = open_session(pg.id.clone(), pg_config(pg, &target.database))
         .await
@@ -992,6 +1080,10 @@ async fn pg_commit(
             return Err(e);
         }
     };
+    if let Err(e) = committing(id) {
+        let _ = session_execute(&session, "ROLLBACK").await;
+        return Err(e);
+    }
     if let Err(e) = session_execute(&session, "COMMIT").await {
         if session.is_closed() {
             return Err(format!(
@@ -1039,11 +1131,19 @@ fn matches(seen: Option<&Reach>, now: &Option<Reach>) -> bool {
 /// RETURNING inside a savepoint, for its rows; for an UPDATE the savepoint
 /// is rolled back to read the old rows by key, then the statement runs
 /// again so the next one sees it.
+/// Notes that COMMIT is about to go, so a crash before its outcome is
+/// written leaves a sign (rowkery/reports#49). Unwritten, nothing is sent.
+fn committing(id: &str) -> Result<(), String> {
+    decide(id, Decision::Committing {}).map_err(|e| format!("{e}. Nothing was saved."))
+}
+
+/// `commit`: what the user saw, and the proposal it commits.
 fn sqlite_run(
     path: &str,
     changes: &[RowChange],
-    expected: Option<&Seen>,
+    commit: Option<(&Seen, &str)>,
 ) -> Result<(Vec<StatementPreview>, Option<RunResult>), String> {
+    let expected = commit.map(|(seen, _)| seen);
     use rowkery_core::db::sqlite::sqlite_value_to_core;
     let err = |e: rusqlite::Error| e.to_string();
     let conn =
@@ -1172,6 +1272,10 @@ fn sqlite_run(
     })();
     let committing = matches!(result, Ok((_, Some(RunResult::Committed(_)))));
     if committing {
+        if let Some(Err(e)) = commit.map(|(_, id)| self::committing(id)) {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
         if let Err(e) = conn.execute_batch("COMMIT") {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e.to_string());
@@ -1593,6 +1697,57 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
         std::env::remove_var("ROWKERY_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_commit_cut_short_stays_waiting_and_says_so() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rowkery-mcp-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+        let p = submit(
+            "shop",
+            "main",
+            "DELETE FROM notes WHERE id = 1",
+            "old",
+            None,
+            None,
+        )
+        .unwrap();
+        // COMMIT was about to go when Rowkery closed (rowkery/reports#49).
+        decide(&p.id, Decision::Committing {}).unwrap();
+        let listed = waiting();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].commit_started_ms.is_some());
+        let told = status(&p.id).unwrap();
+        assert_eq!(told["state"], "waiting");
+        assert!(
+            told["hint"]
+                .as_str()
+                .unwrap()
+                .contains("may already be saved"),
+            "{told}"
+        );
+        // While this process commits it, the marker is no warning.
+        {
+            let _flight = Flight::start(&p.id);
+            assert_eq!(waiting()[0].commit_started_ms, None);
+        }
+        // Rolled back: waiting again, with no warning.
+        decide(&p.id, Decision::Uncommitted {}).unwrap();
+        assert_eq!(waiting()[0].commit_started_ms, None);
+        assert!(status(&p.id).unwrap().get("hint").is_none());
+        // Committed after all: decided, and that stands.
+        decide(&p.id, Decision::Committing {}).unwrap();
+        decide(&p.id, Decision::Committed { rows: vec![1] }).unwrap();
+        decide(&p.id, Decision::Committing {}).unwrap();
+        assert!(waiting().is_empty());
+        assert_eq!(status(&p.id).unwrap()["state"], "committed");
+        // The queue file never holds the field.
+        let queue = std::fs::read_to_string(dir.join(QUEUE_FILE)).unwrap();
+        assert!(!queue.contains("commit_started_ms"), "{queue}");
+        std::env::remove_var("ROWKERY_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

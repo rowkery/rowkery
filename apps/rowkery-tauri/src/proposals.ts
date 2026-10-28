@@ -20,6 +20,8 @@ export interface Proposal {
   expect_rows?: number;
   /** The MCP client's name (`claude-ai`, `claude-code`). */
   client?: string;
+  /** Unix ms: a commit of it was started and Rowkery closed before it finished, so it may already be saved. */
+  commit_started_ms?: number;
 }
 
 /** One statement's dry run: the rows it changed, before and after. */
