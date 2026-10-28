@@ -254,6 +254,7 @@ async fn postgres_errors_and_slow_streams() {
 
     let err = session_query_stream(&session, "SELECT id FROM no_such_table", |_, _| Ok(()))
         .await
+        .map(|_| ())
         .expect_err("missing table");
     match err {
         DriverError::Server {
@@ -527,6 +528,7 @@ async fn postgres_read_only_session_refuses_writes() {
         |_, _| Ok(()),
     )
     .await
+    .map(|_| ())
     .expect_err("read-only session");
     assert!(err.to_string().contains("read-only transaction"), "{err}");
     let rows = session_query_stream(&session, "SELECT 1", |_, _| Ok(()))
@@ -735,8 +737,8 @@ async fn postgres_rereads_a_password_saved_since() {
     };
     let err = open_session(empty.id.clone(), empty)
         .await
-        .err()
-        .expect("no password saved");
+        .map(|_| ())
+        .expect_err("no password saved");
     assert!(err.to_string().contains("none is saved"), "{err}");
 }
 
@@ -1008,8 +1010,8 @@ async fn postgres_sql_ascii_rows_say_why_they_cannot_show() {
         |_, _| Ok(()),
     )
     .await
-    .err()
-    .expect("not UTF-8")
+    .map(|_| ())
+    .expect_err("not UTF-8")
     .into_message();
     assert!(utf8.starts_with("invalid byte sequence"), "{utf8}");
     // Left from an earlier run, or made now.
@@ -1052,8 +1054,8 @@ async fn postgres_sql_ascii_rows_say_why_they_cannot_show() {
         |_, _| Ok(()),
     )
     .await
-    .err()
-    .expect("the Latin-1 row stops the page")
+    .map(|_| ())
+    .expect_err("the Latin-1 row stops the page")
     .into_message();
     assert!(
         browse.starts_with("This database uses the SQL_ASCII encoding"),
