@@ -146,6 +146,12 @@ Press <kbd>Esc</kbd> or <kbd>⌘.</kbd>, or click **Cancel** beside the running 
 
 If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop**. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
 
+## An update won't install
+
+Rowkery replaces itself where it runs, so it can't update a copy opened from the disk image's window, or one opened in Downloads (macOS runs that from a temporary copy). Rowkery says so instead of downloading the update. Move Rowkery into Applications, open it from there, and check again.
+
+If **Restart** fails for another reason, Rowkery says why and keeps the download, so the next **Restart** doesn't download it again.
+
 ## Rowkery feels slow
 
 - **Big results.** A query tab loads every row its query returns, so add a `LIMIT` to load fewer. A table tab loads 1,000 rows at a time and **Load more** gets the next page; its page-size control also offers 5,000 and All. A tab holds at most 1,000,000 rows and says **Stopped at 1,000,000 rows** when it gets there. To get a whole large result, use **Export results…** <kbd>⇧⌘E</kbd>, which streams it straight to a file without loading the rows into the window. On a table tab, **Copy all results as CSV** in <kbd>⌘K</kbd> does the same to the clipboard.

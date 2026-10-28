@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { showOfferToast, showToast } from "./notify";
 import { readKey, writeKey } from "./persist";
 
@@ -24,7 +25,9 @@ export type UpdateStatus =
   | { status: "off" }
   | { status: "up-to-date"; version: string }
   | { status: "available"; version: string; notes: string | null }
-  | { status: "ready"; version: string; notes: string | null };
+  | { status: "ready"; version: string; notes: string | null }
+  /** Newer, but this copy can't be replaced where it runs (the disk image, a translocated copy). */
+  | { status: "misplaced"; version: string; reason: string };
 
 export type UpdatePref = "auto" | "download" | "notify" | "off";
 
@@ -84,6 +87,8 @@ export function useUpdateState(): UpdateState {
 /** Tests: start over. */
 export function resetUpdatesForTests(next: UpdateState = { phase: "idle" }) {
   state = next;
+  misplacedSaid = false;
+  installFailed = false;
   emit();
 }
 
@@ -135,6 +140,11 @@ export function updateToast(
     return manual ? { kind: "say", message: "Couldn't check for updates", detail: result.error, tone: "error" } : { kind: "none" };
   }
   if (result.status === "ready") return manual || pref !== "auto" ? { kind: "offer", version: result.version } : { kind: "none" };
+  // Said once by a quiet check too: nothing else would tell you.
+  if (result.status === "misplaced")
+    return manual || !misplacedSaid
+      ? { kind: "say", message: `Rowkery ${result.version} can't be installed here`, detail: result.reason, tone: "error" }
+      : { kind: "none" };
   if (!manual) return { kind: "none" };
   if (result.status === "available") return { kind: "available", version: result.version };
   if (result.status === "off") return { kind: "say", message: "This build doesn't update itself" };
@@ -147,8 +157,11 @@ export function restartBlocker(running: number): string | null {
   return running === 1 ? "A query is running" : `${running} queries are running`;
 }
 
+let misplacedSaid = false;
+
 function stateOf(result: UpdateStatus | { error: string }): UpdateState {
   if ("error" in result) return { phase: "error", message: result.error };
+  if (result.status === "misplaced") return { phase: "error", message: `Rowkery ${result.version} is out. ${result.reason}` };
   if (result.status === "off") return { phase: "off" };
   if (result.status === "up-to-date") return { phase: "up-to-date", version: result.version };
   return { phase: result.status, version: result.version, notes: result.notes };
@@ -178,6 +191,7 @@ export async function lookForUpdate(manual: boolean, runningNow: () => number): 
     if (!(before.phase === "downloading" && "status" in result && result.status === "available")) setState(stateOf(result));
   }
   const toast = updateToast(result, manual, pref);
+  if ("status" in result && result.status === "misplaced") misplacedSaid = true;
   if (toast.kind === "say") showToast(toast.message, toast.detail, toast.tone);
   if (toast.kind === "offer") offerRestart(toast.version);
   if (toast.kind === "available") showToast(`Rowkery ${toast.version} is out`, "Download it in Settings > Updates");
@@ -199,6 +213,11 @@ export async function downloadUpdate(): Promise<void> {
     showToast("Couldn't download the update", result.error, "error");
     return;
   }
+  if (result.status === "misplaced") {
+    if (found) setState(found);
+    showToast(`Rowkery ${result.version} can't be installed here`, result.reason, "error");
+    return;
+  }
   setState(stateOf(result));
   if (result.status === "ready") offerRestart(result.version);
 }
@@ -208,6 +227,18 @@ export function restartToUpdate() {
   const blocker = restartBlocker(running());
   if (blocker) return showToast(blocker, "Restart once it finishes, or quit to install");
   invoke("restart_to_update").catch((e) => showToast("Couldn't install the update", String(e), "error"));
+}
+
+/** An install that failed after Restart: Automatic stops trying until the next launch. */
+let installFailed = false;
+
+/** Says why a Restart didn't install (`update-install-failed`); the download is kept. Returns the cleanup. */
+export function watchInstallFailures(): () => void {
+  const off = listen<string>("update-install-failed", (e) => {
+    installFailed = true;
+    showToast("Couldn't install the update", e.payload, "error");
+  });
+  return () => void off.then((f) => f());
 }
 
 function offerRestart(version: string) {
@@ -262,7 +293,7 @@ export function watchIdleInstall(runningNow: () => number): () => void {
   window.addEventListener("pointerdown", touch, true);
   let busy = false;
   const tick = async () => {
-    if (busy || state.phase !== "ready" || updatePref() !== "auto") return;
+    if (busy || installFailed || state.phase !== "ready" || updatePref() !== "auto") return;
     if (!idleEnough({ now: Date.now(), lastInput, focused: document.hasFocus(), running: runningNow() })) return;
     busy = true;
     try {

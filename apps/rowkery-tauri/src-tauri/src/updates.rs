@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State, Url};
+use tauri::{AppHandle, Emitter, Manager, State, Url, WebviewWindow};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// The download is a few tens of MB; a slow link gets this long for the
@@ -58,6 +58,13 @@ pub enum UpdateStatus {
         version: String,
         notes: Option<String>,
     },
+    /// Newer, but this copy can't be replaced where it runs (the disk
+    /// image, a translocated copy): not downloaded, and `reason` says what
+    /// to do.
+    Misplaced {
+        version: String,
+        reason: String,
+    },
 }
 
 fn feed_override() -> Option<Url> {
@@ -92,6 +99,13 @@ fn ready_status(update: &Update) -> UpdateStatus {
     UpdateStatus::Ready {
         version: update.version.clone(),
         notes: notes_of(update),
+    }
+}
+
+fn misplaced_status(update: &Update, reason: &str) -> UpdateStatus {
+    UpdateStatus::Misplaced {
+        version: update.version.clone(),
+        reason: reason.into(),
     }
 }
 
@@ -158,6 +172,9 @@ pub async fn check_for_update(
         Err(None) => return Ok(UpdateStatus::Off),
         Err(Some(e)) => return Err(e),
     };
+    if let Some(reason) = crate::app_location::misplaced() {
+        return Ok(misplaced_status(&update, reason));
+    }
     if download == Some(false) {
         let status = available_status(&update);
         *updates.found.lock().unwrap() = Some(update);
@@ -194,34 +211,58 @@ pub async fn download_update(
             Err(Some(e)) => return Err(e),
         },
     };
+    if let Some(reason) = crate::app_location::misplaced() {
+        return Ok(misplaced_status(&update, reason));
+    }
     download_and_hold(&updates, update).await
 }
 
+/// Installs the downloaded update. A failed install keeps it, so Restart
+/// can try again without downloading it again.
 fn install_ready(updates: &Updates) -> Result<bool, String> {
     let Some(ready) = updates.ready.lock().unwrap().take() else {
         return Ok(false);
     };
-    ready
-        .update
-        .install(&ready.bytes)
-        .map_err(|e| e.to_string())?;
+    if let Err(e) = ready.update.install(&ready.bytes) {
+        *updates.ready.lock().unwrap() = Some(ready);
+        return Err(install_error(
+            &e.to_string(),
+            crate::app_location::misplaced(),
+        ));
+    }
     Ok(true)
+}
+
+/// What a failed install tells the user: where the app runs, when that's
+/// the cause, else the updater's own words.
+fn install_error(e: &str, misplaced: Option<&str>) -> String {
+    misplaced.map_or_else(|| e.to_string(), str::to_string)
 }
 
 /// Restart into the downloaded update. The page asks only when no query
 /// runs; work it can't see (a commit, an import, a SQL file, an open
-/// transaction) gets the quit dialog first.
+/// transaction) gets the quit dialog first. The answer comes before that
+/// dialog, so a failed install reaches the window that asked as
+/// `update-install-failed`.
 #[tauri::command]
-pub fn restart_to_update(app: AppHandle, updates: State<'_, Updates>) -> Result<(), String> {
+pub fn restart_to_update(
+    app: AppHandle,
+    window: WebviewWindow,
+    updates: State<'_, Updates>,
+) -> Result<(), String> {
     if updates.ready.lock().unwrap().is_none() {
         return Err("No update is ready".into());
     }
     let restart = app.clone();
+    let asked = window.label().to_string();
     crate::ask_before_quit(&app, "Restart", move || {
         match install_ready(&restart.state::<Updates>()) {
             Ok(true) => restart.restart(),
             Ok(false) => {}
-            Err(e) => eprintln!("update: couldn't install: {e}"),
+            Err(e) => {
+                eprintln!("update: couldn't install: {e}");
+                let _ = restart.emit_to(asked.as_str(), "update-install-failed", e);
+            }
         }
     });
     Ok(())
@@ -254,6 +295,19 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_install_names_the_location_when_that_is_why() {
+        let dmg = "Rowkery is running from the disk image. Move it to Applications, open it from there, and try again.";
+        assert_eq!(
+            install_error("Read-only file system (os error 30)", Some(dmg)),
+            dmg
+        );
+        assert_eq!(
+            install_error("Failed to move the new app into place", None),
+            "Failed to move the new app into place"
+        );
+    }
+
+    #[test]
     fn the_status_is_tagged_for_the_page() {
         let json = serde_json::to_value(UpdateStatus::UpToDate {
             version: "0.1.0".into(),
@@ -273,6 +327,15 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({ "status": "available", "version": "0.1.2", "notes": null })
+        );
+        let json = serde_json::to_value(UpdateStatus::Misplaced {
+            version: "0.1.2".into(),
+            reason: "Move it".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "status": "misplaced", "version": "0.1.2", "reason": "Move it" })
         );
     }
 }
