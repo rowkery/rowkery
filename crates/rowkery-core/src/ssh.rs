@@ -85,14 +85,15 @@ fn load_known_hosts() -> HashMap<String, String> {
 }
 
 fn persist_known_host(host: &str, fingerprint: &str) -> Result<(), SshError> {
-    fs::create_dir_all(config_dir()).map_err(|e| SshError::Message(e.to_string()))?;
+    crate::config::create_private_dir(&config_dir())
+        .map_err(|e| SshError::Message(e.to_string()))?;
     let mut map = load_known_hosts();
     map.insert(host.to_string(), fingerprint.to_string());
     let mut lines = Vec::new();
     for (h, fp) in map {
         lines.push(format!("{h} {fp}"));
     }
-    fs::write(known_hosts_path(), lines.join("\n"))
+    crate::config::write_private(&known_hosts_path(), lines.join("\n"))
         .map_err(|e| SshError::Message(e.to_string()))?;
     Ok(())
 }
