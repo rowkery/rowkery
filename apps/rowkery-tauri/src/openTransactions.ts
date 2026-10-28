@@ -2,10 +2,10 @@ import { openTransactions, type OpenTransaction } from "./api";
 import { showToast } from "./notify";
 
 /**
- * Re-pointing a window (another connection or database, Reconnect) or a new
- * safe mode starts its sessions afresh, which would roll back a transaction
- * open in one of its query tabs. Those are refused while one is, and a toast
- * names the tab.
+ * Re-pointing a window (another connection or database, Reconnect), a new
+ * safe mode, or closing a tab, a window or its connection ends sessions,
+ * which would roll back a transaction open in one of its query tabs. Those
+ * are refused while one is, and a toast names the tab.
  */
 
 /** Each window's tab titles by tab id, as its workspace last showed them. */
@@ -36,14 +36,14 @@ export function refusalToast(
 }
 
 /**
- * Whether a transaction open in one of `windowIds`' tabs is in the way of a
- * switch or a new safe mode; if so, a toast says which.
+ * Whether a transaction open in one of `windowIds`' tabs (only `tabIds`,
+ * when given) is in the way; if so, a toast says which.
  * Core not answering lets the change go ahead, as it did before.
  */
-export async function transactionInTheWay(windowIds: string[]): Promise<boolean> {
-  const held = await openTransactions().catch(() => [] as OpenTransaction[]);
+export async function transactionInTheWay(windowIds: string[], tabIds?: number[]): Promise<boolean> {
+  const held = (await openTransactions().catch(() => null)) ?? ([] as OpenTransaction[]);
   const toast = refusalToast(
-    held.filter((t) => windowIds.includes(t.window_id)),
+    held.filter((t) => windowIds.includes(t.window_id) && (!tabIds || tabIds.includes(t.tab_id))),
     (t) => titles.get(t.window_id)?.get(t.tab_id),
   );
   if (toast) showToast(toast.message, toast.detail, "error");

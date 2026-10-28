@@ -95,7 +95,7 @@ import type { CompletionResult } from "./sqlComplete";
 import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } from "./doneNotify";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
-import { forgetTabTitles, noteTabTitles } from "./openTransactions";
+import { forgetTabTitles, noteTabTitles, transactionInTheWay } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -689,7 +689,12 @@ export function Workspace({
     for (const entry of entries) if (closedTabs.current.includes(entry)) entry.run = undefined;
   };
   const [closedCount, setClosedCount] = useState(0);
-  const closeTab = (id: number) => {
+  // Closing ends the tab's session: never over its open transaction.
+  const closeTab = async (id: number) => {
+    if (await transactionInTheWay([windowId], [id])) return;
+    closeTabNowRef.current(id);
+  };
+  const closeTabNow = (id: number) => {
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
     const tab = tabs[index];
@@ -739,8 +744,16 @@ export function Workspace({
     }
   };
 
+  const closeTabNowRef = useRef(closeTabNow);
+  closeTabNowRef.current = closeTabNow;
+
   /** The tab menu's Close other tabs: each goes to Recently closed; Undo puts them all back. */
-  const closeOtherTabs = (keepId: number) => {
+  const closeOtherTabs = async (keepId: number) => {
+    const others = tabsRef.current.filter((t) => t.id !== keepId).map((t) => t.id);
+    if (await transactionInTheWay([windowId], others)) return;
+    closeOtherTabsNowRef.current(keepId);
+  };
+  const closeOtherTabsNow = (keepId: number) => {
     const entries: ClosedTab[] = [];
     tabs.forEach((tab, index) => {
       if (tab.id === keepId) return;
@@ -760,6 +773,9 @@ export function Workspace({
       commit: () => releaseClosedRows(entries),
     });
   };
+
+  const closeOtherTabsNowRef = useRef(closeOtherTabsNow);
+  closeOtherTabsNowRef.current = closeOtherTabsNow;
 
   /** Puts a closed tab back where it was, as it was (a new id; no query running). */
   const reopenTab = (entry: ClosedTab) => {

@@ -68,6 +68,8 @@ On Postgres, each query tab runs on its own server session and keeps it between 
 
 A tab's session closes after 2 minutes unused and reopens when you next run something. It's never closed while it holds a transaction you opened or a result that's still paging. Each saved connection holds at most 10 sessions, shared by its windows and tabs.
 
+Closing the tab, its window or its connection while a transaction is open is refused: a message names the tab, and you `COMMIT` or `ROLLBACK` first. Quitting asks first.
+
 If the connection drops while you have a transaction open, the server rolls that transaction back. The next run in that tab says so ("nothing since BEGIN was saved"), runs nothing, and asks you to run your statements again.
 
 <Note>

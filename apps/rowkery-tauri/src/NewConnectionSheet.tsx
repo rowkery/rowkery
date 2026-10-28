@@ -49,10 +49,11 @@ interface NewConnectionSheetProps {
   /** `firstShare`: shared with agents here for the first time, no tables picked yet. */
   onSaved: (id: string, name: string, firstShare: boolean) => void;
   /**
-   * Asked before the record is saved; `false` keeps the sheet open, unsaved
-   * (a reconnect would roll back a tab's open transaction).
+   * Asked before the record is saved or deleted; `false` keeps the sheet
+   * open, unchanged (a reconnect or an emptied window would roll back a
+   * tab's open transaction).
    */
-  beforeSave?: () => Promise<boolean>;
+  beforeChange?: () => Promise<boolean>;
   /** A failed connection's field to focus, with the reason printed under it. */
   markField?: { field: string; message: string } | null;
   /** Called after `editing` was deleted. */
@@ -230,7 +231,7 @@ export function NewConnectionSheet({
   markField,
   onClose,
   onSaved,
-  beforeSave,
+  beforeChange,
   onDeleted,
   prefill,
   mcpStats,
@@ -653,7 +654,7 @@ export function NewConnectionSheet({
         return;
       }
     }
-    if (beforeSave && !(await beforeSave())) return;
+    if (beforeChange && !(await beforeChange())) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -670,6 +671,7 @@ export function NewConnectionSheet({
 
   const onDelete = async () => {
     if (!editing || saving) return;
+    if (beforeChange && !(await beforeChange())) return;
     setSaving(true);
     try {
       // Asked first in the foot; the toast still offers Undo, so the

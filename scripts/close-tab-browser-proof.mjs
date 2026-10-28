@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // ⌘W / Ctrl+W and idle env dots without a Tauri webview (stubbed `invoke`).
+// A tab whose session holds an open transaction (`__OPEN_TXNS__`) isn't
+// closed: a toast names it, and its session stays.
 // Ctrl+W closes the active query tab (at once; Undo toast when it had SQL), never
 // the window; the last tab turns into an empty "Query 1". On macOS ⌘W is the
 // menu bar's Close Tab, which reaches the page as `rowkery:command` "close-tab"
@@ -128,6 +130,8 @@ function stubTauri() {
         case "close_query_tab":
           window.__ROWKERY_PENDING__?.[`${args.windowId}:${args.tabId}`]?.();
           return null;
+        case "open_transactions":
+          return window.__OPEN_TXNS__ ?? [];
         case "browse_table_sql":
           return `SELECT * FROM ${args.schema}.${args.table} LIMIT 100;`;
         default:
@@ -236,6 +240,32 @@ const addTabs = async (page, n) => {
   await page.waitForTimeout(300);
   const titles = await tabTitles(page);
   check(titles.length === 1 && titles[0].includes("Query 1"), `menu Close Tab closed the active tab (${titles})`);
+  await page.context().close();
+}
+
+// 3. A tab holding an open transaction stays open, and so does its session.
+{
+  const page = await open(false);
+  await addTabs(page, 2);
+  await page.evaluate(() => (window.__OPEN_TXNS__ = [{ window_id: "w3", tab_id: 2 }]));
+  await page.keyboard.press("Control+w");
+  await page.waitForTimeout(300);
+  let titles = await tabTitles(page);
+  check(titles.length === 2, `the tab without a transaction closed (${titles})`);
+  await page.keyboard.press("Control+w");
+  await page.waitForTimeout(300);
+  titles = await tabTitles(page);
+  check(titles.length === 2 && titles.some((t) => t.includes("Query 2")), `the tab with a transaction stayed (${titles})`);
+  const toast = await page.$$eval("[data-toast] > span", (els) => els.map((e) => e.textContent.trim()).join(" "));
+  check(toast.startsWith("A transaction is open in “Query 2”"), `a toast names it (${toast})`);
+  const closed = await page.evaluate(() =>
+    window.__ROWKERY_CALLS__.filter(([c, a]) => c === "close_query_tab" && a.tabId === 2).length,
+  );
+  check(closed === 0, "its session wasn't closed");
+  await page.evaluate(() => (window.__OPEN_TXNS__ = []));
+  await page.keyboard.press("Control+w");
+  await page.waitForTimeout(300);
+  check((await tabTitles(page)).length === 1, "once it ends, the tab closes");
   await page.context().close();
 }
 

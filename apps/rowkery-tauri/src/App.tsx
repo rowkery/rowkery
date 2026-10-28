@@ -561,7 +561,9 @@ function App() {
   const newWindowRef = useRef(newWindow);
   newWindowRef.current = newWindow;
 
-  const closeWindowById = (id: string) => {
+  const closeWindowById = async (id: string) => {
+    // Closing ends the window's sessions: never over a tab's open transaction.
+    if (await transactionInTheWay([id])) return;
     const closing = windowsRef.current.find((w) => w.id === id);
     const closedIndex = windowsRef.current.findIndex((w) => w.id === id);
     const closedTabs = tabsByWindow.current.get(id);
@@ -584,8 +586,11 @@ function App() {
     void closeWindow(id);
     openSeq.current.delete(id);
     catalogUpdates.current.forget(id);
-    const index = windows.findIndex((w) => w.id === id);
-    const rest = windows.filter((w) => w.id !== id);
+    // Read after the check above: the list may have moved meanwhile.
+    const list = windowsRef.current;
+    const index = list.findIndex((w) => w.id === id);
+    if (index < 0) return;
+    const rest = list.filter((w) => w.id !== id);
     if (rest.length === 0) {
       // Like query tabs, closing the last window leaves an empty one.
       const fresh = `w${nextWindowNo.current++}`;
@@ -594,7 +599,7 @@ function App() {
       return;
     }
     setWindows(rest);
-    if (id === activeWindowId) {
+    if (id === activeWindowIdRef.current) {
       setActiveWindowId(rest[Math.min(index, rest.length - 1)].id);
     }
   };
@@ -1638,8 +1643,9 @@ function App() {
             openAgents(tab);
           }}
           onClose={() => setNewConnOpen(false)}
-          beforeSave={async () => {
-            // Saving an edit reconnects its windows: never over a tab's open transaction.
+          beforeChange={async () => {
+            // Saving an edit reconnects its windows, deleting empties them:
+            // never over a tab's open transaction.
             if (!editingId) return true;
             const on = windowsRef.current.filter((w) => w.connectionId === editingId && w.state === "connected");
             return !(await transactionInTheWay(on.map((w) => w.id)));
