@@ -39,7 +39,10 @@ pub fn humanize_ssh_error(err: &SshError, bastion_host: &str) -> String {
     if msg.contains("has CHANGED") || msg.contains("Unknown SSH host key") {
         return msg;
     }
-    if msg.starts_with("SSH: Permission denied") || msg.starts_with("SSH: The key file") {
+    if msg.starts_with("SSH: Permission denied")
+        || msg.starts_with("SSH: The key file")
+        || msg == KEYCHAIN_LATE
+    {
         return msg;
     }
     if msg.starts_with("Could not open tunnel") {
@@ -208,6 +211,10 @@ pub static OPEN_TUNNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 
 /// How long connecting and authenticating may take before the tunnel gives up.
 pub const SSH_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the SSH secret's keychain read may wait first (on its prompt).
+const KEYCHAIN_WAIT: Duration = Duration::from_secs(120);
+const KEYCHAIN_LATE: &str =
+    "SSH: The keychain didn't answer in 2 minutes. Allow Rowkery in the keychain prompt, then retry.";
 /// SSH keepalives: one every 15 s, and the connection is given up after
 /// three unanswered.
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -237,7 +244,9 @@ impl SshTunnel {
     }
 
     /// `open`, giving up after [`SSH_OPEN_TIMEOUT`] (an unreachable bastion
-    /// otherwise waits for the OS's TCP timeout).
+    /// otherwise waits for the OS's TCP timeout). The SSH secret is read
+    /// first, off the clock: the keychain may be waiting on its prompt, and
+    /// that wait isn't the bastion's.
     pub async fn open_with_timeout(
         ssh: &SshConfig,
         connection_id: &str,
@@ -245,9 +254,24 @@ impl SshTunnel {
         remote_port: u16,
         secrets: Option<&ConnectionSecrets>,
     ) -> Result<Self, SshError> {
+        let mut known = secrets.cloned().unwrap_or_default();
+        let read = |kind| async move {
+            tokio::time::timeout(KEYCHAIN_WAIT, secret_off_thread(connection_id, kind))
+                .await
+                .map_err(|_| SshError::Message(KEYCHAIN_LATE.into()))?
+        };
+        match ssh.auth_method {
+            SshAuthMethod::Password if known.ssh_password.is_none() => {
+                known.ssh_password = read(SecretKind::SshPassword).await?;
+            }
+            SshAuthMethod::KeyFile if known.ssh_key_passphrase.is_none() => {
+                known.ssh_key_passphrase = read(SecretKind::SshKeyPassphrase).await?;
+            }
+            _ => {}
+        }
         tokio::time::timeout(
             SSH_OPEN_TIMEOUT,
-            Self::open(ssh, connection_id, remote_host, remote_port, secrets),
+            Self::open(ssh, connection_id, remote_host, remote_port, Some(&known)),
         )
         .await
         .map_err(|_| {

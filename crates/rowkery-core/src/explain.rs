@@ -9,7 +9,7 @@ use serde::Serialize;
 pub struct ConnectExplanation {
     /// `refused`, `timeout`, `dns`, `tls`, `auth`, `database`, `role`,
     /// `ssh_changed`, `ssh_unknown`, `ssh_timeout`, `ssh_auth`,
-    /// `ssh_key_passphrase`, a Cloud SQL
+    /// `ssh_key_passphrase`, `keychain`, a Cloud SQL
     /// class (`cloudsql_login`, `cloudsql_role`, `cloudsql_instance`,
     /// `cloudsql_api`, `cloudsql_ip`, `cloudsql_google`, `cloudsql_unreachable`,
     /// `cloudsql_tls`, `cloudsql`) or `unknown`.
@@ -79,6 +79,13 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
             "ssh_unknown",
             Some(format!("The SSH host {bastion} is new to this Mac.")),
             Some("sshHost"),
+        );
+    }
+    if has("The keychain didn't answer") {
+        return e(
+            "keychain",
+            Some("The keychain didn't answer. Allow Rowkery in its prompt, then retry.".into()),
+            None,
         );
     }
     if t.ssh_host.is_some()
@@ -413,6 +420,14 @@ mod tests {
 
     #[test]
     fn ssh_causes_beat_the_tunnel_wrapper() {
+        // rowkery/reports#36: a keychain prompt left waiting isn't the bastion's fault.
+        let late = crate::ssh::humanize_ssh_error(
+            &crate::ssh::SshError::Message(
+                "SSH: The keychain didn't answer in 2 minutes. Allow Rowkery in the keychain prompt, then retry.".into(),
+            ),
+            "bastion.internal",
+        );
+        assert_eq!(class(&late, &S).0, "keychain");
         assert_eq!(
             class(
                 "Could not open tunnel to bastion.internal: timed out after 15 s",
