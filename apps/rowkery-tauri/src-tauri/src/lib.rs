@@ -1217,11 +1217,11 @@ fn restore_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<
     rowkery_core::ssh::restore_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
 }
 
-/// SSH host keys trusted on a first connect since the last call, as
-/// (`host:port`, fingerprint), for the connect toast to name.
+/// The key trusted on a first connect to this bastion since the last call,
+/// for the connect toast to name.
 #[tauri::command]
-fn take_trusted_host_keys() -> Vec<(String, String)> {
-    rowkery_core::ssh::take_newly_trusted()
+fn take_trusted_host_key(host: String, port: u16) -> Option<String> {
+    rowkery_core::ssh::take_newly_trusted(&host, port)
 }
 
 /// Cancels the tab's query, if any, and closes its connection.
@@ -2336,7 +2336,7 @@ pub fn run(mut timings: Timings) {
             explain_connect_error,
             forget_ssh_host_key,
             restore_ssh_host_key,
-            take_trusted_host_keys,
+            take_trusted_host_key,
             app_ready,
             get_theme_preference,
             set_theme_preference,

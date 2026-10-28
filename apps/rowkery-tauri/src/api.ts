@@ -199,9 +199,9 @@ export async function restoreSshHostKey(host: string, port: number, fingerprint:
   return invoke("restore_ssh_host_key", { host, port, fingerprint });
 }
 
-/** SSH host keys trusted on a first connect since the last call, as [`host:port`, fingerprint]. */
-export async function takeTrustedHostKeys(): Promise<[string, string][]> {
-  return (await invoke<[string, string][] | null>("take_trusted_host_keys")) ?? [];
+/** The key a first connect to this bastion trusted since the last call, if any. */
+export async function takeTrustedHostKey(host: string, port: number): Promise<string | null> {
+  return (await invoke<string | null>("take_trusted_host_key", { host, port })) ?? null;
 }
 
 export async function explainConnectError(

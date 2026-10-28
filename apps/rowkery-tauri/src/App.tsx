@@ -15,7 +15,7 @@ import {
   saveConnection,
   sqliteFileExists,
   takeOpenLink,
-  takeTrustedHostKeys,
+  takeTrustedHostKey,
   TEST_PG_CONNECTION,
   TEST_PG_SECRETS,
   type LocalServer,
@@ -451,13 +451,13 @@ function App() {
         if (opened.cached)
           applyCatalogUpdate(catalogUpdates.current.expect(windowId, opened.open_seq));
         void fillCountsRef.current(windowId, connectionId, seq);
-        // A bastion trusted on this first connect: say which key was saved.
-        void takeTrustedHostKeys()
-          .then((keys) => {
-            const [hostPort, fingerprint] = keys[keys.length - 1] ?? [];
-            if (hostPort) showToast(`Trusted ${hostPort.replace(/:22$/, "")}'s SSH key`, fingerprint);
-          })
-          .catch(() => {});
+        // This window's bastion, trusted on a first connect: say which key was saved.
+        const conn = connectionsRef.current.find((c) => c.id === connectionId);
+        const ssh = conn?.kind === "postgres" ? conn.ssh : null;
+        if (ssh)
+          void takeTrustedHostKey(ssh.host, ssh.port)
+            .then((fingerprint) => fingerprint && showToast(`Trusted ${ssh.host}'s SSH key`, fingerprint))
+            .catch(() => {});
       } catch (e) {
         if (openSeq.current.get(windowId) !== seq) return;
         mark("socket-failed", { window: windowId, error: String(e) });

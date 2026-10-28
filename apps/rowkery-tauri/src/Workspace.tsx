@@ -1057,21 +1057,29 @@ export function Workspace({
   };
   // Forget saved key: the key shown goes, so Retry (a separate press) meets
   // the host as new; Undo puts it back.
+  const [forgot, setForgot] = useState<string | null>(null);
+  // Only this connection's own bastion (core forgets only a key its tunnel refused, too).
+  const tunnel = activeConnection?.kind === "postgres" ? activeConnection.ssh : null;
+  const shownKeys =
+    explained?.host_keys && tunnel && explained.host_keys.host === tunnel.host && explained.host_keys.port === tunnel.port
+      ? explained.host_keys
+      : null;
   const forgetHostKey = async (keys: HostKeys) => {
     const gone = await forgetSshHostKey(keys.host, keys.port, keys.saved).catch((e) => {
       showToast("Couldn't forget the saved key", String(e), "error");
       return null;
     });
     if (gone === null) return;
-    if (!gone) return showToast("The saved key changed since; nothing was forgotten", "Retry to see it", "error");
-    const trusts = activeConnection?.kind === "postgres" && !!activeConnection.ssh?.trust_host;
+    if (!gone) return showToast("Nothing was forgotten: the saved key isn't the one shown", "Retry to see it again", "error");
+    setForgot(keys.saved);
+    const trusts = !!tunnel?.trust_host;
     showUndoToast(
       `Forgot the saved key for ${keys.host}`,
       trusts ? "Retry trusts its new key" : "Turn on Trust the host key on first connect in Edit…, then Retry",
       {
         undo: () =>
           void restoreSshHostKey(keys.host, keys.port, keys.saved).then(
-            (back) => !back && showToast(`Can't undo: ${keys.host} has a saved key again`),
+            (back) => (back ? setForgot(null) : showToast(`Can't undo: ${keys.host} has a saved key again`)),
             (e) => showToast("Couldn't put the saved key back", String(e), "error"),
           ),
       },
@@ -4468,8 +4476,8 @@ export function Workspace({
             onRetry={connState === "error" ? actions.retryConnect : undefined}
             onEdit={connState === "error" && activeId ? editFailed : undefined}
             onReport={() => reportIssue(true)}
-            hostKeys={explained?.host_keys ?? null}
-            onForgetKey={explained?.host_keys ? () => void forgetHostKey(explained.host_keys!) : undefined}
+            hostKeys={shownKeys}
+            onForgetKey={shownKeys && forgot !== shownKeys.saved ? () => void forgetHostKey(shownKeys) : undefined}
           />
         )}
         <div

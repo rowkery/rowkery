@@ -107,7 +107,24 @@ fn load_known_hosts() -> HashMap<String, String> {
     map
 }
 
+/// Held across every read-modify-write of `ssh_known_hosts`, so a Forget
+/// and a tunnel saving another host's key can't drop each other's line.
+static KNOWN_HOSTS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The keys a tunnel refused as changed (`host:port` → the saved one), seen
+/// by Rowkery itself: Forget acts only on one of these, never on what an
+/// error message says (a database server's error text could imitate it).
+static CHANGED_SEEN: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+
+fn saw_changed(host_key: &str, saved: &str) {
+    if let Ok(mut seen) = CHANGED_SEEN.lock() {
+        seen.get_or_insert_with(HashMap::new)
+            .insert(host_key.to_string(), saved.to_string());
+    }
+}
+
 fn persist_known_host(host: &str, fingerprint: &str) -> Result<(), SshError> {
+    let _write = KNOWN_HOSTS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = load_known_hosts();
     map.insert(host.to_string(), fingerprint.to_string());
     write_known_hosts(map)
@@ -118,15 +135,29 @@ fn write_known_hosts(map: HashMap<String, String>) -> Result<(), SshError> {
         .map_err(|e| SshError::Message(e.to_string()))?;
     let mut lines: Vec<String> = map.into_iter().map(|(h, fp)| format!("{h} {fp}")).collect();
     lines.sort();
-    crate::config::write_private(&known_hosts_path(), lines.join("\n"))
+    // Whole or not at all: a reader never sees a half-written file (which
+    // would make a changed key look new).
+    let path = known_hosts_path();
+    let next = path.with_extension("next");
+    crate::config::write_private(&next, lines.join("\n"))
+        .and_then(|()| fs::rename(&next, &path))
         .map_err(|e| SshError::Message(e.to_string()))
 }
 
 /// Forgets the key saved for `host:port`, only while it is still
-/// `fingerprint` (the one the user was shown), so the next connect treats
-/// the host as new. False when that key wasn't saved.
+/// `fingerprint` (the one the user was shown) and a tunnel in this process
+/// refused that host for it, so the next connect treats the host as new.
+/// False otherwise.
 pub fn forget_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bool, SshError> {
     let host_key = format!("{host}:{port}");
+    let refused = CHANGED_SEEN
+        .lock()
+        .ok()
+        .and_then(|seen| seen.as_ref()?.get(&host_key).cloned());
+    if refused.as_deref() != Some(fingerprint) {
+        return Ok(false);
+    }
+    let _write = KNOWN_HOSTS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = load_known_hosts();
     if map.get(&host_key).map(String::as_str) != Some(fingerprint) {
         return Ok(false);
@@ -140,6 +171,7 @@ pub fn forget_known_host(host: &str, port: u16, fingerprint: &str) -> Result<boo
 /// has a key again by now.
 pub fn restore_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bool, SshError> {
     let host_key = format!("{host}:{port}");
+    let _write = KNOWN_HOSTS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = load_known_hosts();
     if map.contains_key(&host_key) {
         return Ok(false);
@@ -153,12 +185,15 @@ pub fn restore_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bo
 /// [`take_newly_trusted`] hands them to the app to show.
 static NEWLY_TRUSTED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
-/// The host keys trusted on a first connect since the last call.
-pub fn take_newly_trusted() -> Vec<(String, String)> {
-    NEWLY_TRUSTED
-        .lock()
-        .map(|mut t| std::mem::take(&mut *t))
-        .unwrap_or_default()
+/// The key trusted on a first connect to `host:port` since the last call,
+/// if one was (taken, so it is named once).
+pub fn take_newly_trusted(host: &str, port: u16) -> Option<String> {
+    let host_key = format!("{host}:{port}");
+    let mut trusted = NEWLY_TRUSTED.lock().ok()?;
+    let at = trusted.iter().rposition(|(h, _)| *h == host_key)?;
+    let (_, fingerprint) = trusted.remove(at);
+    trusted.retain(|(h, _)| *h != host_key);
+    Some(fingerprint)
 }
 
 /// SHA-256 of the key's SSH wire encoding, base64 with its padding: the
@@ -208,6 +243,7 @@ impl Handler for ClientHandler {
             if expected == &fingerprint {
                 return Ok(true);
             }
+            saw_changed(&host_key, expected);
             note(KeyProblem::Changed {
                 saved: expected.clone(),
                 offered: fingerprint,
@@ -221,6 +257,8 @@ impl Handler for ClientHandler {
         {
             persist_known_host(&host_key, &fingerprint).map_err(|_| russh::Error::UnknownKey)?;
             if let Ok(mut trusted) = NEWLY_TRUSTED.lock() {
+                // One per host: nobody may ever ask (the MCP server, a test connect).
+                trusted.retain(|(h, _)| *h != host_key);
                 trusted.push((host_key, fingerprint));
             }
             return Ok(true);
@@ -521,6 +559,11 @@ mod key_file_tests {
         let _guard = crate::config::test_dir_guard("known-hosts");
         persist_known_host("bastion:22", "SHA256:old").unwrap();
         persist_known_host("other:22", "SHA256:keep").unwrap();
+        // Only a key a tunnel here refused as changed: never one an error
+        // message names.
+        assert!(!forget_known_host("other", 22, "SHA256:keep").unwrap());
+        assert!(!forget_known_host("bastion", 22, "SHA256:old").unwrap());
+        saw_changed("bastion:22", "SHA256:old");
         assert!(!forget_known_host("bastion", 22, "SHA256:not-shown").unwrap());
         assert!(forget_known_host("bastion", 22, "SHA256:old").unwrap());
         let left = load_known_hosts();

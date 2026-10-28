@@ -48,7 +48,7 @@ function stubTauri() {
             throw `Could not open tunnel to bastion.internal: SSH host key for bastion.internal:22 has CHANGED; nothing was sent (saved ${window.__SAVED__}, offered now ${NEW})`;
           if (!window.__SAVED__) {
             window.__SAVED__ = NEW;
-            window.__TRUSTED__ = [["bastion.internal:22", NEW]];
+            window.__TRUSTED__ = { "bastion.internal:22": NEW };
           }
           return { database: "rowkery", catalog: { databases: [{ name: "rowkery", schemas: [{ name: "public", tables }] }] }, elapsed_ms: 2, cached: false, open_seq: 1 };
         case "explain_connect_error": {
@@ -68,9 +68,10 @@ function stubTauri() {
           if (window.__SAVED__) return false;
           window.__SAVED__ = args.fingerprint;
           return true;
-        case "take_trusted_host_keys": {
-          const t = window.__TRUSTED__ ?? [];
-          window.__TRUSTED__ = [];
+        case "take_trusted_host_key": {
+          const key = `${args.host}:${args.port}`;
+          const t = window.__TRUSTED__?.[key] ?? null;
+          if (t) delete window.__TRUSTED__[key];
           return t;
         }
         default:
@@ -122,6 +123,7 @@ check((await toast()) === "Forgot the saved key for bastion.internal", `toast: "
 check((await page.textContent(".toast-detail")).includes("Retry trusts its new key"), "it says what Retry does");
 await page.waitForTimeout(300);
 check((await calls("open_window")).length === opensBefore, "Forget doesn't retry by itself");
+check((await page.$(`${ws} [data-action="forget-key"]`)) === null, "nothing left to forget: the button goes");
 await page.screenshot({ path: `${OUT}/2-forgot.png` });
 
 // 3. Undo puts it back.

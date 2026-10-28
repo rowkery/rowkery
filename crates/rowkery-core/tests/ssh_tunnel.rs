@@ -191,10 +191,10 @@ async fn tunnel_checks_host_keys_and_carries_bytes() {
     assert_eq!(saved.trim(), format!("127.0.0.1:{port} {fingerprint}"));
     // The app is told which key it trusted, once.
     assert_eq!(
-        rowkery_core::ssh::take_newly_trusted(),
-        vec![(format!("127.0.0.1:{port}"), fingerprint.clone())]
+        rowkery_core::ssh::take_newly_trusted("127.0.0.1", port),
+        Some(fingerprint.clone())
     );
-    assert!(rowkery_core::ssh::take_newly_trusted().is_empty());
+    assert_eq!(rowkery_core::ssh::take_newly_trusted("127.0.0.1", port), None);
 
     // Saved: opens without trusting again.
     let tunnel = open(
@@ -254,7 +254,7 @@ async fn tunnel_checks_host_keys_and_carries_bytes() {
     .expect("a changed host key must be refused");
     assert!(err.contains("CHANGED"), "{err}");
     assert!(
-        rowkery_core::ssh::take_newly_trusted().is_empty(),
+        rowkery_core::ssh::take_newly_trusted("127.0.0.1", other).is_none(),
         "nothing trusted"
     );
 
@@ -292,7 +292,7 @@ async fn tunnel_checks_host_keys_and_carries_bytes() {
     round_trip(&tunnel).await;
     drop(tunnel);
     assert_eq!(
-        rowkery_core::ssh::take_newly_trusted(),
-        vec![(format!("127.0.0.1:{other}"), offered)]
+        rowkery_core::ssh::take_newly_trusted("127.0.0.1", other),
+        Some(offered)
     );
 }
