@@ -260,6 +260,7 @@ async fn postgres_errors_and_slow_streams() {
             sqlstate,
             position,
             message,
+            ..
         } => {
             assert_eq!(sqlstate, "42P01");
             assert_eq!(position, Some(16));
@@ -267,6 +268,42 @@ async fn postgres_errors_and_slow_streams() {
         }
         other => panic!("expected a server error, got {other:?}"),
     }
+
+    // DETAIL and HINT come along, as psql prints them (rowkery/reports#43).
+    let err = session_query_stream(&session, "SELECT 1 + 'a'::text", |_, _| Ok(()))
+        .await
+        .expect_err("no such operator");
+    let DriverError::Server { detail, .. } = &err else {
+        panic!("expected a server error, got {err:?}")
+    };
+    assert!(
+        detail.as_deref().is_some_and(|d| d.starts_with("HINT:  ")),
+        "{detail:?}"
+    );
+    let full = err.into_full_message();
+    assert!(
+        full.starts_with("operator does not exist") && full.contains("\nHINT:  "),
+        "{full}"
+    );
+    session_query_stream(
+        &session,
+        "CREATE TEMP TABLE it_detail (id int PRIMARY KEY)",
+        |_, _| Ok(()),
+    )
+    .await
+    .expect("temp table");
+    let err = session_query_stream(&session, "INSERT INTO it_detail VALUES (1), (1)", |_, _| {
+        Ok(())
+    })
+    .await
+    .expect_err("duplicate key");
+    let DriverError::Server { detail, .. } = &err else {
+        panic!("expected a server error, got {err:?}")
+    };
+    assert_eq!(
+        detail.as_deref(),
+        Some("DETAIL:  Key (id)=(1) already exists.")
+    );
 
     // Five rows 60 ms apart: the first batch can't wait for 200 rows. Each row
     // is over 8 KB because Postgres only flushes its output buffer when it fills

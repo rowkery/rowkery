@@ -13,6 +13,8 @@ pub struct QueryDetail {
     pub sqlstate: Option<String>,
     /// 1-based character offset of the error in the statement.
     pub error_position: Option<u32>,
+    /// The server's DETAIL and HINT lines, as psql prints them.
+    pub error_detail: Option<String>,
     /// The rows came from a cursor page (a query tab's free-form read).
     pub paged: bool,
     /// The cursor holds more rows: `fetch_more` continues it.
