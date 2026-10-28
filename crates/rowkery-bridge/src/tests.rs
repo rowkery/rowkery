@@ -6594,6 +6594,7 @@ fn sqlite_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         &bridge,
         ConnectionRecord::Sqlite(SqliteConnection {
             allow_mcp: false,
+            mcp_timeout_s: None,
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
@@ -6680,6 +6681,7 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         &bridge,
         ConnectionRecord::Postgres(PostgresConnection {
             allow_mcp: false,
+            mcp_timeout_s: None,
             mcp_hidden_tables: Vec::new(),
             mcp_until: None,
             mcp_samples_off: false,
