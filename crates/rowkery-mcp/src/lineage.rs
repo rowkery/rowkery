@@ -137,16 +137,24 @@ pub(crate) fn keeps_back(
 /// Postgres pruned partitions as the executor started (`guard::pg_pruned`),
 /// every partition a plan without pruning lists, since the run decides
 /// again which it reads. `explain` is the `EXPLAIN` that gave `plan`.
+/// Called when tables are hidden or columns masked: a plan that reads
+/// tables it doesn't name is refused (`guard::pg_unnamed_scan`).
 pub(crate) async fn pg_read_relations(
     store: &mut Store,
     target: &Target,
     explain: &str,
     plan: &Json,
 ) -> Result<Vec<(Option<String>, String)>, String> {
+    if guard::pg_unnamed_scan(plan) {
+        return Err(guard::UNNAMED_SCAN_REFUSAL.into());
+    }
     let mut touched = guard::pg_relations(plan);
     if guard::pg_pruned(plan) {
         let found = store.read_unpruned(target, explain).await?;
         let (whole, _) = guard::pg_plan_json(found.rows)?;
+        if guard::pg_unnamed_scan(&whole) {
+            return Err(guard::UNNAMED_SCAN_REFUSAL.into());
+        }
         for rel in guard::pg_relations(&whole) {
             if !touched.contains(&rel) {
                 touched.push(rel);

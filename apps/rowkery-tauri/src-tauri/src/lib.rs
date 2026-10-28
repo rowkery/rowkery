@@ -75,6 +75,8 @@ pub struct DoneFrame {
     pub sqlstate: Option<String>,
     /// 1-based character offset of the error in the statement.
     pub error_position: Option<u32>,
+    /// The server's DETAIL and HINT lines, as psql prints them.
+    pub error_detail: Option<String>,
     /// Set when safe mode stopped the query before it ran.
     pub hold: Option<SafetyHold>,
     /// The rows are a cursor page; `more` while it has rows for `fetch_more`.
@@ -283,6 +285,7 @@ impl EventSink for ChannelSink {
                     error,
                     sqlstate: detail.sqlstate,
                     error_position: detail.error_position,
+                    error_detail: detail.error_detail,
                     hold: None,
                     paged: detail.paged,
                     more: detail.more,
@@ -308,6 +311,7 @@ impl EventSink for ChannelSink {
                     error: None,
                     sqlstate: None,
                     error_position: None,
+                    error_detail: None,
                     hold: Some(hold),
                     paged: false,
                     more: false,
@@ -1276,14 +1280,22 @@ struct OpenTransactionDto {
 
 /// The query tabs whose session may hold the user's open transaction:
 /// re-pointing their window would roll it back, so the webview refuses.
+/// `held`: only those surely in one, a running write outside one left out
+/// (closing a tab, which cancels such a write).
 #[tauri::command]
-async fn open_transactions(app: AppHandle) -> Result<Vec<OpenTransactionDto>, String> {
-    on_blocking_pool(app, |bridge| {
-        bridge
-            .open_transactions()
-            .into_iter()
-            .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
-            .collect()
+async fn open_transactions(
+    app: AppHandle,
+    held: Option<bool>,
+) -> Result<Vec<OpenTransactionDto>, String> {
+    on_blocking_pool(app, move |bridge| {
+        if held == Some(true) {
+            bridge.held_transactions()
+        } else {
+            bridge.open_transactions()
+        }
+        .into_iter()
+        .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
+        .collect()
     })
     .await
 }

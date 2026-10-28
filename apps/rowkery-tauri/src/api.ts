@@ -296,6 +296,8 @@ export interface DoneFrame {
   error: string | null;
   sqlstate: string | null;
   error_position: number | null;
+  /** The server's DETAIL and HINT lines, as psql prints them. */
+  error_detail?: string | null;
   hold: SafetyHold | null;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
@@ -541,6 +543,7 @@ function stream<Started>(
             frames: frame.frames,
             sqlstate: frame.sqlstate,
             error_position: frame.error_position,
+            error_detail: frame.error_detail ?? null,
             capped: frame.capped ?? false,
             warning: frame.warning ?? null,
             forced: frame.forced ?? false,
@@ -564,9 +567,13 @@ export interface OpenTransaction {
   tab_id: number;
 }
 
-/** The query tabs, in every window, whose open transaction a re-point or a new safe mode would roll back. */
-export async function openTransactions(): Promise<OpenTransaction[]> {
-  return invoke("open_transactions");
+/**
+ * The query tabs, in every window, whose open transaction a re-point or a
+ * new safe mode would roll back. `held`: only a tab surely in one, not one
+ * running a write outside one (which closing the tab cancels).
+ */
+export async function openTransactions(held = false): Promise<OpenTransaction[]> {
+  return invoke("open_transactions", { held });
 }
 
 /** How an export or a copy-all ended (src-tauri `ExportFrame::Done`). */

@@ -330,6 +330,8 @@ export function CsvImport({
     ...(keyColumns.length ? [{ value: "update" as const, label: "Update" }] : []),
   ];
   const picked = pick ? draft.mapping[pick.field] : null;
+  // Update finds each row by its whole key: without it every row would be new.
+  const unmappedKey = draft.onConflict === "update" ? keyColumns.filter((k) => !draft.mapping.includes(k)) : [];
   return (
     <>
       <InspectorHead onClose={onClose} data-testid="import-head">
@@ -427,6 +429,11 @@ export function CsvImport({
             </ul>
           </>
         )}
+        {unmappedKey.length > 0 && (
+          <div className="ci-error" data-import-unmapped-key role="alert">
+            Update finds rows by {unmappedKey.join(", ")}. Match a column to {unmappedKey.length === 1 ? "it" : "each"}, or pick Stop or Skip.
+          </div>
+        )}
         {error && (
           <div className="ci-error" data-import-error role="alert">
             {error}
@@ -465,7 +472,7 @@ export function CsvImport({
               type="button"
               className="insp-btn ink"
               data-import-run
-              disabled={!tableKey || matched === 0 || rows === 0}
+              disabled={!tableKey || matched === 0 || rows === 0 || unmappedKey.length > 0}
               onClick={onImport}
             >
               Import {n(rows)} {rows === 1 ? "row" : "rows"}

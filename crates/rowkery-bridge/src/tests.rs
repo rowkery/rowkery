@@ -2033,12 +2033,33 @@ fn postgres_cancel_stops_a_run_on_a_dead_connection() {
         "the cancel got its chance first"
     );
 
-    // Cancel twice: stopped at once.
+    // Cancel twice at once (a quick double Esc): one cancel, which gets its
+    // chance before the run is stopped.
     let queue = bridge
         .run_window_query("w", 1, "SELECT 2".into(), None, false)
         .expect("run");
     thread::sleep(std::time::Duration::from_millis(300));
     bridge.cancel_window_query("w", 1);
+    bridge.cancel_window_query("w", 1);
+    let (cancelled, _, waited) =
+        wait_stopped(&queue, std::time::Duration::from_secs(8)).expect("stopped");
+    assert!(
+        cancelled && waited >= std::time::Duration::from_secs(2),
+        "{waited:?}"
+    );
+
+    // Cancel, and again a second later (Force stop): stopped at once.
+    let queue = bridge
+        .run_window_query("w", 1, "SELECT 2".into(), None, false)
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w", 1);
+    thread::sleep(std::time::Duration::from_millis(1100));
+    let early = wait_stopped(&queue, std::time::Duration::from_millis(10));
+    assert!(
+        early.is_none(),
+        "still waiting on the cancel, but got {early:?}"
+    );
     bridge.cancel_window_query("w", 1);
     let (cancelled, _, waited) =
         wait_stopped(&queue, std::time::Duration::from_secs(2)).expect("stopped");
@@ -2579,6 +2600,23 @@ fn sqlite_a_running_tab_keeps_its_transaction() {
     bridge.cancel_window_query("w1", 2);
     wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
 
+    // A write outside one may open one, so a re-point waits; closing the
+    // tab (held) doesn't: it cancels the write, as it always did.
+    let queue = bridge
+        .run_window_query(
+            "w1",
+            2,
+            format!("DELETE FROM orders WHERE id = ({SLOW_SQLITE})"),
+            None,
+            false,
+        )
+        .expect("run");
+    wait_running();
+    assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 2)]);
+    assert!(bridge.held_transactions().is_empty(), "a write outside one");
+    bridge.cancel_window_query("w1", 2);
+    wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
+
     run(1, "BEGIN");
     assert_eq!(run(1, "DELETE FROM orders").4, Some(30));
     let queue = bridge
@@ -2586,6 +2624,7 @@ fn sqlite_a_running_tab_keeps_its_transaction() {
         .expect("run");
     wait_running();
     assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 1)]);
+    assert_eq!(bridge.held_transactions(), vec![("w1".to_string(), 1)]);
     assert_eq!(bridge.busy_work().transactions, 1, "a quit asks first");
     let refused = bridge
         .open_window("w1", "cancel-sqlite", None)
