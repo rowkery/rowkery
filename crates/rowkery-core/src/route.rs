@@ -1,11 +1,11 @@
 //! How a session reaches a server that isn't simply at `host:port`: an SSH
-//! tunnel or the Cloud SQL connector. Shared by every network engine, so
-//! each opens (or reuses) its window's tunnel the same way.
+//! tunnel or the Cloud SQL connector. Kept out of any one driver so each
+//! network engine opens (or reuses) its window's tunnel the same way.
 
 use std::sync::Arc;
 
 use crate::cloudsql::CloudSqlDialer;
-use crate::connections::SshConfig;
+use crate::connections::{CloudSqlConfig, SshConfig};
 use crate::db::DriverError;
 use crate::secrets::ConnectionSecrets;
 use crate::ssh::{humanize_ssh_error, SshTunnel};
@@ -32,12 +32,12 @@ impl Route {
     }
 
     /// The route is the kind a connection with these settings asks for.
-    pub(crate) fn fits(&self, ssh: bool, cloud_sql: bool) -> bool {
+    pub(crate) fn fits(&self, ssh: Option<&SshConfig>, cloud_sql: Option<&CloudSqlConfig>) -> bool {
         match self {
-            Self::Ssh(_) => ssh,
+            Self::Ssh(_) => ssh.is_some(),
             // Each session asks `dialer_for`, which checks the settings and
             // the key; the route only keeps the dialer alive.
-            Self::CloudSql(_) => cloud_sql,
+            Self::CloudSql(_) => cloud_sql.is_some(),
         }
     }
 }

@@ -225,7 +225,7 @@ pub async fn open_session_via(
 ) -> Result<PostgresSession, DriverError> {
     let mut port = config.port;
     let mut route =
-        route.filter(|r| r.fits(config.ssh.is_some(), config.cloud_sql.is_some()) && r.is_alive());
+        route.filter(|r| r.fits(config.ssh.as_ref(), config.cloud_sql.as_ref()) && r.is_alive());
 
     let mut tunneled = false;
     if let Some(ssh) = &config.ssh {
