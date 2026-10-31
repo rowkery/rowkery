@@ -3095,6 +3095,8 @@ fn run_sql_file(
 /// Stops a run at once, without waiting for the server (⌘K "Stop all queries").
 /// Runs `work` on the runtime for a Postgres window; a SQLite window has no
 /// server sessions to show.
+const PLAN_WOULD_WRITE: &str = "Working out this plan would change data (a function in it writes), so Rowkery stopped it. Nothing was changed.";
+
 /// The Sessions target of a MySQL window; `None` for any other window.
 fn mysql_sessions(state: &CoreState, window_id: &str) -> Option<sessions::MysqlTarget> {
     let Some(WindowTarget::Mysql {
@@ -4872,6 +4874,13 @@ impl CoreBridge {
             CoreEvent::QueryFinished {
                 cancelled: true, ..
             } => return Ok(ExplainOutcome::Cancelled),
+            // MySQL's ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION: the plan's
+            // own read-only transaction stopped a write.
+            CoreEvent::QueryFinished {
+                error: Some(error), ..
+            } if error.contains("in a READ ONLY transaction") => {
+                return Err(PLAN_WOULD_WRITE.into())
+            }
             CoreEvent::QueryFinished {
                 error: Some(error), ..
             } => return Err(error),

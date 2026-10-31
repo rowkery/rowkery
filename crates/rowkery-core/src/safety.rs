@@ -191,6 +191,14 @@ pub fn plain_read(sql: &str, dialect: Dialect) -> bool {
         })
 }
 
+/// Calls no function but the built-ins that only compute, as far as its
+/// text can tell (a view it reads may still call one).
+pub fn calls_only_builtins(sql: &str, dialect: Dialect) -> bool {
+    tokenize(sql, dialect)
+        .iter()
+        .all(|toks| !calls_function(toks))
+}
+
 /// Words that stand before `(` without calling a function.
 const BEFORE_PARENS: &[&str] = &[
     "ALL",

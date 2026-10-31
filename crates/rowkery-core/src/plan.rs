@@ -201,7 +201,7 @@ pub fn mysql_explain_sql(mariadb: bool, sql: &str, timed: bool) -> Result<String
         // MySQL 8.0 and 8.4 have no tree for an UPDATE or DELETE; JSON
         // covers every statement on both servers.
         (_, false) => format!("EXPLAIN FORMAT=JSON {body}"),
-        (false, true) => format!("EXPLAIN ANALYZE {body}"),
+        (false, true) => format!("EXPLAIN ANALYZE FORMAT=TREE {body}"),
         (true, true) => format!("ANALYZE FORMAT=JSON {body}"),
     })
 }
@@ -317,8 +317,15 @@ fn parse_mysql_tree(text: &str, timed: bool) -> Plan {
         steps[i].own_ms = if timed { own(1) } else { None };
     }
     Plan {
+        // Each top-level part (a subquery in the select list is one) adds
+        // its own time.
         execution_ms: if timed {
-            totals.first().and_then(|t| t.1)
+            steps
+                .iter()
+                .zip(&totals)
+                .filter(|(s, _)| s.depth == 0)
+                .filter_map(|(_, t)| t.1)
+                .reduce(|a, b| a + b)
         } else {
             None
         },
@@ -358,7 +365,11 @@ fn mysql_tree_head(head: &str, step: &mut PlanStep) {
         Some((t, r)) => (t, Some(r)),
         None => (rest, None),
     };
-    let table = table.split_whitespace().next().unwrap_or(table);
+    // `<union temporary>` is one name; a real one ends at its alias.
+    let table = match table.find('>') {
+        Some(end) if table.starts_with('<') => &table[..=end],
+        _ => table.split_whitespace().next().unwrap_or(table),
+    };
     if !table.starts_with('<') {
         step.table = Some(unquote(table));
     } else {
@@ -507,7 +518,8 @@ fn mariadb_table(t: &Json, depth: usize, timed: bool) -> PlanStep {
         Some("index_merge") => "Index merge",
         Some("fulltext") => "Full-text search",
         Some(other) => other,
-        None => "Table",
+        // `{"message": "No tables used"}` and the like.
+        None => t.get("message").and_then(Json::as_str).unwrap_or("Table"),
     };
     let mut step = PlanStep {
         depth,

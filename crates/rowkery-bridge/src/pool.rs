@@ -604,6 +604,14 @@ impl<S: PoolSession> SessionPool<S> {
         self.tunnel(window_id, generation)
     }
 
+    /// Names `tag` as the tab's session, its only one: a session it had
+    /// before is no longer it (a MySQL id may come back after a restart).
+    fn tag_tab(&mut self, tag: &str, window_id: &str, tab_id: u64) {
+        let tab = (window_id.to_string(), tab_id);
+        self.tags.retain(|_, t| *t != tab);
+        self.tags.insert(tag.to_string(), tab);
+    }
+
     /// Session tags and the tab (window, tab id) each belongs to.
     pub fn tag_tabs(&self) -> HashMap<String, (String, u64)> {
         self.tags.clone()
@@ -659,8 +667,7 @@ impl<S: PoolSession> SessionPool<S> {
             }
         }
         if let Slot::Tab(tab_id) = slot {
-            self.tags
-                .insert(session.tag().to_string(), (window_id.to_string(), tab_id));
+            self.tag_tab(session.tag(), window_id, tab_id);
         }
         let old = self.parked.insert(
             key,
@@ -945,8 +952,7 @@ pub(crate) async fn lease_or_wait<S: PoolSession>(
         // only once it's parked.
         if let Slot::Tab(tab_id) = slot {
             if p.generation(window_id) == generation {
-                p.tags
-                    .insert(session.tag().to_string(), (window_id.to_string(), tab_id));
+                p.tag_tab(session.tag(), window_id, tab_id);
             }
         }
     }

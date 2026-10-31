@@ -691,6 +691,61 @@ pub async fn session_lexical_mode(
         .then(|| format!("character set is {}", charset.to_ascii_lowercase())))
 }
 
+/// Before ⌘E: a transaction of its own, rolled back after, so what the
+/// server evaluates while planning or timing (a function in a subquery)
+/// keeps nothing. `read_only` (for a read) refuses any write outright;
+/// the server won't explain a write in one, so a write's plan has a
+/// read-write one. On MySQL 8.3+ also JSON plans in the form Rowkery
+/// reads. Only outside a transaction: `START TRANSACTION` would commit the
+/// user's. Returns what [`session_plan_end`] puts back.
+pub async fn session_plan_begin(
+    session: &mut MysqlSession,
+    read_only: bool,
+) -> Result<Option<u32>, DriverError> {
+    let mut restore = None;
+    if session.flavor == Flavor::Mysql {
+        // Unknown before 8.3, where version 1 is the only form.
+        let version = text_rows(session, "SELECT @@SESSION.explain_json_format_version")
+            .await
+            .ok()
+            .and_then(|rows| {
+                rows.first()?
+                    .first()?
+                    .as_deref()?
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            });
+        if let Some(v) = version.filter(|v| *v != 1) {
+            session_execute(session, "SET SESSION explain_json_format_version = 1").await?;
+            restore = Some(v);
+        }
+    }
+    let begin = if read_only {
+        "START TRANSACTION READ ONLY"
+    } else {
+        "START TRANSACTION"
+    };
+    if let Err(e) = session_execute(session, begin).await {
+        session_plan_end(session, restore).await;
+        return Err(e);
+    }
+    Ok(restore)
+}
+
+/// After ⌘E: rolls its transaction back and puts the session's plan
+/// form back.
+pub async fn session_plan_end(session: &mut MysqlSession, restore: Option<u32>) {
+    let _ = session_execute(session, "ROLLBACK").await;
+    if let Some(v) = restore {
+        let _ = session_execute(
+            session,
+            &format!("SET SESSION explain_json_format_version = {v}"),
+        )
+        .await;
+    }
+}
+
 /// Runs `sql`, no rows wanted.
 pub async fn session_execute(session: &mut MysqlSession, sql: &str) -> Result<(), DriverError> {
     let config = &session.config;

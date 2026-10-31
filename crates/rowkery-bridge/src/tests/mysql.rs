@@ -10,31 +10,59 @@ fn env(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.into())
 }
 
+/// Lets the test login make stored functions (MySQL 8.0 with binary
+/// logging asks for SUPER otherwise), as root.
+fn trust_function_creators() {
+    let mut root = record("root", SafeMode::Off);
+    root.username = "root".into();
+    let secrets = ConnectionSecrets {
+        db_password: Some(env("ROWKERY_MYSQL_ROOT_PASSWORD", "rowkery")),
+        ..Default::default()
+    };
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut s =
+            rowkery_core::db::mysql::open_session_via(root.id.clone(), root, Some(&secrets), None)
+                .await
+                .expect("root");
+        rowkery_core::db::mysql::session_execute(
+            &mut s,
+            "SET GLOBAL log_bin_trust_function_creators = 1",
+        )
+        .await
+        .expect("trust");
+    });
+}
+
+/// The test server's record.
+fn record(id: &str, safe_mode: SafeMode) -> MysqlConnection {
+    MysqlConnection {
+        id: id.into(),
+        name: id.into(),
+        host: env("ROWKERY_MYSQL_HOST", "127.0.0.1"),
+        port: env("ROWKERY_MYSQL_PORT", "3306").parse().unwrap(),
+        database: env("ROWKERY_MYSQL_DB", "rowkery"),
+        username: env("ROWKERY_MYSQL_USER", "rowkery"),
+        ssl_mode: PostgresSslMode::Disable,
+        ssl_root_cert: None,
+        ssh: None,
+        environment: None,
+        safe_mode,
+        allow_mcp: false,
+        mcp_hidden_tables: Vec::new(),
+        mcp_until: None,
+        mcp_samples_off: false,
+        mcp_timeout_s: None,
+        mcp_access: None,
+        masked_columns: Default::default(),
+        mariadb: false,
+    }
+}
+
 /// The test server saved under `id`, with `safe_mode`.
 fn save_mysql(bridge: &super::super::CoreBridge, id: &str, safe_mode: SafeMode) {
     CoreBridge::upsert_connection(
         bridge,
-        ConnectionRecord::Mysql(MysqlConnection {
-            id: id.into(),
-            name: id.into(),
-            host: env("ROWKERY_MYSQL_HOST", "127.0.0.1"),
-            port: env("ROWKERY_MYSQL_PORT", "3306").parse().unwrap(),
-            database: env("ROWKERY_MYSQL_DB", "rowkery"),
-            username: env("ROWKERY_MYSQL_USER", "rowkery"),
-            ssl_mode: PostgresSslMode::Disable,
-            ssl_root_cert: None,
-            ssh: None,
-            environment: None,
-            safe_mode,
-            allow_mcp: false,
-            mcp_hidden_tables: Vec::new(),
-            mcp_until: None,
-            mcp_samples_off: false,
-            mcp_timeout_s: None,
-            mcp_access: None,
-            masked_columns: Default::default(),
-            mariadb: false,
-        }),
+        ConnectionRecord::Mysql(record(id, safe_mode)),
         ConnectionSecrets {
             db_password: Some(env("ROWKERY_MYSQL_PASSWORD", "rowkery")),
             ..Default::default()
@@ -425,6 +453,93 @@ fn mysql_plans_read_as_steps_and_never_run_writes() {
         .explain("w", 1, "SELECT 1; SELECT 2".into(), false, false)
         .expect_err("two statements");
     assert_eq!(err, "Explain works on one statement at a time.");
+
+    // A function that writes, reached while planning (a subquery the
+    // optimizer evaluates) or timing: the plan's read-only transaction
+    // stops it, on every server.
+    trust_function_creators();
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP FUNCTION IF EXISTS bw_plan_w;
+         CREATE FUNCTION bw_plan_w() RETURNS INT NOT DETERMINISTIC MODIFIES SQL DATA
+         BEGIN INSERT INTO bw_plan VALUES (100 + (SELECT count(*) FROM bw_plan), 0); RETURN 1; END",
+    );
+    assert_eq!(error, None);
+    for (sql, timed) in [
+        (
+            "SELECT * FROM bw_plan WHERE id = (SELECT max(id) FROM bw_plan WHERE bw_plan_w() = 1)",
+            false,
+        ),
+        ("SELECT bw_plan_w()", true),
+    ] {
+        let err = bridge
+            .explain("w", 1, sql.into(), timed, false)
+            .expect_err(sql);
+        assert_eq!(err, crate::PLAN_WOULD_WRITE, "{sql}");
+    }
+    // A write's plan can't be read-only: one calling a function isn't run.
+    let err = bridge
+        .explain(
+            "w",
+            1,
+            "DELETE FROM bw_plan WHERE id = bw_plan_w()".into(),
+            false,
+            false,
+        )
+        .expect_err("write calling a function");
+    assert_eq!(err, crate::mysql::PLAN_WRITE_CALLS);
+    let (rows, _, _) = rows_of(&bridge, "w", 1, "SELECT count(*) FROM bw_plan");
+    assert_eq!(rows, [[Value::Int(4)]]);
+    assert!(bridge.open_transactions().is_empty());
+
+    // Inside the tab's own transaction it would commit it: refused.
+    assert_eq!(rows_of(&bridge, "w", 1, "BEGIN").1, None);
+    let err = bridge
+        .explain("w", 1, "SELECT * FROM bw_plan".into(), false, false)
+        .expect_err("in a transaction");
+    assert_eq!(err, crate::mysql::PLAN_IN_TXN);
+    assert_eq!(bridge.open_transactions(), [("w".to_string(), 1)]);
+    assert_eq!(rows_of(&bridge, "w", 1, "ROLLBACK").1, None);
+    // A server set to another plan form still reads.
+    // (8.3+ only; elsewhere these SETs fail and change nothing.)
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "SET SESSION explain_json_format_version = 2",
+    );
+    assert!(matches!(
+        bridge.explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n > 1".into(),
+            false,
+            false
+        ),
+        Ok(ExplainOutcome::Plan { .. })
+    ));
+    if env("ROWKERY_MYSQL_PORT", "") == "33084" {
+        let (rows, _, _) = rows_of(
+            &bridge,
+            "w",
+            1,
+            "SELECT @@SESSION.explain_json_format_version",
+        );
+        assert_eq!(rows, [[Value::Int(2)]], "put back");
+    }
+    rows_of(&bridge, "w", 1, "SET SESSION explain_format = JSON");
+    assert!(matches!(
+        bridge.explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n > 1".into(),
+            true,
+            false
+        ),
+        Ok(ExplainOutcome::Plan { .. })
+    ));
     bridge.close_window("w");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }

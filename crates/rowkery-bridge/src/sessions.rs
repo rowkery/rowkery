@@ -109,15 +109,20 @@ pub(crate) async fn list(target: Target) -> Result<Vec<SessionRow>, DriverError>
     let read = target
         .on_session(async |s| session_activity(s).await)
         .await?;
-    Ok(label_tabs(&pool, read))
+    Ok(label_tabs(&pool, None, read))
 }
 
-/// Joins each server session to the Rowkery tab whose tag it carries.
+/// Joins each server session to the Rowkery tab whose tag it carries;
+/// with `window`, only that window's tabs.
 fn label_tabs<S: pool::PoolSession>(
     pool: &SharedPool<S>,
+    window: Option<&str>,
     read: Vec<ServerSession>,
 ) -> Vec<SessionRow> {
-    let tabs = pool.lock().map(|p| p.tag_tabs()).unwrap_or_default();
+    let mut tabs = pool.lock().map(|p| p.tag_tabs()).unwrap_or_default();
+    if let Some(window) = window {
+        tabs.retain(|_, (w, _)| w == window);
+    }
     read.into_iter()
         .map(|session| {
             let tab = session
@@ -169,10 +174,13 @@ impl MysqlTarget {
 /// Every other session this login may see on the server, ours labelled.
 pub(crate) async fn mysql_list(target: MysqlTarget) -> Result<Vec<SessionRow>, DriverError> {
     let pool = target.slot.pool.clone();
+    let window = target.slot.window_id.clone();
     let read = target
         .on_session(async |s| mysql::session_activity(s).await)
         .await?;
-    Ok(label_tabs(&pool, read))
+    // A MySQL id is only unique on its server, and other windows may be on
+    // other servers: only this window's tabs are named.
+    Ok(label_tabs(&pool, Some(&window), read))
 }
 
 /// Stops session `id` (`KILL QUERY` / `KILL`) once safe mode allows it.
