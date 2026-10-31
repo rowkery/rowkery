@@ -1308,3 +1308,158 @@ async fn several_edits_need_a_table_that_rolls_back() {
         1
     );
 }
+
+/// Runs `sql` as a SQL file: its scan, then the run.
+async fn run_file(
+    s: &mut MysqlSession,
+    sql: &str,
+    whole_file: bool,
+) -> (
+    rowkery_core::sql_file::Scan,
+    rowkery_core::sql_file::RunReport,
+) {
+    use rowkery_core::sql_file::{run_mysql, scan, RunOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.sql");
+    std::fs::write(&path, sql).unwrap();
+    let scanned = scan(&path, EngineKind::Mysql, |_| true).unwrap();
+    assert_eq!(scanned.refused, None, "{sql}");
+    let options = RunOptions {
+        whole_file,
+        keep_going: false,
+    };
+    let report = run_mysql(s, &path, &scanned, options, || false, |_| {}).await;
+    (scanned, report)
+}
+
+#[tokio::test]
+async fn sql_files_run_as_the_mysql_client_runs_them() {
+    trust_function_creators().await;
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_file_c, it_file_p, it_file_x; DROP PROCEDURE IF EXISTS it_file_proc",
+    )
+    .await
+    .unwrap();
+    // A dump's shape: versioned comments, rows with escapes and `;`, and
+    // bodies under DELIMITER ;; (a trigger as mysqldump writes it).
+    let dump = "/*M!999999\\- enable the sandbox mode */ \n\
+        /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n\
+        /*M!100616 SET @OLD_NOTE_VERBOSITY=@@NOTE_VERBOSITY, NOTE_VERBOSITY=0 */;\n\
+        CREATE TABLE `it_file_p` (`id` int NOT NULL, `name` varchar(20), PRIMARY KEY (`id`)) ENGINE=InnoDB;\n\
+        CREATE TABLE `it_file_c` (`id` int NOT NULL AUTO_INCREMENT, `p` int, `note` text, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n\
+        LOCK TABLES `it_file_p` WRITE;\n\
+        /*!40000 ALTER TABLE `it_file_p` DISABLE KEYS */;\n\
+        INSERT INTO `it_file_p` VALUES (1,'it\\'s'),(2,'back\\\\slash;');\n\
+        /*!40000 ALTER TABLE `it_file_p` ENABLE KEYS */;\n\
+        UNLOCK TABLES;\n\
+        DELIMITER ;;\n\
+        /*!50003 CREATE*/ /*!50003 TRIGGER it_file_t BEFORE INSERT ON it_file_c FOR EACH ROW BEGIN SET NEW.note = CONCAT(NEW.note, ';'); IF NEW.p IS NULL THEN SET NEW.p = 1; END IF; END \n*/;;\n\
+        CREATE PROCEDURE `it_file_proc`()\nBEGIN INSERT INTO it_file_c (note) VALUES ('a'); INSERT INTO it_file_c (p, note) VALUES (2, 'b'); END\n;;\n\
+        DELIMITER ;\n\
+        CALL it_file_proc();\n\
+        /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\n";
+    let (scanned, report) = run_file(&mut s, dump, false).await;
+    assert!(scanned.per_statement.is_some());
+    assert_eq!(report.failed, None, "{report:?}");
+    assert_eq!(report.done, scanned.statements);
+    assert_eq!(
+        rows(&mut s, "SELECT name FROM it_file_p ORDER BY id").await,
+        [
+            [Value::Text("it's".into())],
+            [Value::Text("back\\slash;".into())]
+        ]
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT p, note FROM it_file_c ORDER BY id").await,
+        [
+            [Value::Int(1), Value::Text("a;".into())],
+            [Value::Int(2), Value::Text("b;".into())]
+        ]
+    );
+
+    // Rows alone run as one transaction: an error keeps nothing.
+    let (scanned, report) = run_file(
+        &mut s,
+        "INSERT INTO it_file_p VALUES (3, 'x');\nINSERT INTO it_file_p VALUES (1, 'dup');\n",
+        true,
+    )
+    .await;
+    assert_eq!(scanned.per_statement, None);
+    assert!(report.rolled_back && report.failed.is_some(), "{report:?}");
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_file_p").await, 2);
+    let (_, report) = run_file(
+        &mut s,
+        "BEGIN;\nINSERT INTO it_file_p VALUES (3, 'x');\nUPDATE it_file_p SET name = 'y' WHERE id = 3;\nCOMMIT;\n",
+        true,
+    )
+    .await;
+    assert_eq!(
+        (report.failed.is_none(), report.rows),
+        (true, 2),
+        "{report:?}"
+    );
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_file_p").await, 3);
+    // Per statement, the file's own transaction left open rolls back with
+    // the session (a temporary table doesn't commit it).
+    let mut own = open(config()).await.unwrap();
+    let (_, report) = run_file(
+        &mut own,
+        "BEGIN;\nINSERT INTO it_file_p VALUES (4, 'z');\nCREATE TEMPORARY TABLE it_file_tmp (a int);\nINSERT INTO it_file_p VALUES (5, 'z');\n",
+        false,
+    )
+    .await;
+    assert_eq!((report.done, report.lost), (4, 4), "{report:?}");
+    drop(own);
+    let (_, report) = run_file(
+        &mut open(config()).await.unwrap(),
+        "BEGIN;\nINSERT INTO it_file_p VALUES (4, 'z');\nCREATE TABLE it_file_x (a int);\nINSERT INTO it_file_p VALUES (5, 'z');\n",
+        false,
+    )
+    .await;
+    // The CREATE committed the BEGIN's transaction, and autocommit saved
+    // the INSERT after it: nothing was left open to lose.
+    assert_eq!((report.done, report.lost), (4, 0), "{report:?}");
+    session_execute(&mut s, "DROP TABLE IF EXISTS it_file_x")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        count(&mut s, "SELECT COUNT(*) FROM it_file_p WHERE id = 4").await,
+        1
+    );
+    assert_eq!(
+        count(&mut s, "SELECT COUNT(*) FROM it_file_p WHERE id = 5").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn sql_files_stop_where_quotes_would_read_otherwise() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(&mut s, "SET SESSION sql_mode = 'ANSI'")
+        .await
+        .unwrap();
+    let (_, report) = run_file(&mut s, "SELECT 1;\n", false).await;
+    let failed = report.failed.unwrap();
+    assert!(failed.message.contains("ANSI"), "{failed:?}");
+    assert_eq!(report.done, 0);
+    session_execute(&mut s, "SET SESSION sql_mode = DEFAULT")
+        .await
+        .unwrap();
+    // Set from a variable, it is caught on the server as the run goes.
+    let (_, report) = run_file(
+        &mut s,
+        "SET @m = 'NO_BACKSLASH_ESCAPES';\nSET SESSION sql_mode = @m;\nSELECT 'a\\'';\n",
+        false,
+    )
+    .await;
+    let failed = report.failed.unwrap();
+    assert_eq!(failed.line, Some(2));
+    assert!(
+        failed.message.contains("NO_BACKSLASH_ESCAPES"),
+        "{failed:?}"
+    );
+    assert_eq!(report.done, 2);
+}

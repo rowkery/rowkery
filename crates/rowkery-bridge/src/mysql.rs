@@ -435,3 +435,185 @@ pub(crate) async fn import_csv(
     }
     Ok(result.into())
 }
+
+/// Run SQL file on a session of its own, never parked after: the file's
+/// `SET`s and `USE` stay on it. A stop that the server doesn't answer
+/// in time ends the session at the server (`KILL`), which rolls back what
+/// was still open.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_sql_file(
+    slot: MysqlSlot,
+    connection_id: String,
+    config: MysqlConnection,
+    path: std::path::PathBuf,
+    scan: rowkery_core::sql_file::Scan,
+    options: rowkery_core::sql_file::RunOptions,
+    cancel: CancelSlot,
+    on_progress: impl FnMut(&rowkery_core::sql_file::Progress) + Send,
+) -> Result<rowkery_core::sql_file::RunReport, String> {
+    use rowkery_core::sql_file::{run_mysql, Failure, RunReport};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let Lease { mut session, .. } = pool::lease(
+        &slot.pool,
+        &slot.window_id,
+        Slot::SqlFile,
+        slot.generation,
+        connection_id,
+        config,
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let via = session.cancel_via();
+    if !arm_cancel(&cancel, CancelHandle::Mysql(session.cancel_via())) {
+        return Ok(RunReport {
+            cancelled: true,
+            ..RunReport::default()
+        });
+    }
+    let stop = cancel.lock().map(|s| s.stop.clone()).ok();
+    let committing = Arc::new(AtomicBool::new(false));
+    let sent = committing.clone();
+    let mut on_progress = on_progress;
+    let run = run_mysql(
+        &mut session,
+        &path,
+        &scan,
+        options,
+        || cancel_requested(&cancel),
+        move |p| {
+            sent.store(p.committing, Ordering::SeqCst);
+            on_progress(p)
+        },
+    );
+    let report = match stop {
+        Some(stop) => tokio::select! {
+            report = run => report,
+            _ = stop.notified() => {
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(FORCE_STOP_AFTER * 5, mysql::kill_connection(via)).await;
+                });
+                let committing = committing.load(Ordering::SeqCst);
+                RunReport {
+                    cancelled: true,
+                    rolled_back: options.whole_file && !committing,
+                    failed: Some(Failure {
+                        line: None,
+                        statement: String::new(),
+                        message: if committing {
+                            "The server didn't answer during COMMIT, so Rowkery ended the connection. The file may or may not be saved: reload the schema to check."
+                        } else {
+                            "The server didn't answer the cancel, so Rowkery ended the connection, which rolls back what was still open."
+                        }
+                        .into(),
+                    }),
+                    ..RunReport::default()
+                }
+            }
+        },
+        None => run.await,
+    };
+    disarm_cancel(&cancel);
+    // Never parked: the file's SETs stay on the session.
+    drop(session);
+    Ok(report)
+}
+
+/// Quick Look's lookups on its own session (never a tab's, so never inside
+/// the user's transaction), one after another. Counts are bounded on the
+/// server, so a slow one reads as unknown; a newer batch (`superseded`)
+/// stops this one between lookups. A batch past [`crate::QUICK_LOOK_LIMIT`]
+/// ends its session at the server and comes back empty.
+pub(crate) async fn follow_keys(
+    slot: MysqlSlot,
+    connection_id: String,
+    config: MysqlConnection,
+    lookups: Vec<crate::FollowLookup>,
+    count: bool,
+    superseded: impl Fn() -> bool,
+) -> Result<Vec<Option<crate::FollowRow>>, String> {
+    let none = || lookups.iter().map(|_| None).collect::<Vec<_>>();
+    let Lease { mut session, .. } = pool::lease(
+        &slot.pool,
+        &slot.window_id,
+        Slot::QuickLook,
+        slot.generation,
+        connection_id,
+        config,
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let give_back = |session| {
+        pool::give_back(
+            &slot.pool,
+            &slot.window_id,
+            Slot::QuickLook,
+            slot.generation,
+            session,
+        )
+    };
+    if superseded() {
+        give_back(session);
+        return Ok(none());
+    }
+    let via = session.cancel_via();
+    let all = async {
+        // MySQL bounds a SELECT in milliseconds, MariaDB any statement in
+        // seconds; 0 is no bound.
+        let ms = if count {
+            crate::INCOMING_TIMEOUT.as_millis()
+        } else {
+            0
+        };
+        let limit = match session.flavor() {
+            mysql::Flavor::Mysql => format!("SET SESSION max_execution_time = {ms}"),
+            mysql::Flavor::Mariadb => {
+                format!("SET SESSION max_statement_time = {}", ms as f64 / 1000.0)
+            }
+        };
+        mysql::session_execute(&mut session, &limit).await.ok()?;
+        let mut rows = Vec::with_capacity(lookups.len());
+        for l in &lookups {
+            if superseded() {
+                rows.push(None);
+                continue;
+            }
+            let Some(sql) = crate::lookup_sql(rowkery_core::db::EngineKind::Mysql, l, count) else {
+                rows.push(None);
+                continue;
+            };
+            let mut batches = Vec::new();
+            let ran = session_query_stream(&mut session, &sql, |b, _| {
+                batches.push(b);
+                Ok(())
+            })
+            .await;
+            rows.push(ran.ok().and_then(|_| crate::first_row(batches)));
+        }
+        Some(rows)
+    };
+    match tokio::time::timeout(crate::QUICK_LOOK_LIMIT, all).await {
+        Ok(Some(rows)) => {
+            // A count cut off by its bound leaves an error, which says
+            // nothing of the session: ask.
+            let idle = match session.txn_known() {
+                Some(known) => !known,
+                None => session_probe_txn(&mut session, pool::PROBE_TIMEOUT).await == Some(false),
+            };
+            if idle && !session.is_closed() {
+                give_back(session);
+            }
+            Ok(rows)
+        }
+        Ok(None) => Ok(none()),
+        Err(_) => {
+            drop(session);
+            tokio::spawn(async move {
+                let _ =
+                    tokio::time::timeout(FORCE_STOP_AFTER * 5, mysql::kill_connection(via)).await;
+            });
+            Ok(none())
+        }
+    }
+}

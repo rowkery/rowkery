@@ -47,10 +47,10 @@ pub async fn scan_sql_file(
     engine: String,
     on_frame: Channel<SqlFileFrame>,
 ) -> Result<Scan, String> {
-    let engine = if engine == "postgres" {
-        EngineKind::Postgres
-    } else {
-        EngineKind::Sqlite
+    let engine = match engine.as_str() {
+        "postgres" => EngineKind::Postgres,
+        "mysql" => EngineKind::Mysql,
+        _ => EngineKind::Sqlite,
     };
     let stop = Arc::new(AtomicBool::new(false));
     {

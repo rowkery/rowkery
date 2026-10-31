@@ -108,6 +108,13 @@ struct Pending {
     /// A body opened, so the statement must end with its `END`.
     body: bool,
     last_was_end: bool,
+    /// MySQL: `CREATE … PROCEDURE | FUNCTION | TRIGGER | EVENT` seen.
+    my_routine: bool,
+    /// MySQL: such a routine's body opened with `BEGIN`, so its `;` needs a
+    /// `DELIMITER` of its own, as the mysql client splits.
+    my_compound: bool,
+    /// The last lexeme was a `.` (`NEW.begin` is a name).
+    after_dot: bool,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -138,6 +145,30 @@ impl Pending {
         match rest.first() {
             Some(&kind @ ("FUNCTION" | "PROCEDURE" | "TRIGGER")) => Some(kind),
             _ => None,
+        }
+    }
+
+    /// MySQL's rule: the mysql client splits on its delimiter alone, so no
+    /// body is kept whole here; a routine whose body opens with `BEGIN` is
+    /// only noted, for [`Reader`] to refuse when `;` ends it. Words are
+    /// looked at only in a `CREATE` (a dump's INSERTs cost nothing).
+    fn my_word(&mut self, word: &[u8]) {
+        self.words += 1;
+        let after_dot = std::mem::take(&mut self.after_dot);
+        if self.lead.len() < 4 {
+            self.lead
+                .push(String::from_utf8_lossy(word).to_ascii_uppercase());
+        }
+        if self.lead[0] != "CREATE" || self.my_compound || after_dot {
+            return;
+        }
+        let is = |w: &str| word.eq_ignore_ascii_case(w.as_bytes());
+        if !self.my_routine {
+            self.my_routine = ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
+                .iter()
+                .any(|w| is(w));
+        } else if is("BEGIN") {
+            self.my_compound = true;
         }
     }
 
@@ -211,6 +242,9 @@ pub struct Reader<R> {
     /// How statements are split: as the engine that will run them reads
     /// the text, so each one checked is one the engine runs.
     dialect: Dialect,
+    /// MySQL: what ends a statement, as the file's `DELIMITER` lines set it
+    /// (the mysql client's rule; `;` until one does).
+    delimiter: Vec<u8>,
 }
 
 impl<R: Read> Reader<R> {
@@ -228,6 +262,7 @@ impl<R: Read> Reader<R> {
             copy: false,
             copy_line: false,
             index: 0,
+            delimiter: b";".to_vec(),
         }
     }
 
@@ -308,6 +343,30 @@ impl<R: Read> Reader<R> {
                     ));
                 }
             }
+            if self.delimiter != b";" {
+                // The file's own delimiter ends a statement wherever a
+                // lexeme could start; `;` is then just text.
+                let d = self.delimiter.len();
+                if self.buf.len() - self.pos < d && !self.eof {
+                    self.fill()?;
+                    continue;
+                }
+                if self.buf[self.pos..].starts_with(&self.delimiter) {
+                    let at = self.pos;
+                    match self.stmt.first {
+                        Some(first) => {
+                            return self
+                                .statement(first, at, at + d)
+                                .map(Piece::Statement)
+                                .map(Some)
+                        }
+                        None => {
+                            self.consume(at + d);
+                            continue;
+                        }
+                    }
+                }
+            }
             let Some((lexeme, end)) = lex(&self.buf, self.pos, self.eof, self.dialect) else {
                 if !self.eof {
                     self.fill()?;
@@ -326,29 +385,68 @@ impl<R: Read> Reader<R> {
             let at = self.pos;
             match lexeme {
                 Lexeme::Space | Lexeme::LineComment | Lexeme::BlockComment { .. } => {}
-                Lexeme::Semicolon if self.stmt.begin_depth == 0 => match self.stmt.first {
-                    Some(first) => {
-                        return self
-                            .statement(first, at, end)
-                            .map(Piece::Statement)
-                            .map(Some)
+                Lexeme::Semicolon if self.stmt.begin_depth == 0 && self.delimiter == b";" => {
+                    match self.stmt.first {
+                        Some(first) if self.stmt.my_compound => {
+                            let line = self.line_at(first);
+                            return Err(ReadError::at(
+                            line,
+                            format!("Line {line}: this routine's body has ; in it, so it needs a delimiter of its own: put DELIMITER ;; on the line before it and ;; after its END, as the mysql client reads it."),
+                        ));
+                        }
+                        Some(first) => {
+                            return self
+                                .statement(first, at, end)
+                                .map(Piece::Statement)
+                                .map(Some)
+                        }
+                        None => {
+                            self.consume(end);
+                            continue;
+                        }
                     }
-                    None => {
-                        self.consume(end);
-                        continue;
-                    }
-                },
+                }
                 Lexeme::Other if self.buf[at] == b'\\' => return self.meta().map(Some),
+                Lexeme::Word
+                    if self.dialect == Dialect::Mysql
+                        && self.stmt.first.is_none()
+                        && self.buf[at..end].eq_ignore_ascii_case(b"DELIMITER") =>
+                {
+                    self.set_delimiter()?;
+                    continue;
+                }
+                // MariaDB's `/*M!999999\- enable the sandbox mode */`: a
+                // command to its client, a comment to every server.
+                Lexeme::Executable { inner, .. }
+                    if self.stmt.first.is_none() && self.buf.get(inner.0) == Some(&b'\\') =>
+                {
+                    let line = self.line_at(at);
+                    let text = String::from_utf8_lossy(&self.buf[at..end]).into_owned();
+                    self.consume(end);
+                    return Ok(Some(Piece::Meta {
+                        line,
+                        text,
+                        inside: false,
+                    }));
+                }
                 _ => {
                     self.stmt.first.get_or_insert(at);
+                    let mysql = self.dialect == Dialect::Mysql;
                     match lexeme {
                         Lexeme::Open => self.stmt.parens += 1,
                         Lexeme::Close => self.stmt.parens -= 1,
+                        Lexeme::Word if mysql => {
+                            let (buf, stmt) = (&self.buf, &mut self.stmt);
+                            stmt.my_word(&buf[at..end]);
+                        }
                         Lexeme::Word => {
                             let (buf, stmt) = (&self.buf, &mut self.stmt);
                             stmt.word(&buf[at..end]);
                         }
                         _ => {}
+                    }
+                    if !matches!(lexeme, Lexeme::Word) {
+                        self.stmt.after_dot = lexeme == Lexeme::Dot;
                     }
                 }
             }
@@ -391,6 +489,31 @@ impl<R: Read> Reader<R> {
             verb: pending.lead.into_iter().next().unwrap_or_default(),
             copy_in,
         })
+    }
+
+    /// The mysql client's `DELIMITER xx` line whose word is at `buf[pos]`:
+    /// statements end at `xx` from here on.
+    fn set_delimiter(&mut self) -> Result<(), ReadError> {
+        let stop = loop {
+            match memchr::memchr(b'\n', &self.buf[self.pos..]) {
+                Some(p) => break self.pos + p,
+                None if self.eof => break self.buf.len(),
+                None => self.fill()?,
+            }
+        };
+        let at = self.pos;
+        let line = self.line_at(at);
+        let text = String::from_utf8_lossy(&self.buf[at + "DELIMITER".len()..stop]).into_owned();
+        let delimiter = text.split_whitespace().next().unwrap_or("");
+        if delimiter.is_empty() || delimiter.contains('\\') {
+            return Err(ReadError::at(
+                line,
+                format!("Line {line}: DELIMITER needs the text that ends each statement, such as DELIMITER ;; (no backslash)."),
+            ));
+        }
+        self.delimiter = delimiter.as_bytes().to_vec();
+        self.consume((stop + 1).min(self.buf.len()));
+        Ok(())
     }
 
     /// The psql command whose `\` is at `buf[pos]`: its whole line.
@@ -557,10 +680,12 @@ pub struct Scan {
     pub refused: Option<ReadError>,
 }
 
-/// psql commands pg_dump writes (17.6, 16.10, …) that a run skips.
+/// Client commands dumps write that a run skips: pg_dump's (17.6, 16.10,
+/// …) `\restrict` lines, and mariadb-dump's sandbox line, which only
+/// restricts its own client.
 fn skipped_meta(text: &str) -> bool {
     let command = text.split_whitespace().next().unwrap_or("");
-    matches!(command, "\\restrict" | "\\unrestrict")
+    matches!(command, "\\restrict" | "\\unrestrict") || text.starts_with("/*M!999999\\- ")
 }
 
 /// Reads the whole file at `path` without running anything. `progress` gets
@@ -650,10 +775,20 @@ pub fn scan(
                 ..
             } if skipped_meta(&text) => continue,
             Piece::Meta { line, text, .. } => {
+                let client = if engine == EngineKind::Mysql {
+                    "the mysql client"
+                } else {
+                    "psql"
+                };
+                let what = if engine == EngineKind::Mysql {
+                    "mysql client"
+                } else {
+                    "psql"
+                };
                 refuse(
                     &mut scan,
                     line,
-                    format!("Line {line} is a psql command ({text}), which only psql can run. Remove it, or run the file with psql."),
+                    format!("Line {line} is a {what} command ({text}), which only {client} can run. Remove it, or run the file with {client}."),
                 );
                 return Ok(scan);
             }
@@ -673,6 +808,16 @@ pub fn scan(
                 check.destructive = true;
             } else {
                 check.verb = "INSERT".into();
+            }
+        }
+        if engine == EngineKind::Mysql {
+            if let Some(why) = mysql_mode_change(&statement.sql) {
+                refuse(
+                    &mut scan,
+                    statement.line,
+                    format!("Line {}: {why}", statement.line),
+                );
+                return Ok(scan);
             }
         }
         scan.statements += 1;
@@ -719,6 +864,19 @@ pub fn scan(
             InTransaction::Commits => commits.push((statement.index, statement.line)),
             InTransaction::Controls => {
                 control.get_or_insert((statement.line, check.verb.clone()));
+            }
+            InTransaction::Never if engine == EngineKind::Mysql => {
+                if scan.per_statement.is_none() {
+                    let reason = if check.verb == crate::safety::UNCLEAR_VERB {
+                        "Rowkery can't read this statement for sure, and MySQL commits by itself before most statements that don't just read or write rows".to_string()
+                    } else {
+                        format!("{} commits by itself on MySQL", check.verb)
+                    };
+                    scan.per_statement = Some(PerStatement {
+                        line: statement.line,
+                        reason,
+                    });
+                }
             }
             InTransaction::Never => {
                 if scan.per_statement.is_none() {
@@ -768,6 +926,39 @@ pub fn scan(
     Ok(scan)
 }
 
+/// `sql_mode` flags that change how MySQL reads quotes and backslashes,
+/// which the file was split without (`ANSI` and the like include
+/// `ANSI_QUOTES`).
+pub const MYSQL_LEXICAL_MODES: [&str; 7] = [
+    "ANSI",
+    "NO_BACKSLASH_ESCAPES",
+    "ORACLE",
+    "DB2",
+    "MSSQL",
+    "POSTGRESQL",
+    "MAXDB",
+];
+
+/// Why a MySQL file's statement `sql` can't run: it sets an `sql_mode`
+/// that reads the rest of the file differently from how Rowkery split it.
+/// A mode set from a variable is checked on the server as the run goes.
+fn mysql_mode_change(sql: &str) -> Option<String> {
+    let upper = sql.to_ascii_uppercase();
+    if !upper.contains("SQL_MODE") {
+        return None;
+    }
+    if let Some(flag) = MYSQL_LEXICAL_MODES.iter().find(|f| upper.contains(*f)) {
+        return Some(format!("this sets sql_mode with {flag}, which changes how MySQL reads quotes or backslashes in the rest of the file. Rowkery splits a file the default way, so it can't run this one."));
+    }
+    // MariaDB's `SET STATEMENT sql_mode = … FOR …` holds the statement it
+    // reads under that mode.
+    let words: Vec<&str> = upper.split_whitespace().take(2).collect();
+    if words.ends_with(&["STATEMENT"]) && words.len() == 2 && upper.contains(" FOR ") {
+        return Some("SET STATEMENT sql_mode = … FOR … can change how MySQL reads the statement inside it, so Rowkery can't run this file.".into());
+    }
+    None
+}
+
 /// Why a file that starts with `head` isn't a SQL file, if it isn't.
 fn not_sql(head: &[u8]) -> Option<&'static str> {
     if head.starts_with(b"PGDMP") {
@@ -792,6 +983,23 @@ fn source(head: &[u8]) -> Option<String> {
     {
         let version = rest.split_whitespace().next().unwrap_or("");
         return Some(format!("pg_dump {version}"));
+    }
+    // `-- MySQL dump 10.13  Distrib 8.0.46, for Linux`,
+    // `-- MariaDB dump 10.19  Distrib 10.11.19-MariaDB, for …` (10.x),
+    // `-- MariaDB dump 10.19-11.4.13-MariaDB, for …` (11.x).
+    for line in text.lines().take(3) {
+        if let Some(rest) = line.strip_prefix("-- MySQL dump ") {
+            let version = rest.split("Distrib ").nth(1)?.split([',', ' ']).next()?;
+            return Some(format!("mysqldump {version}"));
+        }
+        if let Some(rest) = line.strip_prefix("-- MariaDB dump ") {
+            let version = match rest.split_once("Distrib ") {
+                Some((_, after)) => after,
+                None => rest.split_once('-')?.1,
+            };
+            let version = version.split(['-', ',', ' ']).next()?;
+            return Some(format!("mariadb-dump {version}"));
+        }
     }
     let start = text.trim_start();
     if start.starts_with("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;") {
@@ -1438,6 +1646,172 @@ pub async fn run_postgres(
     tally.finish(bytes)
 }
 
+/// Runs the scanned file on a MySQL session of its own (never a tab's:
+/// the file's `SET`s and `USE` stay on it, so the caller drops it after).
+/// `cancelled` says a cancel was asked for; whoever asks sends the server
+/// `KILL QUERY` too.
+///
+/// The file was split with backslash escapes and `"` as a string, MySQL's
+/// default reading: a session whose `sql_mode` reads them otherwise is
+/// refused, at the start and after any statement that sets `sql_mode`.
+/// MySQL commits by itself before DDL; the scan sends such files per
+/// statement, and a whole-file run stops if its transaction ends anyway.
+pub async fn run_mysql(
+    session: &mut crate::db::mysql::MysqlSession,
+    path: &Path,
+    scan: &Scan,
+    options: RunOptions,
+    cancelled: impl Fn() -> bool,
+    on_progress: impl FnMut(&Progress),
+) -> RunReport {
+    use crate::db::mysql::{session_execute, session_lexical_mode, session_run_file_statement};
+    use crate::db::DriverError;
+
+    let mut tally = Tally::new(options, on_progress);
+    let failed = |tally: &mut Tally<_>, message: String| {
+        tally.file_failed(ReadError {
+            line: None,
+            message,
+        })
+    };
+    let reader = match check_options(scan, options)
+        .and_then(|_| open_scanned(path, scan, EngineKind::Mysql))
+    {
+        Ok(reader) => reader,
+        Err(message) => {
+            failed(&mut tally, message);
+            return tally.finish(0);
+        }
+    };
+    let lexical = |flag: &str| {
+        format!("This connection's sql_mode has {flag}, which changes how MySQL reads quotes or backslashes. Rowkery reads a file the default way, so it can't run it here.")
+    };
+    match session_lexical_mode(session).await {
+        Ok(None) => {}
+        Ok(Some(flag)) => {
+            failed(&mut tally, lexical(flag));
+            return tally.finish(0);
+        }
+        Err(e) => {
+            failed(&mut tally, e.into_message());
+            return tally.finish(0);
+        }
+    }
+    if options.whole_file {
+        if let Err(e) = session_execute(session, "START TRANSACTION").await {
+            failed(&mut tally, e.into_message());
+            return tally.finish(0);
+        }
+    }
+    let mut rx = feed(reader, scan.clone());
+    let mut bytes = 0;
+    let mut ok = true;
+    let is_cancel = |e: &DriverError| matches!(e, DriverError::Cancelled) || cancelled();
+    while let Some(item) = rx.recv().await {
+        if cancelled() {
+            tally.report.cancelled = true;
+            ok = false;
+            break;
+        }
+        let (statement, offset) = match item {
+            Feed::Statement(statement, offset) => (statement, offset),
+            Feed::Failed(e) => {
+                tally.file_failed(e);
+                ok = false;
+                break;
+            }
+            // MySQL has no COPY: the reader sends no rows.
+            Feed::Rows(..) | Feed::RowsEnd => continue,
+        };
+        bytes = offset;
+        tally.starting(&statement, offset);
+        match session_run_file_statement(session, &statement.sql).await {
+            Ok(rows) => tally.ran(if counts_rows(&statement.verb) {
+                rows
+            } else {
+                0
+            }),
+            Err(e) if is_cancel(&e) => {
+                tally.report.cancelled = true;
+                ok = false;
+                break;
+            }
+            Err(e) => {
+                if !tally.failed(&statement, e.into_message()) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        // A `SET` of `sql_mode` (or a prepared one) may read the rest of
+        // the file otherwise: the server says. Rows can't change it, and
+        // a routine runs under its own mode.
+        let sets_mode = !matches!(
+            statement.verb.as_str(),
+            "INSERT" | "REPLACE" | "UPDATE" | "DELETE"
+        ) && (statement.verb == "EXECUTE"
+            || statement.sql.to_ascii_uppercase().contains("SQL_MODE"));
+        if sets_mode {
+            let flag = match session_lexical_mode(session).await {
+                Ok(flag) => flag.map(lexical),
+                Err(e) => Some(e.into_message()),
+            };
+            if let Some(message) = flag {
+                tally.report.failed = Some(Failure {
+                    line: Some(statement.line),
+                    statement: preview(&statement.sql),
+                    message,
+                });
+                ok = false;
+                break;
+            }
+        }
+        // What the server says, not the file's words: DDL commits by itself.
+        match session.txn_known() {
+            Some(false) if options.whole_file => {
+                tally.report.failed = Some(Failure {
+                    line: Some(statement.line),
+                    statement: preview(&statement.sql),
+                    message: "MySQL committed the transaction at this statement, so what ran up to here is saved and the rest didn't run.".into(),
+                });
+                return tally.finish(offset);
+            }
+            Some(false) => tally.open_since = None,
+            Some(true) if !options.whole_file => {
+                let since = tally.progress.done.saturating_sub(1);
+                tally.open_since.get_or_insert(since);
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    if ok && cancelled() {
+        tally.report.cancelled = true;
+        ok = false;
+    }
+    if options.whole_file {
+        if ok {
+            tally.committing();
+            if let Err(e) = session_execute(session, "COMMIT").await {
+                let message = if session.is_closed() {
+                    "The connection dropped during COMMIT, so the file may or may not be saved. Reload the schema to check.".to_string()
+                } else {
+                    let _ = session_execute(session, "ROLLBACK").await;
+                    tally.report.rolled_back = true;
+                    e.into_message()
+                };
+                failed(&mut tally, message);
+            }
+        } else {
+            // If even this doesn't answer, the server rolls back when the
+            // caller drops the session.
+            let _ = session_execute(session, "ROLLBACK").await;
+            tally.report.rolled_back = true;
+        }
+    }
+    tally.finish(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1657,6 +2031,148 @@ mod tests {
         assert_eq!(copy.line, Some(1));
         let bytes = refused(b"SELECT 'caf\xe9';", EngineKind::Postgres);
         assert!(bytes.message.contains("UTF-8"));
+    }
+
+    /// The shape of a mariadb-dump 11.4 file (mysqldump 8 writes the same
+    /// but for the first line and its header).
+    const MARIADB_DUMP: &str = "/*M!999999\\- enable the sandbox mode */ \n-- MariaDB dump 10.19-11.4.13-MariaDB, for debian-linux-gnu (x86_64)\n--\n/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\nDROP TABLE IF EXISTS `p`;\nCREATE TABLE `p` (`id` int NOT NULL, `name` varchar(20), PRIMARY KEY (`id`));\nLOCK TABLES `p` WRITE;\n/*!40000 ALTER TABLE `p` DISABLE KEYS */;\nINSERT INTO `p` VALUES (1,'it\\'s'),(2,'semi;colon');\n/*!40000 ALTER TABLE `p` ENABLE KEYS */;\nUNLOCK TABLES;\nDELIMITER ;;\n/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER t BEFORE INSERT ON p FOR EACH ROW BEGIN SET NEW.name = CONCAT(NEW.name, ';'); END \n*/;;\nCREATE DEFINER=`root`@`localhost` PROCEDURE `pr`()\nBEGIN SELECT 1; SELECT 2; END\n;;\nDELIMITER ;\n/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\n-- Dump completed\n";
+
+    fn mysql_statements(sql: &str) -> Vec<Piece> {
+        let mut reader = Reader::new(sql.as_bytes(), Dialect::Mysql);
+        let mut out = Vec::new();
+        while let Some(piece) = reader.next_piece().unwrap() {
+            out.push(piece);
+        }
+        out
+    }
+
+    #[test]
+    fn mysql_files_split_as_the_mysql_client_reads_them() {
+        let pieces = mysql_statements(MARIADB_DUMP);
+        assert!(
+            matches!(&pieces[0], Piece::Meta { line: 1, text, inside: false } if text.starts_with("/*M!999999\\-"))
+        );
+        let sql: Vec<&str> = pieces
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Statement(s) => Some(s.sql.as_str()),
+                Piece::Meta { .. } => None,
+            })
+            .collect();
+        assert_eq!(sql.len(), 11, "{sql:#?}");
+        assert_eq!(
+            sql[5],
+            "INSERT INTO `p` VALUES (1,'it\\'s'),(2,'semi;colon')"
+        );
+        // The file's own delimiter keeps each body whole, `;` and all.
+        assert!(sql[8].starts_with("/*!50003 CREATE*/") && sql[8].ends_with("END \n*/"));
+        assert_eq!(
+            sql[9],
+            "CREATE DEFINER=`root`@`localhost` PROCEDURE `pr`()\nBEGIN SELECT 1; SELECT 2; END"
+        );
+        assert_eq!(sql[10], "/*!40101 SET SQL_MODE=@OLD_SQL_MODE */");
+        // Any delimiter, even one that starts a comment or a string.
+        let got = mysql_statements(
+            "DELIMITER //\nSELECT 1; SELECT 2//\nSELECT '//'//\ndelimiter ;\nSELECT 3;",
+        );
+        let sql: Vec<String> = got
+            .into_iter()
+            .filter_map(|p| match p {
+                Piece::Statement(s) => Some(s.sql),
+                Piece::Meta { .. } => None,
+            })
+            .collect();
+        assert_eq!(sql, ["SELECT 1; SELECT 2", "SELECT '//'", "SELECT 3"]);
+        // `-- ` needs its space, `#` is a comment.
+        let got = mysql_statements("SELECT 1--1;\n# a; comment\nSELECT 2;");
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn mysql_scans_say_what_commits_by_itself() {
+        let scan = scan_text(MARIADB_DUMP, EngineKind::Mysql);
+        assert_eq!(scan.refused, None);
+        assert_eq!(scan.source.as_deref(), Some("mariadb-dump 11.4.13"));
+        assert_eq!(scan.statements, 11);
+        let per = scan.per_statement.unwrap();
+        assert_eq!(
+            (per.line, per.reason.as_str()),
+            (5, "DROP TABLE commits by itself on MySQL")
+        );
+        let kinds: Vec<&str> = scan.kinds.iter().map(|k| k.label.as_str()).collect();
+        assert!(
+            kinds.contains(&"ALTER TABLE") && kinds.contains(&"LOCK"),
+            "{kinds:?}"
+        );
+        let mysql = scan_text(
+            "-- MySQL dump 10.13  Distrib 8.0.46, for Linux (x86_64)\nSELECT 1;\n",
+            EngineKind::Mysql,
+        );
+        assert_eq!(mysql.source.as_deref(), Some("mysqldump 8.0.46"));
+        let maria10 = scan_text("-- MariaDB dump 10.19  Distrib 10.11.19-MariaDB, for debian-linux-gnu (x86_64)\nSELECT 1;\n", EngineKind::Mysql);
+        assert_eq!(maria10.source.as_deref(), Some("mariadb-dump 10.11.19"));
+        // Rows alone can run as one transaction; the file's own around them
+        // is replaced by Rowkery's.
+        let rows = scan_text(
+            "SET NAMES utf8mb4;\nBEGIN;\nINSERT INTO t VALUES (1);\nUPDATE t SET a = 2;\nCOMMIT;\n",
+            EngineKind::Mysql,
+        );
+        assert_eq!((rows.per_statement, rows.skip), (None, vec![1, 4]));
+        for (sql, reason) in [
+            ("INSERT INTO t VALUES (1);\nCALL p();\n", "CALL"),
+            ("INSERT INTO t VALUES (1);\nSET autocommit = 1;\n", "SET"),
+            ("INSERT INTO t VALUES (1);\nTRUNCATE t;\n", "TRUNCATE"),
+        ] {
+            let per = scan_text(sql, EngineKind::Mysql).per_statement.unwrap();
+            assert_eq!(per.line, 2, "{sql}");
+            assert!(per.reason.starts_with(reason), "{sql}: {}", per.reason);
+        }
+        assert_eq!(
+            scan_text(
+                "CREATE TEMPORARY TABLE x (a int);\nINSERT INTO x VALUES (1);\n",
+                EngineKind::Mysql
+            )
+            .per_statement,
+            None
+        );
+    }
+
+    #[test]
+    fn mysql_scans_refuse_what_the_split_cant_hold() {
+        let refused = |sql: &str| scan_text(sql, EngineKind::Mysql).refused.unwrap();
+        // A body with `;` and no delimiter of its own: the mysql client
+        // would send it in pieces.
+        let body = refused("SELECT 1;\nCREATE PROCEDURE p()\nBEGIN SELECT 1; SELECT 2; END;\n");
+        assert_eq!(body.line, Some(2));
+        assert!(body.message.contains("DELIMITER ;;"), "{body:?}");
+        // …but a body of one statement, or `begin` as a name, is fine.
+        for sql in [
+            "CREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW SET NEW.begin = 1;\n",
+            "CREATE FUNCTION f() RETURNS int DETERMINISTIC RETURN 1;\n",
+        ] {
+            assert_eq!(scan_text(sql, EngineKind::Mysql).refused, None, "{sql}");
+        }
+        let client = refused("SELECT 1;\n\\G\n");
+        assert!(
+            client.message.contains("mysql client command (\\G)"),
+            "{client:?}"
+        );
+        let mode = refused("SET SESSION sql_mode = 'ANSI_QUOTES';\nSELECT \"a\";\n");
+        assert_eq!(mode.line, Some(1));
+        assert!(mode.message.contains("ANSI"), "{mode:?}");
+        assert!(
+            refused("/*!40101 SET SQL_MODE='NO_BACKSLASH_ESCAPES' */;\n")
+                .message
+                .contains("NO_BACKSLASH_ESCAPES")
+        );
+        assert!(refused("SET STATEMENT sql_mode = @m FOR SELECT 1;\n")
+            .message
+            .contains("SET STATEMENT"));
+        assert!(refused("DELIMITER\nSELECT 1;\n")
+            .message
+            .contains("DELIMITER ;;"));
+        // MySQL has no COPY: its rows' `\.` reads as a client command.
+        assert_eq!(refused("COPY t FROM stdin;\n1\n\\.\n").line, Some(3));
     }
 
     fn sqlite_run(
