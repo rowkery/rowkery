@@ -7,7 +7,7 @@ Please report it privately, not in a public issue:
 - **GitHub:** use [private vulnerability reporting](https://github.com/rowkery/rowkery/security/advisories/new) on `rowkery/rowkery`.
 - **Email:** security@rowkery.com.
 
-Say what you found, how to reproduce it, and which version you ran (**Rowkery › About Rowkery**). We aim to answer within a week and will tell you when a fix ships. Rowkery is in alpha, so fixes go into the next release; there are no backports.
+Say what you found, how to reproduce it, and which version you ran (**Rowkery › About Rowkery**). We aim to answer within a week and will tell you when a fix ships. Rowkery is in beta, so fixes go into the next release; there are no backports.
 
 ## In scope
 

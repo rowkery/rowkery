@@ -126,7 +126,7 @@ These are the gaps we know about. None of them lets an agent change your data.
 
 ## Updates are signed
 
-Rowkery isn't signed by Apple yet, but its updates are signed by the Rowkery team. The public half of the signing key is built into the app (`plugins.updater.pubkey` in `tauri.conf.json`), and the updater downloads an update, checks its signature against that key, and refuses it if it doesn't match. An update is only installed when you choose **Restart** on the toast that offers it, or when you quit. Nothing restarts on its own.
+Rowkery is signed with an Apple Developer ID and notarized by Apple, and its updates are also signed by the Rowkery team. The public half of the signing key is built into the app (`plugins.updater.pubkey` in `tauri.conf.json`), and the updater downloads an update, checks its signature against that key, and refuses it if it doesn't match. An update is only installed when you choose **Restart** on the toast that offers it, or when you quit. Nothing restarts on its own.
 
 ## Open source
 
@@ -139,6 +139,6 @@ Please report a security problem privately, not in a public issue and not throug
 - on GitHub, with [private vulnerability reporting](https://github.com/rowkery/rowkery/security/advisories/new),
 - or by email to security@rowkery.com.
 
-Say what you found, how to reproduce it, and which version you ran (**Rowkery › About Rowkery**). The team aims to answer within a week and will tell you when a fix ships. Rowkery is in alpha, so fixes go into the next release.
+Say what you found, how to reproduce it, and which version you ran (**Rowkery › About Rowkery**). The team aims to answer within a week and will tell you when a fix ships. Rowkery is in beta, so fixes go into the next release.
 
 In scope: an agent running something the guard should refuse (a write, a second statement, a function that changes data, a table you didn't share, a sensitive column's value, a query past its row or time limits), a write that gets past safe mode, any change to your data you didn't commit, and a password or other secret written anywhere outside the keychain. Bugs that need someone who already controls your macOS account are out of scope.

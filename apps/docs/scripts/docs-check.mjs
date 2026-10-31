@@ -95,7 +95,7 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
   ok(await page.locator(".finder .none").isVisible(), "a search with no match says so");
   await page.keyboard.press("Escape");
 
-  await page.goto(BASE + "/quick-setup/");
+  await page.goto(BASE + "/troubleshooting/");
   await page.locator('[data-testid="copy"]').first().click();
   ok((await page.evaluate(() => navigator.clipboard.readText())) === "xattr -dr com.apple.quarantine /Applications/Rowkery.app", "Copy copies exactly the command");
   await ctx.close();

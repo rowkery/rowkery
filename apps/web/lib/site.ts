@@ -13,9 +13,6 @@ export const SPONSOR_URL = "https://github.com/sponsors/rowkery";
 /** The documentation site, apps/docs. */
 export const DOCS_URL = "https://docs.rowkery.com";
 
-/** The command that lets macOS open the app while it isn't signed. */
-export const UNQUARANTINE = "xattr -dr com.apple.quarantine /Applications/Rowkery.app";
-
 /** The latest release's notes, and Lucas's own site (the footer's Made by). */
 export const RELEASE_NOTES_URL = `${REPO_URL}/releases/latest`;
 export const MAKER_URL = "https://lucascodes.dev";

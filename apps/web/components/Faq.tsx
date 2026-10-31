@@ -4,7 +4,7 @@ const QUESTIONS = [
   ["Which databases does it support?", "Postgres, including Google Cloud SQL, and SQLite. More are on the way."],
   ["Does my data go through your servers?", "No. Rowkery connects straight from your Mac to your database."],
   ["Which agents work with it?", "Claude Code and Claude Desktop in one click. Cursor and other MCP clients with a short config entry."],
-  ["Why does macOS warn me the first time?", "The alpha isn’t signed by Apple yet. Run the line under Get Rowkery once before the first launch, and it opens like any other app."],
+  ["Is the app signed?", "Yes. Rowkery is signed and notarized by Apple, so it opens like any other app, and every update is signed too."],
 ];
 
 export function Faq() {
