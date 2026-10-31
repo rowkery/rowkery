@@ -55,7 +55,7 @@ pub const APP_NAME: &str = "Rowkery";
 
 /// A new session's tag: 8 hex digits, unique for this process and unlikely
 /// to match another install's.
-fn new_tag() -> String {
+pub(crate) fn new_tag() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

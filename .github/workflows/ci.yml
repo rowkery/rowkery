@@ -37,6 +37,63 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 15
+      # The MySQL integration tests run against every version Rowkery supports.
+      mysql80:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rowkery
+          MYSQL_DATABASE: rowkery
+          MYSQL_USER: rowkery
+          MYSQL_PASSWORD: rowkery
+        ports:
+          - 33080:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -prowkery"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 40
+      mysql84:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: rowkery
+          MYSQL_DATABASE: rowkery
+          MYSQL_USER: rowkery
+          MYSQL_PASSWORD: rowkery
+        ports:
+          - 33084:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -prowkery"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 40
+      mariadb1011:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: rowkery
+          MARIADB_DATABASE: rowkery
+          MARIADB_USER: rowkery
+          MARIADB_PASSWORD: rowkery
+        ports:
+          - 33110:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 40
+      mariadb114:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: rowkery
+          MARIADB_DATABASE: rowkery
+          MARIADB_USER: rowkery
+          MARIADB_PASSWORD: rowkery
+        ports:
+          - 33114:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 40
     env:
       ROWKERY_PG_HOST: 127.0.0.1
       ROWKERY_PG_PORT: 54329
@@ -72,6 +129,13 @@ jobs:
         run: PGPASSWORD=rowkery psql -h 127.0.0.1 -p 54329 -U rowkery -d rowkery -c "CREATE DATABASE orders"
       - name: cargo test (with the Postgres integration tests)
         run: cargo test --workspace --features rowkery-core/postgres-integration,rowkery-mcp/postgres-integration
+      - name: cargo test (the MySQL and MariaDB integration tests)
+        run: |
+          for server in 33080:mysql 33084:mysql 33110:mariadb 33114:mariadb; do
+            echo "== port ${server%%:*}"
+            ROWKERY_MYSQL_PORT=${server%%:*} ROWKERY_MYSQL_FLAVOR=${server##*:} \
+              cargo test -p rowkery-core --features mysql-integration --test mysql_integration
+          done
       - name: Website build
         working-directory: apps/web
         run: |

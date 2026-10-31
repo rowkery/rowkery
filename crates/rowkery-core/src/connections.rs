@@ -234,6 +234,48 @@ pub struct PostgresConnection {
     pub masked_columns: MaskedColumns,
 }
 
+/// A MySQL or MariaDB server: one connection reaches every database on it
+/// that the user can see (each shows as a schema). Which of the two it is
+/// comes from the server, never from the record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysqlConnection {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    /// The default database (`USE`); empty for none.
+    #[serde(default)]
+    pub database: String,
+    pub username: String,
+    #[serde(default)]
+    pub ssl_mode: PostgresSslMode,
+    /// PEM file of the CA that signs the server certificate, for `Verify`.
+    /// `~/` is expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_root_cert: Option<String>,
+    #[serde(default)]
+    pub ssh: Option<SshConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<ConnectionEnvironment>,
+    #[serde(default, skip_serializing_if = "SafeMode::is_off")]
+    pub safe_mode: SafeMode,
+    /// As on [`PostgresConnection`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_mcp: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_hidden_tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_until: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mcp_samples_off: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_timeout_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_access: Option<McpAccess>,
+    #[serde(default, skip_serializing_if = "MaskedColumns::is_empty")]
+    pub masked_columns: MaskedColumns,
+}
+
 impl ConnectionRecord {
     pub fn id(&self) -> &str {
         match self {
