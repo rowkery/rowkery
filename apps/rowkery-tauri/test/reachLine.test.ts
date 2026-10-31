@@ -28,4 +28,10 @@ describe("reachLine", () => {
   it("an edit that changes rows elsewhere", () => {
     expect(reachLine([upd], { tables: [t("orders", 0, 0, 1)], unnamed: 0 })).toBe("this edit also changes 1 row in orders");
   });
+
+  it("names what MySQL can't count", () => {
+    expect(reachLine([del], { tables: [t("items", 3)], unnamed: 0, uncounted: ["triggers on shop.orders", "shop.categories"] })).toBe(
+      "deleting this row also deletes 3 items and writes rows Rowkery can't count (triggers on shop.orders, shop.categories)",
+    );
+  });
 });

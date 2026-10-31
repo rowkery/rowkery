@@ -7,6 +7,9 @@
 //! rows. Partitions count under their parent. SQLite: the update hook names
 //! the table of each row written, and `total_changes()` counts the ones it
 //! skips (WITHOUT ROWID tables), which show as rows Rowkery can't name.
+//! MySQL keeps no such counters: [`my_reach`] follows the foreign keys a
+//! batch cascades through, locking each level's rows before the next is
+//! counted, so the counts are the rows the cascade will write.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -42,6 +45,10 @@ pub struct Reach {
     /// Rows no table could be named for (SQLite's WITHOUT ROWID tables).
     #[serde(default)]
     pub unnamed: u64,
+    /// Writes that couldn't be counted (MySQL): `triggers on shop.orders`,
+    /// `shop.categories cascading into itself`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncounted: Vec<String>,
 }
 
 impl Reach {
@@ -50,7 +57,7 @@ impl Reach {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.total() == 0
+        self.total() == 0 && self.uncounted.is_empty()
     }
 }
 
@@ -150,6 +157,7 @@ pub fn beyond(reach: Reach, schema: &str, table: &str, own: [u64; 3]) -> Reach {
     Reach {
         tables,
         unnamed: reach.unnamed.saturating_sub(left.iter().sum()),
+        uncounted: reach.uncounted,
     }
 }
 
@@ -251,12 +259,270 @@ impl SqliteCounter {
         Ok(Reach {
             tables,
             unnamed: changes.saturating_sub(named),
+            uncounted: Vec::new(),
         })
     }
 }
 
 fn total_changes(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT total_changes()", [], |r| r.get(0))
+}
+
+/// A table, as `(schema, table)`.
+pub type Name = (String, String);
+
+/// What a MySQL foreign key does to its child's rows when the parent's go
+/// or change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MyRule {
+    Cascade,
+    SetNull,
+    /// RESTRICT, NO ACTION: never writes (it refuses).
+    Refuse,
+}
+
+impl MyRule {
+    pub fn parse(rule: &str) -> Self {
+        match rule {
+            "CASCADE" => MyRule::Cascade,
+            "SET NULL" => MyRule::SetNull,
+            _ => MyRule::Refuse,
+        }
+    }
+}
+
+/// One MySQL foreign key, its columns in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MyForeignKey {
+    pub child: Name,
+    pub child_columns: Vec<String>,
+    pub parent: Name,
+    pub parent_columns: Vec<String>,
+    pub on_delete: MyRule,
+    pub on_update: MyRule,
+}
+
+/// How a cascade writes a table's rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MyWrite {
+    Delete,
+    /// These columns change (set NULL, or to the parent's new key).
+    Update(Vec<String>),
+}
+
+/// One table a batch's deletes cascade into: the rows `predicate` names,
+/// as they are before the batch runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MyStep {
+    pub table: Name,
+    pub write: MyWrite,
+    pub predicate: String,
+}
+
+/// What a MySQL batch on one table writes elsewhere, as far as foreign keys
+/// say: `steps` in order, parents before children, each to be counted (and
+/// locked) in turn; and the tables it writes in ways that can't be counted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MyPlan {
+    pub steps: Vec<MyStep>,
+    pub uncounted: Vec<String>,
+}
+
+/// InnoDB stops a cascade deeper than this (`FK_MAX_CASCADE_DEL`).
+const MY_MAX_DEPTH: usize = 15;
+/// A predicate past this many bytes (many paths into one table) isn't sent.
+const MY_MAX_PREDICATE: usize = 64 * 1024;
+
+/// `schema.table`, as Reach names a table.
+pub fn my_name(name: &Name) -> String {
+    format!("{}.{}", name.0, name.1)
+}
+
+/// Plans [`MyPlan`] for a batch on `target`: `deleted`, the rows its
+/// DELETEs name (their key predicates OR'ed), and `changed`, the columns
+/// its UPDATEs set. `keys` must hold every key that cascades (or sets NULL)
+/// from each table the walk can reach.
+///
+/// A table is counted only when the count is sure: reached by deletes, in
+/// one way only (all deleted, or all the same columns set NULL), on no loop
+/// back to itself or an earlier table, within InnoDB's depth. A key that
+/// follows an UPDATE of the target's own key is never counted (whether the
+/// value really changes is the server's to say). Each such table, and every
+/// table past it, is named in `uncounted` instead.
+pub fn my_plan(
+    target: &Name,
+    deleted: Option<&str>,
+    changed: &[String],
+    keys: &[MyForeignKey],
+) -> MyPlan {
+    let mut uncounted: Vec<Name> = Vec::new();
+    for key in keys.iter().filter(|k| &k.parent == target) {
+        let follows = key.on_update != MyRule::Refuse
+            && key.parent_columns.iter().any(|c| changed.contains(c));
+        if follows && !uncounted.contains(&key.child) {
+            uncounted.push(key.child.clone());
+        }
+    }
+    let Some(deleted) = deleted else {
+        return finish(Vec::new(), uncounted);
+    };
+    // The tables the deletes reach, how each is written, and the keys
+    // between them. A table reached two ways is marked.
+    let mut write: Vec<(Name, MyWrite)> = vec![(target.clone(), MyWrite::Delete)];
+    let mut mixed: Vec<Name> = Vec::new();
+    let mut edges: Vec<&MyForeignKey> = Vec::new();
+    let mut at = 0;
+    while at < write.len() {
+        let (table, how) = write[at].clone();
+        at += 1;
+        for key in keys.iter().filter(|k| k.parent == table) {
+            let child = match &how {
+                MyWrite::Delete => match key.on_delete {
+                    MyRule::Cascade => MyWrite::Delete,
+                    MyRule::SetNull => MyWrite::Update(key.child_columns.clone()),
+                    MyRule::Refuse => continue,
+                },
+                MyWrite::Update(cols) => {
+                    if key.on_update == MyRule::Refuse
+                        || !key.parent_columns.iter().any(|c| cols.contains(c))
+                    {
+                        continue;
+                    }
+                    MyWrite::Update(key.child_columns.clone())
+                }
+            };
+            edges.push(key);
+            // A second way in is walked too, so every table past it is named.
+            let ways: Vec<&MyWrite> = write
+                .iter()
+                .filter(|(t, _)| t == &key.child)
+                .map(|(_, w)| w)
+                .collect();
+            if !ways.contains(&&child) {
+                if !ways.is_empty() && !mixed.contains(&key.child) {
+                    mixed.push(key.child.clone());
+                }
+                write.push((key.child.clone(), child));
+            }
+        }
+    }
+    // Parents before children (Kahn); what is left is on a loop.
+    let mut tables: Vec<&Name> = Vec::new();
+    for (t, _) in &write {
+        if !tables.contains(&t) {
+            tables.push(t);
+        }
+    }
+    let mut waiting: HashMap<&Name, usize> = tables.iter().map(|t| (*t, 0)).collect();
+    for e in &edges {
+        *waiting.get_mut(&e.child).expect("reached") += 1;
+    }
+    let mut order: Vec<&Name> = Vec::new();
+    let mut ready: Vec<&Name> = tables.iter().copied().filter(|t| waiting[t] == 0).collect();
+    while let Some(t) = ready.pop() {
+        order.push(t);
+        for e in edges.iter().filter(|e| &e.parent == t) {
+            let n = waiting.get_mut(&e.child).expect("reached");
+            *n -= 1;
+            if *n == 0 {
+                ready.push(&e.child);
+            }
+        }
+    }
+    let mut bad: Vec<Name> = tables
+        .iter()
+        .filter(|t| !order.contains(t))
+        .map(|t| (*t).clone())
+        .collect();
+    bad.extend(mixed);
+    // In order: a table is counted when every table into it is, within the
+    // depth and the predicate's size.
+    let mut depth: HashMap<&Name, usize> = HashMap::new();
+    let mut predicate: HashMap<&Name, String> = HashMap::new();
+    let mut steps = Vec::new();
+    for t in order {
+        if t == target {
+            depth.insert(t, 0);
+            predicate.insert(t, deleted.to_string());
+            continue;
+        }
+        let into: Vec<&&MyForeignKey> = edges.iter().filter(|e| &e.child == t).collect();
+        if bad.contains(t) || into.iter().any(|e| !predicate.contains_key(&e.parent)) {
+            if !bad.contains(t) {
+                bad.push(t.clone());
+            }
+            continue;
+        }
+        let deep = 1 + into.iter().map(|e| depth[&e.parent]).max().unwrap_or(0);
+        let ors: Vec<String> = into
+            .iter()
+            .map(|e| {
+                format!(
+                    "{} IN (SELECT {} FROM {} WHERE {})",
+                    my_columns(&e.child_columns),
+                    my_columns(&e.parent_columns),
+                    my_table(&e.parent),
+                    predicate[&e.parent]
+                )
+            })
+            .collect();
+        let text = if ors.len() == 1 {
+            ors.into_iter().next().unwrap_or_default()
+        } else {
+            format!("({})", ors.join(" OR "))
+        };
+        if deep > MY_MAX_DEPTH || text.len() > MY_MAX_PREDICATE {
+            bad.push(t.clone());
+            continue;
+        }
+        depth.insert(t, deep);
+        let how = write
+            .iter()
+            .find(|(n, _)| n == t)
+            .map(|(_, w)| w.clone())
+            .expect("reached");
+        steps.push(MyStep {
+            table: t.clone(),
+            write: how,
+            predicate: text.clone(),
+        });
+        predicate.insert(t, text);
+    }
+    // A loop back into the target: nothing past it is sure.
+    if bad.contains(target) {
+        steps.clear();
+        bad = tables.iter().map(|t| (*t).clone()).collect();
+    }
+    for t in bad {
+        if !uncounted.contains(&t) {
+            uncounted.push(t);
+        }
+    }
+    finish(steps, uncounted)
+}
+
+fn finish(steps: Vec<MyStep>, mut uncounted: Vec<Name>) -> MyPlan {
+    uncounted.sort();
+    MyPlan {
+        steps,
+        uncounted: uncounted.iter().map(my_name).collect(),
+    }
+}
+
+fn my_table(name: &Name) -> String {
+    crate::db::qualified_table_sql(crate::db::EngineKind::Mysql, &name.0, &name.1)
+}
+
+fn my_columns(cols: &[String]) -> String {
+    let quoted: Vec<String> = cols
+        .iter()
+        .map(|c| crate::db::quote_ident(crate::db::EngineKind::Mysql, c))
+        .collect();
+    if quoted.len() == 1 {
+        quoted.into_iter().next().unwrap_or_default()
+    } else {
+        format!("({})", quoted.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -293,20 +559,20 @@ mod tests {
         };
         let reach = Reach {
             tables: vec![t("kiosks", 1, 2), t("payouts", 0, 37)],
-            unnamed: 0,
+            ..Reach::default()
         };
         let left = beyond(reach, "public", "kiosks", [0, 0, 1]);
         assert_eq!(left.tables, vec![t("kiosks", 1, 1), t("payouts", 0, 37)]);
         // Only its own rows: nothing beyond.
         let own = Reach {
             tables: vec![t("kiosks", 0, 1)],
-            unnamed: 0,
+            ..Reach::default()
         };
         assert!(beyond(own, "public", "kiosks", [0, 0, 1]).is_empty());
         // A WITHOUT ROWID table's own rows were never named.
         let unnamed = Reach {
-            tables: Vec::new(),
             unnamed: 3,
+            ..Reach::default()
         };
         assert_eq!(beyond(unnamed, "main", "tags", [0, 0, 1]).unnamed, 2);
     }
@@ -344,5 +610,128 @@ mod tests {
         assert_eq!(reach.total(), 8);
         counter.mark(&conn).unwrap();
         assert!(counter.reach(&conn).unwrap().is_empty());
+    }
+
+    fn n(t: &str) -> Name {
+        ("shop".to_string(), t.to_string())
+    }
+
+    fn fk(child: &str, col: &str, parent: &str, del: MyRule, upd: MyRule) -> MyForeignKey {
+        MyForeignKey {
+            child: n(child),
+            child_columns: vec![col.into()],
+            parent: n(parent),
+            parent_columns: vec!["id".into()],
+            on_delete: del,
+            on_update: upd,
+        }
+    }
+
+    #[test]
+    fn my_plan_walks_parents_before_children() {
+        use MyRule::*;
+        let keys = [
+            fk("items", "order_id", "orders", Cascade, Refuse),
+            fk("notes", "item_id", "items", SetNull, Refuse),
+            fk("refunds", "order_id", "orders", Refuse, Refuse),
+            fk("orders", "customer_id", "customers", Cascade, Refuse),
+        ];
+        let plan = my_plan(&n("orders"), Some("`id` = 3"), &[], &keys);
+        assert!(plan.uncounted.is_empty());
+        let steps: Vec<(&str, &MyWrite)> = plan
+            .steps
+            .iter()
+            .map(|s| (s.table.1.as_str(), &s.write))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("items", &MyWrite::Delete),
+                ("notes", &MyWrite::Update(vec!["item_id".into()]))
+            ]
+        );
+        assert_eq!(
+            plan.steps[1].predicate,
+            "item_id IN (SELECT id FROM shop.items WHERE order_id IN (SELECT id FROM shop.orders WHERE `id` = 3))"
+        );
+        // Inserts and plain updates reach nothing.
+        assert_eq!(
+            my_plan(&n("orders"), None, &["note".into()], &keys),
+            MyPlan::default()
+        );
+    }
+
+    #[test]
+    fn my_plan_joins_two_paths_of_one_kind() {
+        use MyRule::*;
+        let keys = [
+            fk("items", "order_id", "orders", Cascade, Refuse),
+            fk("tags", "order_id", "orders", Cascade, Refuse),
+            fk("tags", "item_id", "items", Cascade, Refuse),
+        ];
+        let plan = my_plan(&n("orders"), Some("`id` = 3"), &[], &keys);
+        assert!(plan.uncounted.is_empty());
+        let tags = plan.steps.iter().find(|s| s.table.1 == "tags").unwrap();
+        assert!(tags.predicate.starts_with('(') && tags.predicate.contains(" OR "));
+        let at = |t: &str| plan.steps.iter().position(|s| s.table.1 == t).unwrap();
+        assert!(at("items") < at("tags"));
+    }
+
+    #[test]
+    fn my_plan_names_what_it_cannot_count() {
+        use MyRule::*;
+        // Self-reference on the target: nothing is sure.
+        let keys = [
+            fk("categories", "parent_id", "categories", Cascade, Refuse),
+            fk("products", "category_id", "categories", Cascade, Refuse),
+        ];
+        let plan = my_plan(&n("categories"), Some("`id` = 1"), &[], &keys);
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.uncounted, ["shop.categories", "shop.products"]);
+        // Deleted one way, set NULL another: that table and past it.
+        let keys = [
+            fk("a", "o", "orders", Cascade, Refuse),
+            fk("b", "o", "orders", SetNull, Refuse),
+            fk("b", "a", "a", Cascade, Refuse),
+            fk("c", "b", "b", Cascade, Cascade),
+        ];
+        let plan = my_plan(&n("orders"), Some("`id` = 1"), &[], &keys);
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].table.1, "a");
+        assert_eq!(plan.uncounted, ["shop.b", "shop.c"]);
+        // A loop below the target.
+        let keys = [
+            fk("a", "o", "orders", Cascade, Refuse),
+            fk("b", "a", "a", Cascade, Refuse),
+            fk("a", "b", "b", Cascade, Refuse),
+        ];
+        let plan = my_plan(&n("orders"), Some("`id` = 1"), &[], &keys);
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.uncounted, ["shop.a", "shop.b"]);
+        // Changing a key that cascades on update.
+        let keys = [fk("items", "order_id", "orders", Refuse, Cascade)];
+        let plan = my_plan(&n("orders"), None, &["id".into()], &keys);
+        assert_eq!(plan.uncounted, ["shop.items"]);
+        assert!(my_plan(&n("orders"), None, &["note".into()], &keys)
+            .uncounted
+            .is_empty());
+    }
+
+    #[test]
+    fn my_plan_stops_past_innodb_depth() {
+        use MyRule::*;
+        let mut keys = vec![fk("t1", "p", "orders", Cascade, Refuse)];
+        for i in 1..20 {
+            keys.push(fk(
+                &format!("t{}", i + 1),
+                "p",
+                &format!("t{i}"),
+                Cascade,
+                Refuse,
+            ));
+        }
+        let plan = my_plan(&n("orders"), Some("`id` = 1"), &[], &keys);
+        assert_eq!(plan.steps.len(), 15);
+        assert_eq!(plan.uncounted.len(), 5);
     }
 }

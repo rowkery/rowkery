@@ -426,12 +426,12 @@ const unqualify = (name: string) => name.replace(/^.*\./, "").replace(/^"|"$/g, 
 
 /**
  * A catalog column's editor (Postgres `format_type` names, SQLite declared
- * types). None on MySQL yet: its edits come in a later version.
+ * types, MySQL `COLUMN_TYPE`).
  */
 export function columnEditor(column: ColumnNode, engine: EngineKind, enums: EnumNode[]): ColumnEditor | null {
-  if (engine === "mysql") return null;
   const t = column.type_name.trim().toLowerCase();
   const base = { nullable: column.nullable, default: column.default ?? null };
+  if (engine === "mysql") return mysqlEditor(column.type_name.trim(), t, base);
   if (engine === "sqlite") {
     if (/blob/.test(t)) return null;
     if (/int/.test(t)) return { kind: "int", ...base };
@@ -455,6 +455,26 @@ export function columnEditor(column: ColumnNode, engine: EngineKind, enums: Enum
   }
   const en = enums.find((e) => e.name === unqualify(column.type_name));
   if (en) return { kind: "enum", labels: en.labels, ...base };
+  return { kind: "text", ...base };
+}
+
+/** MySQL's editors. No `now()` here: MySQL reads it only unquoted. */
+function mysqlEditor(type: string, t: string, base: { nullable: boolean; default: string | null }): ColumnEditor | null {
+  const name = t.split(/[ (]/)[0];
+  if (/^(binary|varbinary|tinyblob|blob|mediumblob|longblob)$/.test(name)) return null;
+  if (name === "bool" || name === "boolean" || /^tinyint\(1\)/.test(t)) return { kind: "bool", ...base };
+  if (/^(tinyint|smallint|mediumint|int|integer|bigint|bit|year)$/.test(name)) return { kind: "int", ...base };
+  if (/^(decimal|numeric|dec|fixed|float|double|real)$/.test(name)) return { kind: "number", ...base };
+  if (name === "json") return { kind: "json", ...base };
+  if (/^(date|datetime|timestamp|time)$/.test(name)) {
+    const placeholder = name === "date" ? "YYYY-MM-DD" : name === "time" ? "HH:MM:SS" : "YYYY-MM-DD HH:MM:SS";
+    return { kind: "date", placeholder, ...base };
+  }
+  if (name === "enum") {
+    // enum('a','it''s'): the labels as the server wrote them.
+    const labels = [...type.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+    if (labels.length) return { kind: "enum", labels, ...base };
+  }
   return { kind: "text", ...base };
 }
 

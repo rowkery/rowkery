@@ -62,6 +62,8 @@ export interface Reach {
   tables: TableRows[];
   /** Rows in tables Rowkery can't name (SQLite WITHOUT ROWID). */
   unnamed: number;
+  /** Writes MySQL can't count: `shop.categories`, `triggers on shop.orders`. */
+  uncounted?: string[];
 }
 
 export interface DryRun {

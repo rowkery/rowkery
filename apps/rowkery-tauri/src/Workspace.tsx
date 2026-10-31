@@ -1417,7 +1417,7 @@ export function Workspace({
       reached.current.set(tab.id, { for: key, reach: out.reach, confirmed });
       // The SQL was confirmed: Commit all on the bar is the one button now.
       setHeldEdits(({ [tab.id]: _gone, ...rest }) => rest);
-      return setTray(tab.id, { kind: "reach", text: reachLine(changes, out.reach), total: changes.length + other });
+      return setTray(tab.id, { kind: "reach", text: reachLine(changes, out.reach), total: out.reach.uncounted?.length ? null : changes.length + other });
     }
     if (out.status === "rolled_back") return setTray(tab.id, { kind: "failed", message: out.message, unknown: out.unknown });
     // Only what was sent is done: an edit staged while it ran stays staged,

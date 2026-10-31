@@ -578,3 +578,350 @@ async fn failed_logins_are_explained() {
     let x = explain_connect_error(&raw, &t);
     assert_eq!((x.class, x.field), ("database", Some("database")), "{raw}");
 }
+
+// Staged row edits and what they reach.
+
+use rowkery_core::db::mysql::session_apply_changes_within;
+use rowkery_core::edits::{build_row_changes, CellValue, Change, EditColumn, EditTable};
+use rowkery_core::reach::{Reach, TableRows};
+
+fn edit_table(table: &str, columns: &[(&str, &str)]) -> EditTable {
+    EditTable {
+        schema: config().database,
+        table: table.into(),
+        columns: columns
+            .iter()
+            .map(|(n, t)| EditColumn {
+                name: n.to_string(),
+                type_name: t.to_string(),
+            })
+            .collect(),
+        key: vec!["id".into()],
+    }
+}
+
+fn cell(column: &str, value: Value) -> CellValue {
+    CellValue {
+        column: column.into(),
+        value,
+    }
+}
+
+fn delete(id: i64) -> Change {
+    Change::Delete {
+        key: vec![cell("id", Value::Int(id))],
+    }
+}
+
+async fn apply(
+    s: &mut MysqlSession,
+    table: &EditTable,
+    changes: &[Change],
+    approved: Option<&Reach>,
+) -> Result<rowkery_core::edits::ApplyCounts, rowkery_core::edits::ApplyFailure> {
+    let statements = build_row_changes(EngineKind::Mysql, table, changes).unwrap();
+    let name = (table.schema.clone(), table.table.clone());
+    session_apply_changes_within(
+        s,
+        &name,
+        &statements,
+        Some(Duration::from_secs(10)),
+        approved,
+    )
+    .await
+}
+
+async fn count(s: &mut MysqlSession, sql: &str) -> i64 {
+    match rows(s, sql).await[0][0] {
+        Value::Int(n) => n,
+        ref v => panic!("{sql}: {v:?}"),
+    }
+}
+
+fn deleted(table: &str, n: u64) -> TableRows {
+    TableRows {
+        schema: config().database,
+        table: table.into(),
+        inserted: 0,
+        updated: 0,
+        deleted: n,
+    }
+}
+
+#[tokio::test]
+async fn edits_write_exact_literals_one_row_each() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ed_kiosks; CREATE TABLE it_ed_kiosks (id INT PRIMARY KEY, \
+         name VARCHAR(40), on_air TINYINT(1), blob_v VARBINARY(8), price DECIMAL(10,2), doc JSON, \
+         seen DATETIME, n INT NOT NULL DEFAULT 7)",
+    )
+    .await
+    .unwrap();
+    let table = edit_table(
+        "it_ed_kiosks",
+        &[
+            ("id", "int"),
+            ("name", "varchar(40)"),
+            ("on_air", "tinyint(1)"),
+            ("blob_v", "varbinary(8)"),
+            ("price", "decimal(10,2)"),
+            ("doc", "json"),
+            ("seen", "datetime"),
+            ("n", "int"),
+        ],
+    );
+    let insert = Change::Insert {
+        values: vec![
+            cell("id", Value::Int(1)),
+            cell("name", Value::Text(r"it's a \n back\slash".into())),
+            cell("on_air", Value::Bool(true)),
+            cell("blob_v", Value::Text(r"\x00ff".into())),
+            cell("price", Value::Text("12.50".into())),
+            cell("doc", Value::Text(r#"{"a": "b\\c"}"#.into())),
+            cell("seen", Value::Text("2026-10-31 09:15:00".into())),
+        ],
+    };
+    let counts = apply(&mut s, &table, &[insert], None).await.unwrap();
+    assert_eq!(counts.inserted, 1);
+    let got = rows(
+        &mut s,
+        "SELECT name, on_air, HEX(blob_v), price, JSON_UNQUOTE(JSON_EXTRACT(doc, '$.a')), seen, n FROM it_ed_kiosks",
+    )
+    .await;
+    assert_eq!(got[0][0], Value::Text(r"it's a \n back\slash".into()));
+    assert_eq!(got[0][1], Value::Int(1));
+    assert_eq!(got[0][2], Value::Text("00FF".into()));
+    assert_eq!(got[0][4], Value::Text(r"b\c".into()));
+    assert_eq!(got[0][6], Value::Int(7));
+    // An UPDATE to the value it already has still names its one row.
+    let same = Change::Update {
+        key: vec![cell("id", Value::Int(1))],
+        set: vec![cell("on_air", Value::Bool(true))],
+    };
+    assert_eq!(
+        apply(&mut s, &table, &[same], None).await.unwrap().updated,
+        1
+    );
+    // An empty insert takes every default.
+    let empty = edit_table("it_ed_auto", &[("id", "int")]);
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ed_auto; CREATE TABLE it_ed_auto (id INT AUTO_INCREMENT PRIMARY KEY)",
+    )
+    .await
+    .unwrap();
+    let blank = Change::Insert { values: vec![] };
+    assert_eq!(
+        apply(&mut s, &empty, &[blank], None)
+            .await
+            .unwrap()
+            .inserted,
+        1
+    );
+    // A row that isn't there rolls the whole batch back.
+    let two = Change::Insert {
+        values: vec![cell("id", Value::Int(2))],
+    };
+    let failure = apply(&mut s, &table, &[two, delete(99)], None)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.index, Some(1));
+    assert_eq!(failure.rows, Some(0));
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_ed_kiosks").await, 1);
+    assert_eq!(s.txn_known(), Some(false));
+    // NaN can't be written.
+    let nan = Change::Update {
+        key: vec![cell("id", Value::Int(1))],
+        set: vec![cell("price", Value::Float(f64::NAN))],
+    };
+    assert!(build_row_changes(EngineKind::Mysql, &table, &[nan]).is_err());
+}
+
+#[tokio::test]
+async fn edits_refuse_the_users_transaction() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ed_open; CREATE TABLE it_ed_open (id INT PRIMARY KEY); \
+         INSERT INTO it_ed_open VALUES (1)",
+    )
+    .await
+    .unwrap();
+    let table = edit_table("it_ed_open", &[("id", "int")]);
+    session_execute(&mut s, "BEGIN").await.unwrap();
+    let failure = apply(&mut s, &table, &[delete(1)], None).await.unwrap_err();
+    assert!(
+        failure.message.contains("transaction open"),
+        "{}",
+        failure.message
+    );
+    // Untouched: still open, the row still there.
+    assert!(s.in_transaction());
+    session_execute(&mut s, "ROLLBACK").await.unwrap();
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_ed_open").await, 1);
+}
+
+async fn shop(s: &mut MysqlSession, prefix: &str) {
+    let p = prefix;
+    session_execute(
+        s,
+        &format!(
+            "DROP TABLE IF EXISTS {p}_notes, {p}_items, {p}_orders, {p}_customers; \
+             CREATE TABLE {p}_customers (id INT PRIMARY KEY); \
+             CREATE TABLE {p}_orders (id INT PRIMARY KEY, customer_id INT, \
+               FOREIGN KEY (customer_id) REFERENCES {p}_customers (id) ON DELETE CASCADE); \
+             CREATE TABLE {p}_items (id INT PRIMARY KEY, order_id INT, \
+               FOREIGN KEY (order_id) REFERENCES {p}_orders (id) ON DELETE CASCADE); \
+             CREATE TABLE {p}_notes (id INT PRIMARY KEY, item_id INT, \
+               FOREIGN KEY (item_id) REFERENCES {p}_items (id) ON DELETE SET NULL); \
+             INSERT INTO {p}_customers VALUES (1), (2); \
+             INSERT INTO {p}_orders VALUES (10, 1), (11, 1), (12, 2); \
+             INSERT INTO {p}_items VALUES (100, 10), (101, 10), (102, 11), (103, 12); \
+             INSERT INTO {p}_notes VALUES (1, 100), (2, 102), (3, 103), (4, NULL)"
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cascades_are_counted_before_commit() {
+    let mut s = open(config()).await.unwrap();
+    shop(&mut s, "it_cc").await;
+    let table = edit_table("it_cc_customers", &[("id", "int")]);
+    let failure = apply(&mut s, &table, &[delete(1)], None).await.unwrap_err();
+    let reach = failure.reach.expect("stops before commit");
+    let mut notes = deleted("it_cc_notes", 0);
+    notes.updated = 2;
+    assert_eq!(
+        reach.tables,
+        [deleted("it_cc_items", 3), notes, deleted("it_cc_orders", 2)]
+    );
+    assert!(reach.uncounted.is_empty());
+    // Nothing was saved.
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_cc_orders").await, 3);
+    // Approved, it commits, and the server wrote exactly that.
+    apply(&mut s, &table, &[delete(1)], Some(&reach))
+        .await
+        .unwrap();
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_cc_orders").await, 1);
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_cc_items").await, 1);
+    assert_eq!(
+        count(
+            &mut s,
+            "SELECT COUNT(*) FROM it_cc_notes WHERE item_id IS NULL"
+        )
+        .await,
+        3
+    );
+    // A table no key cascades from writes nowhere else.
+    let leaf = edit_table("it_cc_notes", &[("id", "int")]);
+    assert_eq!(
+        apply(&mut s, &leaf, &[delete(4)], None)
+            .await
+            .unwrap()
+            .deleted,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_child_added_meanwhile_is_counted() {
+    let mut s = open(config()).await.unwrap();
+    shop(&mut s, "it_cr").await;
+    let table = edit_table("it_cr_customers", &[("id", "int")]);
+    let reach = apply(&mut s, &table, &[delete(1)], None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    // Another session adds an order for customer 1 and commits while the
+    // save is waiting on its lock.
+    let mut other = open(config()).await.unwrap();
+    session_execute(&mut other, "BEGIN; INSERT INTO it_cr_orders VALUES (13, 1)")
+        .await
+        .unwrap();
+    let commit_later = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        session_execute(&mut other, "COMMIT").await.unwrap();
+    });
+    let failure = apply(&mut s, &table, &[delete(1)], Some(&reach))
+        .await
+        .unwrap_err();
+    commit_later.await.unwrap();
+    let now = failure.reach.expect("the reach moved");
+    assert!(now.tables.contains(&deleted("it_cr_orders", 3)), "{now:?}");
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_cr_orders").await, 4);
+}
+
+#[tokio::test]
+async fn writes_it_cannot_count_are_named() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_un_log, it_un_lines, it_un_cats, it_un_trig; \
+         CREATE TABLE it_un_cats (id INT PRIMARY KEY, parent_id INT, \
+           FOREIGN KEY (parent_id) REFERENCES it_un_cats (id) ON DELETE CASCADE); \
+         INSERT INTO it_un_cats VALUES (1, NULL), (2, 1), (3, 2); \
+         CREATE TABLE it_un_trig (id INT PRIMARY KEY); \
+         CREATE TABLE it_un_log (what VARCHAR(10)); \
+         CREATE TABLE it_un_lines (id INT PRIMARY KEY, trig_id INT, \
+           FOREIGN KEY (trig_id) REFERENCES it_un_trig (id) ON UPDATE CASCADE); \
+         INSERT INTO it_un_trig VALUES (1), (2); INSERT INTO it_un_lines VALUES (1, 1)",
+    )
+    .await
+    .unwrap();
+    trust_function_creators().await;
+    session_execute(
+        &mut s,
+        "CREATE TRIGGER it_un_t AFTER DELETE ON it_un_trig FOR EACH ROW INSERT INTO it_un_log VALUES ('gone')",
+    )
+    .await
+    .unwrap();
+    let db = config().database;
+    // Cascading into itself: named, not counted; approved, it commits.
+    let cats = edit_table("it_un_cats", &[("id", "int")]);
+    let reach = apply(&mut s, &cats, &[delete(1)], None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    assert!(reach.tables.is_empty());
+    assert_eq!(reach.uncounted, [format!("{db}.it_un_cats")]);
+    apply(&mut s, &cats, &[delete(1)], Some(&reach))
+        .await
+        .unwrap();
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_un_cats").await, 0);
+    // A trigger on the table.
+    let trig = edit_table("it_un_trig", &[("id", "int")]);
+    let reach = apply(&mut s, &trig, &[delete(2)], None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    assert_eq!(reach.uncounted, [format!("triggers on {db}.it_un_trig")]);
+    // Changing a key another table follows; another column is fine.
+    let rekey = Change::Update {
+        key: vec![cell("id", Value::Int(1))],
+        set: vec![cell("id", Value::Int(5))],
+    };
+    let reach = apply(&mut s, &trig, std::slice::from_ref(&rekey), None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    assert_eq!(reach.uncounted, [format!("{db}.it_un_lines")]);
+    apply(&mut s, &trig, &[rekey], Some(&reach)).await.unwrap();
+    assert_eq!(count(&mut s, "SELECT trig_id FROM it_un_lines").await, 5);
+    let lines = edit_table("it_un_lines", &[("id", "int"), ("trig_id", "int")]);
+    let plain = Change::Update {
+        key: vec![cell("id", Value::Int(1))],
+        set: vec![cell("trig_id", Value::Int(5))],
+    };
+    assert_eq!(
+        apply(&mut s, &lines, &[plain], None).await.unwrap().updated,
+        1
+    );
+}

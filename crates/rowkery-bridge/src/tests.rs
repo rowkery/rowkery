@@ -7054,13 +7054,13 @@ fn sqlite_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         1,
         "INSERT INTO kiosk_sessions VALUES (4, 2)",
     );
-    let ApplyOutcome::RolledBack { failure, .. } = apply(delete(), Some(reach)) else {
+    let ApplyOutcome::RolledBack { failure, .. } = apply(delete(), Some(*reach)) else {
         panic!("different counts stop it again")
     };
     let reach = failure.reach.expect("the new counts");
     assert_eq!(reach.tables[1].deleted, 3);
 
-    let out = apply(delete(), Some(reach));
+    let out = apply(delete(), Some(*reach));
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
     assert_eq!(count("kiosk_sessions"), Some(Value::Int(1)));
     assert_eq!(count("audit_log"), Some(Value::Int(1)));
@@ -7216,7 +7216,7 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         Some(Value::Int(6)),
         "nothing saved"
     );
-    let out = apply(&kiosks, delete(), Some(reach));
+    let out = apply(&kiosks, delete(), Some(*reach));
     assert!(matches!(out, ApplyOutcome::Committed { .. }), "{out:?}");
     assert_eq!(
         run("SELECT count(*)::int FROM public.it_sessions").0,
