@@ -88,6 +88,9 @@ pub(crate) fn run_query(
             );
         };
         let may_open = !reads_only(&sql);
+        let changes_session = rowkery_core::safety::check_sql(&sql, Dialect::Mysql)
+            .iter()
+            .any(|c| c.kind == rowkery_core::safety::StatementKind::Session);
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -159,7 +162,7 @@ pub(crate) fn run_query(
                 && attempt == 1
                 && !sent_rows
                 && session.is_closed()
-                && !session.in_transaction()
+                && session.txn_known() == Some(false)
                 && plain_read(&sql, Dialect::Mysql)
             {
                 disarm_cancel(&interrupt_slot);
@@ -191,6 +194,12 @@ pub(crate) fn run_query(
                     drop(out);
                 });
             } else {
+                if changes_session {
+                    session.note_state();
+                }
+                // An error says nothing of the transaction: ask, so a tab's
+                // open one is never taken for none.
+                pool::settle_txn(&mut session).await;
                 pool::give_back(
                     &pooled.pool,
                     &pooled.window_id,

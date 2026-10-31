@@ -130,8 +130,8 @@ impl PoolSession for PostgresSession {
     }
 }
 
-/// MySQL's flags say after every statement whether a transaction is open,
-/// so its state is never unknown, and it pages no cursor.
+/// MySQL's OK packets say after every statement whether a transaction is
+/// open; an error's packet doesn't.
 impl PoolSession for MysqlSession {
     type Config = MysqlConnection;
     fn connection_id(&self) -> &str {
@@ -146,15 +146,19 @@ impl PoolSession for MysqlSession {
     fn tag(&self) -> &str {
         MysqlSession::tag(self)
     }
+    /// Unknown after an error (its packet says nothing): `settle_txn`
+    /// asks the server.
     fn txn_state(&self) -> TxnState {
-        if self.in_transaction() {
-            TxnState::Users
-        } else {
-            TxnState::None
+        match self.txn_known() {
+            Some(true) => TxnState::Users,
+            Some(false) => TxnState::None,
+            None => TxnState::Unknown,
         }
     }
+    /// No cursor, but a `USE` or `SET` the tab's next run counts on: kept
+    /// when idle like a paged result, and closed last.
     fn has_cursor(&self) -> bool {
-        false
+        self.keeps_state()
     }
     fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
         MysqlSession::hold(self, guard)

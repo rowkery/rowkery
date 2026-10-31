@@ -192,6 +192,10 @@ fn mysql_an_open_transaction_stays_with_its_tab() {
         rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_txn").0,
         [[Value::Int(0)]]
     );
+    // A failed statement inside it leaves it open, and it stays counted.
+    let (_, error, _) = rows_of(&bridge, "w", 1, "INSERT INTO bw_txn_missing VALUES (1)");
+    assert!(error.is_some());
+    assert_eq!(bridge.open_transactions(), [("w".to_string(), 1)]);
     let refused = super::set_safe_mode(&bridge, "my-txn", SafeMode::ReadOnly);
     assert_eq!(refused.err().as_deref(), Some(SAFE_MODE_IN_TXN));
     assert_eq!(rows_of(&bridge, "w", 1, "COMMIT").1, None);
@@ -204,6 +208,26 @@ fn mysql_an_open_transaction_stays_with_its_tab() {
     super::set_safe_mode(&bridge, "my-txn", SafeMode::ReadOnly).expect("changes");
     let (_, error, _) = rows_of(&bridge, "w", 1, "INSERT INTO bw_txn VALUES (2)");
     assert_eq!(error.as_deref(), Some("held: Refuse"));
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// On a read-only connection, an error inside the user's transaction
+/// doesn't make the next statement fail (the server refuses a change of
+/// access mode inside a transaction).
+#[test]
+fn mysql_read_only_transaction_survives_an_error() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-ro-txn", SafeMode::ReadOnly);
+    bridge.open_window("w", "my-ro-txn", None).expect("open");
+    assert_eq!(rows_of(&bridge, "w", 1, "BEGIN").1, None);
+    assert!(rows_of(&bridge, "w", 1, "SELECT nope_no_column")
+        .1
+        .is_some());
+    assert_eq!(rows_of(&bridge, "w", 1, "SELECT 3").0, [[Value::Int(3)]]);
+    assert_eq!(bridge.open_transactions(), [("w".to_string(), 1)]);
+    assert_eq!(rows_of(&bridge, "w", 1, "ROLLBACK").1, None);
+    assert!(bridge.open_transactions().is_empty());
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 

@@ -404,11 +404,13 @@ async fn transactions_are_seen() {
     assert!(s.in_transaction());
     rows(&mut s, "SELECT 1").await;
     assert!(s.in_transaction());
-    // A failed statement keeps it open, and asking says so.
+    // A failed statement keeps it open; its packet says nothing of it,
+    // and asking says so.
     assert!(run(&mut s, "SELECT * FROM it_no_such_table")
         .await
         .1
         .is_err());
+    assert_eq!(s.txn_known(), None);
     assert_eq!(
         session_probe_txn(&mut s, Duration::from_secs(2)).await,
         Some(true)
@@ -420,6 +422,10 @@ async fn transactions_are_seen() {
         Some(false)
     );
     assert!(!s.is_closed());
+    // Autocommit off is state a new session wouldn't have.
+    assert!(!s.keeps_state());
+    session_execute(&mut s, "SET autocommit = 0").await.unwrap();
+    assert!(s.keeps_state());
 }
 
 #[tokio::test]
