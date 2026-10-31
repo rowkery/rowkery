@@ -2,13 +2,13 @@ import { DownloadButton } from "./Download";
 import { DOCS_URL, RELEASE, RELEASE_NOTES_URL } from "@/lib/site";
 import { Pg } from "./Pg";
 
-/** The opening: the plain logo, what's new, the one-line pitch and the two buttons. */
+/** The opening: the plain logo, the beta version and what's new, the one-line pitch and the two buttons. */
 export function Hero() {
   return (
     <div className="hero wrap">
       <Pg tight className="mark" />
       <a className="pill" href={RELEASE_NOTES_URL}>
-        <i />
+        <span className="tag">Beta</span>
         Version {RELEASE.version} is out
       </a>
       <h1>
