@@ -217,35 +217,37 @@ export const CONNECTION_ENVS: { value: ConnectionEnv; label: string }[] = [
   { value: "prd", label: "Production" },
 ];
 
+/** What every saved connection carries, whatever its engine. */
+interface ConnectionCommon {
+  id: string;
+  name: string;
+  environment?: ConnectionEnv | null;
+  safe_mode?: SafeMode;
+  /** Readable by the MCP server (`Rowkery --mcp`). Off by default. */
+  allow_mcp?: boolean;
+  /** Tables the MCP server keeps from agents (`schema.table`). */
+  mcp_hidden_tables?: string[];
+  /** Sharing ends at this Unix ms; unset shares until turned off. */
+  mcp_until?: number | null;
+  /** Don't keep 24 h samples of what MCP calls returned. */
+  mcp_samples_off?: boolean;
+  /** Longest one agent query may run, in seconds (`MCP_TIMEOUTS`); unset is 10. */
+  mcp_timeout_s?: number | null;
+  /** Databases and tables shared with agents (mcpAccess.ts); unset on connections saved before it. */
+  mcp_access?: McpAccess | null;
+  /** Sensitive columns per database, as `schema.table.column`: agents get stand-ins. */
+  masked_columns?: MaskedColumns;
+}
+
 export type ConnectionRecord =
-  | {
+  | (ConnectionCommon & {
       kind: "sqlite";
-      id: string;
-      name: string;
       path: string;
-      environment?: ConnectionEnv | null;
-      safe_mode?: SafeMode;
       /** The bundled sample database (core `sample.rs`). */
       sample?: boolean;
-      /** Readable by the MCP server (`Rowkery --mcp`). Off by default. */
-      allow_mcp?: boolean;
-      /** Tables the MCP server keeps from agents (`schema.table`). */
-      mcp_hidden_tables?: string[];
-      /** Sharing ends at this Unix ms; unset shares until turned off. */
-      mcp_until?: number | null;
-      /** Don't keep 24 h samples of what MCP calls returned. */
-      mcp_samples_off?: boolean;
-      /** Longest one agent query may run, in seconds (`MCP_TIMEOUTS`); unset is 10. */
-      mcp_timeout_s?: number | null;
-      /** Databases and tables shared with agents (mcpAccess.ts); unset on connections saved before it. */
-      mcp_access?: McpAccess | null;
-      /** Sensitive columns per database, as `schema.table.column`: agents get stand-ins. */
-      masked_columns?: MaskedColumns;
-    }
-  | {
+    })
+  | (ConnectionCommon & {
       kind: "postgres";
-      id: string;
-      name: string;
       host: string;
       port: number;
       database: string;
@@ -256,23 +258,23 @@ export type ConnectionRecord =
       ssh?: SshConfig | null;
       /** A Cloud SQL instance, reached through the built-in connector; `host` then only names it. */
       cloud_sql?: CloudSqlConfig | null;
-      environment?: ConnectionEnv | null;
-      safe_mode?: SafeMode;
-      /** Readable by the MCP server (`Rowkery --mcp`). Off by default. */
-      allow_mcp?: boolean;
-      /** Tables the MCP server keeps from agents (`schema.table`). */
-      mcp_hidden_tables?: string[];
-      /** Sharing ends at this Unix ms; unset shares until turned off. */
-      mcp_until?: number | null;
-      /** Don't keep 24 h samples of what MCP calls returned. */
-      mcp_samples_off?: boolean;
-      /** Longest one agent query may run, in seconds (`MCP_TIMEOUTS`); unset is 10. */
-      mcp_timeout_s?: number | null;
-      /** Databases and tables shared with agents (mcpAccess.ts); unset on connections saved before it. */
-      mcp_access?: McpAccess | null;
-      /** Sensitive columns per database, as `schema.table.column`: agents get stand-ins. */
-      masked_columns?: MaskedColumns;
-    };
+    })
+  | (ConnectionCommon & {
+      kind: "mysql";
+      host: string;
+      port: number;
+      /** The default database (`USE`); empty for none: every database shows. */
+      database: string;
+      username: string;
+      ssl_mode?: SslMode;
+      ssl_root_cert?: string | null;
+      ssh?: SshConfig | null;
+      /** The server said MariaDB when the form last tested it: lists show its seal. */
+      mariadb?: boolean;
+    });
+
+/** A connection to a server (Postgres or MySQL), not a file. */
+export type ServerConnection = Exclude<ConnectionRecord, { kind: "sqlite" }>;
 
 /** Per database (SQLite `main`): its sensitive columns as `schema.table.column`. */
 export type MaskedColumns = Record<string, string[]>;
@@ -356,11 +358,12 @@ export function safeFormatCell(value: unknown): string {
 
 export function connectionSubtitle(record: ConnectionRecord): string {
   if (record.kind === "sqlite") return record.path;
-  if (record.cloud_sql) return `${record.cloud_sql.instance}/${record.database} · Cloud SQL`;
-  const base = `${record.host}:${record.port}/${record.database}`;
+  if (record.kind === "postgres" && record.cloud_sql) return `${record.cloud_sql.instance}/${record.database} · Cloud SQL`;
+  // A MySQL connection may name no database: it opens on all of them.
+  const base = `${record.host}:${record.port}${record.database ? `/${record.database}` : ""}`;
   return record.ssh ? `${base} · ssh` : base;
 }
 
-export function engineForConnection(record: ConnectionRecord): "sqlite" | "postgres" {
+export function engineForConnection(record: ConnectionRecord): ConnectionRecord["kind"] {
   return record.kind;
 }

@@ -87,6 +87,10 @@ describe("helpers", () => {
     expect(sqlIdent("users")).toBe("users");
     expect(sqlIdent("Users")).toBe('"Users"');
     expect(sqlIdent('we"ird')).toBe('"we""ird"');
+    // MySQL keeps an unquoted name's case; it quotes with backticks.
+    expect(sqlIdent("Users", "mysql")).toBe("Users");
+    expect(sqlIdent("my table", "mysql")).toBe("`my table`");
+    expect(sqlIdent("a`b", "mysql")).toBe("`a``b`");
   });
   test("queryLabel flattens and truncates", () => {
     expect(queryLabel("select\n  1")).toBe("select 1");

@@ -19,7 +19,9 @@ import {
   type ProbeResult,
 } from "./api";
 import { defaultSslMode, guessEnvironment } from "./connectionEnv";
-import { connectionUrlProblem, HIDDEN_PASSWORD, hidePassword, parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, HIDDEN_PASSWORD, hidePassword, parseConnectionUrl } from "./connectionUrl";
+import { EnginePicker } from "./EnginePicker";
+import type { EngineKind } from "./engines";
 import { commandTip, keysFor } from "./commands";
 import { isMacPlatform } from "./platform";
 import { prefetchOn, setPrefetch } from "./prefetchSwitch";
@@ -70,7 +72,7 @@ interface NewConnectionSheetProps {
   onOpenMcp?: (tab: "activity" | "access" | "connect") => void;
 }
 
-type Engine = "postgres" | "sqlite";
+type Engine = EngineKind;
 type SshAuth = "keyfile" | "password";
 type Probe =
   | { state: "idle" }
@@ -150,9 +152,16 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/** Each server engine's own port, filled in until the port is edited. */
+const DEFAULT_PORT: Record<Exclude<Engine, "sqlite">, string> = { postgres: "5432", mysql: "3306" };
+
+/** A server said it is MariaDB (the probe's message is `MariaDB 11.4.2`). */
+const saysMariadb = (message: string) => /^MariaDB\b/.test(message);
+
 /** Form fields for a saved record. Secrets stay blank: blank keeps the stored ones. */
 function pgFormFor(c: ConnectionRecord): PgForm {
-  if (c.kind !== "postgres") return EMPTY_PG;
+  if (c.kind === "sqlite") return EMPTY_PG;
+  const cloudSql = c.kind === "postgres" ? c.cloud_sql : null;
   return {
     ...EMPTY_PG,
     name: c.name,
@@ -169,10 +178,10 @@ function pgFormFor(c: ConnectionRecord): PgForm {
     sshAuth: c.ssh?.auth_method ?? "keyfile",
     sshKeyPath: c.ssh?.private_key_path ?? EMPTY_PG.sshKeyPath,
     sshTrust: c.ssh?.trust_host ?? true,
-    via: c.cloud_sql ? "cloudsql" : "host",
-    csqlInstance: c.cloud_sql?.instance ?? "",
-    csqlIp: c.cloud_sql?.ip_type ?? "public",
-    csqlCreds: c.cloud_sql?.credentials ?? "gcloud",
+    via: cloudSql ? "cloudsql" : "host",
+    csqlInstance: cloudSql?.instance ?? "",
+    csqlIp: cloudSql?.ip_type ?? "public",
+    csqlCreds: cloudSql?.credentials ?? "gcloud",
   };
 }
 
@@ -237,9 +246,12 @@ export function NewConnectionSheet({
   mcpStats,
   onOpenMcp,
 }: NewConnectionSheetProps) {
-  const [engine, setEngine] = useState<Engine>(editing?.kind ?? "postgres");
+  // A pasted URL picks its engine.
+  const [engine, setEngine] = useState<Engine>(
+    () => editing?.kind ?? (prefill?.url ? parseConnectionUrl(prefill.url)?.engine : undefined) ?? "postgres",
+  );
   const prefilled = useMemo(
-    () => (editing || !prefill ? null : { ...(prefill.url ? parsePostgresUrl(prefill.url) : null), ...prefill.fields }),
+    () => (editing || !prefill ? null : { ...(prefill.url ? parseConnectionUrl(prefill.url)?.form : null), ...prefill.fields }),
     // The sheet's starting point, read once.
     [],
   );
@@ -251,7 +263,7 @@ export function NewConnectionSheet({
   // or set by a pasted string's sslmode; a saved one keeps its own.
   const [pg, setPg] = useState<PgForm>(() => {
     if (editing) return pgFormFor(editing);
-    const form = { ...EMPTY_PG, ...prefilled };
+    const form = { ...EMPTY_PG, ...(engine === "mysql" ? { port: DEFAULT_PORT.mysql } : null), ...prefilled };
     return prefilled?.ssl ? form : { ...form, ssl: defaultSslMode(form.host) };
   });
   // Host and port start on libpq's defaults, drawn dim until edited.
@@ -265,6 +277,8 @@ export function NewConnectionSheet({
     editing?.kind === "sqlite" ? editing.name : "",
   );
   const [probe, setProbe] = useState<Probe>({ state: "idle" });
+  // MySQL: what the server said it is when last tested; a saved record's until then.
+  const [mariadb, setMariadb] = useState(editing?.kind === "mysql" && !!editing.mariadb);
   const [probeMark, setProbeMark] = useState<ProbeMark | null>(null);
   const [locked, setLocked] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -288,10 +302,9 @@ export function NewConnectionSheet({
   const [dirty, setDirty] = useState(() => !!prefilled && !!prefill?.url && !markField);
   const [advanced, setAdvanced] = useState(
     () =>
-      (editing?.kind === "postgres" &&
-        (editing.cloud_sql
-          ? (editing.cloud_sql.ip_type ?? "public") !== "public"
-          : !!editing.ssh || (editing.ssl_mode ?? "prefer") !== "prefer")) ||
+      (editing?.kind === "postgres" && editing.cloud_sql
+        ? (editing.cloud_sql.ip_type ?? "public") !== "public"
+        : !!editing && editing.kind !== "sqlite" && (!!editing.ssh || (editing.ssl_mode ?? "prefer") !== "prefer")) ||
       ADVANCED_FIELDS.has(markField?.field ?? ""),
   );
   const [dragging, setDragging] = useState(false);
@@ -406,7 +419,10 @@ export function NewConnectionSheet({
   const onUrl = (text: string, pasted = false) => {
     setUrl(pasted ? hidePassword(text) : text);
     setUrlProblem(connectionUrlProblem(text));
-    const parsed = parsePostgresUrl(text);
+    const read = parseConnectionUrl(text);
+    // A saved connection keeps its engine: another engine's URL fills nothing.
+    const parsed = read && (!editing || read.engine === engine) ? read.form : null;
+    if (read && parsed && read.engine !== engine) setEngine(read.engine);
     // The hidden password, edited around, isn't a new one.
     if (parsed?.password === HIDDEN_PASSWORD) delete parsed.password;
     if (parsed) {
@@ -453,10 +469,11 @@ export function NewConnectionSheet({
   };
 
   const pgName = pg.name.trim() || (cloud ? instanceShortName(pg.csqlInstance) : "") || pg.database.trim() || pg.host.trim();
+  const server = engine !== "sqlite";
   const liteName = sqliteName.trim() || basename(sqlitePath.trim());
 
   const guess =
-    engine === "postgres"
+    server
       ? cloud
         ? guessEnvironment([pg.name, pg.database, pg.csqlInstance], pg.csqlInstance)
         : guessEnvironment([pg.name, pg.database, pg.host], pg.host)
@@ -471,10 +488,11 @@ export function NewConnectionSheet({
     // Blank keeps the stored key when the saved record already used one.
     const storedKey = editing?.kind === "postgres" && editing.cloud_sql?.credentials === "key";
     if (pg.csqlCreds === "key" && !pg.csqlKey && !storedKey) errors.account = "Choose a key file";
-  } else if (engine === "postgres") {
+  } else if (server) {
     if (!pg.host.trim()) errors.host = "Required";
     if (!validPort(pg.port)) errors.port = "1–65535";
-    if (!pg.database.trim()) errors.database = "Required";
+    // MySQL needn't name one: every database the user can see shows.
+    if (engine === "postgres" && !pg.database.trim()) errors.database = "Required";
     if (!pg.username.trim()) errors.username = "Required";
     if (pg.sshOn) {
       if (!pg.sshHost.trim()) errors.sshHost = "Required";
@@ -484,7 +502,7 @@ export function NewConnectionSheet({
         errors.sshKeyPath = "Required";
       // Blank keeps the stored password when the saved record already used one.
       const storedSshPassword =
-        editing?.kind === "postgres" && editing.ssh?.auth_method === "password";
+        !!editing && editing.kind !== "sqlite" && editing.ssh?.auth_method === "password";
       if (pg.sshAuth === "password" && !pg.sshSecret && !storedSshPassword)
         errors.sshSecret = "Required";
     }
@@ -573,23 +591,23 @@ export function NewConnectionSheet({
           trust_host: pg.sshTrust,
         }
       : null;
+    const where = {
+      id,
+      name: pgName,
+      host: pg.host.trim(),
+      port: Number(pg.port),
+      database: pg.database.trim(),
+      username: pg.username.trim(),
+      ssl_mode: pg.ssl,
+      ssl_root_cert: pg.ssl === "verify" && pg.sslRootCert.trim() ? pg.sslRootCert.trim() : null,
+      ssh,
+      environment: env,
+      safe_mode: safeMode,
+      ...mcpKeep,
+    };
     return [
-      {
-        kind: "postgres",
-        id,
-        name: pgName,
-        host: pg.host.trim(),
-        port: Number(pg.port),
-        database: pg.database.trim(),
-        username: pg.username.trim(),
-        ssl_mode: pg.ssl,
-        ssl_root_cert: pg.ssl === "verify" && pg.sslRootCert.trim() ? pg.sslRootCert.trim() : null,
-        ssh,
-        environment: env,
-        safe_mode: safeMode,
-        allow_mcp: allowMcp,
-        ...mcpKeep,
-      },
+      // MySQL isn't shared with agents in this version (core refuses it too).
+      engine === "mysql" ? { kind: "mysql", ...where, allow_mcp: false, mariadb } : { kind: "postgres", ...where, allow_mcp: allowMcp },
       {
         db_password: pg.password || null,
         ssh_password:
@@ -604,6 +622,8 @@ export function NewConnectionSheet({
   const tuple = (() => {
     const [record, secrets] = build("t");
     const { name: _n, environment: _e, safe_mode: _s, ...where } = record;
+    // What the server is comes from the probe, not what it connects with.
+    if (where.kind === "mysql") delete where.mariadb;
     return JSON.stringify([where, secrets]);
   })();
 
@@ -627,7 +647,7 @@ export function NewConnectionSheet({
     let mark: ProbeMark | null = null;
     if (!res.ok) {
       const x =
-        engine === "postgres"
+        server
           ? await explainConnectError(res.message, {
               host: pg.host.trim(),
               port: Number(pg.port),
@@ -648,6 +668,7 @@ export function NewConnectionSheet({
       if (authFails.current >= AUTH_LOCKOUT) setLocked(true);
     } else {
       authFails.current = 0;
+      if (engine === "mysql") setMariadb(saysMariadb(res.message));
     }
     setProbeMark(mark);
     setProbe({ state: "done", ...res });
@@ -736,6 +757,17 @@ export function NewConnectionSheet({
     }
   };
 
+  const pickEngine = (k: Engine) => {
+    touch();
+    setDirty(false);
+    setShowErrors(false);
+    setEngine(k);
+    // The port follows the engine until it is typed in.
+    if (k !== "sqlite" && !edited.has("port")) setPg((prev) => ({ ...prev, port: DEFAULT_PORT[k] }));
+    // Cloud SQL is Postgres only in this version.
+    if (k === "mysql" && pg.via === "cloudsql") setPg((prev) => ({ ...prev, via: "host" }));
+  };
+
   const failedHere = probe.state === "done" && !probe.ok;
   const probeLine = (
     <div
@@ -761,7 +793,13 @@ export function NewConnectionSheet({
       ) : probe.state === "idle" ? (
         <span className="nc-status idle">
           <span className="conn-dot idle" />
-          {engine === "sqlite" ? "Type or drop a file" : cloud ? "Probes once Instance, Database and User are set" : "Probes once Host, Database and User are set"}
+          {engine === "sqlite"
+            ? "Type or drop a file"
+            : cloud
+              ? "Probes once Instance, Database and User are set"
+              : engine === "mysql"
+                ? "Probes once Host and User are set"
+                : "Probes once Host, Database and User are set"}
         </span>
       ) : probe.state === "done" ? (
         probe.ok ? (
@@ -828,6 +866,8 @@ export function NewConnectionSheet({
           ))}
         </div>
       </div>
+      {/* MySQL isn't shared with agents until its guards land. */}
+      {engine !== "mysql" && (<>
       <div className="nc-group nc-mcp">
         <label className="nc-toggle-row nc-mcp-row">
           <span className="nc-toggle-text">
@@ -896,6 +936,7 @@ export function NewConnectionSheet({
           </button>
         </div>
       )}
+      </>)}
     </section>
   );
 
@@ -917,27 +958,7 @@ export function NewConnectionSheet({
           onClose={close}
           tools={
           /* A saved record keeps its engine. */
-          !editing && (
-            <div className="nc-segment nc-engine" role="tablist" aria-label="Engine">
-              {(["postgres", "sqlite"] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  role="tab"
-                  data-engine-tab={k}
-                  aria-selected={engine === k}
-                  onClick={() => {
-                    touch();
-                    setDirty(false);
-                    setShowErrors(false);
-                    setEngine(k);
-                  }}
-                >
-                  {k === "postgres" ? "Postgres" : "SQLite"}
-                </button>
-              ))}
-            </div>
-          )
+          !editing && <EnginePicker value={engine} mariadb={mariadb} onChange={pickEngine} />
           }
         >
           <h2 data-testid="nc-title" className="insp-title nc-title">
@@ -953,8 +974,9 @@ export function NewConnectionSheet({
             if (!confirmDelete) void onSave();
           }}
         >
-          {engine === "postgres" ? (
+          {server ? (
             <>
+              {engine === "postgres" && (
               <div className="nc-row" data-field="via">
                 <span data-testid="nc-label" className="nc-label">Connect to</span>
                 <div className="nc-segment wide" role="radiogroup" aria-label="Connect to">
@@ -973,6 +995,7 @@ export function NewConnectionSheet({
                   ))}
                 </div>
               </div>
+              )}
               {!cloud && (
               <Field label="Paste a connection URL" name="url" error={urlProblem ?? undefined}>
                 <input
@@ -980,7 +1003,7 @@ export function NewConnectionSheet({
                   data-testid="nc-input"
                   className="nc-input mono"
                   value={url}
-                  placeholder="postgres://user:password@host:5432/database"
+                  placeholder={engine === "mysql" ? "mysql://user:password@host:3306/database" : "postgres://user:password@host:5432/database"}
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(e) => onUrl(e.target.value)}
@@ -1054,14 +1077,15 @@ export function NewConnectionSheet({
                 </div>
                 )}
                 <div className="nc-grid cols-2">
-                  <Field label="Database *" name="database" error={err("database")}>
+                  <Field label={engine === "mysql" ? "Database" : "Database *"} name="database" error={err("database")}>
                     <input
                       data-testid="nc-input"
                       className="nc-input mono"
                       value={pg.database}
+                      placeholder={engine === "mysql" ? "All" : undefined}
                       spellCheck={false}
                       autoComplete="off"
-                      aria-required
+                      aria-required={engine !== "mysql"}
                       onChange={(e) => setField("database", e.target.value)}
                     />
                   </Field>
@@ -1299,6 +1323,8 @@ export function NewConnectionSheet({
                     </div>
                     </>)}
 
+                    {/* Hover prefetch is Postgres only in this version. */}
+                    {engine === "postgres" && (<>
                     <div className="nc-group">
                       <label className="nc-toggle-row">
                         <span className="nc-toggle-label">Prefetch on hover</span>
@@ -1315,6 +1341,7 @@ export function NewConnectionSheet({
                     <p className="nc-hint indent">
                       Reads a table's first 200 rows while the pointer rests on it, so a click shows them at once.
                     </p>
+                    </>)}
                   </div>
                 )}
               </section>

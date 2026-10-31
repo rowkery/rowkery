@@ -288,3 +288,31 @@ test("a 10,000 table catalog stays under a frame per keystroke", () => {
   console.log(`  10k tables: index ${build.toFixed(0)}ms, slowest keystroke ${perKey.toFixed(1)}ms`);
   assert.ok(perKey < 16, `keystroke took ${perKey}ms`);
 });
+
+test("MySQL: backticks, names in the session's database bare, others qualified", () => {
+  const my = buildCompletionIndex(
+    {
+      databases: [
+        {
+          name: "def",
+          schemas: [
+            { name: "shop", tables: [table("Orders", [col("id", "int"), col("order", "int")])] },
+            { name: "audit", tables: [table("events", [col("id", "int")])] },
+          ],
+        },
+      ],
+      search_path: ["shop"],
+      enums: [],
+      functions: [],
+    },
+    "mysql",
+  );
+  const run = (sql) => {
+    const caret = sql.indexOf("|");
+    return complete(sql.slice(0, caret) + sql.slice(caret + 1), caret, my, none, {})?.items ?? [];
+  };
+  assert.equal(run("select * from Ord|").find((i) => i.label === "Orders")?.insert, "Orders");
+  assert.equal(run("select * from even|").find((i) => i.label === "events")?.insert, "audit.events");
+  assert.equal(run("select ord| from Orders").find((i) => i.label === "order")?.insert, "`order`");
+  assert.ok(run("select group_con|").some((i) => i.label === "group_concat"));
+});

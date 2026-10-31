@@ -2,6 +2,7 @@ import type { EditTable, RowChange } from "./api";
 import { decimalKey, decimalOf } from "./decimal";
 import { valueText } from "./resultStore";
 import type { ColumnNode, EnumNode, SafeMode, TableNode, Value } from "./types";
+import type { EngineKind } from "./engines";
 
 /**
  * A table tab's staged edits: nothing reaches the database until Commit.
@@ -423,8 +424,12 @@ export interface ColumnEditor {
 
 const unqualify = (name: string) => name.replace(/^.*\./, "").replace(/^"|"$/g, "");
 
-/** A catalog column's editor (Postgres `format_type` names, SQLite declared types). */
-export function columnEditor(column: ColumnNode, engine: "postgres" | "sqlite", enums: EnumNode[]): ColumnEditor | null {
+/**
+ * A catalog column's editor (Postgres `format_type` names, SQLite declared
+ * types). None on MySQL yet: its edits come in a later version.
+ */
+export function columnEditor(column: ColumnNode, engine: EngineKind, enums: EnumNode[]): ColumnEditor | null {
+  if (engine === "mysql") return null;
   const t = column.type_name.trim().toLowerCase();
   const base = { nullable: column.nullable, default: column.default ?? null };
   if (engine === "sqlite") {

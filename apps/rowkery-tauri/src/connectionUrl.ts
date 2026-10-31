@@ -7,13 +7,67 @@ import type { PgForm } from "./NewConnectionSheet";
  * behind a `DATABASE_URL=` (or `export …=`) prefix.
  */
 export function parsePostgresUrl(text: string): Partial<PgForm> | null {
-  let trimmed = text.trim();
-  // DATABASE_URL=postgres://…, export PGURL="…"
-  const assign = /^(?:export\s+)?[A-Z_][A-Z0-9_]*=(.*)$/s.exec(trimmed);
-  if (assign) trimmed = unquote(assign[1].trim());
+  const trimmed = unassign(text);
+  if (MYSQL_SCHEME.test(trimmed)) return null;
   if (/^postgres(ql)?:\/\//i.test(trimmed)) return parseUrl(trimmed);
   if (/^psql(\s|$)/.test(trimmed)) return parsePsql(trimmed);
   return parseKeywords(trimmed);
+}
+
+/** `mysql://`, `mysql2://` (Rails), `mariadb://`, `jdbc:mysql://` and `jdbc:mariadb://`. */
+const MYSQL_SCHEME = /^(?:jdbc:)?(?:mysql2?|mariadb):\/\//i;
+/** Any scheme a connection URL here may start with. */
+const SCHEME = /^(?:postgres(?:ql)?|(?:jdbc:)?(?:mysql2?|mariadb)):\/\//i;
+
+/** `DATABASE_URL=postgres://…`, `export PGURL="…"`: the value. */
+function unassign(text: string): string {
+  const trimmed = text.trim();
+  const assign = /^(?:export\s+)?[A-Z_][A-Z0-9_]*=(.*)$/s.exec(trimmed);
+  return assign ? unquote(assign[1].trim()) : trimmed;
+}
+
+/** `mysql://user:password@host:3306/database` → form fields, or null when the text isn't one. */
+export function parseMysqlUrl(text: string): Partial<PgForm> | null {
+  const trimmed = unassign(text);
+  if (!MYSQL_SCHEME.test(trimmed)) return null;
+  const read = readUrl(trimmed);
+  if (!read || read.socket) return null;
+  const { url } = read;
+  const out: Partial<PgForm> = {};
+  const host = decode(url.hostname);
+  if (host) out.host = host;
+  out.port = url.port || "3306";
+  // The first path segment; `/db?…` and `/db/` alike.
+  const db = decode(url.pathname.replace(/^\//, "").split("/")[0]);
+  if (db) out.database = db;
+  const user = url.searchParams.get("user") ?? (url.username ? decode(url.username) : "");
+  if (user) out.username = user;
+  const password = url.searchParams.get("password") ?? (url.password ? decode(url.password) : "");
+  if (password) out.password = password;
+  const ssl = mysqlSsl(url.searchParams);
+  if (ssl) out.ssl = ssl;
+  return out.host ? out : null;
+}
+
+/** `ssl-mode=REQUIRED` (MySQL's own), `sslMode=…` (JDBC), `require_ssl=true` (mysql_async), `ssl=true`. */
+function mysqlSsl(q: URLSearchParams): PgForm["ssl"] | undefined {
+  const mode = (q.get("ssl-mode") ?? q.get("sslMode") ?? q.get("sslmode") ?? "").toUpperCase();
+  if (mode === "DISABLED") return "disable";
+  if (mode === "PREFERRED") return "prefer";
+  if (mode === "REQUIRED") return "require";
+  if (mode === "VERIFY_CA" || mode === "VERIFY_IDENTITY") return "verify";
+  const on = (q.get("require_ssl") ?? q.get("ssl") ?? q.get("useSSL") ?? "").toLowerCase();
+  if (on === "true" || on === "1") return "require";
+  if (on === "false" || on === "0") return "disable";
+  return undefined;
+}
+
+/** Which engine a pasted connection string is for, with its fields; null when it isn't one. */
+export function parseConnectionUrl(text: string): { engine: "postgres" | "mysql"; form: Partial<PgForm> } | null {
+  const mysql = parseMysqlUrl(text);
+  if (mysql) return { engine: "mysql", form: mysql };
+  const pg = parsePostgresUrl(text);
+  return pg ? { engine: "postgres", form: pg } : null;
 }
 
 function unquote(s: string): string {
@@ -73,7 +127,7 @@ function userEnds(rest: string): number[] {
  */
 function readUrl(trimmed: string): { url: URL; socket: boolean; at: number } | null {
   // Non-special schemes parse inconsistently across engines; borrow http's rules.
-  const rest = trimmed.replace(/^postgres(ql)?:\/\//i, "");
+  const rest = trimmed.replace(SCHEME, "");
   const read = (at: number) => {
     const user = at < 0 ? "" : `${encodeUser(rest.slice(0, at))}@`;
     const after = rest.slice(at + 1);
@@ -215,8 +269,8 @@ export const HIDDEN_PASSWORD = "•••";
  * keyword string's (`password=…`). Text that holds none comes back as it was.
  */
 export function hidePassword(text: string): string {
-  if (/postgres(ql)?:\/\//i.test(text)) {
-    return text.replace(/(postgres(?:ql)?:\/\/)([^"'\n]*)/gi, (_, scheme: string, line: string) => {
+  if (/(?:postgres(?:ql)?|mysql2?|mariadb):\/\//i.test(text)) {
+    return text.replace(/((?:postgres(?:ql)?|mysql2?|mariadb):\/\/)([^"'\n]*)/gi, (_, scheme: string, line: string) => {
       // A password may hold a space (the parse reads one), so the URL runs
       // to the end of the line when only the userinfo has one; otherwise it
       // ends at the first space.
@@ -233,13 +287,13 @@ export function hidePassword(text: string): string {
 }
 
 /**
- * Why a pasted `postgres://` URL can't be read, or null when it can (or
+ * Why a pasted `postgres://` or `mysql://` URL can't be read, or null when it can (or
  * isn't one).
  */
 export function connectionUrlProblem(text: string): string | null {
   const t = text.trim();
-  const url = /^(?:(?:export\s+)?[A-Z_][A-Z0-9_]*=["']?)?postgres(?:ql)?:\/\/(\S+)/i.exec(t);
-  if (!url || parsePostgresUrl(t)) return null;
+  const url = /^(?:(?:export\s+)?[A-Z_][A-Z0-9_]*=["']?)?(?:postgres(?:ql)?|(?:jdbc:)?(?:mysql2?|mariadb)):\/\/(\S+)/i.exec(t);
+  if (!url || parseConnectionUrl(t)) return null;
   const at = url[1].lastIndexOf("@");
   return at > 0 && url[1].slice(0, at).includes("/") ? "A / in the password needs %2F" : "This URL can't be read";
 }

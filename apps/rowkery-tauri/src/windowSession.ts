@@ -14,6 +14,8 @@ export interface WindowSession {
   schema: SchemaCatalog | null;
   /** From the last connect: "16.4" for Postgres, the SQLite library version. */
   serverVersion: string | null;
+  /** A MySQL window's server: MySQL or MariaDB. */
+  serverFlavor?: "MySQL" | "MariaDB" | null;
   connectMs: number | null;
   error: string | null;
   /** When `schema` was loaded (ms since epoch). */

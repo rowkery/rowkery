@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { ResultRows } from "./resultStore";
+import type { EngineKind } from "./engines";
 import { summarizeRows } from "./columnProfile";
 import type { TableCount } from "./rowCounts";
 import type {
@@ -998,7 +999,7 @@ export async function cancelQuery(windowId: string, tabId: number): Promise<void
  */
 export async function countRows(
   windowId: string,
-  engine: "postgres" | "sqlite",
+  engine: EngineKind,
   schema: string,
   table: string,
   filter: string | null,

@@ -183,7 +183,7 @@ export function ConnectionPicker({
                   className={`conn-option${i === cursor ? " cursor" : ""}`}
                   onClick={() => onPick(c.id)}
                 >
-                  <EngineTile kind={c.kind}>
+                  <EngineTile kind={c.kind} mariadb={c.kind === "mysql" && c.mariadb}>
                     <span
                       className={
                         isActive

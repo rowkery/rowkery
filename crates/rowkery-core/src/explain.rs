@@ -79,6 +79,13 @@ fn quoted(text: &str, after: &str) -> Option<String> {
     Some(rest[..rest.find('"')?].to_string())
 }
 
+/// The `'…'` name right after `after` (MySQL's quoting), if there is one.
+fn single_quoted(text: &str, after: &str) -> Option<String> {
+    let rest = text.split_once(after)?.1.trim_start();
+    let rest = rest.strip_prefix('\'')?;
+    Some(rest[..rest.find('\'')?].to_string())
+}
+
 /// Reads `raw` (most specific class first: the tunnel's causes before the
 /// generic "Could not open tunnel" around them).
 pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
@@ -170,6 +177,34 @@ pub fn explain_connect_error(raw: &str, t: &Target) -> ConnectExplanation {
                 t.username
             )),
             Some("password"),
+        );
+    }
+    // MySQL and MariaDB (db/mysql.rs words 1045 and 1049; 1044 comes as
+    // the server says it): a database the user may not use.
+    if says("access denied for user") {
+        if let Some(db) = single_quoted(raw, "to database") {
+            return e(
+                "database",
+                Some(format!("{} may not use the database {db}.", t.username)),
+                Some("database"),
+            );
+        }
+    }
+    if says("the server rejected the password for") || says("access denied for user") {
+        return e(
+            "auth",
+            Some(format!(
+                "The server rejected the password for {}.",
+                t.username
+            )),
+            Some("password"),
+        );
+    }
+    if let Some(db) = single_quoted(raw, "There's no database named") {
+        return e(
+            "database",
+            Some(format!("database \"{db}\" does not exist")),
+            Some("database"),
         );
     }
     if let Some(role) = quoted(raw, "role") {
@@ -370,6 +405,34 @@ mod tests {
     fn class(raw: &str, t: &Target) -> (&'static str, Option<String>, Option<&'static str>) {
         let x = explain_connect_error(raw, t);
         (x.class, x.cause, x.field)
+    }
+
+    #[test]
+    fn mysql_logins_mark_their_field() {
+        assert_eq!(
+            class("The server rejected the password for 'app'", &T),
+            (
+                "auth",
+                Some("The server rejected the password for app.".into()),
+                Some("password")
+            )
+        );
+        assert_eq!(
+            class("There's no database named 'shop' on this server", &T),
+            (
+                "database",
+                Some("database \"shop\" does not exist".into()),
+                Some("database")
+            )
+        );
+        assert_eq!(
+            class("Access denied for user 'app'@'%' to database 'mysql'", &T),
+            (
+                "database",
+                Some("app may not use the database mysql.".into()),
+                Some("database")
+            )
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
-import { parsePostgresUrl } from "./connectionUrl";
+import { parseConnectionUrl } from "./connectionUrl";
+import { needsQuoting } from "./sqlKeywords";
 import type { SidebarSchema, SidebarTable } from "./schemaTree";
 import { formatRowCount } from "./types";
 
@@ -346,7 +347,7 @@ export function pastedItem(raw: string): PaletteItem | null {
   if (SQLITE_PATH.test(text)) {
     return item("connections", "paste:file", "Open SQLite file", { kind: "sqlite-path", path: text }, { detail: text });
   }
-  const form = parsePostgresUrl(text);
+  const form = parseConnectionUrl(text)?.form;
   if (!form || !(form.host || form.database)) return null;
   const where = [form.host, form.database].filter(Boolean).join("/");
   return item("connections", "paste:url", "New connection from URL", { kind: "connection-url", url: text }, { detail: where });
@@ -377,7 +378,10 @@ export function idleBuild<T>(build: () => T): { get: () => T; cancel: () => void
 }
 
 /** Double-quote an identifier only when Postgres/SQLite would need it. */
-export function sqlIdent(name: string): string {
+export function sqlIdent(name: string, engine?: string): string {
+  // MySQL keeps a name's case unquoted, and quotes with backticks (its
+  // reserved words too: they aren't names there unquoted).
+  if (engine === "mysql") return needsQuoting(name.toLowerCase()) ? `\`${name.replace(/`/g, "``")}\`` : name;
   return /^[a-z_][a-z0-9_$]*$/.test(name)
     ? name
     : `"${name.replace(/"/g, '""')}"`;

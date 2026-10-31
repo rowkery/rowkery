@@ -458,6 +458,7 @@ const STATEMENT_START = [
 ];
 const PG_STATEMENT_START = ["SHOW", "VACUUM", "ANALYZE", "COPY", "SET"];
 const SQLITE_STATEMENT_START = ["PRAGMA", "VACUUM", "ATTACH"];
+const MYSQL_STATEMENT_START = ["SHOW", "DESCRIBE", "USE", "ANALYZE", "SET", "CALL"];
 
 const AFTER_FROM = [
   "WHERE",
@@ -548,7 +549,7 @@ const COMMON: Record<string, number> = {
 };
 
 /** Keywords that start a statement, counted apart from the same word mid-statement (SET). */
-const STARTERS = new Set([...STATEMENT_START, ...PG_STATEMENT_START, ...SQLITE_STATEMENT_START]);
+const STARTERS = new Set([...STATEMENT_START, ...PG_STATEMENT_START, ...SQLITE_STATEMENT_START, ...MYSQL_STATEMENT_START]);
 const PHRASES = new Set([...STARTERS, ...AFTER_FROM, ...AFTER_JOIN, ...EXPR_KEYWORDS, "SET", "VALUES", "DEFAULT VALUES"]);
 
 /** The key a keyword's use is counted under: `^SELECT` at a statement's start. */
@@ -742,10 +743,10 @@ function relationDetail(r: RelEntry, showSchema: boolean): string {
 
 /** `schema.name` when a bare name would resolve to something else. */
 function relationInsert(ctx: Ctx, r: RelEntry, qualified: boolean): string {
-  if (qualified) return sqlIdent(r.name);
+  if (qualified) return sqlIdent(r.name, ctx.index.engine);
   const bare = resolveRelation(ctx.index, null, r.name);
-  if (r.pathRank >= 99 || bare !== r) return `${sqlIdent(r.schema)}.${sqlIdent(r.name)}`;
-  return sqlIdent(r.name);
+  if (r.pathRank >= 99 || bare !== r) return `${sqlIdent(r.schema, ctx.index.engine)}.${sqlIdent(r.name, ctx.index.engine)}`;
+  return sqlIdent(r.name, ctx.index.engine);
 }
 
 function addRelations(ctx: Ctx, list: RelEntry[], qualified: boolean, related: Map<RelEntry, string>) {
@@ -784,7 +785,7 @@ function addColumns(ctx: Ctx, ref: Ref, qualify: string | null, bonus: number, s
         kind: "column",
         // A name two tables share shows the alias it will be written with.
         label: qualify ? `${qualify}.${c.name}` : c.name,
-        insert: qualify ? `${sqlIdent(qualify)}.${sqlIdent(c.name)}` : sqlIdent(c.name),
+        insert: qualify ? `${sqlIdent(qualify, ctx.index.engine)}.${sqlIdent(c.name, ctx.index.engine)}` : sqlIdent(c.name, ctx.index.engine),
         detail: showOwner && owner && !qualify ? (type ? `${type} · ${owner}` : owner) : type,
         key: pk.has(c.name) ? "pk" : fk.has(c.name) ? "fk" : undefined,
       },
@@ -807,8 +808,8 @@ function addFunctions(ctx: Ctx) {
 }
 
 function addFunction(ctx: Ctx, f: FnEntry) {
-  const name = f.builtin ? f.name : sqlIdent(f.name);
-  const qualified = f.schema && !f.builtin && f.schema !== "public" ? `${sqlIdent(f.schema)}.${name}` : name;
+  const name = f.builtin ? f.name : sqlIdent(f.name, ctx.index.engine);
+  const qualified = f.schema && !f.builtin && f.schema !== "public" ? `${sqlIdent(f.schema, ctx.index.engine)}.${name}` : name;
   add(
     ctx,
     {
@@ -848,7 +849,7 @@ function joinConditions(ctx: Ctx, joined: Ref, others: Ref[]) {
         ? [link.fk.ref_columns, link.fk.columns]
         : [link.fk.columns, link.fk.ref_columns];
       const text = mine
-        .map((col, i) => `${sqlIdent(a)}.${sqlIdent(col)} = ${sqlIdent(b)}.${sqlIdent(theirs[i] ?? col)}`)
+        .map((col, i) => `${sqlIdent(a, ctx.index.engine)}.${sqlIdent(col, ctx.index.engine)} = ${sqlIdent(b, ctx.index.engine)}.${sqlIdent(theirs[i] ?? col, ctx.index.engine)}`)
         .join(ctx.upperKeywords ? " AND " : " and ");
       add(ctx, { kind: "join", label: text, insert: text, detail: "foreign key" }, 600, text.toLowerCase());
     }
@@ -963,7 +964,7 @@ export function complete(
       case "none":
         return null;
       case "statement": {
-        const extra = index.engine === "postgres" ? PG_STATEMENT_START : SQLITE_STATEMENT_START;
+        const extra = { postgres: PG_STATEMENT_START, sqlite: SQLITE_STATEMENT_START, mysql: MYSQL_STATEMENT_START }[index.engine];
         for (const k of [...STATEMENT_START, ...extra]) keyword(ctx, k, 0, true);
         break;
       }
@@ -973,12 +974,12 @@ export function complete(
         break;
       case "relation": {
         for (const c of ctes)
-          add(ctx, { kind: "cte", label: c.name, insert: sqlIdent(c.name), detail: "CTE" }, 300);
+          add(ctx, { kind: "cte", label: c.name, insert: sqlIdent(c.name, ctx.index.engine), detail: "CTE" }, 300);
         const scope = visible.filter((r) => r.rel);
         addRelations(ctx, index.relations, false, context.join ? relatedTables(ctx, scope) : new Map());
         if (index.schemas.length > 1 && ctx.q) {
           for (const s of index.schemas)
-            add(ctx, { kind: "schema", label: s, insert: `${sqlIdent(s)}.`, detail: "schema" }, -40);
+            add(ctx, { kind: "schema", label: s, insert: `${sqlIdent(s, ctx.index.engine)}.`, detail: "schema" }, -40);
         }
         break;
       }
@@ -1005,7 +1006,7 @@ export function complete(
         for (const c of refColumns(into)) {
           if (listed.has(c.name.toLowerCase())) continue;
           const required = !c.nullable && !c.default;
-          add(ctx, { kind: "column", label: c.name, insert: sqlIdent(c.name), detail: shortType(c.type_name) }, required ? 150 : 100);
+          add(ctx, { kind: "column", label: c.name, insert: sqlIdent(c.name, ctx.index.engine), detail: shortType(c.type_name) }, required ? 150 : 100);
         }
         break;
       }
@@ -1033,7 +1034,7 @@ export function complete(
           }
           const name = r.alias ?? r.name;
           if (name)
-            add(ctx, { kind: "alias", label: name, insert: sqlIdent(name), detail: r.alias && r.name ? r.name : "table" }, 120);
+            add(ctx, { kind: "alias", label: name, insert: sqlIdent(name, ctx.index.engine), detail: r.alias && r.name ? r.name : "table" }, 120);
         }
         addFunctions(ctx);
         // Two letters first, or one for a keyword you run a lot (`select * f` → FROM).
@@ -1174,7 +1175,7 @@ export function expandStar(
   const qualify = qual !== null || chosen.length > 1;
   const names = chosen.flatMap((r) =>
     refColumns(r).map((c) =>
-      qualify ? `${sqlIdent(r.alias ?? r.name)}.${sqlIdent(c.name)}` : sqlIdent(c.name),
+      qualify ? `${sqlIdent(r.alias ?? r.name, index.engine)}.${sqlIdent(c.name, index.engine)}` : sqlIdent(c.name, index.engine),
     ),
   );
   return names.length ? { from, to: caret, insert: names.join(", ") } : null;

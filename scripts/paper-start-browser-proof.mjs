@@ -191,7 +191,7 @@ for (const dark of [false, true]) {
     }),
   );
   const cardText = cards.map((c) => `${c.id}:${c.sub}:${c.key}`).join(" | ");
-  check(cardText === "new:Postgres or SQLite:⌘N | file:or drop one anywhere:⌘O | paste:fills the form for you:⌘V | sample:six tables, one view:↵", `${theme}: four cards with sub-lines and registry keys (${cardText})`);
+  check(cardText === "new:Postgres, MySQL or SQLite:⌘N | file:or drop one anywhere:⌘O | paste:fills the form for you:⌘V | sample:six tables, one view:↵", `${theme}: four cards with sub-lines and registry keys (${cardText})`);
   const fill = await colorOf("--fill");
   check(cards.every((c) => c.border === "rgba(0, 0, 0, 0)" && c.bg === fill && c.radius === "14px" && Math.abs(c.w - 275) < 1), `${theme}: filled with no border, radius 14, two by two`);
   const lists = await page.$$eval(`${ws} :is([data-saved-section], [data-found-section]) > ul`, (els) =>

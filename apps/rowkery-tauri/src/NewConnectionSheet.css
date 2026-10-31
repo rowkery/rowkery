@@ -8,15 +8,77 @@
   display: contents;
 }
 
-.nc-segment.nc-engine {
-  padding: 2px;
+/* The engine: a chip with the logo that opens a menu (Mock A, 2026-10-31). */
+.nc-engine-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px 0 4px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--hover);
+  color: var(--text);
+  font: 500 12px var(--sans);
+  cursor: default;
 }
 
-.nc-segment.nc-engine button {
+.nc-engine-tile {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
   flex: none;
-  height: 22px;
-  padding: 0 9px;
-  font-size: 11.5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--engine) 16%, transparent);
+  color: var(--engine);
+}
+
+.nc-engine-chev {
+  margin-left: 2px;
+  color: var(--mute);
+}
+
+.nc-engine-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 200px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border-radius: var(--r-md);
+  background: var(--bg);
+  box-shadow: var(--pop);
+  transform-origin: calc(100% - 24px) -4px;
+  animation: pop-in 0.13s var(--ease-out);
+}
+
+.nc-engine-menu li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font: 400 13px var(--sans);
+  cursor: default;
+}
+
+.nc-engine-menu li[data-at] {
+  background: var(--hover);
+}
+
+.nc-engine-check {
+  margin-left: auto;
+  color: var(--mute);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nc-engine-menu {
+    animation: none;
+  }
 }
 
 .nc-body {

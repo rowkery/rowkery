@@ -20,7 +20,7 @@ import {
   TEST_PG_SECRETS,
   type LocalServer,
 } from "./api";
-import { connectionUrlProblem, parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, parseConnectionUrl } from "./connectionUrl";
 import { CatalogUpdates, type CatalogUpdate } from "./catalogUpdates";
 import { applyTableCounts } from "./rowCounts";
 import { ConnectionSwitcher } from "./ConnectionSwitcher";
@@ -160,7 +160,7 @@ function gettingStartedTab(): SavedTab {
       "SELECT name, city, opened_on",
       "FROM kiosks ORDER BY opened_on DESC;",
       "",
-      `-- Your own database: ${mod}N, or paste a postgres:// URL.`,
+      `-- Your own database: ${mod}N, or paste a database URL.`,
       `-- ${mod}K "Reset the sample database" puts this file back.`,
       "",
     ].join("\n"),
@@ -432,6 +432,7 @@ function App() {
         state: "connecting",
         schema: null,
         serverVersion: null,
+        serverFlavor: null,
         error: null,
       });
       const started = performance.now();
@@ -446,6 +447,7 @@ function App() {
           database: opened.database,
           schema: opened.catalog,
           serverVersion: opened.server_version ?? null,
+          serverFlavor: opened.server_flavor ?? null,
           state: "connected",
           connectMs: performance.now() - started,
           schemaAt: Date.now(),
@@ -456,7 +458,7 @@ function App() {
         void fillCountsRef.current(windowId, connectionId, seq);
         // This window's bastion, trusted on a first connect: say which key was saved.
         const conn = connectionsRef.current.find((c) => c.id === connectionId);
-        const ssh = conn?.kind === "postgres" ? conn.ssh : null;
+        const ssh = conn && conn.kind !== "sqlite" ? conn.ssh : null;
         if (ssh)
           void takeTrustedHostKey(ssh.host, ssh.port)
             .then((fingerprint) => fingerprint && showToast(`Trusted ${ssh.host}'s SSH key`, fingerprint))
@@ -1156,7 +1158,7 @@ function App() {
   const pasteConnection = async (text?: string, openAnyway = false) => {
     const t = text ?? (await readClipboardText().catch(() => ""));
     // One it can't read opens too, to say why.
-    if (parsePostgresUrl(t) || connectionUrlProblem(t)) openSheet({ url: t.trim() });
+    if (parseConnectionUrl(t) || connectionUrlProblem(t)) openSheet({ url: t.trim() });
     else if (openAnyway) openSheet(null);
   };
   const editConnection = (id: string, mark?: { field: string; message: string }) => {
@@ -1174,8 +1176,8 @@ function App() {
     if (!after) return;
     // A window keeps its database only while it still points at the same server.
     const sameServer =
-      before?.kind === "postgres" &&
-      after.kind === "postgres" &&
+      before && before.kind !== "sqlite" &&
+      after.kind === before.kind &&
       before.host === after.host &&
       before.port === after.port;
     for (const w of windowsRef.current) {
@@ -1327,7 +1329,7 @@ function App() {
       pasteSeen.current = true;
       if (newConnOpen || report || isTextField(e.target)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (!parsePostgresUrl(text) && !connectionUrlProblem(text)) return;
+      if (!parseConnectionUrl(text) && !connectionUrlProblem(text)) return;
       e.preventDefault();
       actionsRef.current.pasteConnection(text);
     };

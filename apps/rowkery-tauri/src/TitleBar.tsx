@@ -1,5 +1,5 @@
 import { useRef, type CSSProperties, type PointerEvent as ReactPointerEvent, type Ref } from "react";
-import { ENGINES } from "./engines";
+import { connectionLook } from "./engines";
 import { PenguinMark } from "./PenguinMark";
 import { GridMenu, useContextMenu } from "./GridMenu";
 import { railTileMenu } from "./contextMenus";
@@ -92,7 +92,7 @@ export function TitleBar({
           const env = conn?.environment ?? undefined;
           const envLabel = CONNECTION_ENVS.find((e) => e.value === env)?.label;
           const name = conn?.name ?? "New window";
-          const engine = conn ? ENGINES[conn.kind] : null;
+          const engine = conn ? connectionLook(conn, w.serverFlavor) : null;
           const on = w.id === activeId;
           const agent = !!conn && !!mcpRecent?.has(conn.id);
           // The shown pill marks a shared connection; any pill marks one an agent just read.

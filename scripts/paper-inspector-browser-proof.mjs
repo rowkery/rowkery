@@ -418,7 +418,8 @@ await shot("connect-dark");
 await setTheme("light");
 
 // SQLite: the tab, a chosen file, its probe.
-await page.click("[data-engine-tab=sqlite]");
+await page.click("[data-engine-pick]");
+await page.click("[data-engine-option=sqlite]");
 await page.click("[data-choose-file]");
 await page.waitForSelector('[data-probe="ok"]');
 check((await text("[data-probe]")).startsWith("Opened in"), `SQLite: the chosen file opens (${await text("[data-probe]")})`);

@@ -20,7 +20,7 @@ export function formatTarget(
   return { start: touched[0].start, end: touched[touched.length - 1].end };
 }
 
-export type FormatDialect = "postgresql" | "sqlite";
+export type FormatDialect = "postgresql" | "sqlite" | "mysql" | "mariadb";
 
 export type FormatResult = { ok: true; sql: string } | { ok: false; error: string };
 
@@ -34,7 +34,7 @@ export async function formatSql(text: string, range: CharRange, dialect: FormatD
   try {
     const f = await import("sql-formatter");
     const out = f.formatDialect(text.slice(range.start, range.end), {
-      dialect: dialect === "sqlite" ? f.sqlite : f.postgresql,
+      dialect: { postgresql: f.postgresql, sqlite: f.sqlite, mysql: f.mysql, mariadb: f.mariadb }[dialect],
       indentStyle: "tabularLeft",
       keywordCase: "upper",
       functionCase: "lower",
