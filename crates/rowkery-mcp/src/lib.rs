@@ -291,6 +291,7 @@ fn engine(record: &ConnectionRecord) -> EngineKind {
     match record {
         ConnectionRecord::Sqlite(_) => EngineKind::Sqlite,
         ConnectionRecord::Postgres(_) => EngineKind::Postgres,
+        ConnectionRecord::Mysql(_) => EngineKind::Mysql,
     }
 }
 
@@ -673,6 +674,8 @@ fn default_schema(record: &ConnectionRecord) -> &'static str {
     match record {
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
+        // Never reached: a MySQL target is refused when it is resolved.
+        ConnectionRecord::Mysql(_) => "",
     }
 }
 
@@ -681,7 +684,8 @@ fn default_schema(record: &ConnectionRecord) -> &'static str {
 const MAX_TABLES: usize = 500;
 
 /// MySQL isn't shared with agents until its guards are in.
-const MYSQL_NOT_SHARED: &str = "Refused: Rowkery doesn't share MySQL connections with agents yet.";
+pub(crate) const MYSQL_NOT_SHARED: &str =
+    "Refused: Rowkery doesn't share MySQL connections with agents yet.";
 
 async fn list_tables(
     store: &mut Store,

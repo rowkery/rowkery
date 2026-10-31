@@ -6027,6 +6027,7 @@ fn set_safe_mode(bridge: &super::CoreBridge, id: &str, mode: SafeMode) -> Result
         .expect("saved");
     match &mut record {
         ConnectionRecord::Postgres(pg) => pg.safe_mode = mode,
+        ConnectionRecord::Mysql(my) => my.safe_mode = mode,
         ConnectionRecord::Sqlite(lite) => lite.safe_mode = mode,
     }
     CoreBridge::upsert_connection(bridge, record, ConnectionSecrets::default())
@@ -7228,3 +7229,6 @@ fn postgres_apply_changes_stops_when_a_cascade_reaches_other_tables() {
         run(sql);
     }
 }
+
+#[cfg(feature = "mysql-integration")]
+mod mysql;

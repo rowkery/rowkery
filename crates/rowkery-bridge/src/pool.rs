@@ -557,13 +557,7 @@ impl<S: PoolSession> SessionPool<S> {
                     && p.session.holds()
                     && (p.session.is_closed() || !at_risk(&p.session))
             })
-            .min_by_key(|(_, p)| {
-                (
-                    !p.session.is_closed(),
-                    p.session.has_cursor(),
-                    p.last_used,
-                )
-            })
+            .min_by_key(|(_, p)| (!p.session.is_closed(), p.session.has_cursor(), p.last_used))
             .map(|(k, _)| k.clone())?;
         let p = self.parked.remove(&key)?;
         let (w, slot) = key;
@@ -1028,8 +1022,7 @@ pub(crate) async fn ping_idle<S: PoolSession>(
         .map(|mut p| p.take_idle(window_id, idle))
         .unwrap_or_default();
     let checks = taken.into_iter().map(|(slot, mut parked, id)| async move {
-        let alive =
-            !parked.session.is_closed() && parked.session.ping(PING_TIMEOUT).await;
+        let alive = !parked.session.is_closed() && parked.session.ping(PING_TIMEOUT).await;
         (slot, parked, id, alive)
     });
     // A dead one's slot is handed to a run that comes for it; replacements
@@ -1141,7 +1134,12 @@ pub(crate) fn give_back<S: PoolSession>(
 
 /// Drops a tab's session that can't be kept; if it may have held the user's
 /// transaction, the tab's next statement says it was lost.
-pub(crate) fn drop_lost<S: PoolSession>(pool: &SharedPool<S>, window_id: &str, slot: Slot, session: S) {
+pub(crate) fn drop_lost<S: PoolSession>(
+    pool: &SharedPool<S>,
+    window_id: &str,
+    slot: Slot,
+    session: S,
+) {
     if let Ok(mut p) = pool.lock() {
         p.note_lost(window_id, slot, &session);
     }

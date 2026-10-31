@@ -41,6 +41,7 @@ pub fn databases(record: &ConnectionRecord) -> Option<Vec<&str>> {
 pub fn default_database(record: &ConnectionRecord) -> Option<String> {
     let own = match record {
         ConnectionRecord::Postgres(pg) => pg.database.as_str(),
+        ConnectionRecord::Mysql(my) => my.database.as_str(),
         ConnectionRecord::Sqlite(_) => "main",
     };
     match databases(record) {

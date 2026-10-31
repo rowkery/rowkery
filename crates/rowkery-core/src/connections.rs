@@ -1,4 +1,4 @@
-//! Saved connection records (SQLite + Postgres).
+//! Saved connection records (SQLite, Postgres, MySQL / MariaDB).
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +10,7 @@ use crate::secrets::ConnectionSecrets;
 pub enum ConnectionRecord {
     Sqlite(SqliteConnection),
     Postgres(PostgresConnection),
+    Mysql(MysqlConnection),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +282,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => &c.id,
             ConnectionRecord::Postgres(c) => &c.id,
+            ConnectionRecord::Mysql(c) => &c.id,
         }
     }
 
@@ -288,6 +290,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => &c.name,
             ConnectionRecord::Postgres(c) => &c.name,
+            ConnectionRecord::Mysql(c) => &c.name,
         }
     }
 
@@ -295,6 +298,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(_) => "sqlite",
             ConnectionRecord::Postgres(_) => "postgres",
+            ConnectionRecord::Mysql(_) => "mysql",
         }
     }
 
@@ -302,6 +306,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => c.environment,
             ConnectionRecord::Postgres(c) => c.environment,
+            ConnectionRecord::Mysql(c) => c.environment,
         }
     }
 
@@ -309,6 +314,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => c.safe_mode,
             ConnectionRecord::Postgres(c) => c.safe_mode,
+            ConnectionRecord::Mysql(c) => c.safe_mode,
         }
     }
 
@@ -318,6 +324,8 @@ impl ConnectionRecord {
         let (on, until) = match self {
             ConnectionRecord::Sqlite(c) => (c.allow_mcp, c.mcp_until),
             ConnectionRecord::Postgres(c) => (c.allow_mcp, c.mcp_until),
+            // Not shared with agents until its guards are in.
+            ConnectionRecord::Mysql(_) => (false, None),
         };
         on && until.is_none_or(|t| now_ms() < t)
     }
@@ -327,6 +335,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => !c.mcp_samples_off,
             ConnectionRecord::Postgres(c) => !c.mcp_samples_off,
+            ConnectionRecord::Mysql(c) => !c.mcp_samples_off,
         }
     }
 
@@ -335,6 +344,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => c.mcp_timeout_s,
             ConnectionRecord::Postgres(c) => c.mcp_timeout_s,
+            ConnectionRecord::Mysql(c) => c.mcp_timeout_s,
         }
     }
 
@@ -343,6 +353,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => &c.mcp_hidden_tables,
             ConnectionRecord::Postgres(c) => &c.mcp_hidden_tables,
+            ConnectionRecord::Mysql(c) => &c.mcp_hidden_tables,
         }
     }
 
@@ -352,6 +363,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(c) => c.mcp_access.as_ref(),
             ConnectionRecord::Postgres(c) => c.mcp_access.as_ref(),
+            ConnectionRecord::Mysql(c) => c.mcp_access.as_ref(),
         }
     }
 
@@ -360,6 +372,7 @@ impl ConnectionRecord {
         let map = match self {
             ConnectionRecord::Sqlite(c) => &c.masked_columns,
             ConnectionRecord::Postgres(c) => &c.masked_columns,
+            ConnectionRecord::Mysql(c) => &c.masked_columns,
         };
         map.get(database).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -368,6 +381,7 @@ impl ConnectionRecord {
         match self {
             ConnectionRecord::Sqlite(_) => false,
             ConnectionRecord::Postgres(c) => c.ssh.is_some(),
+            ConnectionRecord::Mysql(c) => c.ssh.is_some(),
         }
     }
 }

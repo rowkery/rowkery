@@ -10,8 +10,10 @@ use rowkery_core::catalog_cache::{self, CachedCatalog};
 use rowkery_core::config::{AppConfig, ConfigError, ConfigNotice, SaveGate, ThemePreference};
 use rowkery_core::config_writer::ConfigWriter;
 use rowkery_core::connections::{
-    validate_postgres_target, CloudSqlCredentials, ConnectionRecord, PostgresConnection,
+    validate_postgres_target, CloudSqlCredentials, ConnectionRecord, MysqlConnection,
+    PostgresConnection,
 };
+use rowkery_core::db::mysql::MysqlSession;
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session, open_session_with_secrets, session_apply_changes_within,
     session_catalog_fingerprint, session_close_cursor, session_execute, session_fetch_more,
@@ -49,6 +51,7 @@ use tokio::sync::oneshot;
 use tokio_postgres::CancelToken;
 
 mod busy;
+mod mysql;
 mod pool;
 mod prefetch;
 mod sessions;
@@ -282,6 +285,7 @@ pub enum Event {
 enum CancelHandle {
     Sqlite(rowkery_core::db::sqlite::SqliteInterruptHandle),
     Postgres { token: CancelToken, tls: CancelVia },
+    Mysql(rowkery_core::db::mysql::CancelVia),
 }
 
 /// Events for one caller only, so concurrent window queries don't drain each
@@ -548,6 +552,11 @@ enum WindowTarget {
         connection_id: String,
         config: PostgresConnection,
     },
+    /// One server: its databases are the catalog's schemas.
+    Mysql {
+        connection_id: String,
+        config: MysqlConnection,
+    },
 }
 
 /// Result of opening a window: the database it landed on and its schema.
@@ -558,6 +567,8 @@ pub struct WindowOpened {
     /// `16.4` for Postgres, the linked library's `3.46.0` for SQLite; `None`
     /// when the server would not say.
     pub server_version: Option<String>,
+    /// `MySQL` or `MariaDB` for a MySQL connection, from the server.
+    pub server_flavor: Option<&'static str>,
     pub elapsed_ms: u64,
     /// The catalog came from the disk cache; a `CatalogUpdate` with this
     /// `open_seq` follows once the server confirms or replaces it.
@@ -650,6 +661,8 @@ struct CoreState {
     next_query_id: AtomicU64,
     /// Warm Postgres sessions per window and query tab.
     pool: SharedPool,
+    /// The same, for MySQL and MariaDB windows.
+    mysql_pool: SharedPool<MysqlSession>,
     /// SQLite query tabs' own connections and paged reads.
     sqlite_tabs: SharedSqliteTabs,
     runtime: Handle,
@@ -818,6 +831,40 @@ pub fn probe_connection_blocking(
                     match test_result {
                         Ok(Ok(Some(version))) => (true, format!("PostgreSQL {version}")),
                         Ok(Ok(None)) => (true, "PostgreSQL".to_string()),
+                        Ok(Err(e)) => (false, driver_error_message(e)),
+                        Err(msg) => (false, msg),
+                    }
+                }
+            }
+        }
+        ConnectionRecord::Mysql(my) => {
+            let probe_id = format!("{connection_id}-probe");
+            match Runtime::new() {
+                Err(e) => (false, e.to_string()),
+                Ok(runtime) => {
+                    let test_result = with_catch(|| {
+                        runtime.block_on(async {
+                            // The open is bounded, and so is its ping.
+                            let mut session = rowkery_core::db::mysql::open_session_via(
+                                probe_id,
+                                my,
+                                Some(&secrets),
+                                None,
+                            )
+                            .await?;
+                            if !rowkery_core::db::mysql::session_ping(&mut session, CONNECT_TIMEOUT)
+                                .await
+                            {
+                                return Err(DriverError::Message(format!(
+                                    "Connection timed out: the server did not answer in {} s",
+                                    CONNECT_TIMEOUT.as_secs()
+                                )));
+                            }
+                            Ok(format!("{} {}", session.flavor().name(), session.version()))
+                        })
+                    });
+                    match test_result {
+                        Ok(Ok(version)) => (true, version),
                         Ok(Err(e)) => (false, driver_error_message(e)),
                         Err(msg) => (false, msg),
                     }
@@ -1996,6 +2043,10 @@ fn apply_changes_now(
             config,
             connection_id,
         } => (EngineKind::Postgres, config.safe_mode, connection_id),
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+            return;
+        }
     };
     // Edits staged on one server never run on another the window moved to
     // (a table of the same name there is not the same rows).
@@ -2045,6 +2096,10 @@ fn apply_changes_now(
     // Counts as running (a quit asks first) until it answers.
     let held = state.busy.hold(Work::Commit);
     match target {
+        // Refused above.
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+        }
         WindowTarget::Sqlite {
             path, safe_mode, ..
         } => {
@@ -2159,6 +2214,10 @@ fn import_csv_now(
     let safe_mode = match &target {
         WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
         WindowTarget::Postgres { config, .. } => config.safe_mode,
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+            return;
+        }
     };
     if safe_mode == SafeMode::ReadOnly {
         let _ = respond_to.send(Ok(ImportOutcome::Refused));
@@ -2167,6 +2226,10 @@ fn import_csv_now(
     invalidate_prefetch(&state.pool, &window_id, &state.runtime);
     let held = state.busy.hold(Work::Import);
     match target {
+        // Refused above.
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+        }
         WindowTarget::Sqlite { path, .. } => {
             thread::spawn(move || {
                 let _held = held;
@@ -2291,6 +2354,12 @@ fn window_target(
                 config: pg,
             })
         }
+        // Every database on the server is in the catalog already; `database`
+        // is only the default one, which `USE` changes in a tab.
+        ConnectionRecord::Mysql(my) => Ok(WindowTarget::Mysql {
+            connection_id: connection_id.to_string(),
+            config: my,
+        }),
     }
 }
 
@@ -2332,6 +2401,10 @@ fn start_early_open(state: &mut CoreState, ui: Option<&serde_json::Value>) {
     let Ok(target) = window_target(state, &connection_id, database.clone()) else {
         return;
     };
+    // MySQL windows open when the webview asks.
+    if matches!(target, WindowTarget::Mysql { .. }) {
+        return;
+    }
     state.windows.insert(window_id.clone(), target.clone());
     let (generation, stale) = match state.pool.lock() {
         Ok(mut pool) => pool.reset_window(&window_id),
@@ -2403,15 +2476,39 @@ fn open_window_now(
                 Err(_) => (0, Vec::new()),
             };
             drop(stale);
+            let (mysql_generation, stale) = match state.mysql_pool.lock() {
+                Ok(mut pool) => pool.reset_window(&window_id),
+                Err(_) => (0, Vec::new()),
+            };
+            drop(stale);
             if let Ok(mut tabs) = state.sqlite_tabs.lock() {
                 drop_conns(tabs.forget_window(&window_id));
+            }
+            state.next_open_seq += 1;
+            if let WindowTarget::Mysql {
+                connection_id,
+                config,
+            } = target
+            {
+                spawn_open_mysql_window(
+                    &state.runtime,
+                    mysql::MysqlSlot {
+                        pool: state.mysql_pool.clone(),
+                        window_id,
+                        generation: mysql_generation,
+                    },
+                    connection_id,
+                    config,
+                    state.next_open_seq,
+                    respond_to,
+                );
+                return;
             }
             let slot = PoolSlot {
                 pool: state.pool.clone(),
                 window_id,
                 generation,
             };
-            state.next_open_seq += 1;
             spawn_open_window(
                 &state.runtime,
                 target,
@@ -2448,6 +2545,17 @@ fn window_transactions(state: &CoreState, window_id: &str, held: bool) -> Vec<u6
                 }
             })
             .unwrap_or_default(),
+        Some(WindowTarget::Mysql { .. }) => state
+            .mysql_pool
+            .lock()
+            .map(|p| {
+                if held {
+                    p.held_transactions(window_id)
+                } else {
+                    p.open_transactions(window_id)
+                }
+            })
+            .unwrap_or_default(),
         Some(WindowTarget::Sqlite { .. }) => state
             .sqlite_tabs
             .lock()
@@ -2469,6 +2577,12 @@ fn close_window_now(state: &mut CoreState, window_id: String) {
         .map(|mut pool| pool.close_window(&window_id))
         .unwrap_or_default();
     drop(stale);
+    let stale = state
+        .mysql_pool
+        .lock()
+        .map(|mut pool| pool.close_window(&window_id))
+        .unwrap_or_default();
+    drop(stale);
     let tabs: Vec<(String, u64)> = state
         .window_interrupts
         .keys()
@@ -2480,6 +2594,35 @@ fn close_window_now(state: &mut CoreState, window_id: String) {
             request_cancel(&state.runtime, &slot);
         }
     }
+}
+
+/// Opens a MySQL window: its catalog comes from the server each time
+/// (nothing is cached on disk for it yet).
+fn spawn_open_mysql_window(
+    runtime: &Handle,
+    slot: mysql::MysqlSlot,
+    connection_id: String,
+    config: MysqlConnection,
+    open_seq: u64,
+    respond_to: oneshot::Sender<Result<WindowOpened, String>>,
+) {
+    let start = Instant::now();
+    let database = config.database.clone();
+    runtime.spawn(async move {
+        let result = mysql::open_window(slot, connection_id, config)
+            .await
+            .map_err(driver_error_message)
+            .map(|(catalog, version, flavor)| WindowOpened {
+                database,
+                catalog,
+                server_version: Some(version),
+                server_flavor: Some(flavor.name()),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                cached: false,
+                open_seq,
+            });
+        let _ = respond_to.send(result);
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2505,12 +2648,17 @@ fn spawn_open_window(
                     database: "main".into(),
                     catalog,
                     server_version: Some(sqlite_version().to_string()),
+                    server_flavor: None,
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     cached: false,
                     open_seq,
                 });
                 let _ = respond_to.send(result);
             });
+        }
+        // Opened by `spawn_open_mysql_window`, on its own pool.
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
         }
         WindowTarget::Postgres {
             connection_id,
@@ -2527,6 +2675,7 @@ fn spawn_open_window(
                         database: database.clone(),
                         catalog: c.catalog.clone(),
                         server_version: c.server_version.clone(),
+                        server_flavor: None,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         cached: true,
                         open_seq,
@@ -2583,6 +2732,7 @@ fn spawn_open_window(
                             database,
                             catalog: catalog.unwrap_or_default(),
                             server_version,
+                            server_flavor: None,
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             cached: false,
                             open_seq,
@@ -2671,6 +2821,21 @@ fn request_cancel(runtime: &Handle, slot: &CancelSlot) {
                     stop.notify_one();
                 });
             }
+            Some(CancelHandle::Mysql(via)) => {
+                let sent = guard.sent.clone();
+                runtime.spawn(async move {
+                    let _ = tokio::time::timeout(
+                        FORCE_STOP_AFTER,
+                        rowkery_core::db::mysql::cancel(via),
+                    )
+                    .await;
+                    sent.notify_one();
+                });
+                runtime.spawn(async move {
+                    tokio::time::sleep(FORCE_STOP_AFTER).await;
+                    stop.notify_one();
+                });
+            }
             // Asked twice, or waiting for a free connection: stop now.
             None if again || guard.waiting => stop.notify_one(),
             None => {
@@ -2707,6 +2872,10 @@ fn run_sql_file(
     let safe_mode = match &target {
         WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
         WindowTarget::Postgres { config, .. } => config.safe_mode,
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+            return;
+        }
     };
     if safe_mode == SafeMode::ReadOnly {
         let _ = respond_to.send(Err(
@@ -2741,6 +2910,10 @@ fn run_sql_file(
     } = run;
     let held = state.busy.hold(Work::SqlFile);
     match target {
+        // Refused above.
+        WindowTarget::Mysql { .. } => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+        }
         WindowTarget::Sqlite { path: db, .. } => {
             thread::spawn(move || {
                 let _held = held;
@@ -2870,6 +3043,9 @@ fn with_postgres<T, F, Fut>(
         Some(WindowTarget::Sqlite { .. }) => {
             let _ = respond_to.send(Err("SQLite has no other sessions to show".into()));
         }
+        Some(WindowTarget::Mysql { .. }) => {
+            let _ = respond_to.send(Err(mysql::LATER.into()));
+        }
         Some(WindowTarget::Postgres {
             connection_id,
             config,
@@ -2963,9 +3139,13 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 // One lock each for the check and the resets: nothing opens
                 // a transaction in between.
                 let mut pool = state.pool.lock().ok();
+                let mut mysql_pool = state.mysql_pool.lock().ok();
                 let mut sqlite_tabs = state.sqlite_tabs.lock().ok();
                 let held = state.windows.iter().any(|(w, target)| match target {
                     WindowTarget::Postgres { connection_id, .. } if *connection_id == id => pool
+                        .as_ref()
+                        .is_some_and(|p| !p.open_transactions(w).is_empty()),
+                    WindowTarget::Mysql { connection_id, .. } if *connection_id == id => mysql_pool
                         .as_ref()
                         .is_some_and(|p| !p.open_transactions(w).is_empty()),
                     WindowTarget::Sqlite { connection_id, .. } if *connection_id == id => {
@@ -2979,6 +3159,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     break 'event Event::Error(SAFE_MODE_IN_TXN.into());
                 }
                 let mut stale = Vec::new();
+                let mut mysql_stale = Vec::new();
                 let mut closing = Vec::new();
                 for (window_id, target) in state.windows.iter_mut() {
                     match target {
@@ -3001,11 +3182,23 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                                 stale.extend(pool.reset_window(window_id).1);
                             }
                         }
+                        // Its sessions were opened read-only or not.
+                        WindowTarget::Mysql {
+                            connection_id,
+                            config,
+                        } if *connection_id == id && config.safe_mode != mode => {
+                            config.safe_mode = mode;
+                            if let Some(pool) = mysql_pool.as_mut() {
+                                mysql_stale.extend(pool.reset_window(window_id).1);
+                            }
+                        }
                         _ => {}
                     }
                 }
                 // The sessions close outside the lock.
                 drop(pool);
+                drop(mysql_pool);
+                drop(mysql_stale);
                 drop(sqlite_tabs);
                 drop(stale);
                 drop_conns(closing);
@@ -3086,6 +3279,20 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                     connection_id,
                     config,
                 }) => Some((connection_id, config)),
+                Some(WindowTarget::Mysql {
+                    connection_id,
+                    config,
+                }) => {
+                    let pool = state.mysql_pool.clone();
+                    state.runtime.spawn(async move {
+                        let n =
+                            pool::ping_idle(&pool, &window_id, idle, connection_id, config).await;
+                        if let Some(tx) = respond_to {
+                            let _ = tx.send(n);
+                        }
+                    });
+                    return;
+                }
                 _ => None,
             };
             let Some((connection_id, config)) = replaced else {
@@ -3121,6 +3328,9 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             match state.windows.get(&window_id).cloned() {
                 None => {
                     let _ = respond_to.send(Err("This window is not connected".into()));
+                }
+                Some(WindowTarget::Mysql { .. }) => {
+                    let _ = respond_to.send(Err(mysql::LATER.into()));
                 }
                 Some(WindowTarget::Sqlite { path, .. }) => {
                     thread::spawn(move || {
@@ -3295,6 +3505,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             let engine = match &target {
                 WindowTarget::Sqlite { .. } => EngineKind::Sqlite,
                 WindowTarget::Postgres { .. } => EngineKind::Postgres,
+                WindowTarget::Mysql { .. } => EngineKind::Mysql,
             };
             // ⌘E: the statement's plan instead. Only a timed plan runs it, so
             // only a timed plan goes through safe mode, and it is always
@@ -3342,6 +3553,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             let safe_mode = match &target {
                 WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
                 WindowTarget::Postgres { config, .. } => config.safe_mode,
+                WindowTarget::Mysql { config, .. } => config.safe_mode,
             };
             // Safe mode: nothing reaches the database until the user confirms
             // (or ever, on a read-only connection).
@@ -3405,7 +3617,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 WindowTarget::Sqlite { path, .. } => {
                     Some(SqliteTab::new(&state.sqlite_tabs, &tab_key, path))
                 }
-                WindowTarget::Postgres { .. } => None,
+                WindowTarget::Postgres { .. } | WindowTarget::Mysql { .. } => None,
             };
             // A SQLite free-form read pages like a Postgres cursor: the first
             // page now, the rest on demand (`FetchMore`).
@@ -3429,6 +3641,33 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             let cap = (!export && explain.is_none()).then_some(MAX_TAB_ROWS);
             push_event(&events, CoreEvent::QueryStarted { query_id, tab_id });
             match target {
+                WindowTarget::Mysql {
+                    connection_id,
+                    config,
+                } => {
+                    let pooled = mysql::MysqlSlot {
+                        generation: state
+                            .mysql_pool
+                            .lock()
+                            .map(|p| p.generation(&window_id))
+                            .unwrap_or(0),
+                        pool: state.mysql_pool.clone(),
+                        window_id,
+                    };
+                    mysql::run_query(
+                        &state.runtime,
+                        connection_id,
+                        config,
+                        pooled,
+                        query_id,
+                        tab_id,
+                        sql,
+                        apply_limit,
+                        cap,
+                        events,
+                        slot,
+                    );
+                }
                 WindowTarget::Sqlite {
                     path, safe_mode, ..
                 } => {
@@ -3734,6 +3973,12 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 .ok()
                 .and_then(|mut pool| pool.close_tab(&window_id, tab_id));
             drop(stale);
+            let stale = state
+                .mysql_pool
+                .lock()
+                .ok()
+                .and_then(|mut pool| pool.close_tab(&window_id, tab_id));
+            drop(stale);
         }
         Command::ReleaseSqliteFile { path, respond_to } => {
             let conns = state
@@ -3763,7 +4008,9 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
         Command::CountTransactions { respond_to } => {
             // Tabs holding one, a run inside one included (a write that may
             // open one counts as a write); unknown when a lock is poisoned.
-            let sound = state.pool.lock().is_ok() && state.sqlite_tabs.lock().is_ok();
+            let sound = state.pool.lock().is_ok()
+                && state.mysql_pool.lock().is_ok()
+                && state.sqlite_tabs.lock().is_ok();
             let held = sound.then(|| {
                 state
                     .windows
@@ -3880,7 +4127,9 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             None => {
                 let _ = respond_to.send(Err("This window is not connected".into()));
             }
-            Some(WindowTarget::Sqlite { .. }) => {
+            // A MySQL server's databases are its catalog's schemas: there
+            // is no other database to switch to.
+            Some(WindowTarget::Sqlite { .. } | WindowTarget::Mysql { .. }) => {
                 let _ = respond_to.send(Ok(Vec::new()));
             }
             Some(WindowTarget::Postgres {
@@ -3917,7 +4166,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             None => {
                 let _ = respond_to.send(Err("This window is not connected".into()));
             }
-            Some(WindowTarget::Postgres { .. }) => {
+            Some(WindowTarget::Postgres { .. } | WindowTarget::Mysql { .. }) => {
                 let _ = respond_to.send(Ok(Vec::new()));
             }
             Some(WindowTarget::Sqlite { path, .. }) => {
@@ -3978,8 +4227,8 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             None => {
                 let _ = respond_to.send(Err("This window is not connected".into()));
             }
-            // SQLite catalogs carry their indexes; nothing is deferred.
-            Some(WindowTarget::Sqlite { .. }) => {
+            // SQLite and MySQL catalogs carry their indexes; nothing is deferred.
+            Some(WindowTarget::Sqlite { .. } | WindowTarget::Mysql { .. }) => {
                 let _ = respond_to.send(Ok(Vec::new()));
             }
             Some(WindowTarget::Postgres {
@@ -4030,6 +4279,22 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 Some(WindowTarget::Sqlite { path, .. }) => {
                     thread::spawn(move || {
                         let _ = respond_to.send(load_sqlite_catalog(path));
+                    });
+                }
+                Some(WindowTarget::Mysql {
+                    connection_id,
+                    config,
+                }) => {
+                    let pool = state.mysql_pool.clone();
+                    let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
+                    let slot = mysql::MysqlSlot {
+                        pool,
+                        window_id,
+                        generation,
+                    };
+                    state.runtime.spawn(async move {
+                        let catalog = mysql::reload_schema(slot, connection_id, config).await;
+                        let _ = respond_to.send(catalog.map_err(driver_error_message));
                     });
                 }
                 // On the window's spare session, unlike `OpenWindow`: its query
@@ -4103,6 +4368,8 @@ impl CoreBridge {
                 let runtime_handle = runtime.handle().clone();
                 let pool = SharedPool::default();
                 runtime_handle.spawn(pool::sweep_forever(pool.clone()));
+                let mysql_pool: SharedPool<MysqlSession> = SharedPool::default();
+                runtime_handle.spawn(pool::sweep_forever(mysql_pool.clone()));
                 let _tokio_driver = thread::Builder::new()
                     .name("rowkery-tokio".into())
                     .spawn(move || {
@@ -4125,6 +4392,7 @@ impl CoreBridge {
                     window_interrupts: HashMap::new(),
                     next_query_id: AtomicU64::new(1),
                     pool: pool.clone(),
+                    mysql_pool,
                     sqlite_tabs: SharedSqliteTabs::default(),
                     runtime: runtime_handle,
                     busy: thread_busy,
