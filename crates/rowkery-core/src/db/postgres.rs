@@ -22,8 +22,8 @@ use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::cloudsql::{dialer_for, CloudSqlDialer};
 use crate::connections::{expand_home, CloudSqlCredentials, PostgresConnection, PostgresSslMode};
+use crate::route::{self, Route};
 use crate::secrets::{forget_cached, get_secret, keychain_refused, ConnectionSecrets, SecretKind};
-use crate::ssh::{humanize_ssh_error, SshTunnel};
 
 use super::introspect::{
     ColumnNode, DatabaseNode, EnumNode, ForeignKeyNode, FunctionNode, IndexNode, RowEstimate,
@@ -64,38 +64,6 @@ fn new_tag() -> String {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let mixed = (seed ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     format!("{:08x}", (mixed >> 32) as u32)
-}
-
-/// How a session reaches a server that isn't simply at `host:port`.
-#[derive(Clone)]
-pub enum Route {
-    /// Through an SSH tunnel, shared with the window's other sessions (one
-    /// SSH connection per window).
-    Ssh(Arc<SshTunnel>),
-    /// Through the Cloud SQL connector; one dialer per connection, which
-    /// the route keeps alive between sessions.
-    CloudSql(Arc<CloudSqlDialer>),
-}
-
-impl Route {
-    /// Still usable for a new session (a tunnel can drop; a dialer renews
-    /// its certificate itself).
-    pub fn is_alive(&self) -> bool {
-        match self {
-            Self::Ssh(t) => t.is_alive(),
-            Self::CloudSql(_) => true,
-        }
-    }
-
-    /// The route is the one `config` asks for.
-    fn fits(&self, config: &PostgresConnection) -> bool {
-        match self {
-            Self::Ssh(_) => config.ssh.is_some(),
-            // Each session asks `dialer_for`, which checks the settings and
-            // the key; the route only keeps the dialer alive.
-            Self::CloudSql(_) => config.cloud_sql.is_some(),
-        }
-    }
 }
 
 /// Where a cancel request goes: Postgres takes it on a new connection, made
@@ -256,18 +224,20 @@ pub async fn open_session_via(
     route: Option<Route>,
 ) -> Result<PostgresSession, DriverError> {
     let mut port = config.port;
-    let mut route = route.filter(|r| r.fits(&config) && r.is_alive());
+    let mut route =
+        route.filter(|r| r.fits(config.ssh.is_some(), config.cloud_sql.is_some()) && r.is_alive());
 
     let mut tunneled = false;
-    if let Some(ssh) = config.ssh.clone() {
-        let tunnel = match route.take() {
-            Some(Route::Ssh(t)) => t,
-            _ => Arc::new(
-                SshTunnel::open_with_timeout(&ssh, &connection_id, &config.host, port, secrets)
-                    .await
-                    .map_err(|e| DriverError::Message(humanize_ssh_error(&e, &ssh.host)))?,
-            ),
-        };
+    if let Some(ssh) = &config.ssh {
+        let tunnel = route::ssh_tunnel(
+            ssh,
+            route.take(),
+            &connection_id,
+            &config.host,
+            port,
+            secrets,
+        )
+        .await?;
         port = tunnel.local_port;
         tunneled = true;
         route = Some(Route::Ssh(tunnel));
