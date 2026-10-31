@@ -1063,3 +1063,147 @@ async fn triggers_a_login_cannot_see_are_named() {
         .await
         .unwrap();
 }
+
+// CSV import.
+
+use rowkery_core::import::{
+    import_mysql, EmptyCells, ImportColumn, ImportError, ImportSpec, OnConflict,
+};
+
+fn csv_file(name: &str, text: &str) -> String {
+    let path = std::env::temp_dir().join(format!("{name}.csv"));
+    std::fs::write(&path, text).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn spec(path: String, table: &str, columns: &[&str], on_conflict: OnConflict) -> ImportSpec {
+    ImportSpec {
+        path,
+        schema: config().database,
+        table: table.into(),
+        delimiter: ",".into(),
+        header: true,
+        columns: columns
+            .iter()
+            .enumerate()
+            .map(|(field, c)| ImportColumn {
+                field,
+                column: c.to_string(),
+            })
+            .collect(),
+        on_conflict,
+        empty: EmptyCells::Null,
+    }
+}
+
+async fn import(
+    s: &mut MysqlSession,
+    spec: &ImportSpec,
+) -> Result<rowkery_core::import::ImportCounts, ImportError> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    import_mysql(s, spec, stop, &|_| {}).await
+}
+
+#[tokio::test]
+async fn csv_imports_stop_skip_and_update() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_csv; CREATE TABLE it_csv (id INT PRIMARY KEY, \
+         name VARCHAR(20) NOT NULL DEFAULT 'none', note TEXT, seen DATETIME DEFAULT CURRENT_TIMESTAMP, \
+         code VARCHAR(5) UNIQUE, n INT AS (id * 2)); \
+         INSERT INTO it_csv (id, name, code) VALUES (1, 'old', 'a')",
+    )
+    .await
+    .unwrap();
+    let cols = ["id", "name", "note", "code"];
+    // Stop: a key already there fails it, nothing written.
+    let file = csv_file(
+        "it_csv_1",
+        "id,name,note,code\n2,Bo,\"back\\slash, it's\",b\n1,dup,,z\n",
+    );
+    let failure = import(
+        &mut s,
+        &spec(file.clone(), "it_csv", &cols, OnConflict::Stop),
+    )
+    .await;
+    assert!(
+        matches!(failure, Err(ImportError::Failed(ref m)) if m.contains("Duplicate")),
+        "{failure:?}"
+    );
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_csv").await, 1);
+    // Skip: the new row in, the old one kept; empty cells take the defaults.
+    let counts = import(
+        &mut s,
+        &spec(file.clone(), "it_csv", &cols, OnConflict::Skip),
+    )
+    .await
+    .unwrap();
+    assert_eq!((counts.inserted, counts.updated, counts.skipped), (1, 0, 1));
+    let got = rows(
+        &mut s,
+        "SELECT name, note, seen IS NOT NULL, n FROM it_csv WHERE id = 2",
+    )
+    .await;
+    assert_eq!(
+        got[0][..3],
+        [
+            Value::Text("Bo".into()),
+            Value::Text("back\\slash, it's".into()),
+            Value::Int(1)
+        ]
+    );
+    assert_eq!(
+        count(&mut s, "SELECT COUNT(*) FROM it_csv WHERE name = 'old'").await,
+        1
+    );
+    // Update: existing rows take the file's values (an empty cell keeps
+    // the old one), new rows go in; the defaults fill a new row's gaps.
+    let file = csv_file("it_csv_2", "id,name,note,code\n1,,new note,\n3,,,c\n");
+    let counts = import(&mut s, &spec(file, "it_csv", &cols, OnConflict::Update))
+        .await
+        .unwrap();
+    assert_eq!((counts.inserted, counts.updated, counts.skipped), (1, 1, 0));
+    let got = rows(
+        &mut s,
+        "SELECT id, name, note, code FROM it_csv WHERE id IN (1, 3) ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        got[0],
+        [
+            Value::Int(1),
+            Value::Text("old".into()),
+            Value::Text("new note".into()),
+            Value::Text("a".into())
+        ]
+    );
+    assert_eq!(got[1][1], Value::Text("none".into()));
+    // A bad value names its line, and nothing is written.
+    let file = csv_file("it_csv_3", "id,name,note,code\n4,x,,d\nfive,y,,e\n");
+    let failure = import(&mut s, &spec(file, "it_csv", &cols, OnConflict::Stop)).await;
+    assert!(
+        matches!(failure, Err(ImportError::Failed(ref m)) if m.starts_with("Line 3, id")),
+        "{failure:?}"
+    );
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_csv").await, 3);
+    // A generated column can't be imported into.
+    let file = csv_file("it_csv_4", "id,n\n9,1\n");
+    assert!(import(
+        &mut s,
+        &spec(file, "it_csv", &["id", "n"], OnConflict::Stop)
+    )
+    .await
+    .is_err());
+    assert_eq!(s.txn_known(), Some(false));
+    // Many rows go in batches.
+    let mut big = String::from("id,name,note,code\n");
+    for i in 100..20_100 {
+        big.push_str(&format!("{i},row {i},{},\n", "x".repeat(40)));
+    }
+    let file = csv_file("it_csv_5", &big);
+    let counts = import(&mut s, &spec(file, "it_csv", &cols, OnConflict::Stop))
+        .await
+        .unwrap();
+    assert_eq!(counts.inserted, 20_000);
+}
