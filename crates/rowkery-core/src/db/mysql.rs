@@ -819,7 +819,7 @@ fn unlimited(session: &MysqlSession, select: &str) -> String {
     }
 }
 
-async fn select_text(
+pub(crate) async fn select_text(
     session: &mut MysqlSession,
     select: &str,
 ) -> Result<Vec<Vec<Option<String>>>, DriverError> {

@@ -1207,3 +1207,78 @@ async fn csv_imports_stop_skip_and_update() {
         .unwrap();
     assert_eq!(counts.inserted, 20_000);
 }
+
+#[tokio::test]
+async fn csv_imports_leave_empty_cells_to_the_table() {
+    let mut s = open(config()).await.unwrap();
+    let mariadb = s.flavor() == Flavor::Mariadb;
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_csvd, it_csvm; CREATE TABLE it_csvd (id INT AUTO_INCREMENT PRIMARY KEY, \
+         doc JSON DEFAULT ('[\"it''s\"]'), bin VARBINARY(4) DEFAULT 'ab', f FLOAT DEFAULT 1.5, \
+         d DATE, v VARCHAR(3), h INT DEFAULT 2, twice INT DEFAULT (h * 2)); \
+         CREATE TABLE it_csvm (id INT PRIMARY KEY) ENGINE = MyISAM",
+    )
+    .await
+    .unwrap();
+    let cols = ["id", "doc", "bin", "f", "d", "v", "h"];
+    // Empty cells take the table's defaults, expressions included; an
+    // empty id takes the next AUTO_INCREMENT; a row of empty cells is all
+    // defaults.
+    let file = csv_file(
+        "it_csvd_1",
+        "id,doc,bin,f,d,v,h\n,,,1.2345678,2024-02-29,abc,5\n,,,,,,\n",
+    );
+    let counts = import(&mut s, &spec(file, "it_csvd", &cols, OnConflict::Stop))
+        .await
+        .unwrap();
+    assert_eq!(counts.inserted, 2);
+    let got = rows(
+        &mut s,
+        "SELECT id, JSON_UNQUOTE(JSON_EXTRACT(doc, '$[0]')), bin, f = CAST(1.2345678 AS FLOAT), twice FROM it_csvd ORDER BY id",
+    )
+    .await;
+    assert_eq!(got[0][0], Value::Int(1));
+    if !mariadb {
+        // MariaDB keeps JSON as text: its expression default reads the same.
+        assert_eq!(got[0][1], Value::Text("it's".into()));
+    }
+    assert_eq!(got[0][2], Value::Bytes(b"ab".to_vec()));
+    assert_eq!(got[0][3], Value::Int(1));
+    assert_eq!(
+        (got[0][4].clone(), got[1][4].clone()),
+        (Value::Int(10), Value::Int(4))
+    );
+    // Strict, whatever the server's mode: a value the column can't hold
+    // fails, naming its line, and the session's mode comes back.
+    session_execute(&mut s, "SET SESSION sql_mode = ''")
+        .await
+        .unwrap();
+    let file = csv_file(
+        "it_csvd_2",
+        "id,doc,bin,f,d,v,h\n10,,,,,ok,\n11,,,,2020-02-30,,\n",
+    );
+    let failure = import(&mut s, &spec(file, "it_csvd", &cols, OnConflict::Stop)).await;
+    assert!(
+        matches!(failure, Err(ImportError::Failed(ref m)) if m.starts_with("Line 3:") && !m.contains("rowkery_import")),
+        "{failure:?}"
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT @@SESSION.sql_mode").await[0][0],
+        Value::Text("".into())
+    );
+    let file = csv_file("it_csvd_3", "id,doc,bin,f,d,v,h\n12,,,,,abcdef,\n");
+    assert!(
+        import(&mut s, &spec(file, "it_csvd", &cols, OnConflict::Stop))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_csvd").await, 2);
+    // A table that can't roll back is refused before anything is written.
+    let file = csv_file("it_csvd_4", "id\n1\n");
+    let failure = import(&mut s, &spec(file, "it_csvm", &["id"], OnConflict::Stop)).await;
+    assert!(
+        matches!(failure, Err(ImportError::Failed(ref m)) if m.contains("MyISAM")),
+        "{failure:?}"
+    );
+}
