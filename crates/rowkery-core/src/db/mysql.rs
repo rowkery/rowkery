@@ -871,6 +871,25 @@ async fn my_plan_for(
     };
     // The catalog's own spelling, for information_schema.
     let (db, table) = (mysql_text(&target.0), mysql_text(&target.1));
+    // Several statements are one change only if the table can roll back.
+    if statements.len() > 1 {
+        let engine = select_text(
+            session,
+            &format!(
+                "SELECT t.ENGINE FROM information_schema.TABLES t \
+                 JOIN information_schema.ENGINES e ON e.ENGINE = t.ENGINE \
+                 WHERE t.TABLE_SCHEMA = {db} AND t.TABLE_NAME = {table} \
+                 AND COALESCE(e.TRANSACTIONS, 'NO') <> 'YES'"
+            ),
+        )
+        .await?;
+        if let Some(engine) = engine.first().map(|r| cell(r, 0)) {
+            return Err(DriverError::Message(format!(
+                "{} is a {engine} table, which can't roll back, so these changes can't be saved as one. Commit them one row at a time.",
+                target.1
+            )));
+        }
+    }
     let target = name(target);
     // The keys out of the target and every table they reach, a level per
     // round.
