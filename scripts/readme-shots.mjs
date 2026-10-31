@@ -8,8 +8,8 @@
 //  - docs/readme/agents-{light,dark}.webp: the Agents inbox, a proposed change opened with its
 //    dry run done, the activity log under it;
 //  - docs/readme/health-{light,dark}.webp: the Health tab with a finding opened beside it.
-// Writes PNGs to outDir (default /tmp/rowkery-proof/readme-shots); with --commit it also converts
-// them (Python's Pillow) into the repo paths above. Not a proof: it checks nothing beyond waiting
+// Writes PNGs to outDir (default /tmp/rowkery-proof/docs-shots); with --commit it also converts
+// them (Python's Pillow) into the repo paths above (--write is the docs' flag and is refused here). Not a proof: it checks nothing beyond waiting
 // for each screen.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { openApp, shot, close, launch, filter, hideKeyStrip, WS, OUT, ROOT } from "./docs-shots/lib.mjs";
 
 const COMMIT = process.argv.includes("--commit");
+if (process.argv.includes("--write")) throw new Error("--write would write the docs' images; use --commit for docs/readme");
 
 /** What the README's screens need on top of the base stub (runs in the page). */
 function more() {
@@ -151,7 +152,10 @@ function more() {
 }
 
 const made = {};
-const take = async (page, name, clip) => (made[name] = (await shot(page, name, { clip }), `${OUT}/${name}.png`));
+const take = async (page, name) => {
+  await shot(page, name);
+  made[name] = `${OUT}/${name}.png`;
+};
 
 for (const scheme of ["light", "dark"]) {
   // 1. The whole window (the banner's app): orders filtered to paid.
@@ -190,7 +194,7 @@ for (const scheme of ["light", "dark"]) {
   }
   // 4. The Health tab, the IDs finding opened beside it.
   {
-    const { context, page } = await openApp({ w: 1280, h: 800, more, scheme, init: () => (window.__HEALTH__ = true) });
+    const { context, page } = await openApp({ w: 1280, h: 840, more, scheme, init: () => (window.__HEALTH__ = true) });
     await hideKeyStrip(page);
     await page.addStyleTag({ content: "[data-toast] { display: none !important; }" });
     await page.keyboard.press("Meta+k");
