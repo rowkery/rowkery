@@ -1,7 +1,7 @@
 [
   {
     "version": "v1.0.0",
-    "markdown": "Rowkery 1.0.0 is the first beta.\n\n## New\n\n- **Signed and notarized by Apple.** A fresh download opens like any other app, with no Open Anyway step.\n- After this update, macOS asks once more for each connection's keychain item. Choose **Always Allow**, and later updates won't ask again.\n"
+    "markdown": "Rowkery 1.0.0 is the first beta.\n\n## New\n\n- **Signed with an Apple Developer ID and notarized.** A fresh download opens like any other app, with no Open Anyway step.\n- After this update, macOS asks once more for each connection's keychain item. Choose **Always Allow**, and later updates won't ask again.\n"
   },
   {
     "version": "v0.4.0",
