@@ -458,7 +458,22 @@ pub fn literal(engine: EngineKind, type_name: &str, value: &Value) -> Result<Str
     match engine {
         EngineKind::Postgres => pg_literal(pg_kind(type_name), value),
         EngineKind::Sqlite => sqlite_literal(value),
-        EngineKind::Mysql => my_literal(my_kind(type_name), value),
+        EngineKind::Mysql => match (my_now(type_name), value) {
+            // The editor's `now()`, as Postgres reads `'now'`.
+            (Some(now), Value::Text(t)) if t.trim().eq_ignore_ascii_case("now") => Ok(now.into()),
+            _ => my_literal(my_kind(type_name), value),
+        },
+    }
+}
+
+/// The current time for a MySQL date or time column.
+fn my_now(type_name: &str) -> Option<&'static str> {
+    let t = type_name.trim().to_ascii_lowercase();
+    match t.split(['(', ' ']).next().unwrap_or("") {
+        "date" => Some("CURRENT_DATE"),
+        "time" => Some("CURRENT_TIME"),
+        "datetime" | "timestamp" => Some("CURRENT_TIMESTAMP"),
+        _ => None,
     }
 }
 
@@ -1057,6 +1072,52 @@ mod tests {
                 key: vec![cell("id", Value::Int(3))],
                 set: vec![cell("city", Value::Null)],
             }
+        );
+    }
+
+    #[test]
+    fn mysql_literals_read_the_same_in_every_sql_mode() {
+        let my = |t: &str, v: Value| literal(EngineKind::Mysql, t, &v);
+        assert_eq!(
+            my("varchar(10)", Value::Text("it's".into())).unwrap(),
+            "'it''s'"
+        );
+        assert_eq!(
+            my("text", Value::Text("a\\b".into())).unwrap(),
+            "_utf8mb4 X'615C62'"
+        );
+        assert_eq!(my("tinyint(1)", Value::Bool(true)).unwrap(), "TRUE");
+        assert_eq!(
+            my("int unsigned", Value::Text("18446744073709551615".into())).unwrap(),
+            "18446744073709551615"
+        );
+        assert!(my("int", Value::Text("1; DROP".into())).is_err());
+        assert_eq!(
+            my("decimal(10,2)", Value::Text(" 12.50 ".into())).unwrap(),
+            "12.50"
+        );
+        assert!(my("double", Value::Float(f64::NAN)).is_err());
+        assert_eq!(
+            my("varbinary(4)", Value::Bytes(vec![0, 255])).unwrap(),
+            "X'00ff'"
+        );
+        assert_eq!(
+            my("blob", Value::Text("\\x00FF".into())).unwrap(),
+            "X'00ff'"
+        );
+        assert!(my("blob", Value::Text("zz".into())).is_err());
+        assert!(my("json", Value::Text("{a".into())).is_err());
+        assert_eq!(
+            my("datetime(6)", Value::Text("now".into())).unwrap(),
+            "CURRENT_TIMESTAMP"
+        );
+        assert_eq!(
+            my("date", Value::Text("now".into())).unwrap(),
+            "CURRENT_DATE"
+        );
+        assert_eq!(
+            my("varchar(5)", Value::Text("now".into())).unwrap(),
+            "'now'"
         );
     }
 }

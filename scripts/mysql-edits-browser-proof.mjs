@@ -3,7 +3,7 @@
 // and cascade counts are proved against MySQL 8.0, 8.4 and MariaDB 10.11,
 // 11.4 by `cargo test -p rowkery-core --features mysql-integration --test
 // mysql_integration`). Each column type opens its editor (text, bool for
-// tinyint(1), the enum's labels from COLUMN_TYPE, a date without now(),
+// tinyint(1), the enum's labels from COLUMN_TYPE, a date taking now(),
 // none for a blob); a delete whose cascades are counted and whose
 // trigger isn't stops before COMMIT, says both, and Commit all (no number:
 // some rows aren't counted) sends that reach back and commits.
@@ -153,7 +153,7 @@ await shot("1-enum");
 await page.keyboard.press("Escape");
 check((await openOn(3, "joined")) === "date", "a date opens the date editor");
 const hint = await page.locator(`${ws} [data-cell-editor] input`).getAttribute("placeholder");
-check(hint === "YYYY-MM-DD", `its hint has no now(): ${hint}`);
+check(hint === "YYYY-MM-DD · now()", `its hint: ${hint}`);
 await page.keyboard.press("Escape");
 check((await openOn(3, "avatar")) === null, "a blob opens no editor");
 await page.keyboard.press("Escape");

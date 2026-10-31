@@ -355,12 +355,20 @@ pub fn my_plan(
     changed: &[String],
     keys: &[MyForeignKey],
 ) -> MyPlan {
+    // Every table an UPDATE of a followed key reaches, however far.
     let mut uncounted: Vec<Name> = Vec::new();
-    for key in keys.iter().filter(|k| &k.parent == target) {
-        let follows = key.on_update != MyRule::Refuse
-            && key.parent_columns.iter().any(|c| changed.contains(c));
-        if follows && !uncounted.contains(&key.child) {
-            uncounted.push(key.child.clone());
+    let mut seen: Vec<(Name, MyWrite)> = vec![(target.clone(), MyWrite::Update(changed.to_vec()))];
+    let mut at = 0;
+    while at < seen.len() {
+        let (table, how) = seen[at].clone();
+        at += 1;
+        for (key, child) in my_children(keys, &table, &how) {
+            if !uncounted.contains(&key.child) {
+                uncounted.push(key.child.clone());
+            }
+            if !seen.iter().any(|(t, w)| t == &key.child && *w == child) {
+                seen.push((key.child.clone(), child));
+            }
         }
     }
     let Some(deleted) = deleted else {
@@ -375,22 +383,7 @@ pub fn my_plan(
     while at < write.len() {
         let (table, how) = write[at].clone();
         at += 1;
-        for key in keys.iter().filter(|k| k.parent == table) {
-            let child = match &how {
-                MyWrite::Delete => match key.on_delete {
-                    MyRule::Cascade => MyWrite::Delete,
-                    MyRule::SetNull => MyWrite::Update(key.child_columns.clone()),
-                    MyRule::Refuse => continue,
-                },
-                MyWrite::Update(cols) => {
-                    if key.on_update == MyRule::Refuse
-                        || !key.parent_columns.iter().any(|c| cols.contains(c))
-                    {
-                        continue;
-                    }
-                    MyWrite::Update(key.child_columns.clone())
-                }
-            };
+        for (key, child) in my_children(keys, &table, &how) {
             edges.push(key);
             // A second way in is walked too, so every table past it is named.
             let ways: Vec<&MyWrite> = write
@@ -460,7 +453,7 @@ pub fn my_plan(
                 format!(
                     "{} IN (SELECT {} FROM {} WHERE {})",
                     my_columns(&e.child_columns),
-                    my_columns(&e.parent_columns),
+                    my_select_list(&e.parent_columns),
                     my_table(&e.parent),
                     predicate[&e.parent]
                 )
@@ -507,6 +500,43 @@ fn finish(steps: Vec<MyStep>, mut uncounted: Vec<Name>) -> MyPlan {
         steps,
         uncounted: uncounted.iter().map(my_name).collect(),
     }
+}
+
+/// The keys `how` writing `table` follows, and how each writes its child.
+fn my_children<'a>(
+    keys: &'a [MyForeignKey],
+    table: &Name,
+    how: &MyWrite,
+) -> Vec<(&'a MyForeignKey, MyWrite)> {
+    keys.iter()
+        .filter(|k| &k.parent == table)
+        .filter_map(|key| {
+            let child = match how {
+                MyWrite::Delete => match key.on_delete {
+                    MyRule::Cascade => MyWrite::Delete,
+                    MyRule::SetNull => MyWrite::Update(key.child_columns.clone()),
+                    MyRule::Refuse => return None,
+                },
+                MyWrite::Update(cols) => {
+                    if key.on_update == MyRule::Refuse
+                        || !key.parent_columns.iter().any(|c| cols.contains(c))
+                    {
+                        return None;
+                    }
+                    MyWrite::Update(key.child_columns.clone())
+                }
+            };
+            Some((key, child))
+        })
+        .collect()
+}
+
+/// `a, b`: a subquery's select list takes no parentheses.
+fn my_select_list(cols: &[String]) -> String {
+    cols.iter()
+        .map(|c| crate::db::quote_ident(crate::db::EngineKind::Mysql, c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn my_table(name: &Name) -> String {
@@ -733,5 +763,35 @@ mod tests {
         let plan = my_plan(&n("orders"), Some("`id` = 1"), &[], &keys);
         assert_eq!(plan.steps.len(), 15);
         assert_eq!(plan.uncounted.len(), 5);
+    }
+
+    #[test]
+    fn my_plan_composite_keys_and_followed_updates() {
+        use MyRule::*;
+        let lines = MyForeignKey {
+            child: n("lines"),
+            child_columns: vec!["oid".into(), "region".into()],
+            parent: n("orders"),
+            parent_columns: vec!["id".into(), "region".into()],
+            on_delete: Cascade,
+            on_update: Cascade,
+        };
+        let plan = my_plan(
+            &n("orders"),
+            Some("`id` = 1"),
+            &[],
+            std::slice::from_ref(&lines),
+        );
+        assert_eq!(
+            plan.steps[0].predicate,
+            "(oid, region) IN (SELECT id, region FROM shop.orders WHERE `id` = 1)"
+        );
+        // A followed key's change is named as far as it goes.
+        let keys = [lines, fk("notes", "line_oid", "lines", Refuse, Cascade)];
+        let mut notes = keys[1].clone();
+        notes.parent_columns = vec!["oid".into()];
+        let keys = [keys[0].clone(), notes];
+        let plan = my_plan(&n("orders"), None, &["region".into()], &keys);
+        assert_eq!(plan.uncounted, ["shop.lines", "shop.notes"]);
     }
 }

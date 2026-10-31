@@ -925,3 +925,141 @@ async fn writes_it_cannot_count_are_named() {
         1
     );
 }
+
+#[tokio::test]
+async fn reach_holds_whatever_the_tab_set() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ts_g, it_ts_c, it_ts_p; \
+         CREATE TABLE it_ts_p (id INT, region INT, code INT UNIQUE, PRIMARY KEY (id, region)); \
+         CREATE TABLE it_ts_c (id INT PRIMARY KEY, pid INT, pregion INT, code INT UNIQUE, \
+           FOREIGN KEY (pid, pregion) REFERENCES it_ts_p (id, region) ON DELETE CASCADE, \
+           FOREIGN KEY (code) REFERENCES it_ts_p (code) ON UPDATE CASCADE); \
+         CREATE TABLE it_ts_g (id INT PRIMARY KEY, code INT, \
+           FOREIGN KEY (code) REFERENCES it_ts_c (code) ON UPDATE CASCADE); \
+         INSERT INTO it_ts_p VALUES (1, 1, 10), (1, 2, 20); \
+         INSERT INTO it_ts_c VALUES (1, 1, 1, 10), (2, 1, 1, NULL), (3, 1, 2, 20); \
+         INSERT INTO it_ts_g VALUES (1, 20)",
+    )
+    .await
+    .unwrap();
+    let mut table = edit_table(
+        "it_ts_p",
+        &[("id", "int"), ("region", "int"), ("code", "int")],
+    );
+    table.key = vec!["id".into(), "region".into()];
+    let gone = Change::Delete {
+        key: vec![cell("id", Value::Int(1)), cell("region", Value::Int(1))],
+    };
+    // A composite key cascades and is counted.
+    let failure = apply(&mut s, &table, std::slice::from_ref(&gone), None)
+        .await
+        .unwrap_err();
+    let reach = failure
+        .reach
+        .unwrap_or_else(|| panic!("{}", failure.message));
+    assert_eq!(reach.tables, [deleted("it_ts_c", 2)]);
+    // A select limit on the tab cuts no count short.
+    session_execute(&mut s, "SET sql_select_limit = 0")
+        .await
+        .unwrap();
+    let again = apply(&mut s, &table, std::slice::from_ref(&gone), None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    assert_eq!(again, reach);
+    session_execute(&mut s, "SET sql_select_limit = DEFAULT")
+        .await
+        .unwrap();
+    // Changing a followed key names every table it reaches.
+    let rekey = Change::Update {
+        key: vec![cell("id", Value::Int(1)), cell("region", Value::Int(1))],
+        set: vec![cell("code", Value::Int(11))],
+    };
+    let db = config().database;
+    let reach = apply(&mut s, &table, std::slice::from_ref(&rekey), None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    assert_eq!(
+        reach.uncounted,
+        [format!("{db}.it_ts_c"), format!("{db}.it_ts_g")]
+    );
+    // With foreign key checks off InnoDB cascades nothing, and nothing is
+    // counted.
+    session_execute(&mut s, "SET foreign_key_checks = 0")
+        .await
+        .unwrap();
+    apply(&mut s, &table, &[gone], None).await.unwrap();
+    session_execute(&mut s, "SET foreign_key_checks = 1")
+        .await
+        .unwrap();
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_ts_c").await, 3);
+}
+
+#[tokio::test]
+async fn triggers_a_login_cannot_see_are_named() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ht; CREATE TABLE it_ht (id INT PRIMARY KEY); \
+         INSERT INTO it_ht VALUES (1), (2)",
+    )
+    .await
+    .unwrap();
+    let mut root = config();
+    root.username = "root".into();
+    let root_secrets = ConnectionSecrets {
+        db_password: Some(env("ROWKERY_MYSQL_ROOT_PASSWORD", "rowkery")),
+        ..Default::default()
+    };
+    let mut r = open_session_via(root.id.clone(), root, Some(&root_secrets), None)
+        .await
+        .unwrap();
+    let db = config().database;
+    session_execute(
+        &mut r,
+        &format!(
+            "DROP USER IF EXISTS 'it_narrow'@'%'; CREATE USER 'it_narrow'@'%' IDENTIFIED BY 'narrow'; \
+             GRANT SELECT, DELETE ON {db}.it_ht TO 'it_narrow'@'%'"
+        ),
+    )
+    .await
+    .unwrap();
+    let mut narrow = config();
+    narrow.username = "it_narrow".into();
+    let secrets = ConnectionSecrets {
+        db_password: Some("narrow".into()),
+        ..Default::default()
+    };
+    let mut n = open_session_via(narrow.id.clone(), narrow, Some(&secrets), None)
+        .await
+        .unwrap();
+    let table = edit_table("it_ht", &[("id", "int")]);
+    let reach = apply(&mut n, &table, &[delete(1)], None)
+        .await
+        .unwrap_err()
+        .reach
+        .unwrap();
+    assert_eq!(
+        reach.uncounted,
+        [format!("any triggers on {db}.it_ht this login can't see")]
+    );
+    apply(&mut n, &table, &[delete(1)], Some(&reach))
+        .await
+        .unwrap();
+    // The table's owner sees there are none.
+    assert_eq!(
+        apply(&mut s, &table, &[delete(2)], None)
+            .await
+            .unwrap()
+            .deleted,
+        1
+    );
+    session_execute(&mut r, "DROP USER 'it_narrow'@'%'")
+        .await
+        .unwrap();
+}

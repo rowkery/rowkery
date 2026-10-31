@@ -140,8 +140,8 @@ describe("who may edit", () => {
       "text",
       "text",
     ]);
-    expect(my("datetime(6)")).toMatchObject({ kind: "date", placeholder: "YYYY-MM-DD HH:MM:SS" });
-    expect(my("enum('open','it''s')")).toMatchObject({ kind: "enum", labels: ["open", "it's"] });
+    expect(my("datetime(6)")).toMatchObject({ kind: "date", placeholder: "YYYY-MM-DD HH:MM:SS · now()" });
+    expect(my("enum('open','it''s','a\\\\b')")).toMatchObject({ kind: "enum", labels: ["open", "it's", "a\\b"] });
     expect([my("varbinary(16)"), my("longblob")]).toEqual([null, null]);
   });
 });

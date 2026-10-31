@@ -669,6 +669,23 @@ pub async fn session_apply_changes_within(
         // Left unknown: the caller drops the session.
         None => return Err(ApplyFailure::other(late("The database"))),
     }
+    // The catalog reads come first: inside the transaction the first plain
+    // read would fix its snapshot before the rows are locked.
+    let planned = match tokio::time::timeout(limit, my_plan_for(session, target, statements)).await
+    {
+        Ok(Ok(planned)) => planned,
+        Ok(Err(err)) => {
+            // With autocommit off the reads opened a transaction of ours.
+            if session.in_transaction() {
+                rollback(session, limit).await;
+            }
+            return Err(ApplyFailure::other(err.into_message()));
+        }
+        Err(_) => {
+            abandon(session);
+            return Err(ApplyFailure::other(late("The database")));
+        }
+    };
     match tokio::time::timeout(limit, session.conn.query_drop("START TRANSACTION")).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => return Err(ApplyFailure::other(humanize(session, &err))),
@@ -677,7 +694,7 @@ pub async fn session_apply_changes_within(
             return Err(ApplyFailure::other(late("START TRANSACTION")));
         }
     }
-    let reach = match tokio::time::timeout(limit, my_reach(session, target, statements)).await {
+    let reach = match tokio::time::timeout(limit, my_count(session, planned)).await {
         Ok(Ok(reach)) => reach,
         Ok(Err(err)) => {
             rollback(session, limit).await;
@@ -777,14 +794,42 @@ fn rows_matched(info: &str) -> Option<u64> {
 /// The most tables a cascade walk loads keys for before giving up counting.
 const MAX_REACH_TABLES: usize = 200;
 
-/// What the batch writes beyond its own rows, counted with the rows locked
-/// (see [`session_apply_changes_within`]). Runs inside its transaction,
-/// before the batch's statements.
-async fn my_reach(
+/// A reach plan and the rows the batch's DELETEs name.
+struct Planned {
+    target: Name,
+    deleted: Option<String>,
+    plan: MyPlan,
+}
+
+/// `select` (a SELECT) without the session's `sql_select_limit`, which
+/// would cut a catalog read or a count short (or to nothing).
+fn unlimited(session: &MysqlSession, select: &str) -> String {
+    const ALL: &str = "18446744073709551615";
+    match session.flavor {
+        Flavor::Mariadb => format!("SET STATEMENT sql_select_limit = {ALL} FOR {select}"),
+        Flavor::Mysql => {
+            let rest = select.strip_prefix("SELECT ").unwrap_or(select);
+            format!("SELECT /*+ SET_VAR(sql_select_limit = {ALL}) */ {rest}")
+        }
+    }
+}
+
+async fn select_text(
+    session: &mut MysqlSession,
+    select: &str,
+) -> Result<Vec<Vec<Option<String>>>, DriverError> {
+    let sql = unlimited(session, select);
+    text_rows(session, &sql).await
+}
+
+/// What the batch can write beyond its own rows, from the catalog: the
+/// keys it cascades through (none while the tab has `foreign_key_checks`
+/// off: InnoDB cascades nothing then) and the target's triggers.
+async fn my_plan_for(
     session: &mut MysqlSession,
     target: &Name,
     statements: &[RowStatement],
-) -> Result<Reach, DriverError> {
+) -> Result<Planned, DriverError> {
     let deletes: Vec<&str> = statements
         .iter()
         .filter(|s| s.verb == Verb::Delete)
@@ -808,25 +853,48 @@ async fn my_reach(
             }
         }
     }
-    // The keys out of the target, and (for deletes) out of every table
-    // they reach, a level per round.
+    let settings = select_text(
+        session,
+        "SELECT @@foreign_key_checks, @@lower_case_table_names",
+    )
+    .await?;
+    let setting = |i: usize| settings.first().map(|r| cell(r, i)).unwrap_or_default();
+    let cascades = setting(0) != "0";
+    // Names compare without case when the server stores them so.
+    let fold = setting(1) != "0";
+    let name = |n: &Name| {
+        if fold {
+            (n.0.to_lowercase(), n.1.to_lowercase())
+        } else {
+            n.clone()
+        }
+    };
+    // The catalog's own spelling, for information_schema.
+    let (db, table) = (mysql_text(&target.0), mysql_text(&target.1));
+    let target = name(target);
+    // The keys out of the target and every table they reach, a level per
+    // round.
     let mut keys: Vec<MyForeignKey> = Vec::new();
     let mut loaded: Vec<Name> = Vec::new();
-    let mut next = vec![target.clone()];
+    let mut next = if cascades && (deleted.is_some() || !changed.is_empty()) {
+        vec![target.clone()]
+    } else {
+        Vec::new()
+    };
     while !next.is_empty() && loaded.len() < MAX_REACH_TABLES {
         let found = cascading_keys(session, &next).await?;
         loaded.append(&mut next);
-        if deleted.is_some() {
-            for key in &found {
-                if !loaded.contains(&key.child) && !next.contains(&key.child) {
-                    next.push(key.child.clone());
-                }
+        for mut key in found {
+            key.child = name(&key.child);
+            key.parent = name(&key.parent);
+            if !loaded.contains(&key.child) && !next.contains(&key.child) {
+                next.push(key.child.clone());
             }
+            keys.push(key);
         }
-        keys.extend(found);
     }
     let mut plan = if next.is_empty() {
-        reach::my_plan(target, deleted.as_deref(), &changed, &keys)
+        reach::my_plan(&target, deleted.as_deref(), &changed, &keys)
     } else {
         // Too far to follow: name what was seen, count nothing.
         let mut all: Vec<String> = loaded.iter().chain(&next).map(reach::my_name).collect();
@@ -847,34 +915,74 @@ async fn my_reach(
             Verb::Delete => "'DELETE'",
         })
         .collect();
-    let triggers = text_rows(
+    let triggers = select_text(
         session,
         &format!(
             "SELECT 1 FROM information_schema.TRIGGERS \
-             WHERE EVENT_OBJECT_SCHEMA = {} AND EVENT_OBJECT_TABLE = {} \
+             WHERE EVENT_OBJECT_SCHEMA = {db} AND EVENT_OBJECT_TABLE = {table} \
              AND EVENT_MANIPULATION IN ({}) LIMIT 1",
-            mysql_text(&target.0),
-            mysql_text(&target.1),
             verbs.join(", ")
         ),
     )
     .await?;
     if !triggers.is_empty() {
         plan.uncounted
-            .insert(0, format!("triggers on {}", reach::my_name(target)));
+            .insert(0, format!("triggers on {}", reach::my_name(&target)));
+    } else {
+        // information_schema shows triggers only to a login with the
+        // TRIGGER privilege on the table: without it, there may be some.
+        const ME: &str = "CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '''@''', SUBSTRING_INDEX(CURRENT_USER(), '@', -1), '''')";
+        let sees = select_text(
+            session,
+            &format!(
+                "SELECT 1 FROM information_schema.USER_PRIVILEGES \
+                 WHERE PRIVILEGE_TYPE = 'TRIGGER' AND GRANTEE = {ME} \
+                 UNION ALL SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES \
+                 WHERE PRIVILEGE_TYPE = 'TRIGGER' AND GRANTEE = {ME} AND TABLE_SCHEMA = {db} \
+                 UNION ALL SELECT 1 FROM information_schema.TABLE_PRIVILEGES \
+                 WHERE PRIVILEGE_TYPE = 'TRIGGER' AND GRANTEE = {ME} AND TABLE_SCHEMA = {db} \
+                 AND TABLE_NAME = {table}"
+            ),
+        )
+        .await?;
+        if sees.is_empty() {
+            plan.uncounted.insert(
+                0,
+                format!(
+                    "any triggers on {} this login can't see",
+                    reach::my_name(&target)
+                ),
+            );
+        }
     }
+    Ok(Planned {
+        target,
+        deleted,
+        plan,
+    })
+}
+
+/// The plan's counts, with the rows locked: the target's, then each
+/// level's, parents before children (see [`session_apply_changes_within`]).
+/// Runs inside the batch's transaction, before its statements.
+async fn my_count(session: &mut MysqlSession, planned: Planned) -> Result<Reach, DriverError> {
+    let Planned {
+        target,
+        deleted,
+        plan,
+    } = planned;
     let mut tables = Vec::new();
     if let (Some(deleted), false) = (&deleted, plan.steps.is_empty()) {
         let table = super::qualified_table_sql(super::EngineKind::Mysql, &target.0, &target.1);
-        session_execute(
+        let lock = unlimited(
             session,
             &format!("SELECT 1 FROM {table} WHERE {deleted} FOR UPDATE"),
-        )
-        .await?;
+        );
+        session_execute(session, &lock).await?;
         for step in &plan.steps {
             let table =
                 super::qualified_table_sql(super::EngineKind::Mysql, &step.table.0, &step.table.1);
-            let rows = text_rows(
+            let rows = select_text(
                 session,
                 &format!(
                     "SELECT COUNT(*) FROM {table} WHERE {} FOR UPDATE",
@@ -886,7 +994,7 @@ async fn my_reach(
                 .first()
                 .map(|r| cell(r, 0))
                 .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
+                .ok_or_else(|| DriverError::Message("The server didn't count the rows".into()))?;
             if n == 0 {
                 continue;
             }
@@ -920,7 +1028,7 @@ async fn cascading_keys(
         .iter()
         .map(|(s, t)| format!("({}, {})", mysql_text(s), mysql_text(t)))
         .collect();
-    let rows = text_rows(
+    let rows = select_text(
         session,
         &format!(
             "SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, \

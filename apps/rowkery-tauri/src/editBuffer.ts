@@ -458,7 +458,7 @@ export function columnEditor(column: ColumnNode, engine: EngineKind, enums: Enum
   return { kind: "text", ...base };
 }
 
-/** MySQL's editors. No `now()` here: MySQL reads it only unquoted. */
+/** MySQL's editors (core writes the date editor's `now()` as CURRENT_TIMESTAMP). */
 function mysqlEditor(type: string, t: string, base: { nullable: boolean; default: string | null }): ColumnEditor | null {
   const name = t.split(/[ (]/)[0];
   if (/^(binary|varbinary|tinyblob|blob|mediumblob|longblob)$/.test(name)) return null;
@@ -467,12 +467,12 @@ function mysqlEditor(type: string, t: string, base: { nullable: boolean; default
   if (/^(decimal|numeric|dec|fixed|float|double|real)$/.test(name)) return { kind: "number", ...base };
   if (name === "json") return { kind: "json", ...base };
   if (/^(date|datetime|timestamp|time)$/.test(name)) {
-    const placeholder = name === "date" ? "YYYY-MM-DD" : name === "time" ? "HH:MM:SS" : "YYYY-MM-DD HH:MM:SS";
+    const placeholder = name === "date" ? "YYYY-MM-DD · now()" : name === "time" ? "HH:MM:SS · now()" : "YYYY-MM-DD HH:MM:SS · now()";
     return { kind: "date", placeholder, ...base };
   }
   if (name === "enum") {
-    // enum('a','it''s'): the labels as the server wrote them.
-    const labels = [...type.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"));
+    // enum('a','it''s','a\\b'): COLUMN_TYPE doubles quotes and escapes backslashes.
+    const labels = [...type.matchAll(/'((?:[^'\\]|''|\\.)*)'/g)].map((m) => m[1].replace(/''|\\(.)/g, (_q, c) => c ?? "'"));
     if (labels.length) return { kind: "enum", labels, ...base };
   }
   return { kind: "text", ...base };
