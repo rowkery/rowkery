@@ -308,12 +308,13 @@ fn parse_mysql_tree(text: &str, timed: bool) -> Plan {
             .take_while(|&j| steps[j].depth > depth)
             .filter(|&j| steps[j].depth == depth + 1)
             .collect();
-        let own = |k: fn(&(Option<f64>, Option<f64>)) -> Option<f64>| {
-            k(&totals[i])
-                .map(|t| (t - children.iter().filter_map(|&j| k(&totals[j])).sum::<f64>()).max(0.0))
+        // `part` 0 is the cost, 1 the time.
+        let own = |part: usize| {
+            let of = |j: usize| if part == 0 { totals[j].0 } else { totals[j].1 };
+            of(i).map(|t| (t - children.iter().filter_map(|&j| of(j)).sum::<f64>()).max(0.0))
         };
-        steps[i].own_cost = own(|t| t.0);
-        steps[i].own_ms = if timed { own(|t| t.1) } else { None };
+        steps[i].own_cost = own(0);
+        steps[i].own_ms = if timed { own(1) } else { None };
     }
     Plan {
         execution_ms: if timed {
@@ -1796,7 +1797,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn mysql_json_estimates_read_as_steps() {
         let json = r#"{"query_block":{"select_id":1,"cost_info":{"query_cost":"2.45"},"ordering_operation":{"using_filesort":true,"nested_loop":[{"table":{"table_name":"a","access_type":"ALL","rows_examined_per_scan":4,"cost_info":{"read_cost":"0.52","eval_cost":"0.13","prefix_cost":"0.65"},"used_columns":["id","n"],"attached_condition":"(`a`.`n` > 1)"}},{"table":{"table_name":"b","access_type":"eq_ref","key":"PRIMARY","ref":["rowkery.a.n"],"rows_examined_per_scan":1,"cost_info":{"read_cost":"0.33","eval_cost":"0.13"}}}]}}}"#;
         let plan = parse_mysql(json, false).unwrap();
@@ -1824,6 +1824,7 @@ mod tests {
         assert_eq!(plan.steps[0].kind, "Index scan");
     }
 
+    #[test]
     fn mariadb_json_reads_as_steps() {
         let json = r#"{"query_optimization":{"r_total_time_ms":0.2},"query_block":{"select_id":1,"r_loops":1,"r_total_time_ms":0.11,"filesort":{"sort_key":"pl_a.n desc","r_loops":1,"temporary_table":{"nested_loop":[{"table":{"table_name":"pl_b","access_type":"ALL","r_loops":1,"rows":3,"r_rows":3,"r_table_time_ms":0.02,"r_other_time_ms":0.01,"r_engine_stats":{"pages_accessed":1},"filtered":100,"attached_condition":"pl_b.a is not null"}},{"table":{"table_name":"pl_a","access_type":"eq_ref","possible_keys":["PRIMARY","n"],"key":"PRIMARY","ref":["rowkery.pl_b.a"],"r_loops":3,"rows":1,"r_rows":1,"r_table_time_ms":0.03,"r_other_time_ms":0.01}}]}}}}"#;
         let plan = parse_mysql(json, true).unwrap();

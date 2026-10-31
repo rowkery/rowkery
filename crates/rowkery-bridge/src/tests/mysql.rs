@@ -428,3 +428,123 @@ fn mysql_plans_read_as_steps_and_never_run_writes() {
     bridge.close_window("w");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// The Sessions tab on MySQL: our tabs are labelled, a blocked statement
+/// is cancelled with `KILL QUERY`, ending a session asks first (`KILL`),
+/// and a read-only connection refuses both. Run as a login with PROCESS
+/// (`ROWKERY_MYSQL_USER=root`), it also says who blocks whom.
+#[test]
+fn mysql_sessions_list_ours_and_stop_through_safe_mode() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-sessions", SafeMode::Off);
+    bridge.open_window("w", "my-sessions", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_sess; CREATE TABLE bw_sess (id INT PRIMARY KEY, n INT) ENGINE=InnoDB;
+         INSERT INTO bw_sess VALUES (1, 0)",
+    );
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "BEGIN; SELECT n FROM bw_sess WHERE id = 1 FOR UPDATE",
+    );
+    assert_eq!(error, None);
+    let blocked = bridge
+        .run_window_query(
+            "w",
+            2,
+            "UPDATE bw_sess SET n = 2 WHERE id = 1".into(),
+            None,
+            false,
+        )
+        .expect("run");
+    let tab_row = |rows: &[SessionRow], tab: u64| {
+        rows.iter()
+            .find(|r| {
+                r.tab
+                    .as_ref()
+                    .is_some_and(|t| t.window_id == "w" && t.tab_id == tab)
+            })
+            .cloned()
+    };
+    // The UPDATE shows up waiting.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (holder, waiter) = loop {
+        let rows = bridge.sessions("w").expect("sessions");
+        if let (Some(h), Some(w)) = (tab_row(&rows, 1), tab_row(&rows, 2)) {
+            if w.session
+                .query
+                .as_deref()
+                .is_some_and(|q| q.contains("UPDATE"))
+            {
+                break (h, w);
+            }
+        }
+        assert!(Instant::now() < deadline, "{rows:?}");
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(waiter.session.state.as_deref(), Some("active"));
+    assert!(holder.session.can_stop && waiter.session.can_stop);
+    // Without PROCESS the server hides transactions; root has it.
+    let process = env("ROWKERY_MYSQL_USER", "rowkery") == "root";
+    assert_eq!(holder.session.xact_secs.is_some(), process, "{holder:?}");
+    if process {
+        assert_eq!(holder.session.state.as_deref(), Some("idle in transaction"));
+        assert_eq!(waiter.session.blocked_by, [holder.session.pid]);
+        assert!(
+            waiter
+                .session
+                .wait
+                .as_deref()
+                .is_some_and(|w| w.starts_with("Lock: ")),
+            "{waiter:?}"
+        );
+    }
+
+    // Cancel stops the UPDATE; its tab stays.
+    let out = bridge
+        .stop_session("w", waiter.session.pid, StopKind::Cancel, false)
+        .expect("cancel");
+    assert_eq!(out, StopOutcome::Stopped { gone: false });
+    let (_, error, cancelled) = wait_finished(&blocked);
+    assert!(cancelled || error.is_some(), "{error:?}");
+    assert_eq!(rows_of(&bridge, "w", 2, "SELECT 4").0, [[Value::Int(4)]]);
+
+    // Ending a session asks first, with exactly what runs.
+    let pid = holder.session.pid;
+    let out = bridge
+        .stop_session("w", pid, StopKind::End, false)
+        .expect("end");
+    assert_eq!(
+        out,
+        StopOutcome::Held {
+            sql: format!("KILL {pid}")
+        }
+    );
+    let out = bridge
+        .stop_session("w", pid, StopKind::End, true)
+        .expect("end");
+    assert_eq!(out, StopOutcome::Stopped { gone: false });
+    // Its transaction rolled back: the row is free for another tab.
+    let (_, error, _) = rows_of(&bridge, "w", 2, "UPDATE bw_sess SET n = 3 WHERE id = 1");
+    assert_eq!(error, None);
+    let out = bridge
+        .stop_session("w", pid, StopKind::End, true)
+        .expect("end again");
+    assert_eq!(out, StopOutcome::Stopped { gone: true });
+    bridge.close_window("w");
+
+    save_mysql(&bridge, "my-sessions-ro", SafeMode::ReadOnly);
+    bridge
+        .open_window("r", "my-sessions-ro", None)
+        .expect("open");
+    for kind in [StopKind::Cancel, StopKind::End] {
+        let out = bridge.stop_session("r", 1, kind, true).expect("stop");
+        assert!(matches!(out, StopOutcome::Refused { .. }), "{out:?}");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

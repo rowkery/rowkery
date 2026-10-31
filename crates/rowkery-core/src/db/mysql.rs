@@ -28,6 +28,9 @@ use super::introspect::{
 };
 use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 
+mod activity;
+pub use activity::{session_activity, session_stop};
+
 /// The one catalog a MySQL server has (`information_schema`'s
 /// `TABLE_CATALOG`): the catalog's single database. Its databases are the
 /// catalog's schemas.
@@ -79,7 +82,8 @@ pub struct MysqlSession {
     opts: Opts,
     flavor: Flavor,
     version: String,
-    /// In its `program_name` connect attribute, after `Rowkery `.
+    /// The server's id for the connection, as text: what the Sessions
+    /// tab knows it by (`PROCESSLIST.ID`).
     tag: String,
     /// Kept while the session lives (a place under the connection's cap).
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
@@ -116,8 +120,8 @@ impl MysqlSession {
         &self.version
     }
 
-    /// Names this session's connection in `performance_schema`
-    /// (`program_name` = `Rowkery <tag>`).
+    /// Names this session's connection in the Sessions tab: its
+    /// `PROCESSLIST.ID`.
     pub fn tag(&self) -> &str {
         &self.tag
     }
@@ -245,7 +249,6 @@ pub async fn open_session_via(
         None if secrets.is_some() => String::new(),
         None => stored_password(&connection_id).await?,
     };
-    let tag = super::postgres::new_tag();
     let builder = |tls: Option<SslOpts>| {
         let mut b = OptsBuilder::default()
             // Through a tunnel the socket goes to the local end; the
@@ -264,10 +267,7 @@ pub async fn open_session_via(
             .prefer_socket(false)
             .tcp_keepalive(Some(Duration::from_secs(30)))
             .stmt_cache_size(0)
-            .connect_attribute(
-                "program_name",
-                format!("{} {tag}", super::postgres::APP_NAME),
-            )
+            .connect_attribute("program_name", super::postgres::APP_NAME)
             .ssl_opts(tls);
         // Read-only connections are read-only at the server too, so a write
         // the text check misses (a function in a SELECT) still fails.
@@ -312,6 +312,7 @@ pub async fn open_session_via(
             .map_err(|_| late())?
             .map_err(|e| map_error(e, &config))?;
     let (flavor, version) = parse_version(full.as_deref().unwrap_or_default());
+    let tag = conn.id().to_string();
     Ok(MysqlSession {
         config,
         connection_id,

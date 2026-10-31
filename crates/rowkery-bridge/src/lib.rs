@@ -3095,6 +3095,30 @@ fn run_sql_file(
 /// Stops a run at once, without waiting for the server (⌘K "Stop all queries").
 /// Runs `work` on the runtime for a Postgres window; a SQLite window has no
 /// server sessions to show.
+/// The Sessions target of a MySQL window; `None` for any other window.
+fn mysql_sessions(state: &CoreState, window_id: &str) -> Option<sessions::MysqlTarget> {
+    let Some(WindowTarget::Mysql {
+        connection_id,
+        config,
+    }) = state.windows.get(window_id).cloned()
+    else {
+        return None;
+    };
+    Some(sessions::MysqlTarget {
+        slot: mysql::MysqlSlot {
+            pool: state.mysql_pool.clone(),
+            generation: state
+                .mysql_pool
+                .lock()
+                .map(|p| p.generation(window_id))
+                .unwrap_or(0),
+            window_id: window_id.to_string(),
+        },
+        connection_id,
+        config,
+    })
+}
+
 fn with_postgres<T, F, Fut>(
     state: &CoreState,
     window_id: String,
@@ -4295,7 +4319,15 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
         Command::Sessions {
             window_id,
             respond_to,
-        } => with_postgres(state, window_id, respond_to, sessions::list),
+        } => match mysql_sessions(state, &window_id) {
+            Some(target) => {
+                state.runtime.spawn(async move {
+                    let listed = sessions::mysql_list(target).await;
+                    let _ = respond_to.send(listed.map_err(driver_error_message));
+                });
+            }
+            None => with_postgres(state, window_id, respond_to, sessions::list),
+        },
         Command::Health {
             window_id,
             respond_to,
@@ -4326,9 +4358,17 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             kind,
             confirmed,
             respond_to,
-        } => with_postgres(state, window_id, respond_to, move |t| {
-            sessions::stop(t, pid, kind, confirmed)
-        }),
+        } => match mysql_sessions(state, &window_id) {
+            Some(target) => {
+                state.runtime.spawn(async move {
+                    let stopped = sessions::mysql_stop(target, pid, kind, confirmed).await;
+                    let _ = respond_to.send(stopped.map_err(driver_error_message));
+                });
+            }
+            None => with_postgres(state, window_id, respond_to, move |t| {
+                sessions::stop(t, pid, kind, confirmed)
+            }),
+        },
         Command::TableIndexes {
             window_id,
             schema,

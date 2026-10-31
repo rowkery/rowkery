@@ -937,8 +937,18 @@ pub(crate) async fn lease_or_wait<S: PoolSession>(
     if let Some(place) = place {
         session.hold(Box::new(place));
     }
-    if let (Some(t), Ok(mut p)) = (session.route(), pool.lock()) {
-        p.keep_tunnel(window_id, generation, t);
+    if let Ok(mut p) = pool.lock() {
+        if let Some(t) = session.route() {
+            p.keep_tunnel(window_id, generation, t);
+        }
+        // The Sessions tab names a tab's session from its first run, not
+        // only once it's parked.
+        if let Slot::Tab(tab_id) = slot {
+            if p.generation(window_id) == generation {
+                p.tags
+                    .insert(session.tag().to_string(), (window_id.to_string(), tab_id));
+            }
+        }
     }
     Ok(Lease {
         session,

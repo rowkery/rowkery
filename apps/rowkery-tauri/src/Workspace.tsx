@@ -3987,6 +3987,7 @@ export function Workspace({
       connection: activeConnection
         ? {
             postgres: activeConnection.kind === "postgres",
+            mysql: activeConnection.kind === "mysql",
             environment: activeConnection.environment ?? null,
             safeMode: activeConnection.safe_mode ?? "off",
             allowMcp: mcpShared(activeConnection),
