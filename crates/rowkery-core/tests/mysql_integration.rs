@@ -1282,3 +1282,29 @@ async fn csv_imports_leave_empty_cells_to_the_table() {
         "{failure:?}"
     );
 }
+
+#[tokio::test]
+async fn several_edits_need_a_table_that_rolls_back() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ed_myisam; CREATE TABLE it_ed_myisam (id INT PRIMARY KEY) ENGINE = MyISAM; \
+         INSERT INTO it_ed_myisam VALUES (1), (2)",
+    )
+    .await
+    .unwrap();
+    let table = edit_table("it_ed_myisam", &[("id", "int")]);
+    let failure = apply(&mut s, &table, &[delete(1), delete(99)], None)
+        .await
+        .unwrap_err();
+    assert!(failure.message.contains("MyISAM"), "{}", failure.message);
+    assert_eq!(count(&mut s, "SELECT COUNT(*) FROM it_ed_myisam").await, 2);
+    // One row alone is one statement.
+    assert_eq!(
+        apply(&mut s, &table, &[delete(1)], None)
+            .await
+            .unwrap()
+            .deleted,
+        1
+    );
+}
