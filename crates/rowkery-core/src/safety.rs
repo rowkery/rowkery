@@ -626,15 +626,70 @@ impl Tok {
 
 /// Statements (split on top-level `;`) as tokens. Strings, numbers and
 /// comments are dropped; dollar-quoted bodies are dropped too.
+///
+/// A MySQL `/*!NNNNN … */` runs only on servers at or past version NNNNN,
+/// and MySQL skips `/*M! … */`: which of a statement's executable comments
+/// run depends on the server. Every way they can fall is checked; if the
+/// readings aren't all the same, the statement is unclear.
 fn tokenize(sql: &str, dialect: Dialect) -> Vec<Vec<Tok>> {
-    tokenize_spans(sql, dialect).0
+    let (mut statements, spans, executables) = tokenize_spans(sql, dialect, u32::MAX);
+    for ((toks, span), k) in statements.iter_mut().zip(&spans).zip(executables) {
+        if k == 0 {
+            continue;
+        }
+        if k > MAX_EXECUTABLE_COMMENTS {
+            *toks = vec![Tok::Unclear];
+            continue;
+        }
+        let text = &sql[span.clone()];
+        let mut seen: Option<StatementCheck> = None;
+        let mut same = true;
+        for mask in 0..(1u32 << k) {
+            let reading: Vec<Tok> = tokenize_spans(text, dialect, mask)
+                .0
+                .into_iter()
+                .flatten()
+                .collect();
+            if reading.is_empty() {
+                // Nothing runs: no reading to compare.
+                continue;
+            }
+            let check = check_tokens(&reading);
+            match &seen {
+                Some(first) if *first != check => {
+                    same = false;
+                    break;
+                }
+                Some(_) => {}
+                None => seen = Some(check),
+            }
+        }
+        if !same {
+            *toks = vec![Tok::Unclear];
+        }
+    }
+    statements
 }
 
-/// `tokenize`, with each statement's byte range in `sql` (its `;` left out).
-fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>) {
+/// More executable comments than this in one statement make it unclear
+/// (each one doubles the readings to check).
+const MAX_EXECUTABLE_COMMENTS: usize = 6;
+
+/// `tokenize`, with each statement's byte range in `sql` (its `;` left out)
+/// and how many executable comments it has. Executable comment `j` (counted
+/// from the start of `sql`) reads as SQL when bit `j` of `run` is set
+/// (`u32::MAX`: all of them), else as a comment.
+#[allow(clippy::type_complexity)]
+fn tokenize_spans(
+    sql: &str,
+    dialect: Dialect,
+    run: u32,
+) -> (Vec<Vec<Tok>>, Vec<std::ops::Range<usize>>, Vec<usize>) {
     let b = sql.as_bytes();
     let mut out = vec![Vec::new()];
     let mut spans = Vec::new();
+    let mut executables = vec![0usize];
+    let mut seen = 0u32;
     let mut start = 0;
     let mut i = 0;
     while let Some((lexeme, end)) = lex(b, i, true, dialect) {
@@ -652,7 +707,12 @@ fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::
                 if !closed {
                     toks.push(Tok::Unclear);
                 }
-                executable_tokens(sql, inner, dialect, toks);
+                *executables.last_mut().unwrap() += 1;
+                let runs = seen >= 32 || run & (1 << seen) != 0;
+                seen = seen.saturating_add(1);
+                if runs {
+                    executable_tokens(sql, inner, dialect, toks);
+                }
             }
             Lexeme::Dollar { closed } => {
                 if !closed {
@@ -662,6 +722,7 @@ fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::
             }
             Lexeme::Semicolon => {
                 out.push(Vec::new());
+                executables.push(0);
                 spans.push(start..i);
                 start = end;
             }
@@ -688,16 +749,24 @@ fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::
         i = end;
     }
     spans.push(start..b.len().max(start));
-    (out, spans)
+    (out, spans, executables)
 }
 
 /// The tokens of the SQL inside a MySQL `/*! … */` comment, which the
 /// server runs as part of the statement around it. A `;`, or a comment of
 /// the same kind inside (where the outer one ends is then unclear), makes
-/// the statement unclear: no statement is checked by half.
+/// the statement unclear: no statement is checked by half. So does a
+/// string, quoted name or line comment inside: the server reads those
+/// before it looks for the `*/`, so a `*/` in one doesn't end the comment
+/// for it (`/*!00000 # */ …` runs what follows).
 fn executable_tokens(sql: &str, (from, to): (usize, usize), dialect: Dialect, toks: &mut Vec<Tok>) {
-    let mut inner = tokenize(&sql[..to][from..], dialect);
-    if inner.len() > 1 || sql[from..to].contains("/*") {
+    let text = &sql[..to][from..];
+    let (mut inner, _, _) = tokenize_spans(text, dialect, u32::MAX);
+    if inner.len() > 1
+        || ["/*", "#", "--", "'", "\"", "`"]
+            .iter()
+            .any(|m| text.contains(m))
+    {
         toks.push(Tok::Unclear);
     }
     toks.extend(inner.drain(..).flatten());
@@ -707,7 +776,7 @@ fn executable_tokens(sql: &str, (from, to): (usize, usize), dialect: Dialect, to
 /// left out: what the SQL file reader must agree with.
 #[cfg(test)]
 pub(crate) fn split_statements(sql: &str) -> Vec<String> {
-    let (toks, spans) = tokenize_spans(sql, Dialect::Either);
+    let (toks, spans, _) = tokenize_spans(sql, Dialect::Either, u32::MAX);
     toks.iter()
         .zip(spans)
         .filter(|(t, _)| !t.is_empty())
@@ -1068,7 +1137,7 @@ pub struct RowChange {
 /// its own to preview it), no RETURNING (Rowkery adds its own), and no
 /// UPDATE … FROM or DELETE … USING (the preview matches rows of one table).
 pub fn row_changes(sql: &str) -> Result<Vec<RowChange>, String> {
-    let (statements, spans) = tokenize_spans(sql, Dialect::Either);
+    let (statements, spans, _) = tokenize_spans(sql, Dialect::Either, u32::MAX);
     let mut out = Vec::new();
     for (toks, span) in statements.iter().zip(spans) {
         if toks.is_empty() {
@@ -1478,17 +1547,12 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
         "SHOW" | "VALUES" | "TABLE" | "FETCH" | "MOVE" | "DECLARE" | "CLOSE" | "LISTEN"
         | "UNLISTEN" => read(),
         // MySQL: `SET GLOBAL` / `SET PERSIST` change the server for every
-        // session, and `RESET MASTER` and the like drop server state.
-        "SET"
-            if toks
-                .get(1)
-                .is_some_and(|t| t.is("GLOBAL") || t.is("PERSIST") || t.is("PERSIST_ONLY"))
-                || sets_global_variable(toks) =>
-        {
-            write_verb(&format!(
-                "SET {}",
-                toks.get(1).and_then(Tok::word).unwrap_or("GLOBAL")
-            ))
+        // session (in any item of `SET a = 1, GLOBAL b = 2`), `SET PASSWORD`
+        // and `SET DEFAULT ROLE` change accounts, `SET RESOURCE GROUP` moves
+        // other threads, and MariaDB's `SET STATEMENT … FOR` runs a
+        // statement. `RESET MASTER` and the like drop server state.
+        "SET" if set_writes(toks).is_some() => {
+            write_verb(&format!("SET {}", set_writes(toks).unwrap_or("GLOBAL")))
         }
         "RESET"
             if toks.get(1).is_some_and(|t| {
@@ -1644,6 +1708,29 @@ fn schema_check(toks: &[Tok], first: &str) -> StatementCheck {
         target,
         unlocks_writes: false,
     }
+}
+
+/// The word naming what a MySQL `SET` changes beyond this session, if it
+/// does: checked at the start of every top-level comma item.
+fn set_writes(toks: &[Tok]) -> Option<&'static str> {
+    const ACCOUNT: [&str; 4] = ["PASSWORD", "DEFAULT", "RESOURCE", "STATEMENT"];
+    const SCOPE: [&str; 3] = ["GLOBAL", "PERSIST", "PERSIST_ONLY"];
+    if let Some(w) = ACCOUNT
+        .iter()
+        .find(|w| toks.get(1).is_some_and(|t| t.is(w)))
+    {
+        return Some(w);
+    }
+    let mut item_start = true;
+    for t in top_level(&toks[1..]) {
+        if item_start {
+            if let Some(w) = SCOPE.iter().find(|w| t.is(w)) {
+                return Some(w);
+            }
+        }
+        item_start = *t == Tok::Other(',');
+    }
+    sets_global_variable(toks).then_some("GLOBAL")
 }
 
 /// A MySQL `SET @@GLOBAL.x = …` (or `@@PERSIST.`): a setting for every
@@ -2713,6 +2800,47 @@ mod tests {
             kinds("SELECT 'a\\\\', 'b' ; SELECT \"it\"\"s\""),
             [Read, Read]
         );
+        // A comment, string or quoted name inside `/*! … */` hides a `*/`
+        // from the server: where the comment ends is unclear.
+        assert_eq!(
+            verbs("/*!00000 # */ EXPLAIN /*\n*/ DELETE FROM t WHERE a=7"),
+            [UNCLEAR_VERB]
+        );
+        assert_eq!(
+            verbs("SELECT 1 /*!00000 -- */ /*\n; DELETE FROM t */"),
+            [UNCLEAR_VERB]
+        );
+        assert_eq!(verbs("SELECT /*!00000 '*/' */ 1"), [UNCLEAR_VERB]);
+        // A server may skip a versioned or `/*M!` comment: every reading
+        // counts.
+        assert_eq!(verbs("/*!99999 EXPLAIN */ DELETE FROM t"), [UNCLEAR_VERB]);
+        assert_eq!(verbs("/*M!999999 EXPLAIN */ DELETE FROM t"), [UNCLEAR_VERB]);
+        assert_eq!(verbs("/*M!000000 DESC */ DELETE FROM t"), [UNCLEAR_VERB]);
+        assert_eq!(
+            verbs("/*!99999 EXPLAIN */ /*!00000 DELETE FROM t */"),
+            [UNCLEAR_VERB]
+        );
+        // Readings that agree stay as they are; one that runs nothing
+        // isn't a reading.
+        assert_eq!(kinds("/*!40101 SET NAMES utf8mb4 */"), [Session]);
+        assert_eq!(kinds("SELECT 1 /*!50000 , 2 */"), [Read]);
+        assert_eq!(
+            kinds("/*!50000 DELETE FROM t */; /*!50000 SELECT 1 */"),
+            [Write, Read]
+        );
+        // Every comma item of a SET, and the SETs that change accounts or
+        // other threads, or run a statement.
+        assert_eq!(kinds("SET @a = 1, GLOBAL max_connections = 10"), [Write]);
+        assert_eq!(kinds("SET sql_mode = '', PERSIST x = 1"), [Write]);
+        assert_eq!(kinds("SET PASSWORD FOR 'root'@'%' = 'x'"), [Write]);
+        assert_eq!(kinds("SET DEFAULT ROLE ALL TO u"), [Write]);
+        assert_eq!(kinds("SET RESOURCE GROUP rg FOR 12"), [Write]);
+        assert_eq!(
+            kinds("SET STATEMENT max_statement_time = 1 FOR DELETE FROM t"),
+            [Write]
+        );
+        assert_eq!(kinds("SET @a = 1, @b = (SELECT 2)"), [Session]);
+        assert_eq!(kinds("SET NAMES utf8mb4"), [Session]);
         // `/*! … */` runs; its SQL is checked as part of the statement.
         assert_eq!(verbs("/*!80000 DROP TABLE t */"), ["DROP TABLE"]);
         assert_eq!(verbs("/*!40101 SET NAMES utf8mb4 */"), ["SET"]);
