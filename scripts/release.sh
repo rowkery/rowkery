@@ -26,7 +26,8 @@
 # (users then open it with System Settings > Privacy & Security > Open
 # Anyway). These variables are read from ~/.config/rowkery/release.env
 # (ROWKERY_RELEASE_ENV to use another file) when it exists, so they needn't be
-# in the shell. Usually run through `make release`.
+# in the shell; a variable set on the command line wins over the file.
+# Usually run through `make release`.
 set -euo pipefail
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -35,10 +36,14 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 release_env="${ROWKERY_RELEASE_ENV:-$HOME/.config/rowkery/release.env}"
 if [[ -f "$release_env" ]]; then
   # set -a exports every line, so a line without `export` still reaches tauri build.
+  # What the shell already exported is put back after, so `ALLOW_UNSIGNED=1 make
+  # release` still wins over the file.
+  inline="$(export -p)"
   set -a
   # shellcheck source=/dev/null
   source "$release_env"
   set +a
+  eval "$inline"
   say "loaded $release_env"
 elif [[ -n "${ROWKERY_RELEASE_ENV:-}" ]]; then
   die "no file at ROWKERY_RELEASE_ENV ($release_env)"
@@ -109,7 +114,9 @@ export TAURI_SIGNING_PRIVATE_KEY="$key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 say "Rowkery $version ($(git -C "$root" rev-parse --short HEAD)) for Apple Silicon and Intel"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cd "$app"
-npm install --no-audit --no-fund
+# Dependencies' install scripts never see the signing secrets.
+env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u APPLE_PASSWORD \
+  -u APPLE_API_KEY -u APPLE_API_KEY_PATH -u APPLE_API_ISSUER npm install --no-audit --no-fund
 npm run tauri build -- --target universal-apple-darwin --bundles app,dmg \
   --config "{\"bundle\":{\"createUpdaterArtifacts\":true},\"plugins\":{\"updater\":{\"endpoints\":[\"$feed\"]}}}"
 

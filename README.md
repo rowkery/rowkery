@@ -130,7 +130,8 @@ Releases are published to this repo's GitHub Releases. The app reads the update 
 
 1. Once, for a new fork: `scripts/updater-key.sh` creates the update signing key and writes its public half into `tauri.conf.json`. Back up `~/.tauri/rowkery-updater.key` and its password outside the Mac. Installed copies only accept updates signed with that key, so a new key strands every install made with the old one.
 2. Bump the version in `tauri.conf.json`, `package.json` (and its lockfile) and `[workspace.package]` in the root `Cargo.toml`, write `docs/releases/v<version>.md`, and push.
-3. `make release publish` builds the universal DMG, the signed update bundle and `latest.json`, and opens a draft release at that commit. Publish it as a full release, not a pre-release.
+3. The Apple Developer ID identity and notarization credentials go in `~/.config/rowkery/release.env` (the variables are listed at the top of `scripts/release.sh`), which the release loads by itself.
+4. `make release publish` builds the universal DMG, the signed update bundle and `latest.json`, and opens a draft release at that commit. Publish it as a full release, not a pre-release.
 
 `scripts/update-rehearsal.sh` proves the update path on a Mac without publishing anything.
 
