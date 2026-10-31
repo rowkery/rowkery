@@ -40,7 +40,7 @@ Rowkery keeps your passwords in the macOS Keychain. You'll see macOS ask whether
 - once more after updating from a version before 1.0.0, since those weren't signed by Apple and to macOS the signed app is a different app,
 - when your agent first reads a connection, since the MCP server is the same Rowkery app reading the same item.
 
-Rowkery keeps one keychain item per connection, holding all its secrets, so you're asked once per connection rather than once per password. Choose **Always Allow** to stop the prompt for that item. Updates from 1.0.0 on carry the same Apple signature, so they don't bring the prompt back. If you choose **Deny**, that connection can't log in this time, and an agent can't get stand-ins for its sensitive columns (it gets a refusal instead). Rowkery remembers a denial until it restarts, so it doesn't ask again for every query.
+Rowkery keeps one keychain item per connection, holding all its secrets, so you're asked once per connection rather than once per password. Choose **Always Allow** to stop the prompt for that item. Updates from 1.0.0 on are signed with the same Developer ID, so they don't bring the prompt back. If you choose **Deny**, that connection can't log in this time, and an agent can't get stand-ins for its sensitive columns (it gets a refusal instead). Rowkery remembers a denial until it restarts, so it doesn't ask again for every query.
 
 ## Couldn't connect
 

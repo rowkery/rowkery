@@ -356,7 +356,7 @@ const NEWER_KINDS: [SecretKind; 2] = [SecretKind::MaskKey, SecretKind::GcpKey];
 
 /// A connection's secrets, by kind label: the JSON held in its one keychain
 /// item. One item per connection means macOS asks once per connection (after
-/// each unsigned build), and the MCP server only ever reads the items of the
+/// each self-built copy), and the MCP server only ever reads the items of the
 /// connections it was given.
 type Item = std::collections::BTreeMap<String, String>;
 
