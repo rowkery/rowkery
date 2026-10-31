@@ -9,6 +9,8 @@ use crate::query_util::sql_literal;
 pub enum EngineKind {
     Sqlite,
     Postgres,
+    /// MySQL and MariaDB.
+    Mysql,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -479,6 +481,35 @@ const KEYWORDS: &[&str] = &[
     "without",
 ];
 
+/// Reserved words of MySQL 8.4 and MariaDB, space separated: on MySQL a
+/// name that is one of them (or a [`KEYWORDS`] word) is quoted.
+const MYSQL_RESERVED: &str =
+    "accessible add all alter analyze and as asc asensitive before between bigint binary \
+    blob both by call cascade case change char character check collate column condition \
+    constraint continue convert create cross cube cume_dist current_date current_time \
+    current_timestamp current_user cursor database databases day_hour day_microsecond \
+    day_minute day_second dec decimal declare default delayed delete dense_rank desc \
+    describe deterministic distinct distinctrow div double drop dual each else elseif empty \
+    enclosed escaped except exists exit explain false fetch first_value float float4 float8 \
+    for force foreign from fulltext function generated get grant group grouping groups \
+    having high_priority hour_microsecond hour_minute hour_second if ignore in index infile \
+    inner inout insensitive insert int int1 int2 int3 int4 int8 integer intersect interval \
+    into io_after_gtids io_before_gtids is iterate join json_table key keys kill lag \
+    last_value lateral lead leading leave left like limit linear lines load localtime \
+    localtimestamp lock long longblob longtext loop low_priority master_bind \
+    master_ssl_verify_server_cert match maxvalue mediumblob mediumint mediumtext middleint \
+    minute_microsecond minute_second mod modifies natural no_write_to_binlog not nth_value \
+    ntile null numeric of offset on optimize optimizer_costs option optionally or order out \
+    outer outfile over partition percent_rank precision primary procedure purge range rank \
+    read read_write reads real recursive references regexp release rename repeat replace \
+    require resignal restrict return returning revoke right rlike row row_number rows \
+    schema schemas second_microsecond select sensitive separator set show signal smallint \
+    spatial specific sql sql_big_result sql_calc_found_rows sql_small_result sqlexception \
+    sqlstate sqlwarning ssl starting stored straight_join system table terminated then \
+    tinyblob tinyint tinytext to trailing trigger true undo union unique unlock unsigned \
+    update usage use using utc_date utc_time utc_timestamp values varbinary varchar \
+    varcharacter varying virtual when where while window with write xor year_month zerofill";
+
 /// Whether `ident` must be quoted to mean itself: anything but a lowercase
 /// letter or `_` followed by lowercase letters, digits and `_`, or a keyword.
 pub fn needs_quoting(ident: &str) -> bool {
@@ -492,12 +523,18 @@ pub fn needs_quoting(ident: &str) -> bool {
 /// it, so generated SQL reads as a person would write it (`public.wallet_tx`,
 /// `"Order"`, `"user"`).
 pub fn quote_ident(engine: EngineKind, ident: &str) -> String {
-    if !needs_quoting(ident) {
-        return ident.to_string();
-    }
-    let escaped = ident.replace('"', "\"\"");
+    let mysql_reserved = || {
+        let lower = ident.to_ascii_lowercase();
+        MYSQL_RESERVED.split_ascii_whitespace().any(|w| w == lower)
+    };
     match engine {
-        EngineKind::Sqlite | EngineKind::Postgres => format!("\"{escaped}\""),
+        EngineKind::Mysql if needs_quoting(ident) || mysql_reserved() => {
+            format!("`{}`", ident.replace('`', "``"))
+        }
+        EngineKind::Sqlite | EngineKind::Postgres if needs_quoting(ident) => {
+            format!("\"{}\"", ident.replace('"', "\"\""))
+        }
+        _ => ident.to_string(),
     }
 }
 
@@ -505,7 +542,8 @@ pub fn quote_ident(engine: EngineKind, ident: &str) -> String {
 pub fn qualified_table_sql(engine: EngineKind, schema: &str, table: &str) -> String {
     match engine {
         EngineKind::Sqlite => quote_ident(engine, table),
-        EngineKind::Postgres => format!(
+        // A MySQL schema is a database: `shop`.`orders`.
+        EngineKind::Postgres | EngineKind::Mysql => format!(
             "{}.{}",
             quote_ident(engine, schema),
             quote_ident(engine, table)
@@ -712,12 +750,16 @@ pub fn table_browse_query(
                 let name = quote_ident(engine, &o.column);
                 let dir = if o.desc { " DESC" } else { "" };
                 // Keyset pages put NULLs last whatever the engine's default.
-                let nulls = if opts.pages_by_key() && !opts.key.contains(&o.column) {
-                    " NULLS LAST"
-                } else {
-                    ""
-                };
-                format!("{name}{dir}{nulls}")
+                // MySQL has no NULLS LAST and sorts them first going up.
+                let nulls_last = opts.pages_by_key() && !opts.key.contains(&o.column);
+                match engine {
+                    EngineKind::Mysql if nulls_last && !o.desc => {
+                        format!("{name} IS NULL, {name}")
+                    }
+                    EngineKind::Mysql => format!("{name}{dir}"),
+                    _ if nulls_last => format!("{name}{dir} NULLS LAST"),
+                    _ => format!("{name}{dir}"),
+                }
             })
             .collect();
         sql.push_str(&format!("\nORDER BY {}", cols.join(", ")));
@@ -1175,5 +1217,42 @@ mod tests {
     fn browse_sql_sqlite() {
         let sql = table_browse_sql(EngineKind::Sqlite, "main", "items", 500);
         assert_eq!(sql, "SELECT * FROM items\nLIMIT 500;");
+    }
+
+    #[test]
+    fn mysql_names_take_backticks() {
+        let q = |name: &str| quote_ident(EngineKind::Mysql, name);
+        assert_eq!(q("orders"), "orders");
+        // Reserved in MySQL, not in Postgres.
+        assert_eq!(q("rank"), "`rank`");
+        assert_eq!(q("Key"), "`Key`");
+        assert_eq!(q("Order"), "`Order`");
+        assert_eq!(q("a`b"), "`a``b`");
+        assert_eq!(quote_ident(EngineKind::Postgres, "rank"), "rank");
+        assert_eq!(
+            qualified_table_sql(EngineKind::Mysql, "shop", "order items"),
+            "shop.`order items`"
+        );
+    }
+
+    #[test]
+    fn mysql_keyset_pages_put_nulls_last_without_nulls_last() {
+        let mut opts = BrowseOptions::first_page(50);
+        opts.key = vec!["id".into()];
+        opts.order = vec![
+            BrowseOrder {
+                column: "rank".into(),
+                desc: false,
+            },
+            BrowseOrder {
+                column: "seen".into(),
+                desc: true,
+            },
+        ];
+        let sql = table_browse_query(EngineKind::Mysql, "shop", "t", &opts);
+        assert_eq!(
+            sql,
+            "SELECT * FROM shop.t\nORDER BY `rank` IS NULL, `rank`, seen DESC, id\nLIMIT 50;"
+        );
     }
 }

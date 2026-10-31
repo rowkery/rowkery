@@ -168,6 +168,7 @@ pub fn explain_sql(engine: EngineKind, sql: &str, timed: bool) -> Result<String,
         }
         EngineKind::Postgres => format!("EXPLAIN (FORMAT JSON, VERBOSE) {body}"),
         EngineKind::Sqlite => format!("EXPLAIN QUERY PLAN {body}"),
+        EngineKind::Mysql => return Err("Plans for MySQL aren't in this version yet.".into()),
     })
 }
 
@@ -521,6 +522,7 @@ pub fn add_hint(plan: &mut Plan, engine: EngineKind, facts: &PlanFacts) {
     plan.hint = match engine {
         EngineKind::Postgres => pg_hint(plan, facts),
         EngineKind::Sqlite => sqlite_hint(plan, facts),
+        EngineKind::Mysql => None,
     };
 }
 
