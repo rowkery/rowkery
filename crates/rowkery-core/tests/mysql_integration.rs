@@ -1,6 +1,8 @@
 //! Against a live MySQL or MariaDB: `ROWKERY_MYSQL_PORT` (and `_HOST`,
 //! `_USER`, `_PASSWORD`, `_DB`, all `rowkery` / 127.0.0.1 by default).
 //! `ROWKERY_MYSQL_FLAVOR` (`mysql` or `mariadb`) checks the detection.
+//! Tests that make stored functions sign in as root once
+//! (`ROWKERY_MYSQL_ROOT_PASSWORD`, `rowkery` by default).
 //! Each test makes its own tables, named after itself.
 #![cfg(feature = "mysql-integration")]
 
@@ -54,6 +56,23 @@ fn secrets() -> ConnectionSecrets {
 
 async fn open(config: MysqlConnection) -> Result<MysqlSession, DriverError> {
     open_session_via(config.id.clone(), config, Some(&secrets()), None).await
+}
+
+/// Lets the test user make stored functions: with binary logging on (MySQL
+/// 8.0's default) only a SUPER user may, unless the server trusts them.
+async fn trust_function_creators() {
+    let mut root = config();
+    root.username = "root".into();
+    let secrets = ConnectionSecrets {
+        db_password: Some(env("ROWKERY_MYSQL_ROOT_PASSWORD", "rowkery")),
+        ..Default::default()
+    };
+    let mut s = open_session_via(root.id.clone(), root, Some(&secrets), None)
+        .await
+        .unwrap();
+    session_execute(&mut s, "SET GLOBAL log_bin_trust_function_creators = 1")
+        .await
+        .unwrap();
 }
 
 /// Every batch of `sql`, and what it returned.
@@ -244,8 +263,33 @@ async fn the_catalog_lists_databases_as_schemas() {
         ("code", "varchar(10)", false)
     );
     assert_eq!(code.comment.as_deref(), Some("the code"));
-    let default = code.default.as_deref().unwrap();
-    assert!(default == "x" || default == "'x'", "{default}");
+    // MariaDB's `'x'` reads as MySQL's `x`.
+    assert_eq!(code.default.as_deref(), Some("x"));
+    // Arguments past GROUP_CONCAT's 1024 bytes are all there.
+    let long_arg = format!("a_{}", "x".repeat(60));
+    let params: Vec<String> = (0..20).map(|i| format!("{long_arg}{i} INT")).collect();
+    trust_function_creators().await;
+    session_execute(
+        &mut s,
+        &format!(
+            "DROP FUNCTION IF EXISTS it_many; CREATE FUNCTION it_many({}) RETURNS INT DETERMINISTIC RETURN 1",
+            params.join(", ")
+        ),
+    )
+    .await
+    .unwrap();
+    let catalog = session_introspect(&mut s).await.unwrap();
+    let many = catalog
+        .functions
+        .iter()
+        .find(|f| f.name == "it_many")
+        .unwrap();
+    assert_eq!(many.args.matches(&long_arg).count(), 20, "{}", many.args);
+    assert!(
+        many.args.contains(&format!("{long_arg}19 int")),
+        "{}",
+        many.args
+    );
     let unique = parent.indexes.iter().find(|i| i.name == "it_code").unwrap();
     assert!(unique.unique && !unique.primary);
     assert_eq!(unique.columns, ["code"]);
@@ -310,6 +354,20 @@ async fn read_only_is_read_only_at_the_server() {
         matches!(&result, Err(DriverError::Server { sqlstate, .. }) if sqlstate == "25006"),
         "{result:?}"
     );
+    // So is one turned back by an earlier statement of the same run.
+    trust_function_creators().await;
+    session_execute(
+        &mut writer,
+        "DROP FUNCTION IF EXISTS it_unlock; DROP FUNCTION IF EXISTS it_write;
+         CREATE FUNCTION it_unlock() RETURNS INT DETERMINISTIC
+           BEGIN SET SESSION TRANSACTION READ WRITE; RETURN 1; END;
+         CREATE FUNCTION it_write() RETURNS INT DETERMINISTIC
+           BEGIN INSERT INTO it_ro VALUES (3); RETURN 1; END",
+    )
+    .await
+    .unwrap();
+    let (_, result) = run(&mut s, "SELECT it_unlock(); SELECT it_write()").await;
+    assert!(result.is_err(), "{result:?}");
     assert_eq!(
         rows(&mut s, "SELECT count(*) FROM it_ro").await,
         [[Value::Int(0)]]
@@ -445,6 +503,13 @@ async fn a_run_returns_its_last_statements_count() {
         ("SELECT 1; DELETE FROM it_count", 3),
         ("DELETE FROM it_count; SELECT 1", 1),
         ("SET @x = 1", 0),
+        (
+            "DROP PROCEDURE IF EXISTS it_three; \
+             CREATE PROCEDURE it_three() SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3",
+            0,
+        ),
+        // A CALL's own OK after its rows doesn't count over them.
+        ("CALL it_three()", 3),
     ] {
         let (_, result) = run(&mut s, sql).await;
         assert_eq!(result.unwrap(), n, "{sql}");

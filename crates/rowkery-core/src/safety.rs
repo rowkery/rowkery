@@ -772,6 +772,17 @@ fn executable_tokens(sql: &str, (from, to): (usize, usize), dialect: Dialect, to
     toks.extend(inner.drain(..).flatten());
 }
 
+/// Each statement's text in `sql` as `dialect` reads it, trimmed, its `;`
+/// and empty ones left out.
+pub fn statement_texts(sql: &str, dialect: Dialect) -> Vec<&str> {
+    let (toks, spans, _) = tokenize_spans(sql, dialect, u32::MAX);
+    toks.iter()
+        .zip(spans)
+        .filter(|(t, _)| !t.is_empty())
+        .map(|(_, span)| sql[span].trim())
+        .collect()
+}
+
 /// Each statement's text as the editor splits `sql`, trimmed, empty ones
 /// left out: what the SQL file reader must agree with.
 #[cfg(test)]

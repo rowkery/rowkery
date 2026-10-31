@@ -16,7 +16,7 @@ use mysql_async::{Conn, Opts, OptsBuilder, Row, SslOpts};
 
 use crate::connections::{expand_home, MysqlConnection, PostgresSslMode};
 use crate::route::{self, Route};
-use crate::safety::SafeMode;
+use crate::safety::{statement_texts, Dialect, SafeMode};
 use crate::secrets::{get_secret, ConnectionSecrets, SecretKind};
 
 use super::introspect::{
@@ -395,10 +395,13 @@ pub async fn cancel(via: CancelVia) -> Result<(), DriverError> {
         .await
         .map_err(|_| DriverError::Message("The server didn't take the cancel in time".into()))?
         .map_err(|e| DriverError::Message(e.to_string()))?;
-    let killed = conn
-        .query_drop(format!("KILL QUERY {}", via.thread_id))
-        .await
-        .map_err(|e| DriverError::Message(e.to_string()));
+    let killed = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        conn.query_drop(format!("KILL QUERY {}", via.thread_id)),
+    )
+    .await
+    .map_err(|_| DriverError::Message("The server didn't take the cancel in time".into()))
+    .and_then(|r| r.map_err(|e| DriverError::Message(e.to_string())));
     let _ = conn.disconnect().await;
     killed
 }
@@ -407,10 +410,36 @@ pub async fn cancel(via: CancelVia) -> Result<(), DriverError> {
 /// in batches; `on_batch`'s second argument is true for the first batch
 /// of a result set. Returns the last result set's row count, or the rows
 /// the last statement changed when it returned none.
+///
+/// On a read-only connection each statement goes on its own, with
+/// [`READ_ONLY`] again ahead of it: a stored function in one statement can
+/// turn the session read-write (MariaDB lets it), and the next must still
+/// be refused. Safe mode has refused unclear text there, so this split is
+/// the server's.
 pub async fn session_query_stream<F>(
     session: &mut MysqlSession,
     sql: &str,
     mut on_batch: F,
+) -> Result<u64, DriverError>
+where
+    F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
+{
+    let pieces = if session.config.safe_mode == SafeMode::ReadOnly {
+        statement_texts(sql, Dialect::Mysql)
+    } else {
+        vec![sql]
+    };
+    let mut last = 0u64;
+    for piece in pieces {
+        last = stream_statements(session, piece, &mut on_batch).await?;
+    }
+    Ok(last)
+}
+
+async fn stream_statements<F>(
+    session: &mut MysqlSession,
+    sql: &str,
+    on_batch: &mut F,
 ) -> Result<u64, DriverError>
 where
     F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
@@ -422,6 +451,11 @@ where
             .await
             .map_err(|e| map_error(e, &session.config))?;
     }
+    // A CALL ends with an OK of its own after the result sets it returned:
+    // its count is the last result set's, not that OK's.
+    let calls = statement_texts(sql, Dialect::Mysql)
+        .last()
+        .is_some_and(|s| s.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("CALL")));
     let config = &session.config;
     let mut result = session
         .conn
@@ -429,6 +463,7 @@ where
         .await
         .map_err(|e| map_error(e, config))?;
     let mut last = 0u64;
+    let mut had_rows = false;
     loop {
         let Some(mut stream) = result
             .stream::<Row>()
@@ -440,7 +475,9 @@ where
         let cols = stream.columns();
         if cols.is_empty() {
             // A statement with no result set: what it changed.
-            last = stream.affected_rows();
+            if !(calls && had_rows) {
+                last = stream.affected_rows();
+            }
         } else {
             let meta: Vec<Column> = cols.iter().map(column).collect();
             let kinds: Vec<Kind> = cols.iter().map(Kind::of).collect();
@@ -479,6 +516,7 @@ where
                 on_batch(batch, first)?;
             }
             last = count;
+            had_rows = true;
         }
     }
     Ok(last)
@@ -561,12 +599,22 @@ impl Kind {
                 .and_then(|t| t.parse().ok())
                 .map_or_else(|| as_text(bytes.clone()), Value::Float),
             Kind::Bit if bytes.len() <= 8 => {
-                Value::Int(bytes.iter().fold(0i64, |n, b| (n << 8) | i64::from(*b)))
+                uint(bytes.iter().fold(0u64, |n, b| (n << 8) | u64::from(*b)))
             }
             Kind::Bit | Kind::Bytes => Value::Bytes(bytes),
             Kind::Text => as_text(bytes),
         }
     }
+}
+
+/// `'it''s'` as `it's`; `None` unless `sql` is one quoted literal.
+fn unquote_literal(sql: &str) -> Option<String> {
+    let inner = sql.strip_prefix('\'')?.strip_suffix('\'')?;
+    // A lone quote inside: more than one literal (or not one at all).
+    if inner.replace("''", "").contains('\'') || inner.contains('\\') {
+        return None;
+    }
+    Some(inner.replace("''", "'"))
 }
 
 fn uint(n: u64) -> Value {
@@ -753,18 +801,33 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
     let functions = text_rows(
         session,
         &format!(
-            "SELECT r.ROUTINE_SCHEMA, r.ROUTINE_NAME, r.DTD_IDENTIFIER, \
-             (SELECT GROUP_CONCAT(CONCAT(p.PARAMETER_NAME, ' ', p.DTD_IDENTIFIER) \
-                ORDER BY p.ORDINAL_POSITION SEPARATOR ', ') \
-              FROM information_schema.PARAMETERS p \
-              WHERE p.SPECIFIC_SCHEMA = r.ROUTINE_SCHEMA AND p.SPECIFIC_NAME = r.SPECIFIC_NAME \
-                AND p.ORDINAL_POSITION > 0) \
+            "SELECT r.ROUTINE_SCHEMA, r.ROUTINE_NAME, r.DTD_IDENTIFIER, r.SPECIFIC_NAME \
              FROM information_schema.ROUTINES r \
              WHERE r.ROUTINE_TYPE = 'FUNCTION' AND r.ROUTINE_SCHEMA {where_schema} \
              ORDER BY r.ROUTINE_SCHEMA, r.ROUTINE_NAME"
         ),
     )
     .await?;
+    // Joined here, not with GROUP_CONCAT: that stops at the session's
+    // `group_concat_max_len` (1024 bytes unless raised).
+    let parameters = text_rows(
+        session,
+        &format!(
+            "SELECT p.SPECIFIC_SCHEMA, p.SPECIFIC_NAME, \
+               CONCAT(p.PARAMETER_NAME, ' ', p.DTD_IDENTIFIER) \
+             FROM information_schema.PARAMETERS p \
+             WHERE p.ROUTINE_TYPE = 'FUNCTION' AND p.ORDINAL_POSITION > 0 \
+               AND p.SPECIFIC_SCHEMA {where_schema} \
+             ORDER BY p.SPECIFIC_SCHEMA, p.SPECIFIC_NAME, p.ORDINAL_POSITION"
+        ),
+    )
+    .await?;
+    let mut args: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for r in &parameters {
+        args.entry((cell(r, 0), cell(r, 1)))
+            .or_default()
+            .push(cell(r, 2));
+    }
     let current = text_rows(session, "SELECT DATABASE()").await?;
 
     let mut out: Vec<SchemaNode> = schemas
@@ -824,9 +887,11 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
             continue;
         };
         let default = r.get(5).cloned().flatten();
-        // MariaDB writes a default as SQL (`'abc'`, `NULL`); MySQL as the value.
+        // MariaDB writes a default as SQL (`'abc'`, `NULL`); MySQL as the
+        // value, which both show.
         let default = match default {
             Some(d) if mariadb && d == "NULL" => None,
+            Some(d) if mariadb => Some(unquote_literal(&d).unwrap_or(d)),
             d => d,
         };
         let comment = cell(r, 6);
@@ -903,7 +968,10 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
             .map(|r| FunctionNode {
                 schema: cell(r, 0),
                 name: cell(r, 1),
-                args: cell(r, 3),
+                args: args
+                    .get(&(cell(r, 0), cell(r, 3)))
+                    .map(|a| a.join(", "))
+                    .unwrap_or_default(),
                 returns: cell(r, 2),
             })
             .collect(),
@@ -948,6 +1016,14 @@ mod tests {
             Kind::Bit.value(Some(mysql_async::Value::Bytes(vec![1, 0]))),
             Value::Int(256)
         );
+        // A BIT(64) with its top bit set is unsigned, as `b + 0` reads it.
+        assert_eq!(
+            Kind::Bit.value(Some(mysql_async::Value::Bytes(vec![0xff; 8]))),
+            Value::Text("18446744073709551615".into())
+        );
+        assert_eq!(unquote_literal("'it''s'").as_deref(), Some("it's"));
+        assert_eq!(unquote_literal("'a' + 'b'"), None);
+        assert_eq!(unquote_literal("current_timestamp()"), None);
         assert_eq!(
             Kind::Text.value(Some(mysql_async::Value::Bytes(vec![0xff]))),
             Value::Bytes(vec![0xff])
