@@ -38,7 +38,8 @@ export function setShownState(s: CommandState) {
   shown = s;
 }
 
-const OVERLAY = '[role="dialog"], .cp-panel, .conn-popover, .grid-menu';
+/** Overlays whose keys are their own (⌘K, a picker, a sheet, a menu). */
+export const OVERLAY = '[role="dialog"], .cp-panel, .conn-popover, .grid-menu';
 const GRID = ".results-grid-wrap";
 const PANEL = ".sidebar";
 const ZONE: Partial<Record<SheetSection, string>> = {

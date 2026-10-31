@@ -39,8 +39,11 @@ pub fn humanize_ssh_error(err: &SshError, bastion_host: &str) -> String {
     if msg.contains("has CHANGED") || msg.contains("Unknown SSH host key") {
         return msg;
     }
-    if msg.contains("Permission denied") {
-        return "SSH: Permission denied (publickey)".to_string();
+    if msg.starts_with("SSH: Permission denied")
+        || msg.starts_with("SSH: The key file")
+        || msg == KEYCHAIN_LATE
+    {
+        return msg;
     }
     if msg.starts_with("Could not open tunnel") {
         return msg;
@@ -51,11 +54,34 @@ pub fn humanize_ssh_error(err: &SshError, bastion_host: &str) -> String {
     format!("SSH: {msg}")
 }
 
+/// Why a key file didn't open: its passphrase first, as that's the usual cause.
+/// A crypto error only means a wrong passphrase on a key that parses as an
+/// encrypted OpenSSH key; a damaged or odd file raises the same error.
+fn key_error(e: &russh::keys::Error, key_text: &str, had_passphrase: bool) -> String {
+    use russh::keys::{ssh_key, Error};
+    match e {
+        Error::KeyIsEncrypted => {
+            "SSH: The key file is encrypted, and no passphrase is saved for it.".into()
+        }
+        Error::SshKey(ssh_key::Error::Crypto)
+            if had_passphrase
+                && ssh_key::PrivateKey::from_openssh(key_text).is_ok_and(|k| k.is_encrypted()) =>
+        {
+            "SSH: The key file's passphrase is wrong.".into()
+        }
+        e => format!("Invalid SSH key: {e}"),
+    }
+}
+
 /// What `check_server_key` found wrong, for the error after the handshake.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum KeyProblem {
     Unknown,
-    Changed,
+    /// The fingerprint saved for the host, and the one it offers now.
+    Changed {
+        saved: String,
+        offered: String,
+    },
 }
 
 fn known_hosts_path() -> PathBuf {
@@ -84,17 +110,94 @@ fn load_known_hosts() -> HashMap<String, String> {
     map
 }
 
+/// Held across every read-modify-write of `ssh_known_hosts`, so a Forget
+/// and a tunnel saving another host's key can't drop each other's line.
+static KNOWN_HOSTS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The keys a tunnel refused as changed (`host:port` → the saved one), seen
+/// by Rowkery itself: Forget acts only on one of these, never on what an
+/// error message says (a database server's error text could imitate it).
+static CHANGED_SEEN: std::sync::Mutex<Option<HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+fn saw_changed(host_key: &str, saved: &str) {
+    if let Ok(mut seen) = CHANGED_SEEN.lock() {
+        seen.get_or_insert_with(HashMap::new)
+            .insert(host_key.to_string(), saved.to_string());
+    }
+}
+
 fn persist_known_host(host: &str, fingerprint: &str) -> Result<(), SshError> {
-    fs::create_dir_all(config_dir()).map_err(|e| SshError::Message(e.to_string()))?;
+    let _write = KNOWN_HOSTS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = load_known_hosts();
     map.insert(host.to_string(), fingerprint.to_string());
-    let mut lines = Vec::new();
-    for (h, fp) in map {
-        lines.push(format!("{h} {fp}"));
-    }
-    fs::write(known_hosts_path(), lines.join("\n"))
+    write_known_hosts(map)
+}
+
+fn write_known_hosts(map: HashMap<String, String>) -> Result<(), SshError> {
+    crate::config::create_private_dir(&config_dir())
         .map_err(|e| SshError::Message(e.to_string()))?;
-    Ok(())
+    let mut lines: Vec<String> = map.into_iter().map(|(h, fp)| format!("{h} {fp}")).collect();
+    lines.sort();
+    // Whole or not at all: a reader never sees a half-written file (which
+    // would make a changed key look new).
+    let path = known_hosts_path();
+    let next = path.with_extension("next");
+    crate::config::write_private(&next, lines.join("\n"))
+        .and_then(|()| fs::rename(&next, &path))
+        .map_err(|e| SshError::Message(e.to_string()))
+}
+
+/// Forgets the key saved for `host:port`, only while it is still
+/// `fingerprint` (the one the user was shown) and a tunnel in this process
+/// refused that host for it, so the next connect treats the host as new.
+/// False otherwise.
+pub fn forget_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bool, SshError> {
+    let host_key = format!("{host}:{port}");
+    let refused = CHANGED_SEEN
+        .lock()
+        .ok()
+        .and_then(|seen| seen.as_ref()?.get(&host_key).cloned());
+    if refused.as_deref() != Some(fingerprint) {
+        return Ok(false);
+    }
+    let _write = KNOWN_HOSTS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = load_known_hosts();
+    if map.get(&host_key).map(String::as_str) != Some(fingerprint) {
+        return Ok(false);
+    }
+    map.remove(&host_key);
+    write_known_hosts(map)?;
+    Ok(true)
+}
+
+/// Puts back a key [`forget_known_host`] forgot (its Undo), unless the host
+/// has a key again by now.
+pub fn restore_known_host(host: &str, port: u16, fingerprint: &str) -> Result<bool, SshError> {
+    let host_key = format!("{host}:{port}");
+    let _write = KNOWN_HOSTS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = load_known_hosts();
+    if map.contains_key(&host_key) {
+        return Ok(false);
+    }
+    map.insert(host_key, fingerprint.to_string());
+    write_known_hosts(map)?;
+    Ok(true)
+}
+
+/// Host keys trusted on a first connect (`host:port`, fingerprint), until
+/// [`take_newly_trusted`] hands them to the app to show.
+static NEWLY_TRUSTED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The key trusted on a first connect to `host:port` since the last call,
+/// if one was (taken, so it is named once).
+pub fn take_newly_trusted(host: &str, port: u16) -> Option<String> {
+    let host_key = format!("{host}:{port}");
+    let mut trusted = NEWLY_TRUSTED.lock().ok()?;
+    let at = trusted.iter().rposition(|(h, _)| *h == host_key)?;
+    let (_, fingerprint) = trusted.remove(at);
+    trusted.retain(|(h, _)| *h != host_key);
+    Some(fingerprint)
 }
 
 /// SHA-256 of the key's SSH wire encoding, base64 with its padding: the
@@ -144,7 +247,11 @@ impl Handler for ClientHandler {
             if expected == &fingerprint {
                 return Ok(true);
             }
-            note(KeyProblem::Changed);
+            saw_changed(&host_key, expected);
+            note(KeyProblem::Changed {
+                saved: expected.clone(),
+                offered: fingerprint,
+            });
             return Err(russh::Error::UnknownKey);
         }
         if self.trust_host
@@ -153,6 +260,11 @@ impl Handler for ClientHandler {
                 .unwrap_or(false)
         {
             persist_known_host(&host_key, &fingerprint).map_err(|_| russh::Error::UnknownKey)?;
+            if let Ok(mut trusted) = NEWLY_TRUSTED.lock() {
+                // One per host: nobody may ever ask (the MCP server, a test connect).
+                trusted.retain(|(h, _)| *h != host_key);
+                trusted.push((host_key, fingerprint));
+            }
             return Ok(true);
         }
         note(KeyProblem::Unknown);
@@ -188,6 +300,10 @@ pub static OPEN_TUNNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 
 /// How long connecting and authenticating may take before the tunnel gives up.
 pub const SSH_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the SSH secret's keychain read may wait first (on its prompt).
+const KEYCHAIN_WAIT: Duration = Duration::from_secs(120);
+const KEYCHAIN_LATE: &str =
+    "SSH: The keychain didn't answer in 2 minutes. Allow Rowkery in the keychain prompt, then retry.";
 /// SSH keepalives: one every 15 s, and the connection is given up after
 /// three unanswered.
 const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -217,7 +333,9 @@ impl SshTunnel {
     }
 
     /// `open`, giving up after [`SSH_OPEN_TIMEOUT`] (an unreachable bastion
-    /// otherwise waits for the OS's TCP timeout).
+    /// otherwise waits for the OS's TCP timeout). The SSH secret is read
+    /// first, off the clock: the keychain may be waiting on its prompt, and
+    /// that wait isn't the bastion's.
     pub async fn open_with_timeout(
         ssh: &SshConfig,
         connection_id: &str,
@@ -225,9 +343,24 @@ impl SshTunnel {
         remote_port: u16,
         secrets: Option<&ConnectionSecrets>,
     ) -> Result<Self, SshError> {
+        let mut known = secrets.cloned().unwrap_or_default();
+        let read = |kind| async move {
+            tokio::time::timeout(KEYCHAIN_WAIT, secret_off_thread(connection_id, kind))
+                .await
+                .map_err(|_| SshError::Message(KEYCHAIN_LATE.into()))?
+        };
+        match ssh.auth_method {
+            SshAuthMethod::Password if known.ssh_password.is_none() => {
+                known.ssh_password = read(SecretKind::SshPassword).await?;
+            }
+            SshAuthMethod::KeyFile if known.ssh_key_passphrase.is_none() => {
+                known.ssh_key_passphrase = read(SecretKind::SshKeyPassphrase).await?;
+            }
+            _ => {}
+        }
         tokio::time::timeout(
             SSH_OPEN_TIMEOUT,
-            Self::open(ssh, connection_id, remote_host, remote_port, secrets),
+            Self::open(ssh, connection_id, remote_host, remote_port, Some(&known)),
         )
         .await
         .map_err(|_| {
@@ -270,10 +403,11 @@ impl SshTunnel {
         };
         let addr = format!("{}:{}", ssh.host, ssh.port);
         let mut handle = client::connect(config, &addr, handler).await.map_err(|e| {
-            let why = match problem.lock().ok().and_then(|p| *p) {
-                Some(KeyProblem::Changed) => {
-                    format!("SSH host key for {host_key} has CHANGED; nothing was sent")
-                }
+            let why = match problem.lock().ok().and_then(|p| p.clone()) {
+                Some(KeyProblem::Changed { saved, offered }) => format!(
+                    "SSH host key for {host_key} has CHANGED; nothing was sent \
+                     (saved {saved}, offered now {offered})"
+                ),
                 Some(KeyProblem::Unknown) => format!("Unknown SSH host key for {host_key}"),
                 None => e.to_string(),
             };
@@ -307,8 +441,9 @@ impl SshTunnel {
                     Some(p) => Some(p),
                     None => secret_off_thread(connection_id, SecretKind::SshKeyPassphrase).await?,
                 };
-                let key = decode_secret_key(&key_text, passphrase.as_deref())
-                    .map_err(|e| SshError::Message(format!("Invalid SSH key: {e}")))?;
+                let key = decode_secret_key(&key_text, passphrase.as_deref()).map_err(|e| {
+                    SshError::Message(key_error(&e, &key_text, passphrase.is_some()))
+                })?;
                 // RSA keys sign with the best hash the server takes (SHA-2).
                 let hash = handle
                     .best_supported_rsa_hash()
@@ -326,9 +461,11 @@ impl SshTunnel {
             }
         };
         if !auth_ok {
-            return Err(SshError::Message(
-                "SSH: Permission denied (publickey)".into(),
-            ));
+            // Named as ssh does: which way in the host refused.
+            return Err(SshError::Message(match ssh.auth_method {
+                SshAuthMethod::Password => "SSH: Permission denied (password)".into(),
+                SshAuthMethod::KeyFile => "SSH: Permission denied (publickey)".into(),
+            }));
         }
 
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -433,5 +570,119 @@ impl Drop for SshTunnel {
         }
         self.task.abort();
         OPEN_TUNNELS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod key_file_tests {
+    use super::*;
+
+    /// rowkery/reports#35: forgetting a changed key takes only the key the
+    /// user was shown, and Undo puts it back.
+    #[test]
+    fn a_saved_host_key_is_forgotten_and_restored() {
+        let _guard = crate::config::test_dir_guard("known-hosts");
+        persist_known_host("bastion:22", "SHA256:old").unwrap();
+        persist_known_host("other:22", "SHA256:keep").unwrap();
+        // Only a key a tunnel here refused as changed: never one an error
+        // message names.
+        assert!(!forget_known_host("other", 22, "SHA256:keep").unwrap());
+        assert!(!forget_known_host("bastion", 22, "SHA256:old").unwrap());
+        saw_changed("bastion:22", "SHA256:old");
+        assert!(!forget_known_host("bastion", 22, "SHA256:not-shown").unwrap());
+        assert!(forget_known_host("bastion", 22, "SHA256:old").unwrap());
+        let left = load_known_hosts();
+        assert_eq!(left.get("bastion:22"), None);
+        assert_eq!(
+            left.get("other:22").map(String::as_str),
+            Some("SHA256:keep")
+        );
+        assert!(restore_known_host("bastion", 22, "SHA256:old").unwrap());
+        assert_eq!(
+            load_known_hosts().get("bastion:22").map(String::as_str),
+            Some("SHA256:old")
+        );
+        // A key saved again since isn't replaced by the Undo.
+        assert!(forget_known_host("bastion", 22, "SHA256:old").unwrap());
+        persist_known_host("bastion:22", "SHA256:new").unwrap();
+        assert!(!restore_known_host("bastion", 22, "SHA256:old").unwrap());
+        assert_eq!(
+            load_known_hosts().get("bastion:22").map(String::as_str),
+            Some("SHA256:new")
+        );
+    }
+
+    /// rowkery/reports#51: an encrypted key says what it needs.
+    #[test]
+    fn an_encrypted_key_asks_for_its_passphrase() {
+        let mut rng = rand_core_010::UnwrapErr(getrandom::SysRng);
+        let key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .unwrap()
+            .encrypt(&mut rng, "right horse")
+            .unwrap()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap();
+        let opened = |p: Option<&str>| {
+            decode_secret_key(&key, p)
+                .map(|_| ())
+                .map_err(|e| key_error(&e, &key, p.is_some()))
+        };
+        assert_eq!(
+            opened(None),
+            Err("SSH: The key file is encrypted, and no passphrase is saved for it.".into())
+        );
+        assert_eq!(
+            opened(Some("wrong")),
+            Err("SSH: The key file's passphrase is wrong.".into())
+        );
+        assert_eq!(opened(Some("right horse")), Ok(()));
+        let err = SshError::Message(opened(None).unwrap_err());
+        assert_eq!(
+            humanize_ssh_error(&err, "bastion"),
+            "SSH: The key file is encrypted, and no passphrase is saved for it."
+        );
+        let refused = SshError::Message("SSH: Permission denied (password)".into());
+        assert_eq!(
+            humanize_ssh_error(&refused, "bastion"),
+            "SSH: Permission denied (password)"
+        );
+    }
+
+    /// A crypto error on a key that isn't encrypted is a bad file, not a
+    /// wrong passphrase, even with a stale passphrase saved.
+    #[test]
+    fn a_damaged_key_is_not_blamed_on_its_passphrase() {
+        let mut rng = rand_core_010::UnwrapErr(getrandom::SysRng);
+        let plain = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .unwrap()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap();
+        let crypto = russh::keys::Error::SshKey(russh::keys::ssh_key::Error::Crypto);
+        assert!(key_error(&crypto, &plain, true).starts_with("Invalid SSH key: "));
+        assert!(key_error(&crypto, "not a key", true).starts_with("Invalid SSH key: "));
+    }
+
+    /// A key file the app can't read says so, instead of reading as a
+    /// refused login.
+    #[test]
+    fn an_unreadable_key_file_is_not_a_refused_login() {
+        let err =
+            SshError::Message("Could not read key file: Permission denied (os error 13)".into());
+        let msg = humanize_ssh_error(&err, "bastion");
+        assert_eq!(
+            msg,
+            "SSH: Could not read key file: Permission denied (os error 13)"
+        );
+        let target = crate::explain::Target {
+            host: "db",
+            port: 5432,
+            username: "app",
+            ssh_host: Some("bastion"),
+            cloud_sql: None,
+        };
+        assert_ne!(
+            crate::explain::explain_connect_error(&msg, &target).class,
+            "ssh_auth"
+        );
     }
 }

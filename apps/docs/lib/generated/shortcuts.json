@@ -22,10 +22,6 @@
         {
           "title": "Open a SQLite file…",
           "keys": "⌘O"
-        },
-        {
-          "title": "Refresh schema",
-          "keys": "⌘R"
         }
       ]
     },
@@ -55,10 +51,6 @@
         {
           "title": "Cancel query",
           "keys": "⌘."
-        },
-        {
-          "title": "Refresh rows",
-          "keys": "⇧⌘R"
         },
         {
           "title": "Export results…",
@@ -121,6 +113,14 @@
         {
           "title": "Duplicate row",
           "keys": "⌘D"
+        },
+        {
+          "title": "Undo the last change",
+          "keys": "⌘Z"
+        },
+        {
+          "title": "Redo the change",
+          "keys": "⇧⌘Z"
         },
         {
           "title": "Commit changes",
@@ -187,6 +187,10 @@
         {
           "title": "Hide sidebar",
           "keys": "⌘B"
+        },
+        {
+          "title": "Refresh",
+          "keys": "⌘R"
         },
         {
           "title": "Show data",
@@ -330,7 +334,7 @@
         },
         {
           "title": "Refresh schema",
-          "rowkery": "⌘R",
+          "rowkery": "",
           "keys": "⌥⌘Y"
         }
       ]
@@ -417,7 +421,7 @@
         },
         {
           "title": "Refresh Schema",
-          "keys": "⌘R"
+          "keys": ""
         },
         {
           "title": "Reconnect",
@@ -454,7 +458,7 @@
         },
         {
           "title": "Refresh Rows",
-          "keys": "⇧⌘R"
+          "keys": ""
         },
         {
           "title": "Copy Results as CSV",
@@ -480,6 +484,10 @@
         {
           "title": "Start Presenting",
           "keys": ""
+        },
+        {
+          "title": "Refresh",
+          "keys": "⌘R"
         },
         {
           "title": "Data",
@@ -745,12 +753,16 @@
       "keys": ""
     },
     {
+      "title": "Refresh",
+      "keys": "⌘R"
+    },
+    {
       "title": "Refresh rows",
-      "keys": "⇧⌘R"
+      "keys": ""
     },
     {
       "title": "Refresh schema",
-      "keys": "⌘R"
+      "keys": ""
     },
     {
       "title": "Retry connecting",

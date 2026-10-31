@@ -26,7 +26,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use crate::db::EngineKind;
-use crate::safety::{check_file_statement, lex, Dialect, InTransaction, Lexeme};
+use crate::safety::{check_file_statement, lex, Dialect, InTransaction, Lexeme, StatementKind};
 
 /// Bytes read from the file at a time (at least). Tiny in tests, so every
 /// lexeme gets cut somewhere.
@@ -659,10 +659,22 @@ pub fn scan(
             }
             Piece::Statement(statement) => statement,
         };
-        let Some((check, role)) = check_file_statement(classified(&statement.sql), engine.into())
-        else {
+        let (head, cut) = classified(&statement.sql);
+        let Some((mut check, role)) = check_file_statement(head, engine.into()) else {
             continue;
         };
+        // What comes after the head is unread. A long INSERT (a dump's rows)
+        // adds rows; anything else, a long `WITH … DELETE` or a SELECT calling
+        // a writing function, may change anything, so it is listed in red.
+        let unread = cut && !starts_insert(head);
+        if cut {
+            check.kind = StatementKind::Write;
+            if unread {
+                check.destructive = true;
+            } else {
+                check.verb = "INSERT".into();
+            }
+        }
         scan.statements += 1;
         scan.writes |= check.changes_data() || check.unlocks_writes;
         last = Some(statement.index);
@@ -696,6 +708,7 @@ pub fn scan(
             continue;
         }
         let label = match check.verb.as_str() {
+            _ if unread => format!("{} (not fully read)", check.verb),
             "DELETE" | "UPDATE" if check.destructive => format!("{} without WHERE", check.verb),
             _ => check.verb.clone(),
         };
@@ -1027,19 +1040,40 @@ impl<F: FnMut(&Progress)> Tally<F> {
 }
 
 /// What a statement is, it says in its start: the classifier's tokens cost
-/// about 48 times the text, so a 500 MB INSERT is read from its first 64 kB.
-/// A DELETE or UPDATE whose WHERE comes later counts as without one, the
-/// safe side.
-fn classified(sql: &str) -> &str {
+/// about 48 times the text, so a 500 MB INSERT is read from its first 64 kB,
+/// and `true` says it was cut. A DELETE or UPDATE whose WHERE comes later
+/// counts as without one, and a cut statement that reads as no write
+/// counts as one: the safe side.
+fn classified(sql: &str) -> (&str, bool) {
     const HEAD: usize = 64 * 1024;
     if sql.len() <= HEAD {
-        return sql;
+        return (sql, false);
     }
     let mut end = HEAD;
     while !sql.is_char_boundary(end) {
         end -= 1;
     }
-    &sql[..end]
+    (&sql[..end], true)
+}
+
+/// Whether `sql` is an INSERT, after any leading space and comments.
+fn starts_insert(sql: &str) -> bool {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.find('\n').map_or("", |n| &after[n..]).trim_start();
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after
+                .find("*/")
+                .map_or("", |n| &after[n + 2..])
+                .trim_start();
+        } else {
+            break;
+        }
+    }
+    rest.get(..6)
+        .is_some_and(|w| w.eq_ignore_ascii_case("INSERT"))
+        && !rest[6..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Runs `sql`, one statement of a file, on SQLite: exactly one statement
@@ -1706,9 +1740,61 @@ mod tests {
         while sql.len() < 200 * 1024 {
             sql.push_str(", (1)");
         }
-        assert_eq!(classified(&sql).len(), 64 * 1024);
+        assert_eq!(classified(&sql), (&sql[..64 * 1024], true));
         let scanned = scan_text(&format!("{sql};\n"), EngineKind::Sqlite);
         assert_eq!(scanned.kinds[0].label, "INSERT");
+    }
+
+    #[test]
+    fn a_huge_statement_whose_write_comes_late_is_a_write() {
+        let mut sql = String::from("WITH fixes (id, v) AS (VALUES (1, 'a')");
+        while sql.len() < 200 * 1024 {
+            sql.push_str(", (1, 'a')");
+        }
+        sql.push_str(") UPDATE t SET v = fixes.v FROM fixes WHERE t.id = fixes.id");
+        // The panel lists it in red, since what it changes is unread.
+        let unread = |scan: &Scan| {
+            scan.writes
+                && scan
+                    .kinds
+                    .iter()
+                    .any(|k| k.destructive && k.label.ends_with("(not fully read)"))
+        };
+        for engine in [EngineKind::Postgres, EngineKind::Sqlite] {
+            assert!(
+                unread(&scan_text(&format!("{sql};\n"), engine)),
+                "{engine:?}"
+            );
+        }
+        // A short one is read whole, and a long read-only SELECT still reads
+        // as a write: what follows its head is unknown.
+        assert!(
+            !scan_text(
+                "WITH x AS (SELECT 1) SELECT * FROM x;\n",
+                EngineKind::Postgres
+            )
+            .writes
+        );
+        let mut select = String::from("SELECT 1");
+        while select.len() < 70 * 1024 {
+            select.push_str(", 1");
+        }
+        assert!(unread(&scan_text(
+            &format!("{select};\n"),
+            EngineKind::Postgres
+        )));
+        // A long INSERT, a dump's rows cut mid-string, is an INSERT.
+        let mut insert = String::from("-- rows\nINSERT INTO t VALUES (1, 'a')");
+        while insert.len() < 70 * 1024 {
+            insert.push_str(", (1, 'a')");
+        }
+        let scan = scan_text(&format!("{insert};\n"), EngineKind::Postgres);
+        assert!(scan.writes);
+        assert_eq!(scan.kinds.len(), 1);
+        assert_eq!(
+            (scan.kinds[0].label.as_str(), scan.kinds[0].destructive),
+            ("INSERT", false)
+        );
     }
 
     #[test]

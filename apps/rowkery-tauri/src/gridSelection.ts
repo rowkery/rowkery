@@ -34,13 +34,3 @@ export function selRect(sel: Selection): SelRect {
 export function single(pos: CellPos): Selection {
   return { active: pos, anchor: pos, focus: pos };
 }
-
-/**
- * The block is whole rows (⌫ marks them for delete): it spans every column
- * and either came from the row numbers or spans more than one column, so a
- * lone cell of a one-column table is never a row.
- */
-export function wholeRowsOf(sel: Selection | null, rect: SelRect | null, columnCount: number): boolean {
-  if (!sel || !rect || rect.c0 !== 0 || rect.c1 !== columnCount - 1) return false;
-  return columnCount > 1 || !!sel.rows;
-}

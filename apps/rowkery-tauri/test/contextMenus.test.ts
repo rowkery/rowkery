@@ -126,6 +126,15 @@ describe("context menus", () => {
     expect(hint(false)).toBe("Shift-click");
   });
 
+  test("Delete row counts the rows it marks, and restores marked ones", () => {
+    const label = (s: Partial<typeof base>) => cellMenu({ state: { ...base, ...s } }).find((r) => r.id === "delete-row")?.label;
+    const editable = { tableTab: true, hasRows: true, rowsEditable: true, rowsSelected: true };
+    expect(label({ ...editable, selectedRows: 1 })).toBe("Delete row");
+    expect(label({ ...editable, selectedRows: 3 })).toBe("Delete 3 rows");
+    expect(label({ ...editable, selectedRows: 3, rowsMarked: true })).toBe("Restore 3 rows");
+    expect(label({ ...editable, rowsSelected: false })).toBeUndefined();
+  });
+
   test("hints are pointer gestures, never keys", () => {
     for (const [menu, rows] of allMenus()) {
       for (const row of rows) {
@@ -144,7 +153,7 @@ describe("context menus", () => {
     expect(keys(panelRowMenu({ pinned: false, mac: true }))).toMatchObject({ structure: undefined, insert: "⌥↵" });
     expect(keys(tabMenu({ table: true, preview: false, tabCount: 2, closedTabs: 1 }))).toMatchObject({
       "edit-sql": "⌘E",
-      "refresh-rows": "⇧⌘R",
+      "refresh-rows": undefined,
       close: "⌘W",
       reopen: "⇧⌘T",
     });

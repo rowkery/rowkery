@@ -19,7 +19,7 @@ import {
   type ProbeResult,
 } from "./api";
 import { defaultSslMode, guessEnvironment } from "./connectionEnv";
-import { parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, HIDDEN_PASSWORD, hidePassword, parsePostgresUrl } from "./connectionUrl";
 import { commandTip, keysFor } from "./commands";
 import { isMacPlatform } from "./platform";
 import { prefetchOn, setPrefetch } from "./prefetchSwitch";
@@ -49,10 +49,11 @@ interface NewConnectionSheetProps {
   /** `firstShare`: shared with agents here for the first time, no tables picked yet. */
   onSaved: (id: string, name: string, firstShare: boolean) => void;
   /**
-   * Asked before the record is saved; `false` keeps the sheet open, unsaved
-   * (a reconnect would roll back a tab's open transaction).
+   * Asked before the record is saved or deleted; `false` keeps the sheet
+   * open, unchanged (a reconnect or an emptied window would roll back a
+   * tab's open transaction).
    */
-  beforeSave?: () => Promise<boolean>;
+  beforeChange?: (deleting: boolean) => Promise<boolean>;
   /** A failed connection's field to focus, with the reason printed under it. */
   markField?: { field: string; message: string } | null;
   /** Called after `editing` was deleted. */
@@ -230,7 +231,7 @@ export function NewConnectionSheet({
   markField,
   onClose,
   onSaved,
-  beforeSave,
+  beforeChange,
   onDeleted,
   prefill,
   mcpStats,
@@ -242,7 +243,10 @@ export function NewConnectionSheet({
     // The sheet's starting point, read once.
     [],
   );
-  const [url, setUrl] = useState(() => (prefilled && prefill?.url) || "");
+  // The password goes to its own field; the URL shows it hidden.
+  const [url, setUrl] = useState(() => hidePassword((prefilled && prefill?.url) || ""));
+  // Read from the URL as written: hidden, one that can't be read would pass.
+  const [urlProblem, setUrlProblem] = useState(() => connectionUrlProblem((prefilled && prefill?.url) || ""));
   // A new connection's SSL follows its host (`defaultSslMode`) until picked,
   // or set by a pasted string's sslmode; a saved one keeps its own.
   const [pg, setPg] = useState<PgForm>(() => {
@@ -264,6 +268,9 @@ export function NewConnectionSheet({
   const [probeMark, setProbeMark] = useState<ProbeMark | null>(null);
   const [locked, setLocked] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Save is waiting on its own probe: the button says so and takes no
+  // second press, and the auto-probe holds off so it can't supersede it.
+  const [saveProbing, setSaveProbing] = useState(false);
   // Delete… asks first: the foot turns into Keep / Delete until one is picked.
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteRef = useRef<HTMLButtonElement>(null);
@@ -347,6 +354,26 @@ export function NewConnectionSheet({
   // their outcome so Save can reuse it.
   const probed = useRef(new Map<string, boolean>());
   const authFails = useRef(0);
+  const autoProbe = useRef<number | undefined>(undefined);
+  // Cancel or Esc drops a pending save: its probe's answer is ignored.
+  const closed = useRef(false);
+  const close = () => {
+    closed.current = true;
+    probeSeq.current++;
+    onClose();
+  };
+  // Closed some other way (the app's own Esc, ⌘W, the Agents link): the
+  // sheet plays its exit under Presence's data-closing, then unmounts.
+  // Either counts.
+  const overlay = useRef<HTMLDivElement>(null);
+  const gone = () => closed.current || !!overlay.current?.closest("[data-closing]");
+  useEffect(() => {
+    closed.current = false;
+    return () => {
+      closed.current = true;
+      probeSeq.current++;
+    };
+  }, []);
   const mac = isMacPlatform();
 
   const touch = () => {
@@ -375,9 +402,13 @@ export function NewConnectionSheet({
     });
   };
 
-  const onUrl = (text: string) => {
-    setUrl(text);
+  /** `pasted`: shown with its password hidden at once, not only on blur. */
+  const onUrl = (text: string, pasted = false) => {
+    setUrl(pasted ? hidePassword(text) : text);
+    setUrlProblem(connectionUrlProblem(text));
     const parsed = parsePostgresUrl(text);
+    // The hidden password, edited around, isn't a new one.
+    if (parsed?.password === HIDDEN_PASSWORD) delete parsed.password;
     if (parsed) {
       touch();
       setEdited((prev) => new Set([...prev, ...(Object.keys(parsed) as (keyof PgForm)[])]));
@@ -626,10 +657,11 @@ export function NewConnectionSheet({
   // Auto-probe: 600 ms after the last edit, once the form could connect, for
   // a tuple not probed yet, unless two logins in a row were refused.
   useEffect(() => {
-    if (!dirty || !valid || locked || probed.current.has(tuple)) return;
+    if (!dirty || !valid || locked || saveProbing || probed.current.has(tuple)) return;
     const t = window.setTimeout(() => void runProbe(), PROBE_DELAY_MS);
+    autoProbe.current = t;
     return () => window.clearTimeout(t);
-  }, [dirty, valid, locked, tuple]);
+  }, [dirty, valid, locked, saveProbing, tuple]);
 
   // Test ⌘T always probes: no dedupe, no lockout.
   const onTest = async () => {
@@ -640,20 +672,25 @@ export function NewConnectionSheet({
 
   const onSave = async () => {
     setShowErrors(true);
-    if (!valid || saving) return;
+    if (!valid || saving || saveProbing) return;
     // The sheet never closes on a failure: Save probes (again) a tuple it
     // hasn't seen connect, and a failed one keeps the sheet open with the field
     // marked. Saving the same failed tuple again keeps it anyway (a server
     // only reachable from elsewhere).
     if (blockedTuple !== tuple && probed.current.get(tuple) !== true) {
+      window.clearTimeout(autoProbe.current);
+      setSaveProbing(true);
       const ok = await runProbe();
+      if (gone()) return;
+      setSaveProbing(false);
       if (ok === null) return;
       if (!ok) {
         setBlockedTuple(tuple);
         return;
       }
     }
-    if (beforeSave && !(await beforeSave())) return;
+    if (beforeChange && !(await beforeChange(false))) return;
+    if (gone()) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -670,7 +707,9 @@ export function NewConnectionSheet({
 
   const onDelete = async () => {
     if (!editing || saving) return;
+    // Busy before the check, so a second click can't delete twice.
     setSaving(true);
+    if (beforeChange && !(await beforeChange(true))) return setSaving(false);
     try {
       // Asked first in the foot; the toast still offers Undo, so the
       // keychain entries stay until it is gone.
@@ -689,7 +728,7 @@ export function NewConnectionSheet({
       e.stopPropagation();
       // Esc backs out of the delete question before it closes the sheet.
       if (confirmDelete) keepConnection();
-      else onClose();
+      else close();
     } else if (e.key === "Enter" && modKey && !confirmDelete) {
       // connection-save's chord (commands.ts). Test has none: ⌘T is New window.
       e.preventDefault();
@@ -864,7 +903,7 @@ export function NewConnectionSheet({
   return (
     // The inspector column at the window's right (Paper, 2026-10-10; it
     // was a modal sheet): the window stays in view and usable beside it.
-    <div data-testid="nc-overlay" className="nc-overlay">
+    <div ref={overlay} data-testid="nc-overlay" className="nc-overlay">
       <Inspector
         kind="connect"
         data-testid="nc-sheet"
@@ -875,7 +914,7 @@ export function NewConnectionSheet({
         onKeyDown={onKeyDown}
       >
         <InspectorHead
-          onClose={onClose}
+          onClose={close}
           tools={
           /* A saved record keeps its engine. */
           !editing && (
@@ -935,7 +974,7 @@ export function NewConnectionSheet({
                 </div>
               </div>
               {!cloud && (
-              <Field label="Paste a connection URL" name="url">
+              <Field label="Paste a connection URL" name="url" error={urlProblem ?? undefined}>
                 <input
                   autoFocus={!editing}
                   data-testid="nc-input"
@@ -945,6 +984,16 @@ export function NewConnectionSheet({
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(e) => onUrl(e.target.value)}
+                  onPaste={(e) => {
+                    const text = e.clipboardData.getData("text/plain");
+                    if (!text) return;
+                    e.preventDefault();
+                    const input = e.currentTarget;
+                    // One line, as the field shows it.
+                    const line = text.replace(/[\r\n]+/g, "");
+                    onUrl(input.value.slice(0, input.selectionStart ?? 0) + line + input.value.slice(input.selectionEnd ?? input.value.length), true);
+                  }}
+                  onBlur={() => setUrl((u) => hidePassword(u))}
                 />
               </Field>
               )}
@@ -1349,7 +1398,7 @@ export function NewConnectionSheet({
             Test
           </button>
           <span className="insp-gap" />
-          <button type="button" className="insp-btn ghost" data-cancel onClick={onClose}>
+          <button type="button" className="insp-btn ghost" data-cancel onClick={close}>
             Cancel
           </button>
           <button
@@ -1360,11 +1409,13 @@ export function NewConnectionSheet({
             data-ready={valid ? "" : undefined}
             data-save-anyway={failedHere && blockedTuple === tuple ? "" : undefined}
             title={commandTip("connection-save", editing ? "Save" : "Save and connect", mac)}
-            disabled={saving}
+            disabled={saving || saveProbing}
             onClick={() => void onSave()}
           >
             {saving
               ? "Saving…"
+              : saveProbing
+                ? "Connecting…"
               : failedHere && blockedTuple === tuple
                 ? "Save anyway"
                 : editing

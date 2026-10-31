@@ -10,7 +10,7 @@ export const metadata = { title: "Table tabs and filters" };
 
 ## Opening a table
 
-The schema column on the left lists the database's tables and views with an estimate of their row count (shown as 140, 61k, 4.1M). With one schema you see **Tables** and **Views**; with several, each schema gets its own section, plus one for its views. Click a section's title to fold it.
+The schema column on the left lists the database's tables and views with an estimate of their row count (shown as 140, 61k, 4.1M). Postgres updates its estimate only when it analyzes a table, so once Rowkery knows better it shows its own number: after a table tab loads every row with no filter, after an exact count, and after you commit inserts or deletes. With one schema you see **Tables** and **Views**; with several, each schema gets its own section, plus one for its views. Click a section's title to fold it.
 
 | Do this | What happens |
 | --- | --- |
@@ -39,7 +39,7 @@ To keep a preview tab without changing anything, double-click its tab or right-c
 
 ### The tab's menu
 
-Right-click a table tab for **Keep open** (on a preview tab), **Edit SQL** <kbd>⌘E</kbd>, **Refresh rows** <kbd>⇧⌘R</kbd>, **New query tab**, **Close tab** <kbd>⌘W</kbd>, **Close other tabs** and **Reopen closed tab** <kbd>⇧⌘T</kbd>.
+Right-click a table tab for **Keep open** (on a preview tab), **Edit SQL** <kbd>⌘E</kbd>, **Refresh rows**, **New query tab**, **Close tab** <kbd>⌘W</kbd>, **Close other tabs** and **Reopen closed tab** <kbd>⇧⌘T</kbd>.
 
 ## The query line
 
@@ -59,7 +59,7 @@ Under the query line, the **WHERE** line holds your filters, joined by AND, and 
 | Time | How long the query took |
 | **Load more** | Fetches the next page now |
 | **Clear sort** | Puts the rows back in key order |
-| ↻ | **Refresh rows** <kbd>⇧⌘R</kbd>: runs the table's query again |
+| ↻ | **Refresh rows**: runs the table's query again (<kbd>⌘R</kbd> does too, with the schema) |
 | … | More for these results: insert a row, copy, export, clear, timings |
 
 While the query runs, the line reads **Running** with the time and a **Cancel** button. <kbd>Esc</kbd> or <kbd>⌘.</kbd> cancels it.
@@ -107,11 +107,13 @@ The operator list shows the four most useful for the column's type first (for te
 | less than | `<` |
 | at least | `>=` |
 | at most | `<=` |
-| contains | `ILIKE` on Postgres, `LIKE` on SQLite |
+| contains | `ILIKE` on Postgres (on a number, date or other non-text column, over its text: `CAST(col AS TEXT) ILIKE`), `LIKE` on SQLite |
 | one of | `IN`, values separated by commas |
 | between | `BETWEEN`, a low and a high value |
 | is empty | `IS NULL` |
 | is not empty | `IS NOT NULL` |
+
+A value of `null` means SQL's NULL, so **is** `null` writes `IS NULL`. To find the text "null", quote it: **is** `'null'` writes `= 'null'`.
 
 ### Filtering from a cell
 

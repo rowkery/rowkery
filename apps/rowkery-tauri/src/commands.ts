@@ -67,8 +67,16 @@ export interface CommandState {
   cellEditable?: boolean;
   /** `cellEditable`, the column takes NULL and the cell's row isn't marked for delete: Set NULL. */
   cellNullable?: boolean;
-  /** Whole rows are selected in the grid (row numbers): ⌫ marks them for delete. */
+  /** `rowsEditable`, and loaded rows are under the grid's selection (a cell is its row): ⌫ marks them for delete. */
   rowsSelected?: boolean;
+  /** Every row under the grid's selection is marked for delete: ⌫ restores them. */
+  rowsMarked?: boolean;
+  /** How many loaded rows the grid's selection holds. */
+  selectedRows?: number;
+  /** The shown table tab has a staged change (or a Discard) ⌘Z can take back. */
+  editUndoable?: boolean;
+  /** …and one ⌘Z took back that ⇧⌘Z can put back. */
+  editRedoable?: boolean;
   /** Staged edits waiting in the shown table tab's tray. */
   pendingEdits?: number;
   /** A write waits for ⇧⌘↵: a held statement, held edits, or Review SQL is open. */
@@ -314,7 +322,7 @@ const zoneCommands = (): Command[] => [
     id: "delete-row",
     title: "Delete row",
     section: "Grid",
-    // ⌫ on chips removes a filter; on whole rows selected in the grid, marks them.
+    // ⌫ on chips removes a filter; on the grid's selection, marks its rows.
     chord: { mac: "Backspace" },
     palette: false,
     canRun: (s) => !!s.rowsEditable && !!s.rowsSelected,
@@ -351,7 +359,8 @@ const zoneCommands = (): Command[] => [
     section: "Grid",
     chord: { mac: "Backspace" },
     palette: false,
-    canRun: (s) => s.tableTab && !s.rowsSelected,
+    // ⌫ in the grid is Delete row: COMMAND_ZONE (keyTracker.ts) tells them apart.
+    canRun: (s) => s.tableTab,
   },
 ];
 
@@ -372,6 +381,24 @@ const editCommands = (): Command[] => [
     chord: { mac: "Mod+D" },
     synonyms: ["copy row"],
     canRun: (s) => !!s.cellEditable,
+  },
+  {
+    id: "undo-edit",
+    title: "Undo the last change",
+    section: "Grid",
+    chord: { mac: "Mod+Z" },
+    sharesPredefined: "a table tab's keydown takes back the change before Edit > Undo sees the key; in a text field it stays the field's",
+    palette: false,
+    canRun: (s) => s.tableTab && !!s.editUndoable,
+  },
+  {
+    id: "redo-edit",
+    title: "Redo the change",
+    section: "Grid",
+    chord: { mac: "Mod+Shift+Z" },
+    sharesPredefined: "a table tab's keydown puts the change back before Edit > Redo sees the key; in a text field it stays the field's",
+    palette: false,
+    canRun: (s) => s.tableTab && !!s.editRedoable,
   },
   {
     id: "commit-edits",
@@ -686,10 +713,18 @@ export const COMMANDS: Command[] = [
   { id: "next-window", title: "Next window", menuTitle: "Next Window", canRun: (s) => s.windowCount > 1 },
   { id: "prev-window", title: "Previous window", menuTitle: "Previous Window", canRun: (s) => s.windowCount > 1 },
   {
+    id: "refresh",
+    title: "Refresh",
+    menuTitle: "Refresh",
+    // The schema and the shown tab: a table tab's rows, a query tab's statement when it only reads.
+    chord: { mac: "Mod+R" },
+    synonyms: ["reload", "rerun"],
+    canRun: (s) => s.connected,
+  },
+  {
     id: "refresh-rows",
     title: "Refresh rows",
     menuTitle: "Refresh Rows",
-    chord: { mac: "Mod+Shift+R" },
     synonyms: ["reload", "rerun"],
     canRun: (s) => s.tableTab && s.connected && !s.running,
   },
@@ -697,13 +732,12 @@ export const COMMANDS: Command[] = [
     id: "refresh-schema",
     title: "Refresh schema",
     menuTitle: "Refresh Schema",
-    chord: { mac: "Mod+R" },
     canRun: (s) => s.connected,
   },
   {
     id: "retry-connect",
     title: "Retry connecting",
-    // ⌘R is Refresh schema while connected, Retry while failed.
+    // ⌘R is Refresh while connected, Retry while failed.
     chord: { mac: "Mod+R" },
     canRun: (s) => s.failed,
   },
@@ -892,7 +926,7 @@ export function eventMatches(
 
 /**
  * The command a keydown stands for under the active keymap: of the commands
- * on that chord, the first that can run now (⌘R: Refresh schema or Retry).
+ * on that chord, the first that can run now (⌘R: Refresh or Retry).
  */
 export function matchCommand(
   e: Parameters<typeof eventMatches>[0],
@@ -999,7 +1033,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
   },
   {
     submenu: "View",
-    items: ["toggle-sidebar", "presenting", null, "show-data", "show-structure", "show-map", "show-sessions", "show-health", null, "theme:auto", "theme:light", "theme:dark"],
+    items: ["toggle-sidebar", "presenting", null, "refresh", null, "show-data", "show-structure", "show-map", "show-sessions", "show-health", null, "theme:auto", "theme:light", "theme:dark"],
   },
   {
     submenu: "Go",

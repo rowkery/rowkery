@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Schema refresh proof without a Tauri webview (stubbed `invoke`): a table
 // created outside the app (a migration) shows up after the refresh button in
-// the schema panel's head, ⌘R / Ctrl+R, or ⌘K "Refresh schema".
+// the schema panel's head, ⌘R / Ctrl+R, or ⌘K "Refresh schema"; on a query
+// tab ⌘R also runs its last statement again when it only reads, never one that writes.
 // The button spins while the reload runs, the list keeps showing meanwhile,
 // and a toast says it is done (or why it failed).
 //
@@ -138,6 +139,9 @@ function stubTauri() {
         case "close_query_tab":
           window.__ROWKERY_PENDING__?.[`${args.windowId}:${args.tabId}`]?.();
           return null;
+        case "reads_only":
+          // Core's `plain_read` decides in the app; here a SELECT reads and anything else writes.
+          return /^\s*select\b/i.test(args.sql);
         case "browse_table_sql":
           return `SELECT * FROM ${args.schema}.${args.table} LIMIT 100;`;
         default:
@@ -228,5 +232,33 @@ await page.waitForTimeout(800);
 check((await toastText())?.startsWith("Couldn't refresh schema"), "toast: Couldn't refresh schema");
 check((await names()).includes("added_by_migration_4"), "failed reload keeps the list");
 await page.screenshot({ path: `${OUT}/4-failed.png`, clip });
+
+// 7. On a query tab ⌘R runs its last statement again when it only reads; one that writes never.
+await page.evaluate(() => (window.__ROWKERY_RELOAD_FAIL__ = false));
+await page.waitForTimeout(2600);
+const queryRuns = () => page.evaluate(() => window.__ROWKERY_CALLS__.filter(([c]) => c === "run_query").map(([, a]) => a.sql));
+const runInEditor = async (sql) => {
+  await page.click(visible + ' [data-testid="sql-editor"]');
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type(sql);
+  const n = (await queryRuns()).length;
+  await page.keyboard.press("Control+Enter");
+  await page.waitForFunction((n) => window.__ROWKERY_CALLS__.filter(([c]) => c === "run_query").length > n, n);
+  await page.waitForTimeout(300);
+};
+await runInEditor("SELECT 42");
+let ran = (await queryRuns()).length;
+await page.keyboard.press("Control+r");
+await page.waitForTimeout(900);
+const after = await queryRuns();
+check(after.length === ran + 1 && after[after.length - 1] === "SELECT 42", "Ctrl+R runs a reading query again");
+check((await names()).includes("added_by_migration_5"), "…and refreshes the schema");
+await runInEditor("INSERT INTO wallets (id) VALUES (7)");
+ran = (await queryRuns()).length;
+await page.keyboard.press("Control+r");
+await page.waitForTimeout(900);
+check((await queryRuns()).length === ran, "Ctrl+R never runs a writing query again");
+check((await toastText())?.startsWith("Schema refreshed · this query changes data"), `toast: ${await toastText()}`);
+await page.screenshot({ path: `${OUT}/5-write-not-rerun.png` });
 
 await browser.close();

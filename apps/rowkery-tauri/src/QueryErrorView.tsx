@@ -7,6 +7,8 @@ interface Props {
   /** The statement that ran, and the server's 1-based position in it. */
   sql: string | null;
   position: number | null;
+  /** The server's DETAIL and HINT lines, under the raw text as psql prints them. */
+  detail?: string | null;
   /** "Did you mean name?" (an unknown column or table). */
   suggestion: string | null;
   onReplace: () => void;
@@ -18,8 +20,8 @@ interface Props {
  * it probably meant with Replace and run, and the raw text as psql prints it
  * (with the SQLSTATE), then Copy error and Report….
  */
-export function QueryErrorView({ message, sqlstate, sql, position, suggestion, onReplace, onReport }: Props) {
-  const raw = rawErrorLines(message, sql, position);
+export function QueryErrorView({ message, sqlstate, sql, position, detail, suggestion, onReplace, onReport }: Props) {
+  const raw = [...rawErrorLines(message, sql, position), ...(detail ? detail.split("\n") : [])];
   const copy = async () => {
     try {
       await navigator.clipboard.writeText([...raw, ...(sqlstate ? [`SQLSTATE ${sqlstate}`] : [])].join("\n"));

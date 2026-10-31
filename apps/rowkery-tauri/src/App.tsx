@@ -15,11 +15,12 @@ import {
   saveConnection,
   sqliteFileExists,
   takeOpenLink,
+  takeTrustedHostKey,
   TEST_PG_CONNECTION,
   TEST_PG_SECRETS,
   type LocalServer,
 } from "./api";
-import { parsePostgresUrl } from "./connectionUrl";
+import { connectionUrlProblem, parsePostgresUrl } from "./connectionUrl";
 import { CatalogUpdates, type CatalogUpdate } from "./catalogUpdates";
 import { applyTableCounts } from "./rowCounts";
 import { ConnectionSwitcher } from "./ConnectionSwitcher";
@@ -40,7 +41,7 @@ import { Presence } from "./motion";
 import { isMacPlatform } from "./platform";
 import { hasPendingUndo, liveOffer, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, toastPreview } from "./notify";
 import { RenderErrorBoundary } from "./ErrorBoundary";
-import { transactionInTheWay } from "./openTransactions";
+import { transactionBlocksClose, transactionInTheWay } from "./openTransactions";
 import { persistNotice, readKey, takeConfigNotice, writeKey } from "./persist";
 import { endSpanAfterPaint, flushTimings, mark, markOnce, startSpan } from "./timings";
 import { ToastHost } from "./Toast";
@@ -57,11 +58,12 @@ import { defaultAccess } from "./mcpAccess";
 import { moveItem } from "./tabReorder";
 import { planSqliteOpen } from "./sqliteOpen";
 import { TitleBar } from "./TitleBar";
-import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall } from "./updates";
+import { FIRST_CHECK_MS, RECHECK_MS, lookForUpdate, watchIdleInstall, watchInstallFailures } from "./updates";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { CmdHints } from "./CmdHints";
 import { forgetHistory } from "./queryHistory";
 import { loadWindows, saveWindows, type SavedTab } from "./windowStore";
+import { changeCount, savedBuffer, savedParked } from "./editBuffer";
 import { Workspace } from "./Workspace";
 import type { WindowActions, WindowSession } from "./windowSession";
 import "./App.css";
@@ -351,10 +353,12 @@ function App() {
     const first = window.setTimeout(quiet, FIRST_CHECK_MS);
     const again = window.setInterval(quiet, RECHECK_MS);
     const idle = watchIdleInstall(runningQueries);
+    const failures = watchInstallFailures();
     return () => {
       window.clearTimeout(first);
       window.clearInterval(again);
       idle();
+      failures();
     };
   }, [loaded, runningQueries]);
 
@@ -450,6 +454,13 @@ function App() {
         if (opened.cached)
           applyCatalogUpdate(catalogUpdates.current.expect(windowId, opened.open_seq));
         void fillCountsRef.current(windowId, connectionId, seq);
+        // This window's bastion, trusted on a first connect: say which key was saved.
+        const conn = connectionsRef.current.find((c) => c.id === connectionId);
+        const ssh = conn?.kind === "postgres" ? conn.ssh : null;
+        if (ssh)
+          void takeTrustedHostKey(ssh.host, ssh.port)
+            .then((fingerprint) => fingerprint && showToast(`Trusted ${ssh.host}'s SSH key`, fingerprint))
+            .catch(() => {});
       } catch (e) {
         if (openSeq.current.get(windowId) !== seq) return;
         mark("socket-failed", { window: windowId, error: String(e) });
@@ -466,12 +477,13 @@ function App() {
    * query tabs' sessions and any transaction open in them.
    */
   const refreshing = useRef(new Map<string, boolean>()); // window → asked again
-  const announce = useRef(new Set<string>()); // windows whose reload was asked for by hand
+  // Windows whose reload was asked for by hand, and what its toast says once done (the latest ask's).
+  const announce = useRef(new Map<string, string>());
   const refreshSchema = useCallback(
-    async (windowId: string, manual = false) => {
+    async (windowId: string, manual = false, done = "Schema refreshed") => {
       const w = windowsRef.current.find((x) => x.id === windowId);
       if (!w?.connectionId || w.state !== "connected") return;
-      if (manual) announce.current.add(windowId);
+      if (manual) announce.current.set(windowId, done);
       // DDL that lands mid-reload may miss its snapshot: go again after.
       if (refreshing.current.has(windowId)) {
         refreshing.current.set(windowId, true);
@@ -492,7 +504,8 @@ function App() {
           patchWindow(windowId, { schema: catalog, schemaAt: Date.now() });
           void fillCountsRef.current(windowId, w.connectionId, seq);
         } while (refreshing.current.get(windowId));
-        if (announce.current.has(windowId)) showToast("Schema refreshed");
+        const said = announce.current.get(windowId);
+        if (said) showToast(said);
       } catch (e) {
         // Keep the schema we have; the next reload may work.
         if (announce.current.has(windowId))
@@ -561,12 +574,18 @@ function App() {
   const newWindowRef = useRef(newWindow);
   newWindowRef.current = newWindow;
 
-  const closeWindowById = (id: string) => {
-    const closing = windowsRef.current.find((w) => w.id === id);
-    const closedIndex = windowsRef.current.findIndex((w) => w.id === id);
+  const closeWindowById = async (id: string) => {
+    // Closing ends the window's sessions: never over a tab's open transaction.
+    if (await transactionBlocksClose([id])) return;
+    // Read after the check: the list may have moved meanwhile, or a second
+    // close of the same window got here first.
+    const list = windowsRef.current;
+    const closing = list.find((w) => w.id === id);
+    if (!closing) return;
+    const closedIndex = list.indexOf(closing);
     const closedTabs = tabsByWindow.current.get(id);
-    if (closing?.connectionId) {
-      const name = connections.find((c) => c.id === closing.connectionId)?.name ?? "window";
+    if (closing.connectionId) {
+      const name = connectionsRef.current.find((c) => c.id === closing.connectionId)?.name ?? "window";
       // Undo brings it back where it was, with its tabs; it reconnects when shown.
       const restore = () => {
         const back = `w${nextWindowNo.current++}`;
@@ -579,13 +598,19 @@ function App() {
         });
         setActiveWindowId(back);
       };
-      showUndoToast(`Closed ${name}${closing.database ? ` / ${closing.database}` : ""}`, undefined, { undo: restore });
+      // Its tabs' unsaved work is named like a tab's close names it, and its
+      // Undo outlasts the next plain toast: it is the only copy of that work.
+      const unsaved = unsavedWork(closedTabs?.tabs ?? []);
+      showUndoToast(`Closed ${name}${closing.database ? ` / ${closing.database}` : ""}${unsaved}`, undefined, {
+        undo: restore,
+        lasting: !!unsaved,
+      });
     }
     void closeWindow(id);
     openSeq.current.delete(id);
     catalogUpdates.current.forget(id);
-    const index = windows.findIndex((w) => w.id === id);
-    const rest = windows.filter((w) => w.id !== id);
+    const index = closedIndex;
+    const rest = list.filter((w) => w.id !== id);
     if (rest.length === 0) {
       // Like query tabs, closing the last window leaves an empty one.
       const fresh = `w${nextWindowNo.current++}`;
@@ -594,7 +619,7 @@ function App() {
       return;
     }
     setWindows(rest);
-    if (id === activeWindowId) {
+    if (id === activeWindowIdRef.current) {
       setActiveWindowId(rest[Math.min(index, rest.length - 1)].id);
     }
   };
@@ -1130,7 +1155,8 @@ function App() {
   /** ⌘V outside a text field: a connection string fills the sheet; anything else does nothing. */
   const pasteConnection = async (text?: string, openAnyway = false) => {
     const t = text ?? (await readClipboardText().catch(() => ""));
-    if (parsePostgresUrl(t)) openSheet({ url: t.trim() });
+    // One it can't read opens too, to say why.
+    if (parsePostgresUrl(t) || connectionUrlProblem(t)) openSheet({ url: t.trim() });
     else if (openAnyway) openSheet(null);
   };
   const editConnection = (id: string, mark?: { field: string; message: string }) => {
@@ -1275,7 +1301,7 @@ function App() {
     openMcp: (tab) => openAgents(tab),
     reviewProposals: () => openAgents("page"),
     toggleSidebar,
-    refreshSchema: (id, manual) => void refreshSchema(id, manual),
+    refreshSchema: (id, manual, done) => void refreshSchema(id, manual, done),
     reportIssue: (context) => {
       setPopover(null);
       setPaletteOpen(false);
@@ -1301,7 +1327,7 @@ function App() {
       pasteSeen.current = true;
       if (newConnOpen || report || isTextField(e.target)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (!parsePostgresUrl(text)) return;
+      if (!parsePostgresUrl(text) && !connectionUrlProblem(text)) return;
       e.preventDefault();
       actionsRef.current.pasteConnection(text);
     };
@@ -1638,11 +1664,12 @@ function App() {
             openAgents(tab);
           }}
           onClose={() => setNewConnOpen(false)}
-          beforeSave={async () => {
-            // Saving an edit reconnects its windows: never over a tab's open transaction.
+          beforeChange={async (deleting) => {
+            // Saving an edit reconnects its windows, deleting empties them:
+            // never over a tab's open transaction.
             if (!editingId) return true;
             const on = windowsRef.current.filter((w) => w.connectionId === editingId && w.state === "connected");
-            return !(await transactionInTheWay(on.map((w) => w.id)));
+            return !(await (deleting ? transactionBlocksClose : transactionInTheWay)(on.map((w) => w.id)));
           }}
           onDeleted={(id) => {
             setNewConnOpen(false);
@@ -1738,3 +1765,14 @@ function App() {
 }
 
 export default App;
+
+/** " with 3 unsaved changes" (staged edits, shown or parked), " with unsaved SQL", or "". */
+function unsavedWork(tabs: SavedTab[]): string {
+  let edits = 0;
+  for (const t of tabs) {
+    edits += changeCount(savedBuffer(t.edits));
+    for (const b of Object.values(savedParked(t.parked) ?? {})) edits += changeCount(b);
+  }
+  if (edits) return ` with ${edits} unsaved ${edits === 1 ? "change" : "changes"}`;
+  return tabs.some((t) => t.kind === "query" && t.sql.trim()) ? " with unsaved SQL" : "";
+}

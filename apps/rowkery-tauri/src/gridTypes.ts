@@ -63,8 +63,8 @@ export interface GridEditing {
   searchKey?: (col: number, query: string) => Promise<KeyChoice[]>;
   /** A new row ⌘I just added: its first column's editor opens. */
   focusInsert?: number;
-  /** The selected loaded rows (⌘D duplicates them), and whether they are whole rows (⌫). */
-  onSelection?: (rows: number[], wholeRows: boolean, col: number) => void;
+  /** The loaded rows under the selection (⌘D duplicates them, ⌫ marks them). */
+  onSelection?: (rows: number[], col: number) => void;
 }
 
 export type GridFilterOp = "=" | "IS DISTINCT FROM" | "IS NULL" | "IS NOT NULL" | "BETWEEN";

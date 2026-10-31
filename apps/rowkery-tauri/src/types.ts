@@ -35,6 +35,8 @@ export interface QueryResultDto {
   sqlstate?: string | null;
   /** 1-based character offset of the error in the statement. */
   error_position?: number | null;
+  /** The server's DETAIL and HINT lines, as psql prints them (`DETAIL:  Key (email)=(a@b.c) already exists.`). */
+  error_detail?: string | null;
   /** The run reached the most rows a tab holds and left the rest out. */
   capped?: boolean;
   /** The server's warnings, one per line (`there is no transaction in progress`). */

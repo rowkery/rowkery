@@ -50,7 +50,7 @@ export interface WindowActions {
    * Reloads a window's schema in the background, keeping the current one
    * meanwhile. `manual` (refresh button, ⌘R) shows a spinner and a toast.
    */
-  refreshSchema: (windowId: string, manual?: boolean) => void;
+  refreshSchema: (windowId: string, manual?: boolean, done?: string) => void;
   /** Opens the Report an Issue sheet with this window's context. */
   reportIssue: (context: ReportContext) => void;
   /** ⌘K Open (`reset` false) / Reset (`reset` true) the sample database. */

@@ -124,6 +124,9 @@ export function stageCell(
   const k = rowKey(key);
   const cur = b.updates[k];
   const original = cur && column in cur.was ? cur.was[column] : was;
+  // Nothing new: the same buffer, so no ⌘Z step is made of it.
+  const staged = !!cur && column in cur.set;
+  if (staged ? sameValue(value, cur.set[column], kind) && !sameValue(value, original, kind) : sameValue(value, original, kind)) return b;
   const set = { ...cur?.set };
   const before = { ...cur?.was };
   if (sameValue(value, original, kind)) {
@@ -521,6 +524,25 @@ export function jsonEditorText(raw: string): string {
   const a = jsonNumbers(raw);
   const b = jsonNumbers(pretty);
   return a.length === b.length && a.every((n, i) => n === b[i]) ? pretty : raw;
+}
+
+/** Past this, Quick Look shows JSON as stored: pretty-printing it would stall a render. */
+const JSON_SHOWN_PRETTY_MAX = 256 * 1024;
+const shownJson = new Map<string, string>();
+
+/**
+ * `jsonEditorText` for Quick Look, which renders on every selection move:
+ * kept for the last few values, and as stored past `JSON_SHOWN_PRETTY_MAX`.
+ */
+export function jsonShownText(raw: string): string {
+  if (raw.length > JSON_SHOWN_PRETTY_MAX) return raw;
+  let text = shownJson.get(raw);
+  if (text === undefined) {
+    text = jsonEditorText(raw);
+    if (shownJson.size >= 32) shownJson.delete(shownJson.keys().next().value as string);
+    shownJson.set(raw, text);
+  }
+  return text;
 }
 
 /** What a cell's editor starts with: NULL (and a new row's DEFAULT) is empty. */

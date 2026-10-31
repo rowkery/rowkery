@@ -1067,6 +1067,16 @@ fn sqlite_explain_reads_the_plan_and_runs_nothing() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// A timed plan never wraps its statement in `BEGIN … ROLLBACK` unless the
+/// tab surely has no transaction: an unknown state (the probe didn't answer)
+/// takes the savepoint form, which can't end the user's transaction.
+#[test]
+fn a_timed_plan_on_an_unknown_transaction_keeps_it() {
+    assert!(!super::plan_in_savepoint(TxnState::None));
+    assert!(super::plan_in_savepoint(TxnState::Users));
+    assert!(super::plan_in_savepoint(TxnState::Unknown));
+}
+
 /// ⌘E on Postgres: an estimate with a missing-index hint; a timed plan of
 /// a write held by Confirm writes, then run and rolled back, also inside
 /// the user's own transaction.
@@ -2033,12 +2043,33 @@ fn postgres_cancel_stops_a_run_on_a_dead_connection() {
         "the cancel got its chance first"
     );
 
-    // Cancel twice: stopped at once.
+    // Cancel twice at once (a quick double Esc): one cancel, which gets its
+    // chance before the run is stopped.
     let queue = bridge
         .run_window_query("w", 1, "SELECT 2".into(), None, false)
         .expect("run");
     thread::sleep(std::time::Duration::from_millis(300));
     bridge.cancel_window_query("w", 1);
+    bridge.cancel_window_query("w", 1);
+    let (cancelled, _, waited) =
+        wait_stopped(&queue, std::time::Duration::from_secs(8)).expect("stopped");
+    assert!(
+        cancelled && waited >= std::time::Duration::from_secs(2),
+        "{waited:?}"
+    );
+
+    // Cancel, and again a second later (Force stop): stopped at once.
+    let queue = bridge
+        .run_window_query("w", 1, "SELECT 2".into(), None, false)
+        .expect("run");
+    thread::sleep(std::time::Duration::from_millis(300));
+    bridge.cancel_window_query("w", 1);
+    thread::sleep(std::time::Duration::from_millis(1100));
+    let early = wait_stopped(&queue, std::time::Duration::from_millis(10));
+    assert!(
+        early.is_none(),
+        "still waiting on the cancel, but got {early:?}"
+    );
     bridge.cancel_window_query("w", 1);
     let (cancelled, _, waited) =
         wait_stopped(&queue, std::time::Duration::from_secs(2)).expect("stopped");
@@ -2579,6 +2610,23 @@ fn sqlite_a_running_tab_keeps_its_transaction() {
     bridge.cancel_window_query("w1", 2);
     wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
 
+    // A write outside one may open one, so a re-point waits; closing the
+    // tab (held) doesn't: it cancels the write, as it always did.
+    let queue = bridge
+        .run_window_query(
+            "w1",
+            2,
+            format!("DELETE FROM orders WHERE id = ({SLOW_SQLITE})"),
+            None,
+            false,
+        )
+        .expect("run");
+    wait_running();
+    assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 2)]);
+    assert!(bridge.held_transactions().is_empty(), "a write outside one");
+    bridge.cancel_window_query("w1", 2);
+    wait_query_finished(&queue, Duration::from_secs(5)).expect("stopped");
+
     run(1, "BEGIN");
     assert_eq!(run(1, "DELETE FROM orders").4, Some(30));
     let queue = bridge
@@ -2586,6 +2634,7 @@ fn sqlite_a_running_tab_keeps_its_transaction() {
         .expect("run");
     wait_running();
     assert_eq!(bridge.open_transactions(), vec![("w1".to_string(), 1)]);
+    assert_eq!(bridge.held_transactions(), vec![("w1".to_string(), 1)]);
     assert_eq!(bridge.busy_work().transactions, 1, "a quit asks first");
     let refused = bridge
         .open_window("w1", "cancel-sqlite", None)
@@ -3446,6 +3495,161 @@ fn postgres_dead_sessions_are_replaced_off_the_query_path() {
     let third = pid(1);
     assert_ne!(third, second);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A TCP proxy to Postgres that holds each new connection (accepted,
+/// nothing passed) while `hold` is set, like a laptop whose network is
+/// still coming back. Returns its port, the switch, and how many it holds.
+fn holding_proxy(
+    upstream: String,
+) -> (
+    u16,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let hold = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (switch, count) = (hold.clone(), held.clone());
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let (hold, held, upstream) = (switch.clone(), count.clone(), upstream.clone());
+            thread::spawn(move || {
+                if hold.load(Ordering::SeqCst) {
+                    held.fetch_add(1, Ordering::SeqCst);
+                    while hold.load(Ordering::SeqCst) {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    held.fetch_sub(1, Ordering::SeqCst);
+                }
+                let Ok(server) = TcpStream::connect(&upstream) else {
+                    return;
+                };
+                let (mut c, mut s) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                thread::spawn(move || {
+                    let _ = std::io::copy(&mut c, &mut s);
+                });
+                let (mut s, mut c) = (server, client);
+                let _ = std::io::copy(&mut s, &mut c);
+            });
+        }
+    });
+    (port, hold, held)
+}
+
+/// After a sleep, the window's dead sessions are replaced side by side, and
+/// a run never waits for its own tab's replacement: it opens its own session
+/// (the replacement is dropped), and a tab closed meanwhile keeps none.
+#[test]
+fn postgres_a_run_never_waits_for_its_sessions_replacement() {
+    let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+        eprintln!(
+            "skip postgres_a_run_never_waits_for_its_sessions_replacement (set ROWKERY_PG_HOST)"
+        );
+        return;
+    };
+    let pg_port = std::env::var("ROWKERY_PG_PORT").unwrap_or_else(|_| "54329".into());
+    let (port, hold, held) = holding_proxy(format!("{host}:{pg_port}"));
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "postgres-replacing";
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Postgres(PostgresConnection {
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_timeout_s: None,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            environment: None,
+            safe_mode: Default::default(),
+            id: id.into(),
+            name: id.into(),
+            host: "127.0.0.1".into(),
+            port,
+            database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+            username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+            ssl_mode: PostgresSslMode::Disable,
+            ssl_root_cert: None,
+            ssh: None,
+            cloud_sql: None,
+        }),
+        ConnectionSecrets {
+            db_password: Some(
+                std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("save");
+    bridge.open_window("w", id, None).expect("open");
+    let pid = |tab| match window_query(&bridge, "w", tab, "SELECT pg_backend_pid()").0 {
+        Some(Value::Int(p)) => p,
+        other => panic!("pid: {other:?}"),
+    };
+    let pids: Vec<i64> = [1, 2, 3].into_iter().map(pid).collect();
+    for victim in &pids {
+        let (_, err, ..) = window_query(
+            &bridge,
+            "w",
+            9,
+            &format!("SELECT pg_terminate_backend({victim})"),
+        );
+        assert_eq!(err, None);
+    }
+    thread::sleep(std::time::Duration::from_millis(300));
+
+    // The network is still coming back: replacements can't open yet.
+    hold.store(true, Ordering::SeqCst);
+    thread::scope(|scope| {
+        let ping = scope.spawn(|| bridge.ping_idle_blocking("w", std::time::Duration::ZERO));
+        // Pings of the dead may each take their whole 3 s.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while held.load(Ordering::SeqCst) < 3 {
+            assert!(Instant::now() < deadline, "three replacements open at once");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Tab 2 closes while its replacement opens.
+        bridge.close_window_tab("w", 2);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Tab 1 runs: it doesn't wait for its replacement but opens its own,
+        // which is held too until the network is back.
+        let queue = bridge
+            .run_window_query("w", 1, "SELECT 1::int8".into(), None, false)
+            .expect("run");
+        while held.load(Ordering::SeqCst) < 4 {
+            assert!(Instant::now() < deadline, "tab 1 opens its own session");
+            thread::sleep(Duration::from_millis(10));
+        }
+        hold.store(false, Ordering::SeqCst);
+        let events = loop {
+            let events = queue.lock().unwrap().clone();
+            if events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::QueryFinished { .. }))
+            {
+                break events;
+            }
+            assert!(Instant::now() < deadline, "tab 1 ran");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::QueryWaiting { .. })),
+            "no wait: {events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::QueryFinished { error: None, .. })));
+        // Only tab 3's replacement is kept: tab 1 has its own, tab 2 closed.
+        assert_eq!(ping.join().unwrap(), 1);
+    });
 }
 
 /// A window's sessions share one SSH tunnel: three tabs running at once
@@ -4755,6 +4959,29 @@ fn postgres_incoming_counts_are_bounded_and_one_at_a_time() {
         started.elapsed()
     );
 
+    // The window's other backends (Quick Look's among them), seen from tab 9:
+    // those started since tab 1, so an earlier test's leaving one can't count.
+    let tab1 = int_of(window_query(&bridge, "w", 1, "SELECT pg_backend_pid()").0);
+    let others = |bridge: &super::CoreBridge| {
+        match window_query(
+        bridge,
+        "w",
+        9,
+        &format!(
+            "SELECT string_agg(pid::text, ',' ORDER BY pid) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND backend_type = 'client backend' \
+                 AND pid NOT IN (pg_backend_pid(), {tab1}) \
+                 AND backend_start >= (SELECT backend_start FROM pg_stat_activity WHERE pid = {tab1})"
+        ),
+    )
+    .0
+    {
+        Some(Value::Text(pids)) => pids,
+        other => panic!("pids: {other:?}"),
+    }
+    };
+    let quick_look = others(&bridge);
+
     // Six at once (↑↓ through rows): one backend at a time.
     let started = std::time::Instant::now();
     let calls: Vec<_> = (0..6)
@@ -4785,6 +5012,9 @@ fn postgres_incoming_counts_are_bounded_and_one_at_a_time() {
     }
     assert!(most <= 1, "{most} backends counted at once");
     assert!(started.elapsed() < std::time::Duration::from_secs(8));
+    // rowkery/reports#59: each superseded batch's backend answered after its
+    // cancel, so Quick Look kept it instead of reconnecting on every step.
+    assert_eq!(others(&bridge), quick_look, "the same Quick Look backend");
 
     // And Quick Look still counts what it can.
     assert_eq!(
@@ -4860,6 +5090,189 @@ fn count_window_rows_on_read_only_never_hangs() {
         );
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// A TCP proxy to Postgres whose answers each arrive `delay` late, like a
+/// database 40 ms away. Returns its port.
+fn slow_proxy(upstream: String, delay: std::time::Duration) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let Ok(server) = TcpStream::connect(&upstream) else {
+                continue;
+            };
+            let (mut c, mut s) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+            thread::spawn(move || {
+                let _ = std::io::copy(&mut c, &mut s);
+            });
+            // Each answer is passed on `delay` after it arrived, however
+            // many are on the way (latency, not a slow link).
+            let (mut s, mut c) = (server, client);
+            let (tx, rx) = std::sync::mpsc::channel::<(std::time::Instant, Vec<u8>)>();
+            thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                while let Ok(n) = s.read(&mut buf) {
+                    if n == 0
+                        || tx
+                            .send((std::time::Instant::now(), buf[..n].to_vec()))
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+            thread::spawn(move || {
+                for (at, bytes) in rx {
+                    if let Some(wait) =
+                        (at + delay).checked_duration_since(std::time::Instant::now())
+                    {
+                        thread::sleep(wait);
+                    }
+                    if c.write_all(&bytes).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// Staged edits are sent together: 200 of them against a database 40 ms
+/// away commit in a few round trips (one by one they took about 25 s),
+/// still in order, and a failure still names its own statement.
+#[test]
+fn postgres_staged_edits_commit_in_a_few_round_trips() {
+    let Ok(host) = std::env::var("ROWKERY_PG_HOST") else {
+        eprintln!("skip postgres_staged_edits_commit_in_a_few_round_trips (set ROWKERY_PG_HOST)");
+        return;
+    };
+    let pg_port = std::env::var("ROWKERY_PG_PORT").unwrap_or_else(|_| "54329".into());
+    let port = slow_proxy(
+        format!("{host}:{pg_port}"),
+        std::time::Duration::from_millis(40),
+    );
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::CoreBridge::spawn();
+    let id = "postgres-far";
+    CoreBridge::upsert_connection(
+        &bridge,
+        ConnectionRecord::Postgres(PostgresConnection {
+            allow_mcp: false,
+            mcp_hidden_tables: Vec::new(),
+            mcp_until: None,
+            mcp_samples_off: false,
+            mcp_timeout_s: None,
+            mcp_access: None,
+            masked_columns: Default::default(),
+            environment: None,
+            safe_mode: SafeMode::Off,
+            id: id.into(),
+            name: id.into(),
+            host: "127.0.0.1".into(),
+            port,
+            database: std::env::var("ROWKERY_PG_DB").unwrap_or_else(|_| "rowkery".into()),
+            username: std::env::var("ROWKERY_PG_USER").unwrap_or_else(|_| "rowkery".into()),
+            ssl_mode: PostgresSslMode::Disable,
+            ssl_root_cert: None,
+            ssh: None,
+            cloud_sql: None,
+        }),
+        ConnectionSecrets {
+            db_password: Some(
+                std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into()),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("save");
+    bridge.open_window("w", id, None).expect("open");
+    let run = |sql: &str| window_query(&bridge, "w", 1, sql);
+    for sql in [
+        "DROP TABLE IF EXISTS public.it_far",
+        "CREATE TABLE public.it_far (id int PRIMARY KEY, name text NOT NULL)",
+        "INSERT INTO public.it_far SELECT g, 'row ' || g FROM generate_series(1, 200) g",
+    ] {
+        assert_eq!(run(sql).1, None, "{sql}");
+    }
+    let table = edit_table(
+        "public",
+        "it_far",
+        &[("id", "integer"), ("name", "text")],
+        &["id"],
+    );
+    let text = |s: &str| Value::Text(s.into());
+
+    // 200 updates, then an insert and an update of the row it adds: in order.
+    let mut changes: Vec<Change> = (1..=200)
+        .map(|i| update(i, "name", text(&format!("changed {i}"))))
+        .collect();
+    changes.push(Change::Insert {
+        values: vec![cell("id", Value::Int(201)), cell("name", text("new"))],
+    });
+    changes.push(update(201, "name", text("new, then changed")));
+    let started = Instant::now();
+    let out = bridge
+        .apply_changes("w", id, 1, table.clone(), changes, None, None)
+        .expect("apply");
+    let took = started.elapsed();
+    let ApplyOutcome::Committed { counts, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!((counts.inserted, counts.updated), (1, 201));
+    assert!(took < Duration::from_secs(5), "committed in {took:?}");
+    assert_eq!(
+        run("SELECT count(*)::int8 FROM public.it_far WHERE name LIKE 'changed %'").0,
+        Some(Value::Int(200))
+    );
+    assert_eq!(
+        run("SELECT name FROM public.it_far WHERE id = 201").0,
+        Some(text("new, then changed"))
+    );
+
+    // The 51st fails (NOT NULL): it is the one named, and nothing is kept,
+    // not even the statements after it that the server refused.
+    let mut changes: Vec<Change> = (1..=100)
+        .map(|i| update(i, "name", text("again")))
+        .collect();
+    changes[50] = update(51, "name", Value::Null);
+    let out = bridge
+        .apply_changes("w", id, 1, table.clone(), changes, None, None)
+        .expect("apply");
+    let ApplyOutcome::RolledBack { failure, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!(failure.index, Some(50), "{failure:?}");
+    assert!(failure.message.contains("null"), "{}", failure.message);
+    assert_eq!(
+        run("SELECT count(*)::int8 FROM public.it_far WHERE name = 'again'").0,
+        Some(Value::Int(0))
+    );
+    // A statement that changes no row stops the batch the same way.
+    let out = bridge
+        .apply_changes(
+            "w",
+            id,
+            1,
+            table,
+            vec![update(1, "name", text("x")), update(999, "name", text("x"))],
+            None,
+            None,
+        )
+        .expect("apply");
+    let ApplyOutcome::RolledBack { failure, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!((failure.index, failure.rows), (Some(1), Some(0)));
+    assert_eq!(
+        run("SELECT name FROM public.it_far WHERE id = 1").0,
+        Some(text("changed 1")),
+        "the statement before it was rolled back"
+    );
+    assert_eq!(run("DROP TABLE public.it_far").1, None);
 }
 
 /// Saving edits waits a bounded time for a row lock (or a dead link):
@@ -5033,6 +5446,7 @@ fn postgres_an_eleventh_tab_waits_for_a_free_connection() {
                 e,
                 CoreEvent::QueryWaiting {
                     waiting: true,
+                    tab: false,
                     tab_id: 11,
                     ..
                 }
@@ -6533,17 +6947,17 @@ fn postgres_a_run_behind_the_tabs_busy_session_says_it_waits() {
         assert!(Instant::now() < deadline, "the second run ended");
         thread::sleep(Duration::from_millis(5));
     };
-    let waits: Vec<bool> = events
+    let waits: Vec<(bool, bool)> = events
         .iter()
         .filter_map(|e| match e {
-            CoreEvent::QueryWaiting { waiting, .. } => Some(*waiting),
+            CoreEvent::QueryWaiting { waiting, tab, .. } => Some((*waiting, *tab)),
             _ => None,
         })
         .collect();
     assert_eq!(
         waits,
-        vec![true, false],
-        "said it waited, then that it has one"
+        vec![(true, true), (false, false)],
+        "said it waited for the tab's own session, then that it has one"
     );
     let error = events.iter().find_map(|e| match e {
         CoreEvent::QueryFinished { error, .. } => Some(error.clone()),

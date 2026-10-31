@@ -4613,7 +4613,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-bridge"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "futures",
  "rowkery-core",
@@ -4627,7 +4627,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4635,6 +4635,7 @@ dependencies = [
  "csv",
  "futures",
  "getrandom 0.4.3",
+ "jiff",
  "keyring",
  "memchr",
  "rand 0.8.8",
@@ -4663,7 +4664,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-mcp"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "hmac 0.12.1",
  "rmcp",
@@ -4677,9 +4678,10 @@ dependencies = [
 
 [[package]]
 name = "rowkery-tauri"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "indexmap 2.14.2",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "rowkery-bridge",

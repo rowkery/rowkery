@@ -56,7 +56,7 @@ A new connection to another machine starts on **Verify**, which encrypts the con
 
 ### SSH
 
-Rowkery remembers each SSH server's host key, as a SHA-256 fingerprint, in `ssh_known_hosts` in its folder. **Trust the host key on first connect** is on for a new tunnel, so the first key a server shows is remembered. If a server ever shows a different key, Rowkery refuses to connect and sends nothing: "The SSH host key for HOST has CHANGED. Nothing was sent." With the setting off, a server Rowkery hasn't seen is refused too, until you check its key. A tunnel whose server stops answering closes within a minute.
+Rowkery remembers each SSH server's host key, as a SHA-256 fingerprint, in `ssh_known_hosts` in its folder. **Trust the host key on first connect** is on for a new tunnel, so the first key a server shows is remembered, and a toast names its fingerprint. If a server ever shows a different key, Rowkery refuses to connect and sends nothing: "The SSH host key for HOST has CHANGED. Nothing was sent." With the setting off, a server Rowkery hasn't seen is refused too, until you check its key. A tunnel whose server stops answering closes within a minute.
 
 ## Your own writes
 

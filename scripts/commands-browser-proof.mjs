@@ -247,14 +247,14 @@ const want = {
   "switch-connection": "Ctrl+Shift+O",
   "switch-database": "Ctrl+Shift+D",
   "new-window": "Ctrl+T",
-  "refresh-schema": "Ctrl+R",
+  refresh: "Ctrl+R",
 };
 for (const [id, keys] of Object.entries(want)) {
   check(rows[id] === keys, `${id} listed with "${keys}" (got ${JSON.stringify(rows[id])})`);
 }
 check(!("cancel" in rows), "no Cancel while nothing runs");
 check(!("next-tab" in rows) && !("close-window" in rows), "no tab or window cycling with one of each");
-check(!("refresh" in rows), "no Refresh rows on a query tab");
+check(!("refresh-rows" in rows), "no Refresh rows on a query tab");
 await closePalette();
 
 // 3. A menu bar pick runs the same command: New query tab via ⌘K, then

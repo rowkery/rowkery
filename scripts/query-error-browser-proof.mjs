@@ -50,6 +50,8 @@ function stubTauri() {
           if (/\bnmae\b/.test(sql)) return fail(sql, "nmae", 'column "nmae" does not exist', "42703");
           if (/\bkiosk\b/.test(sql)) return fail(sql, "kiosk", 'relation "kiosk" does not exist', "42P01");
           if (/\bFORM\b/.test(sql)) return fail(sql, "FORM", 'syntax error at or near "FORM"', "42601");
+          if (/^INSERT/.test(sql))
+            return { ...fail(sql, "", 'duplicate key value violates unique constraint "kiosks_pkey"', "23505"), error_position: null, error_detail: "DETAIL:  Key (id)=(1) already exists." };
           return { columns: [{ name: "n", type_name: "int4" }], rows: [[{ Int: 1 }]], row_count: 1, elapsed_ms: 1, error: null, cancelled: false };
         }
         default:
@@ -143,4 +145,12 @@ await page.screenshot({ path: `${OUT}/2-syntax-error.png` });
 await page.keyboard.press("Enter");
 await page.waitForTimeout(100);
 check((await value()).includes("\n") && (await runs()).length === 5 && !(await hasMark()), "↵ without a suggestion is a newline, and the edit removes the underline");
+
+// The server's DETAIL under the raw text, as psql prints it (rowkery/reports#43).
+await setSql("INSERT INTO kiosks VALUES (1);");
+await page.keyboard.press("Control+Enter");
+await page.waitForSelector(`${ws} [data-query-error="23505"]`);
+const dupe = await page.textContent(`${ws} [data-testid="qe-raw"]`);
+check(/ERROR: {2}duplicate key[^\n]*\n\s*DETAIL: {2}Key \(id\)=\(1\) already exists\./.test(dupe), `DETAIL under the error (${JSON.stringify(dupe)})`);
+await page.screenshot({ path: `${OUT}/3-detail.png` });
 await browser.close();

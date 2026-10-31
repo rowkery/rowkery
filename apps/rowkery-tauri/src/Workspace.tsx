@@ -7,6 +7,7 @@ import {
   importCsv,
   previewCsv,
   copyAllResults,
+  readsOnly,
   reviewChanges,
   exportResults,
   browseTableSql,
@@ -30,6 +31,10 @@ import {
   type ConnectExplanation,
   type CsvPreview,
   type FollowLookup,
+  type HostKeys,
+  forgetSshHostKey,
+  restoreSshHostKey,
+  type WaitingFor,
 } from "./api";
 import { PlanView, copy as copyPlanText, planText } from "./PlanView";
 import { CommandPalette, type PickMode } from "./CommandPalette";
@@ -41,7 +46,7 @@ import { catalogResult } from "./catalogRows";
 import { columnComments } from "./comments";
 import { TimingsSheet } from "./TimingsSheet";
 import { syncMenu } from "./menuSync";
-import { setShownState } from "./keyTracker";
+import { OVERLAY as OVERLAY_KEYS, setShownState } from "./keyTracker";
 import { closeScope, setCloseScope, subscribeCloseScope } from "./closeScope";
 import { useKeymap } from "./keymaps";
 import { KeyStrip } from "./KeyStrip";
@@ -78,7 +83,17 @@ import type { KeyColumns, QuickLookView } from "./gridTypes";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
 import { sqlStatementRanges, type CharRange } from "./sqlStatements";
-import { allTables, buildSchemaTree, findTable, isView, tableKey, takesImport, type SidebarTable } from "./schemaTree";
+import {
+  allTables,
+  buildSchemaTree,
+  findTable,
+  isView,
+  tableKey,
+  takesImport,
+  withSeenCounts,
+  type SeenCount,
+  type SidebarTable,
+} from "./schemaTree";
 import { prefetchOn } from "./prefetchSwitch";
 import { toggleNativeDecorations } from "./windowChrome";
 import { TableStructure } from "./TableStructure";
@@ -95,7 +110,7 @@ import type { CompletionResult } from "./sqlComplete";
 import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } from "./doneNotify";
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
-import { forgetTabTitles, noteTabTitles } from "./openTransactions";
+import { forgetTabTitles, noteTabTitles, transactionBlocksClose } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
 import { parsePostgresUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
@@ -111,11 +126,13 @@ import {
   chipsToWhere,
   defaultOp,
   parseFragment,
+  readsAsNull,
   renameFragmentColumn,
   savedChips,
   textColumns,
   unknownColumn,
   type FilterChip,
+  type PredicateChip,
 } from "./filterChips";
 import { flushPersist, readKey, writeKey } from "./persist";
 import type { SelectionStats } from "./selectionStats";
@@ -245,6 +262,12 @@ const TYPE_TO_FILTER_KEY = "rowkery.typeToFilter";
 const NOTICE_MS = 2400;
 /** Force stop: how long core's stop has to report back before the tab lets the run go. */
 const FORCE_STOP_GRACE_MS = 2000;
+/**
+ * How long after Cancel a second one is a Force stop, so a quick double Esc
+ * is one cancel: core's `FORCE_ASK_AFTER` (1 s, from when core takes the
+ * first cancel) and a margin, or core would ignore it.
+ */
+const FORCE_READY_MS = 1200;
 /** An unsorted grid's keys: one array, so the memo'd grid sees no change. */
 const NO_SORT: SortState[] = [];
 
@@ -539,6 +562,7 @@ export function Workspace({
   const renderError = activeRun.error;
   const runStartedAt = activeRun.startedAt;
   const cancelling = activeRun.cancelling;
+  const forceReady = cancelling && !!activeRun.forceReady;
   /** When the shown tab last stopped running: an Esc just after it was meant for the run (`escMayDiscard`). */
   const runEnd = useRef<{ running: boolean; endedAt: number | null }>({ running: false, endedAt: null });
   if (runEnd.current.running !== (runStartedAt !== null)) {
@@ -684,14 +708,29 @@ export function Workspace({
    * and a query tab waits for ⌘↵.
    */
   const closedTabs = useRef<ClosedTab[]>([]);
+  /** Tabs closed in this window (ids are never reused): a Run All on one stops, as it does once the window closes. */
+  const closedTabIds = useRef(new Set<number>());
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+    };
+  }, []);
   const releaseClosedRows = (entries: ClosedTab[]) => {
     // Only those still in Recently closed: one reopened meanwhile has its rows in `runs`.
     for (const entry of entries) if (closedTabs.current.includes(entry)) entry.run = undefined;
   };
   const [closedCount, setClosedCount] = useState(0);
-  const closeTab = (id: number) => {
+  // Closing ends the tab's session: never over its open transaction.
+  const closeTab = async (id: number) => {
+    if (await transactionBlocksClose([windowId], [id])) return;
+    closeTabNowRef.current(id);
+  };
+  const closeTabNow = (id: number) => {
     const index = tabs.findIndex((t) => t.id === id);
     if (index < 0) return;
+    rowEditsRef.current.forget(id);
     const tab = tabs[index];
     // Closing the import tab is the panel's Cancel (a running import is
     // cancelled first); it never goes to Recently closed.
@@ -704,7 +743,8 @@ export function Workspace({
       return;
     }
     void closeQueryTab(windowId, id).catch(() => {});
-    const run = runsRef.current[id];
+    closedTabIds.current.add(id);
+    const run = closedRun(runsRef.current[id]);
     const worthKeeping = tab.kind === "table" || !!tab.sql.trim() || !!run?.result;
     const entry: ClosedTab = { tab, run, index };
     if (worthKeeping) {
@@ -739,15 +779,24 @@ export function Workspace({
     }
   };
 
+  const closeTabNowRef = useRef(closeTabNow);
+  closeTabNowRef.current = closeTabNow;
+
   /** The tab menu's Close other tabs: each goes to Recently closed; Undo puts them all back. */
-  const closeOtherTabs = (keepId: number) => {
+  const closeOtherTabs = async (keepId: number) => {
+    const others = tabsRef.current.filter((t) => t.id !== keepId).map((t) => t.id);
+    if (await transactionBlocksClose([windowId], others)) return;
+    closeOtherTabsNowRef.current(keepId);
+  };
+  const closeOtherTabsNow = (keepId: number) => {
     const entries: ClosedTab[] = [];
     tabs.forEach((tab, index) => {
       if (tab.id === keepId) return;
       // The import tab closes as its Cancel does, not into Recently closed.
       if (tab.kind === "import") return closeImportRef.current(true);
       void closeQueryTab(windowId, tab.id).catch(() => {});
-      entries.push({ tab, run: runsRef.current[tab.id], index });
+      closedTabIds.current.add(tab.id);
+      entries.push({ tab, run: closedRun(runsRef.current[tab.id]), index });
     });
     if (!entries.length) return;
     closedTabs.current = [...closedTabs.current, ...entries].slice(-MAX_CLOSED_TABS);
@@ -760,6 +809,9 @@ export function Workspace({
       commit: () => releaseClosedRows(entries),
     });
   };
+
+  const closeOtherTabsNowRef = useRef(closeOtherTabsNow);
+  closeOtherTabsNowRef.current = closeOtherTabsNow;
 
   /** Puts a closed tab back where it was, as it was (a new id; no query running). */
   const reopenTab = (entry: ClosedTab) => {
@@ -979,6 +1031,22 @@ export function Workspace({
   };
 
   const schemaTree = useMemo(() => buildSchemaTree(schema), [schema]);
+  /**
+   * Row counts this window saw itself, by table key: a table tab that loaded
+   * every row with no filter, an exact count (#) with none, a commit's
+   * inserts and deletes. The sidebar shows them over the catalog's estimate.
+   */
+  const [seenCounts, setSeenCounts] = useState<Record<string, SeenCount>>({});
+  useEffect(() => setSeenCounts({}), [activeId]);
+  const seenCountsRef = useRef(seenCounts);
+  seenCountsRef.current = seenCounts;
+  const sidebarTree = useMemo(() => withSeenCounts(schemaTree, seenCounts), [schemaTree, seenCounts]);
+  /** A count seen on `connectionId`: dropped when the window has moved on, and on SQLite, whose catalog counts exactly. */
+  const seeCount = (key: string, rows: number, connectionId: string | null) => {
+    if (!connectionId || activeIdRef.current !== connectionId || !countsSeenRef.current) return;
+    const over = findTable(schemaTreeRef.current, key)?.rows ?? null;
+    setSeenCounts((prev) => (prev[key]?.rows === rows && prev[key]?.over === over ? prev : { ...prev, [key]: { rows, over } }));
+  };
   // Flattened once per schema load, when the browser is next idle (or at
   // once if ⌘K opens first); the palette only filters it.
   const tableIndex = useMemo(() => idleBuild(() => buildTableIndex(schemaTree)), [schemaTree]);
@@ -999,6 +1067,9 @@ export function Workspace({
   }, [schemaTree]);
 
   const activeConnection = connections.find((c) => c.id === activeId) ?? null;
+  // Postgres's estimate lags writes; SQLite's catalog counts exactly (`table_counts`).
+  const countsSeenRef = useRef(false);
+  countsSeenRef.current = !!activeConnection && engineForConnection(activeConnection) === "postgres";
 
   // A failed connection, explained by core: the cause sentence and the field
   // Edit… marks.
@@ -1026,6 +1097,36 @@ export function Workspace({
     // The sheet calls the SSH password field sshSecret.
     const field = explained?.field === "sshPassword" ? "sshSecret" : explained?.field;
     actions.editConnection(activeId, field ? { field, message: explained?.cause ?? session.error ?? "" } : undefined);
+  };
+  // Forget saved key: the key shown goes, so Retry (a separate press) meets
+  // the host as new; Undo puts it back.
+  const [forgot, setForgot] = useState<string | null>(null);
+  // Only this connection's own bastion (core forgets only a key its tunnel refused, too).
+  const tunnel = activeConnection?.kind === "postgres" ? activeConnection.ssh : null;
+  const shownKeys =
+    explained?.host_keys && tunnel && explained.host_keys.host === tunnel.host && explained.host_keys.port === tunnel.port
+      ? explained.host_keys
+      : null;
+  const forgetHostKey = async (keys: HostKeys) => {
+    const gone = await forgetSshHostKey(keys.host, keys.port, keys.saved).catch((e) => {
+      showToast("Couldn't forget the saved key", String(e), "error");
+      return null;
+    });
+    if (gone === null) return;
+    if (!gone) return showToast("Nothing was forgotten: the saved key isn't the one shown", "Retry to see it again", "error");
+    setForgot(keys.saved);
+    const trusts = !!tunnel?.trust_host;
+    showUndoToast(
+      `Forgot the saved key for ${keys.host}`,
+      trusts ? "Retry trusts its new key" : "Turn on Trust the host key on first connect in Edit…, then Retry",
+      {
+        undo: () =>
+          void restoreSshHostKey(keys.host, keys.port, keys.saved).then(
+            (back) => (back ? setForgot(null) : showToast(`Can't undo: ${keys.host} has a saved key again`)),
+            (e) => showToast("Couldn't put the saved key back", String(e), "error"),
+          ),
+      },
+    );
   };
   const failedRef = useRef(false);
   failedRef.current = connState === "error";
@@ -1318,6 +1419,8 @@ export function Workspace({
     // Only what was sent is done: an edit staged while it ran stays staged,
     // and neither the tab's buffer nor a parked copy of it sends it twice.
     setTabEdits(tab.id, (cur) => withoutCommittedTab({ edits: cur }, buffer).edits);
+    // What committed can't be taken back by ⌘Z.
+    rowEdits.forget(tab.id);
     setTabs((prev) =>
       prev.map((t) => (t.id === tab.id && t.parked ? { ...t, parked: withoutCommittedTab(t, buffer).parked } : t)),
     );
@@ -1328,6 +1431,14 @@ export function Workspace({
       formatMs(out.elapsed_ms),
     ].filter(Boolean);
     setTray(tab.id, { kind: "done", text: done.join(" · ") }, 1600);
+    // A count the window saw moves with the commit (an estimate stays one); a
+    // reload that brings every row counts it exactly.
+    if (tab.tableKey && (out.inserted || out.deleted)) {
+      const key = tab.tableKey;
+      const was = seenCountsRef.current[key];
+      if (was && was.over === (findTable(schemaTreeRef.current, key)?.rows ?? null))
+        seeCount(key, Math.max(0, was.rows + (out.inserted ?? 0) - (out.deleted ?? 0)), buffer.connectionId);
+    }
     // The rows as the database has them now (new rows get their keys), when
     // the window is still on the connection they went to.
     if (activeIdRef.current === buffer.connectionId) void runTable({ ...tab, edits: undefined });
@@ -1368,7 +1479,8 @@ export function Workspace({
     const tab = activeTab;
     const prev = rowEdits.buffer ?? undefined;
     const n = changeCount(prev);
-    if (!tab || !n) return;
+    if (!tab || !prev || !n) return;
+    rowEdits.noteDiscard(tab.id, prev);
     setTabEdits(tab.id, undefined);
     setTray(tab.id, null);
     const action: Undoable = {
@@ -1377,7 +1489,10 @@ export function Workspace({
       undo: () => {
         const now = tabsRef.current.find((t) => t.id === tab.id);
         if (!now) return showToast("Can't undo the discard: its tab is closed");
+        // ⌘Z in the grid brought it back already.
+        if (now.edits === prev) return;
         if (changeCount(now.edits) > 0) return showToast("Can't undo the discard: the tab has edits staged since");
+        rowEdits.forget(tab.id);
         setTabEdits(tab.id, prev);
       },
       lasting: true,
@@ -1941,19 +2056,13 @@ export function Workspace({
         closeActiveTabRef.current();
         return;
       }
-      // ⌘R (Ctrl+R): reload the schema, e.g. after a migration run elsewhere;
-      // on a window whose connection failed, connect again. ⌘E there opens
-      // the connection's settings with the field that failed marked.
-      // ⇧⌘R (Ctrl+Shift+R) on a table tab: its rows again.
-      if (mod && !e.altKey && e.shiftKey && e.code === "KeyR" && isTableTabRef.current) {
-        e.preventDefault();
-        refreshRowsRef.current();
-        return;
-      }
+      // ⌘R (Ctrl+R): the schema again (a migration run elsewhere) and the
+      // shown tab's rows; on a window whose connection failed, connect again.
+      // ⌘E there opens the connection's settings with the field that failed marked.
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyR") {
         e.preventDefault();
         if (failedRef.current) retryRef.current();
-        else refreshSchemaRef.current();
+        else refreshAllRef.current();
         return;
       }
       if (mod && !e.altKey && !e.shiftKey && e.code === "KeyE" && failedRef.current) {
@@ -2058,6 +2167,30 @@ export function Workspace({
         if (e.key === "Enter" && mod && e.shiftKey && !e.altKey) {
           e.preventDefault();
           void commitEditsRef.current(heldCommit.sql);
+          return;
+        }
+      }
+      // Table tabs: ⌘Z takes back the last staged change, ⇧⌘Z puts it back. A
+      // text field (the cell editor, the SQL line) and an overlay keep theirs;
+      // nothing moves while a commit is on its way.
+      const target = e.target as Element | null;
+      if (
+        mod &&
+        !e.altKey &&
+        e.code === "KeyZ" &&
+        isTableTabRef.current &&
+        !isTypingTarget(e.target) &&
+        !target?.closest?.(OVERLAY_KEYS) &&
+        !e.defaultPrevented
+      ) {
+        const edits = rowEditsRef.current;
+        const inGrid = !!target?.closest?.(".results-grid-wrap");
+        const can = (e.shiftKey ? edits.redoable : edits.undoable) && !committing.current.has(activeTabIdRef.current);
+        // In the grid ⌘Z is always the grid's: Edit > Undo never reaches a field that lost focus.
+        if (can || inGrid) e.preventDefault();
+        if (can) {
+          if (e.shiftKey) edits.redo();
+          else edits.undo();
           return;
         }
       }
@@ -2227,15 +2360,27 @@ export function Workspace({
   // Elapsed times tick in `Elapsed` alone (the run clock, TabStatus.tsx): a running
   // query never re-renders the workspace or the grid.
 
-  // Cancel asks the server; pressed again (Force stop, or Esc twice) core
-  // stops the run outright. Core also does that by itself after 3 s, since
-  // a dead connection never answers a cancel. A run whose end never reaches
-  // the tab even then is let go, so the tab is never stuck on Running.
+  // Cancel asks the server; pressed again a second later (Force stop, or
+  // Esc again) core stops the run outright, which rolls back an open
+  // transaction, so a quick double Esc is one cancel. Core also stops it by
+  // itself after 3 s, since a dead connection never answers a cancel. A run
+  // whose end never reaches the tab even then is let go, so the tab is never
+  // stuck on Running.
   const onCancel = async () => {
     if (runStartedAt === null) return;
     const tabId = activeTabId;
-    const giveUp = runsRef.current[tabId]?.cancelling ? abandonRun(windowId, tabId) : undefined;
-    patchRun(tabId, { cancelling: true });
+    const run = runsRef.current[tabId];
+    if (run?.cancelling && !run.forceReady) return;
+    const giveUp = run?.cancelling ? abandonRun(windowId, tabId) : undefined;
+    if (!run?.cancelling) {
+      patchRun(tabId, { cancelling: true, forceReady: false });
+      // This run's, not a later one cancelled in the same tab.
+      const startedAt = run?.startedAt;
+      setTimeout(() => {
+        const now = runsRef.current[tabId];
+        if (now?.cancelling && now.startedAt === startedAt) patchRun(tabId, { forceReady: true });
+      }, FORCE_READY_MS);
+    }
     try {
       await cancelQuery(windowId, tabId);
     } catch (e) {
@@ -2292,7 +2437,7 @@ export function Workspace({
     patchRun(tabId, (prev) => ({
       error: null,
       cancelling: false,
-      waiting: false,
+      waiting: null,
       outcome: null,
       elapsedMs: null,
       held: null,
@@ -2330,8 +2475,8 @@ export function Workspace({
               streamed = true;
               patchRun(tabId, { result: partial, streaming: true });
           };
-      // Every connection is busy: the tab says it waits, rather than look stuck.
-      const onWaiting = (waiting: boolean) => {
+      // Every connection, or the tab's own, is busy: the tab says it waits, rather than look stuck.
+      const onWaiting = (waiting: WaitingFor | null) => {
         if (tableRun && !tableRun.current()) return;
         patchRun(tabId, { waiting });
       };
@@ -2455,7 +2600,7 @@ export function Workspace({
         startedAt: null,
         appending: false,
         cancelling: false,
-        waiting: false,
+        waiting: null,
         streaming: false,
         outcome,
         elapsedMs: elapsedMs ?? Math.round(performance.now() - started),
@@ -2496,6 +2641,11 @@ export function Workspace({
       if (end !== "done") break;
       // onRun refuses while the tab shows a run: wait for the render that ends this one.
       while (runsRef.current[tabId]?.startedAt != null) await new Promise((r) => setTimeout(r, 16));
+      // Closed (or its window) between two statements: the rest never run.
+      if (closedTabIds.current.has(tabId) || unmounted.current) {
+        end = "skipped";
+        break;
+      }
     }
     if (end === "done" || (end === "error" && !runsRef.current[tabId]?.cancelling)) {
       const ms = performance.now() - started;
@@ -3081,13 +3231,14 @@ export function Workspace({
     const t = db ? findTable(schemaTree, tableKey(db, target.schema, target.table)) : undefined;
     if (!t || sqlLiteral(value) === null) return;
     const v = value as Record<string, unknown>;
-    const chip: FilterChip = {
+    const chip: PredicateChip = {
       kind: "pred",
       column: target.column,
       type: t.table.columns?.find((c) => c.name === target.column)?.type_name ?? "",
       op: "=",
       value: "Text" in v ? String(v.Text) : "BigInt" in v ? String(v.BigInt) : safeFormatCell(value),
     };
+    if (readsAsNull(chip.value)) chip.text = true;
     lookOnLand.current = { tableKey: t.key, stale: result ?? null };
     openTable(t, {
       keep: own,
@@ -3266,7 +3417,16 @@ export function Workspace({
 
   /** The grid's cell menu, profile segments and histogram drags add chips. */
   const gridFilter = useStableCallback((column: string, op: ChipDraft["op"], value: string = "", value2?: string) =>
-    addChip({ kind: "pred", column, type: chipType(column), op, value, value2 }),
+    addChip({
+      kind: "pred",
+      column,
+      type: chipType(column),
+      op,
+      value,
+      value2,
+      // A cell's text is itself, even the word null (rowkery/reports#44).
+      ...(readsAsNull(value) && (op === "=" || op === "IS DISTINCT FROM") ? { text: true as const } : {}),
+    }),
   );
 
   /**
@@ -3522,6 +3682,7 @@ export function Workspace({
     if (!activeConnection || !activeTab || activeTab.kind !== "table" || !activeTab.table) return;
     const tab = activeTab;
     const key = lineKey(tab);
+    const connectionId = activeId;
     setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value: null, counting: true } }));
     try {
       const value = await countRows(
@@ -3532,6 +3693,7 @@ export function Workspace({
         tab.filter?.trim() ? tab.filter : null,
       );
       setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value, counting: false } }));
+      if (!tab.filter?.trim() && tab.tableKey && value !== null) seeCount(tab.tableKey, value, connectionId);
     } catch (e) {
       setExactCounts((prev) => ({ ...prev, [tab.id]: { key, value: null, counting: false } }));
       flash(String(e));
@@ -3555,6 +3717,51 @@ export function Workspace({
 
   const refreshRowsRef = useRef(refreshRows);
   refreshRowsRef.current = refreshRows;
+
+  /**
+   * ⌘R: the schema again and the shown tab, as the database has it now: a
+   * table tab's rows, or a query tab's last statement when it only reads
+   * (core's `plain_read`). One that writes is never run again.
+   */
+  const refreshAll = async () => {
+    if (connState !== "connected") return;
+    const tab = activeTab;
+    const run = tab ? runsRef.current[tab.id] : undefined;
+    if (isTableTab) refreshRows();
+    const sql = tab?.kind === "query" ? run?.ranSql : undefined;
+    if (!sql || !tab || !activeConnection) return actions.refreshSchema(windowId, true);
+    // The reload's own toast says why the query wasn't run again.
+    const again = commandKeys("run");
+    if (run?.startedAt != null) return actions.refreshSchema(windowId, true, "Schema refreshed · the query is still running");
+    if ((run?.statements?.length ?? 0) > 1)
+      return actions.refreshSchema(windowId, true, `Schema refreshed · ${again} runs the statements again`);
+    const reads = await readsOnly(engineForConnection(activeConnection), sql).catch(() => false);
+    if (!reads) return actions.refreshSchema(windowId, true, `Schema refreshed · this query changes data, so ${again} runs it again`);
+    actions.refreshSchema(windowId, true);
+    void onRun(sql, false, undefined, tab.id);
+  };
+  const refreshAllRef = useRef(refreshAll);
+  refreshAllRef.current = refreshAll;
+
+  // A table tab that loaded every row of its table, no filter, counted it.
+  const wholeTable =
+    isTableTab &&
+    !!activeTab?.tableKey &&
+    !activeTab.filter?.trim() &&
+    resultTableKey === activeTab.tableKey &&
+    runStartedAt === null &&
+    !activeRun.hasMore &&
+    !!result &&
+    !result.error &&
+    !result.cancelled &&
+    !activeRun.error &&
+    !result.capped &&
+    !atCap(result.rows.length);
+  const wholeRows = wholeTable ? result!.rows.length : null;
+  useEffect(() => {
+    if (wholeRows !== null && activeTab?.tableKey) seeCount(activeTab.tableKey, wholeRows, activeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wholeRows, activeTab?.tableKey, schemaTree]);
 
   const focusTableFilterRef = useRef(focusTableFilter);
   focusTableFilterRef.current = focusTableFilter;
@@ -3662,9 +3869,9 @@ export function Workspace({
                     {activeRun.exporting.rows.toLocaleString()} rows
                   </span>
                 ) : activeRun.waiting && !cancelling ? (
-                  // Every connection is busy: say so, rather than look stuck.
-                  <span data-waiting="connection">
-                    Waiting for a free connection ·{" "}
+                  // Every connection, or the tab's own, is busy: say which, rather than look stuck.
+                  <span data-waiting={activeRun.waiting}>
+                    {activeRun.waiting === "tab" ? "Waiting for this tab's connection" : "Waiting for a free connection"} ·{" "}
                     {runStartedAt !== null && <Elapsed since={runStartedAt} active={active} format={formatMs} />}
                   </span>
                 ) : (
@@ -3677,11 +3884,12 @@ export function Workspace({
                 <button
                   type="button"
                   className="cancel-btn"
-                  data-cancel={cancelling ? "force" : "cancel"}
-                  title={cancelling ? "Stop it now, without waiting for the server" : undefined}
+                  data-cancel={forceReady ? "force" : "cancel"}
+                  title={forceReady ? "Stop it now, without waiting for the server" : undefined}
+                  disabled={cancelling && !forceReady}
                   onClick={() => void onCancel()}
                 >
-                  {cancelling ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
+                  {forceReady ? "Force stop" : "Cancel"} <span className="cancel-key">esc</span>
                 </button>
               </span>
   );
@@ -3797,6 +4005,10 @@ export function Workspace({
       cellEditable: rowEdits.cellEditable,
       cellNullable: rowEdits.cellNullable,
       rowsSelected: rowEdits.rowsSelected,
+      rowsMarked: rowEdits.rowsMarked,
+      selectedRows: rowEdits.selectedRows,
+      editUndoable: rowEdits.undoable,
+      editRedoable: rowEdits.redoable,
       pendingEdits: rowEdits.count,
       writeHeld: !!activeRun.held || !!heldEdit || !!review,
       connectionForm: !!connectionForm,
@@ -3834,6 +4046,10 @@ export function Workspace({
       rowEdits.cellEditable,
       rowEdits.cellNullable,
       rowEdits.rowsSelected,
+      rowEdits.rowsMarked,
+      rowEdits.selectedRows,
+      rowEdits.undoable,
+      rowEdits.redoable,
       rowEdits.count,
       activeRun.held,
       heldEdit,
@@ -4053,7 +4269,7 @@ export function Workspace({
     }
     switch (id) {
       case "refresh":
-        return activeTab && void runTable({ ...activeTab });
+        return void refreshAll();
       case "open-in-query":
         return void openInQueryTab();
       case "filter-rows":
@@ -4147,6 +4363,10 @@ export function Workspace({
         return discardEdits();
       case "insert-row":
         return rowEdits.insertRow();
+      case "undo-edit":
+        return rowEdits.undo();
+      case "redo-edit":
+        return rowEdits.redo();
       case "duplicate-row":
         return rowEdits.duplicateSelected();
       case "clear-results":
@@ -4308,7 +4528,7 @@ export function Workspace({
         <Sidebar
           ref={filterRef}
           connectionId={activeId}
-          schemas={schemaTree}
+          schemas={sidebarTree}
           connecting={connState === "connecting"}
           failed={!!failure}
           selectedKey={activeTable?.key ?? null}
@@ -4395,6 +4615,8 @@ export function Workspace({
             onRetry={connState === "error" ? actions.retryConnect : undefined}
             onEdit={connState === "error" && activeId ? editFailed : undefined}
             onReport={() => reportIssue(true)}
+            hostKeys={shownKeys}
+            onForgetKey={shownKeys && forgot !== shownKeys.saved ? () => void forgetHostKey(shownKeys) : undefined}
           />
         )}
         <div
@@ -4631,8 +4853,8 @@ export function Workspace({
                 className={`run-btn${running ? " running" : ""}`}
                 disabled={busy || connState !== "connected"}
                 onClick={() => void onRun()}
-                data-waiting={running && activeRun.waiting ? "connection" : undefined}
-                title={running && activeRun.waiting ? "Waiting for a free connection" : undefined}
+                data-waiting={(running && activeRun.waiting) || undefined}
+                title={running && activeRun.waiting ? (activeRun.waiting === "tab" ? "Waiting for this tab's connection" : "Waiting for a free connection") : undefined}
               >
                 <PlayIcon size={10} />
                 {/* Run counts the time while its query runs; says when it waits for a connection. */}
@@ -4886,6 +5108,7 @@ export function Workspace({
                   sqlstate={result.sqlstate ?? null}
                   sql={activeRun.ranSql ?? null}
                   position={result.error_position ?? null}
+                  detail={result.error_detail ?? null}
                   suggestion={activeRun.errorMark?.suggestion ?? null}
                   onReplace={applySuggestion}
                   onReport={() => reportIssue(true)}
@@ -5151,4 +5374,14 @@ export function Workspace({
       </Presence>
     </div>
   );
+}
+
+/**
+ * A closed tab's run as Undo brings it back: closed while its rows streamed,
+ * those rows are marked cancelled, not a finished result. Rows shown while
+ * a re-run, export, plan or next page was on its way stay as they were.
+ */
+function closedRun(run: TabRun | undefined): TabRun | undefined {
+  if (run?.startedAt == null || !run.result || !run.streaming || run.appending || run.exporting) return run;
+  return { ...run, result: { ...run.result, cancelled: true, elapsed_ms: Date.now() - run.startedAt } };
 }

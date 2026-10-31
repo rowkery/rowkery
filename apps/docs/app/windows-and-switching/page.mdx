@@ -149,7 +149,7 @@ Rowkery keeps a window's server sessions open between queries, so the next query
 
 When tables or columns change on the server, reload them:
 
-- **Refresh schema** <kbd>⌘R</kbd> (**Connection › Refresh Schema**), or the ↻ button on the schema column's host line, reloads tables and columns. The window keeps showing the schema it has until the new one arrives, and your query tabs keep their sessions and any open transaction. A toast says **Schema refreshed**, or **Couldn't refresh schema** with the reason.
+- **Refresh** <kbd>⌘R</kbd> (**View › Refresh**) reloads tables and columns and the tab you're on: a table tab's rows, or a query tab's last statement when it only reads. A query that may change something (INSERT, UPDATE, a call to a function, a cursor's FETCH), or a run of several statements, isn't run again; the toast says <kbd>⌘↵</kbd> runs it. **Refresh schema** (**Connection › Refresh Schema**), or the ↻ button on the schema column's host line, reloads tables and columns only. The window keeps showing the schema it has until the new one arrives, and your query tabs keep their sessions and any open transaction. A toast says **Schema refreshed**, or **Couldn't refresh schema** with the reason.
 - **Reconnect** (**Connection › Reconnect**, the pill's menu, or **Reconnect and reload schema** in <kbd>⌘K</kbd>) connects the window again from scratch and loads the schema. It closes the window's query tab sessions, so a transaction you left open in a tab ends.
 
 With the DataGrip keymap, Refresh schema is <kbd>⌥⌘Y</kbd>.

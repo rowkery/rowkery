@@ -68,7 +68,10 @@ When a connection fails, the window shows **Couldn't connect** in place of the e
 | `The SSH host key for HOST has CHANGED. Nothing was sent.` | See [SSH host key changed](#ssh-host-key-changed) |
 | `The SSH host HOST is new to this Mac.` | Rowkery hasn't seen this SSH server before and **Trust the host key on first connect** is off. Turn it on under Advanced, SSH tunnel, or check the key with the server's owner first |
 | `The SSH host HOST did not answer.` | The SSH server didn't answer within 15 seconds, or refused the connection. Check the SSH host and port |
-| `The SSH host HOST refused the key or password.` | The SSH user, key file or password is wrong |
+| `The SSH host HOST refused the key.` | The SSH user is wrong, or the server doesn't accept that key file |
+| `The SSH host HOST refused the password.` | The SSH user or password is wrong, or the server only takes keys |
+| `The SSH key file is encrypted. Enter its passphrase.` | The key file has a passphrase and none is saved. Enter it in the field under the key file |
+| `The SSH key file's passphrase is wrong.` | The saved passphrase doesn't open the key file |
 
 A Google Cloud SQL connection has causes of its own, such as a missing gcloud login or the Cloud SQL Client role. [When it can't connect](/google-cloud-sql/#when-it-cant-connect) lists them.
 
@@ -104,11 +107,13 @@ SSL is under **Advanced** in the connection's form. A new connection to another 
 
 Rowkery remembers each SSH server's host key the first time it connects, in `ssh_known_hosts` in [Rowkery's folder](/where-rowkery-keeps-things/). If a server later shows a different key, Rowkery stops before sending anything, since that's what a server pretending to be yours would look like.
 
-If the server's owner tells you the key changed on purpose (the server was rebuilt or moved), open `~/Library/Application Support/Rowkery/ssh_known_hosts` in a text editor and delete the line that starts with that server's `host:port`. The next connect treats it as new and, with **Trust the host key on first connect** on, remembers the new key.
+The panel shows both fingerprints: **Saved**, the key Rowkery remembered, and **Now**, the one the server offered this time. Ask the server's owner whether the new one is right. If it changed on purpose (the server was rebuilt or moved), press **Forget saved key**, then **Retry**. With **Trust the host key on first connect** on, Retry remembers the new key, and a toast names the fingerprint it saved. Undo in the Forget toast puts the old key back.
 
 ### Waiting for a free connection
 
 Each saved connection holds at most 10 sessions to the server, shared by its windows and tabs. When all of them are busy, a new run says **Waiting for a free connection** with the time, and starts as soon as one frees. <kbd>Esc</kbd> cancels the wait.
+
+A run that says **Waiting for this tab's connection** is waiting for its own tab's session: an earlier run on that tab is still ending (after a Cancel, say), or Rowkery is checking the session after your Mac woke. The check gives up after 3 seconds. If the session turns out to be dead, the run opens a new one and doesn't wait for Rowkery's replacement.
 
 ## The agent can't see Rowkery
 
@@ -117,7 +122,7 @@ Work through these in order.
 1. **Share a connection.** On the Agents page (<kbd>⇧⌘A</kbd>) the connection's switch must be on. A card that says **Not shared** is off; one that says **Sharing ended …** had a time limit (1 hour, or Today, which ends at midnight) that ran out. Turn it on again.
 2. **Share a database and its tables.** Open the card's Edit access. A connection with no database picked answers the agent with `No database on this connection is shared yet.`
 3. **Restart the client.** After Connect an agent, quit Claude Desktop (<kbd>⌘Q</kbd>) and open it again. In Claude Code, start a new session: one that was already open won't see Rowkery until you restart it.
-4. **Keep Rowkery where you connected it.** Connect an agent adds the path of the Rowkery you ran it from. If you moved the app afterwards, or ran it from the disk image or Downloads, the agent can't start it. Move Rowkery into Applications, open it from there, and run **Connect an agent** again. It shows the old entry and offers **Replace**.
+4. **Keep Rowkery where you connected it.** Connect an agent adds the path of the Rowkery you ran it from. If you moved the app afterwards, the agent can't start it. Open Rowkery from Applications and run **Connect an agent** again. It says when the old entry's copy is gone, and offers **Replace**. Run from the disk image or Downloads, Connect an agent asks you to move Rowkery to Applications first.
 5. **Claude Code isn't found.** If Connect an agent says "Rowkery looked for claude in your shell's PATH and didn't find it. Install Claude Code (claude.com/claude-code), then try again.", either Claude Code isn't installed, or your login shell's PATH doesn't include the folder it's in. Rowkery reads PATH from your login shell because an app opened from the Dock doesn't get the one your terminal has. Make sure `which claude` works in a new Terminal window, or run the command the sheet shows yourself with **Copy command**.
 6. **Claude Desktop's config is broken.** If Connect an agent says "Claude Desktop's config file isn't valid JSON.", Rowkery leaves the file as it is. Fix the file, or add the entry the sheet shows by hand with **Copy entry**.
 
@@ -144,7 +149,25 @@ Every message an agent can get, with what it means, is on [MCP tools](/mcp-tools
 
 Press <kbd>Esc</kbd> or <kbd>⌘.</kbd>, or click **Cancel** beside the running time. Rowkery asks the server to cancel the query.
 
-If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop**. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
+If the server doesn't answer, for example because the connection dropped while your Mac slept, the button turns into **Force stop** a second after you cancel. Click it, or press <kbd>Esc</kbd> again, and Rowkery stops waiting at once. It also does that by itself 3 seconds after an unanswered cancel. To stop every running query in every tab, choose **Stop all queries** in <kbd>⌘K</kbd>.
+
+## A table won't show on an old database
+
+If a page of rows fails with `This database uses the SQL_ASCII encoding, and a value here isn't valid UTF-8`, the database was created with `SQL_ASCII`, which stores bytes without checking them. A row holds bytes that aren't UTF-8 (often Latin-1 accents), and Postgres refuses to send it to a UTF-8 client like Rowkery. Pages without such a row still show.
+
+To see the bytes, select the column as `column_name::bytea` in a query tab. Rowkery doesn't decode the bytes another way.
+
+## An update won't install
+
+Rowkery replaces itself where it runs, so it can't update a copy opened from the disk image's window, or one opened in Downloads (macOS runs that from a temporary copy). Rowkery says so instead of downloading the update. Move Rowkery into Applications, open it from there, and check again.
+
+If **Restart** fails for another reason, Rowkery says why and keeps the download, so the next **Restart** doesn't download it again.
+
+## An update won't install
+
+Rowkery replaces itself where it runs, so it can't update a copy opened from the disk image's window, or one opened in Downloads (macOS runs that from a temporary copy). Rowkery says so instead of downloading the update. Move Rowkery into Applications, open it from there, and check again.
+
+If **Restart** fails for another reason, Rowkery says why and keeps the download, so the next **Restart** doesn't download it again.
 
 ## Rowkery feels slow
 

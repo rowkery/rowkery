@@ -1,0 +1,82 @@
+name: Site preview
+
+# Vercel's own Git deploys run on main only (apps/web/vercel.json and
+# apps/docs/vercel.json), so a pull request that leaves the sites alone makes
+# no Vercel deployment at all: each one counts toward Hobby's 100 a day, even
+# a build canceled by Ignored Build Step. This deploys a preview of a site
+# only when a pull request changes it. Needs the repository secrets
+# VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID_WEB and
+# VERCEL_PROJECT_ID_DOCS; without them (fork pull requests, Dependabot)
+# nothing deploys.
+on:
+  pull_request:
+    paths:
+      - "apps/web/**"
+      - "apps/docs/**"
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      sites: ${{ steps.changed.outputs.sites }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Which sites did this pull request change?
+        id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HAS_SECRETS: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID_WEB != '' && secrets.VERCEL_PROJECT_ID_DOCS != '' }}
+        run: |
+          sites=()
+          if [ "$HAS_SECRETS" != "true" ]; then
+            echo "No Vercel secrets here, skipping."
+          else
+            for site in web docs; do
+              git diff --quiet "$BASE"...HEAD -- "apps/$site" || sites+=("\"$site\"")
+            done
+          fi
+          echo "sites=[$(IFS=,; echo "${sites[*]}")]" >> "$GITHUB_OUTPUT"
+
+  preview:
+    needs: changes
+    if: needs.changes.outputs.sites != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        site: ${{ fromJSON(needs.changes.outputs.sites) }}
+    concurrency:
+      group: site-preview-${{ matrix.site }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    environment:
+      name: preview-${{ matrix.site }}
+      url: ${{ steps.deploy.outputs.url }}
+    # The token goes on the command line only, so the site's own build and
+    # its npm install scripts never see it in their environment.
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets[format('VERCEL_PROJECT_ID_{0}', matrix.site == 'web' && 'WEB' || 'DOCS')] }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      # Settings (root directory, build command) come from the Vercel project.
+      - name: Build and deploy the preview
+        id: deploy
+        run: |
+          test -n "$VERCEL_PROJECT_ID"
+          npx --yes vercel@64.0.2 pull --yes --environment=preview --token="${{ secrets.VERCEL_TOKEN }}"
+          npx --yes vercel@64.0.2 build --token="${{ secrets.VERCEL_TOKEN }}"
+          url=$(npx --yes vercel@64.0.2 deploy --prebuilt --token="${{ secrets.VERCEL_TOKEN }}")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Preview: $url" >> "$GITHUB_STEP_SUMMARY"

@@ -13,6 +13,8 @@ pub struct QueryDetail {
     pub sqlstate: Option<String>,
     /// 1-based character offset of the error in the statement.
     pub error_position: Option<u32>,
+    /// The server's DETAIL and HINT lines, as psql prints them.
+    pub error_detail: Option<String>,
     /// The rows came from a cursor page (a query tab's free-form read).
     pub paged: bool,
     /// The cursor holds more rows: `fetch_more` continues it.
@@ -33,11 +35,14 @@ pub enum CoreEvent {
         tab_id: u64,
     },
     /// The run is waiting for a free connection (every one the saved
-    /// connection may hold is busy), or, with `waiting` false, has one now.
+    /// connection may hold is busy), or with `tab` for its tab's own session
+    /// (an earlier run, or a check after a sleep, still has it); with
+    /// `waiting` false, it has one now.
     QueryWaiting {
         query_id: u64,
         tab_id: u64,
         waiting: bool,
+        tab: bool,
     },
     QueryBatch {
         query_id: u64,

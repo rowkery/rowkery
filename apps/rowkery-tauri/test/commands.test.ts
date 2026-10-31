@@ -14,6 +14,7 @@ import {
   menuState,
   type CommandState,
 } from "../src/commands";
+import { COMMAND_ZONE } from "../src/keyTracker";
 import { menuDiff } from "../src/menuSync";
 
 const MENU_JSON = fileURLToPath(new URL("../src-tauri/menu.json", import.meta.url));
@@ -42,10 +43,10 @@ describe("chords", () => {
       if (!c.chord) continue;
       const mac = formatChord(c.chord, true);
       if (PREDEFINED_MAC_CHORDS.includes(mac)) {
-        // A zone's own Copy keeps Edit > Copy: the zone's keydown sees ⌘C first.
+        // A zone's own Copy (a table tab's Undo) keeps the Edit item: the page's keydown sees the key first.
         if (c.sharesPredefined) {
           expect(c.palette, `${c.id} acts in its zone only`).toBe(false);
-          expect(["⌘C", "⌘A"], `${c.id} may share only an Edit item`).toContain(mac);
+          expect(["⌘C", "⌘A", "⌘Z", "⇧⌘Z"], `${c.id} may share only an Edit item`).toContain(mac);
           continue;
         }
         expect(c.replacesPredefined, `${c.id} uses ${mac}`).toBeTruthy();
@@ -62,7 +63,7 @@ describe("chords", () => {
   // explains a query tab's statement and edits a table tab's SQL; ⌘I formats a
   // query tab's SQL and inserts a row in a table tab.
   const SHARED_CHORDS: Record<string, string> = {
-    "retry-connect": "refresh-schema",
+    "retry-connect": "refresh",
     "find-results": "filter-rows",
     "follow-key": "run",
     "edit-failed-connection": "open-in-query",
@@ -75,6 +76,8 @@ describe("chords", () => {
   test("shared chords are never runnable together", () => {
     const byId = new Map(COMMANDS.map((c) => [c.id, c]));
     for (const [a, b] of Object.entries(SHARED_CHORDS)) {
+      // Two zones' own keys (⌫ on a chip, ⌫ in the grid): the zone the key is pressed in picks.
+      if (COMMAND_ZONE[a] && COMMAND_ZONE[b] && COMMAND_ZONE[a] !== COMMAND_ZONE[b]) continue;
       for (const s of [
         { ...base, connected: true, failed: false },
         { ...base, connected: true, failed: false, connectionForm: true },
@@ -122,7 +125,7 @@ describe("chords", () => {
       "switch-connection": "⇧⌘O",
       "switch-database": "⇧⌘D",
       "new-window": "⌘T",
-      "refresh-schema": "⌘R",
+      refresh: "⌘R",
       "show-structure": "⌥⌘2",
     });
     expect(keys(false)).toMatchObject({
@@ -151,7 +154,7 @@ describe("availableCommands", () => {
       expect(new Set(titles).size, titles.join(", ")).toBe(titles.length);
     }
     expect(availableCommands({ ...base, tableTab: true }, true).filter((c) => c.title === "Refresh rows")).toEqual([
-      expect.objectContaining({ id: "refresh-rows", keys: "⇧⌘R" }),
+      expect.objectContaining({ id: "refresh-rows", keys: undefined }),
     ]);
   });
 

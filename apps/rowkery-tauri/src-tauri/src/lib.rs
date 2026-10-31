@@ -14,13 +14,14 @@ use rowkery_core::db::{
 };
 use rowkery_core::edits::{Change, EditTable};
 use rowkery_core::health::HealthReport;
-use rowkery_core::safety::SafetyHold;
+use rowkery_core::safety::{check_sql, plain_read, Dialect, SafetyHold};
 use rowkery_core::secrets::ConnectionSecrets;
 use rowkery_core::CoreEvent;
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 
+mod app_location;
 mod done_notify;
 #[cfg(feature = "e2e")]
 mod e2e;
@@ -46,11 +47,13 @@ pub enum Frame {
         query_id: u64,
         columns: Vec<Column>,
     },
-    /// Every connection the saved connection may hold is busy: the run waits
-    /// for one (`waiting` false once it has one).
+    /// Every connection the saved connection may hold is busy, or (`tab`)
+    /// the tab's own still is: the run waits for one (`waiting` false once
+    /// it has one).
     Waiting {
         query_id: u64,
         waiting: bool,
+        tab: bool,
     },
     Done(Box<DoneFrame>),
 }
@@ -75,6 +78,8 @@ pub struct DoneFrame {
     pub sqlstate: Option<String>,
     /// 1-based character offset of the error in the statement.
     pub error_position: Option<u32>,
+    /// The server's DETAIL and HINT lines, as psql prints them.
+    pub error_detail: Option<String>,
     /// Set when safe mode stopped the query before it ran.
     pub hold: Option<SafetyHold>,
     /// The rows are a cursor page; `more` while it has rows for `fetch_more`.
@@ -283,6 +288,7 @@ impl EventSink for ChannelSink {
                     error,
                     sqlstate: detail.sqlstate,
                     error_position: detail.error_position,
+                    error_detail: detail.error_detail,
                     hold: None,
                     paged: detail.paged,
                     more: detail.more,
@@ -293,8 +299,18 @@ impl EventSink for ChannelSink {
                 Self::send_json(&self.channel, &Frame::Done(Box::new(done)));
             }
             CoreEvent::QueryWaiting {
-                query_id, waiting, ..
-            } => Self::send_json(&self.channel, &Frame::Waiting { query_id, waiting }),
+                query_id,
+                waiting,
+                tab,
+                ..
+            } => Self::send_json(
+                &self.channel,
+                &Frame::Waiting {
+                    query_id,
+                    waiting,
+                    tab,
+                },
+            ),
             CoreEvent::QueryHeld { query_id, hold, .. } => {
                 let done = DoneFrame {
                     query_id,
@@ -308,6 +324,7 @@ impl EventSink for ChannelSink {
                     error: None,
                     sqlstate: None,
                     error_position: None,
+                    error_detail: None,
                     hold: Some(hold),
                     paged: false,
                     more: false,
@@ -1200,6 +1217,26 @@ fn explain_connect_error(
     )
 }
 
+/// Forget saved key on a changed SSH host key: removes the key saved for
+/// `host:port` while it is still `fingerprint`, the one the panel showed.
+#[tauri::command]
+fn forget_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<bool, String> {
+    rowkery_core::ssh::forget_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
+}
+
+/// Its Undo: puts the key back, unless the host has one again by now.
+#[tauri::command]
+fn restore_ssh_host_key(host: String, port: u16, fingerprint: String) -> Result<bool, String> {
+    rowkery_core::ssh::restore_known_host(&host, port, &fingerprint).map_err(|e| e.to_string())
+}
+
+/// The key trusted on a first connect to this bastion since the last call,
+/// for the connect toast to name.
+#[tauri::command]
+fn take_trusted_host_key(host: String, port: u16) -> Option<String> {
+    rowkery_core::ssh::take_newly_trusted(&host, port)
+}
+
 /// Cancels the tab's query, if any, and closes its connection.
 #[tauri::command]
 fn close_query_tab(bridge: State<'_, CoreBridge>, window_id: String, tab_id: u64) {
@@ -1276,14 +1313,22 @@ struct OpenTransactionDto {
 
 /// The query tabs whose session may hold the user's open transaction:
 /// re-pointing their window would roll it back, so the webview refuses.
+/// `held`: only those surely in one, a running write outside one left out
+/// (closing a tab, which cancels such a write).
 #[tauri::command]
-async fn open_transactions(app: AppHandle) -> Result<Vec<OpenTransactionDto>, String> {
-    on_blocking_pool(app, |bridge| {
-        bridge
-            .open_transactions()
-            .into_iter()
-            .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
-            .collect()
+async fn open_transactions(
+    app: AppHandle,
+    held: Option<bool>,
+) -> Result<Vec<OpenTransactionDto>, String> {
+    on_blocking_pool(app, move |bridge| {
+        if held == Some(true) {
+            bridge.held_transactions()
+        } else {
+            bridge.open_transactions()
+        }
+        .into_iter()
+        .map(|(window_id, tab_id)| OpenTransactionDto { window_id, tab_id })
+        .collect()
     })
     .await
 }
@@ -1475,6 +1520,24 @@ fn review_changes(
         _ => EngineKind::Sqlite,
     };
     rowkery_bridge::review_changes(kind, &table, &changes)
+}
+
+/// ⌘R on a query tab: whether its last statement only reads, so running it
+/// again shows the same thing as it is now (core's `plain_read`). A cursor
+/// statement reads but moves on (`FETCH`) or fails the second time
+/// (`DECLARE`), so it never runs again either.
+#[tauri::command]
+fn reads_only(engine: String, sql: String) -> bool {
+    let dialect = match engine.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        _ => return false,
+    };
+    const CURSOR: [&str; 6] = ["FETCH", "MOVE", "DECLARE", "CLOSE", "LISTEN", "UNLISTEN"];
+    plain_read(&sql, dialect)
+        && check_sql(&sql, dialect)
+            .iter()
+            .all(|s| !CURSOR.contains(&s.verb.as_str()))
 }
 
 /// Commits staged edits as one transaction on the tab's session; held by
@@ -2270,6 +2333,7 @@ pub fn run(mut timings: Timings) {
             sql_file::cancel_sql_file,
             sql_file::forget_sql_file,
             list_connections,
+            reads_only,
             save_connection,
             delete_connection,
             forget_connection_secrets,
@@ -2302,6 +2366,9 @@ pub fn run(mut timings: Timings) {
             browse_table_sql,
             fetch_more,
             explain_connect_error,
+            forget_ssh_host_key,
+            restore_ssh_host_key,
+            take_trusted_host_key,
             app_ready,
             get_theme_preference,
             set_theme_preference,
@@ -2608,6 +2675,19 @@ mod frame_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_runs_again_only_what_reads_and_stays_put() {
+        let pg = |sql: &str| reads_only("postgres".into(), sql.into());
+        assert!(pg("SELECT * FROM kiosks"));
+        assert!(reads_only("sqlite".into(), "SELECT 1".into()));
+        assert!(!pg("INSERT INTO kiosks VALUES (1)"));
+        assert!(!pg("SELECT write_fn()"));
+        assert!(!pg("FETCH 50 FROM c"));
+        assert!(!pg("DECLARE c CURSOR FOR SELECT 1"));
+        assert!(!pg("SELECT 1; DELETE FROM kiosks"));
+        assert!(!reads_only("mysql".into(), "SELECT 1".into()));
+    }
 
     #[test]
     fn menu_json_parses_and_keeps_close_tab_on_cmd_w() {
