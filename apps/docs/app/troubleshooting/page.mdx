@@ -8,7 +8,7 @@ export const metadata = { title: "Troubleshooting" };
 
 ## macOS won't open Rowkery
 
-Rowkery is in beta and isn't signed by Apple yet, so the first time you open it, macOS stops it. It says Rowkery "can't be opened" because Apple can't check it, or, for a copy that was downloaded, that it "is damaged and can't be opened". Neither means anything is wrong with the app. Allow it once in either of these ways.
+Rowkery 1.0.0 and later are signed and notarized by Apple, so they open like any other app. A copy you [built yourself](/build-from-source/) or a download of a version before 1.0.0 isn't signed, so the first time you open it, macOS stops it. It says Rowkery "can't be opened" because Apple can't check it, or, for a copy that was downloaded, that it "is damaged and can't be opened". Neither means anything is wrong with the app. Allow it once in either of these ways.
 
 <Steps>
 
@@ -28,19 +28,19 @@ xattr -dr com.apple.quarantine /Applications/Rowkery.app
 
 <Note>
 
-**Updates are still checked.** Even without Apple's signature, every update is signed by the Rowkery team and the updater refuses one whose signature doesn't match. [Security and privacy](/security-and-privacy/#updates-are-signed) has the details.
+**Updates are checked too.** Every update is signed by the Rowkery team, and the updater refuses one whose signature doesn't match. [Security and privacy](/security-and-privacy/#updates-are-signed) has the details.
 
 </Note>
 
 ## Keychain prompts
 
-Rowkery keeps your passwords in the macOS Keychain. Because the app isn't signed by Apple, macOS only trusts the exact copy that saved an item. So you'll see macOS ask whether Rowkery may use an item in your keychain:
+Rowkery keeps your passwords in the macOS Keychain. You'll see macOS ask whether Rowkery may use an item in your keychain:
 
 - the first time each connection's password is read after you install Rowkery,
-- again after each update, since to macOS a new unsigned build is a different app,
+- once more after updating from a version before 1.0.0, since those weren't signed by Apple and to macOS the signed app is a different app,
 - when your agent first reads a connection, since the MCP server is the same Rowkery app reading the same item.
 
-Rowkery keeps one keychain item per connection, holding all its secrets, so you're asked once per connection rather than once per password. Choose **Always Allow** to stop the prompt for that item until the next update. If you choose **Deny**, that connection can't log in this time, and an agent can't get stand-ins for its sensitive columns (it gets a refusal instead). Rowkery remembers a denial until it restarts, so it doesn't ask again for every query.
+Rowkery keeps one keychain item per connection, holding all its secrets, so you're asked once per connection rather than once per password. Choose **Always Allow** to stop the prompt for that item. Updates from 1.0.0 on carry the same Apple signature, so they don't bring the prompt back. If you choose **Deny**, that connection can't log in this time, and an agent can't get stand-ins for its sensitive columns (it gets a refusal instead). Rowkery remembers a denial until it restarts, so it doesn't ask again for every query.
 
 ## Couldn't connect
 

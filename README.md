@@ -77,15 +77,10 @@ In clients that draw MCP Apps views, the agent's rows show as a grid in the chat
 
 ## Download
 
-Rowkery is in beta and runs on macOS (Apple Silicon and Intel). Linux and Windows build from source, but they aren't released or tested the way the Mac app is.
+Rowkery is in beta and runs on macOS (Apple Silicon and Intel). The app is signed and notarized by Apple. Linux and Windows build from source, but they aren't released or tested the way the Mac app is.
 
 1. Download the `.dmg` from the [latest release](https://github.com/rowkery/rowkery/releases/latest).
 2. Open it and drag **Rowkery** into **Applications**.
-3. This build isn't signed by Apple yet, so macOS blocks the first launch. Choose **Open Anyway** in System Settings › Privacy & Security, or run:
-
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Rowkery.app
-   ```
 
 The first launch opens a small sample database with its first query already run. Rowkery checks for updates after launch and installs them when you restart it; **Settings › Updates** (⌘,) chooses how. What changed in each version is in the [release notes](https://github.com/rowkery/rowkery/releases).
 

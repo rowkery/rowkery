@@ -126,7 +126,7 @@ These are the gaps we know about. None of them lets an agent change your data.
 
 ## Updates are signed
 
-Rowkery isn't signed by Apple yet, but its updates are signed by the Rowkery team. The public half of the signing key is built into the app (`plugins.updater.pubkey` in `tauri.conf.json`), and the updater downloads an update, checks its signature against that key, and refuses it if it doesn't match. An update is only installed when you choose **Restart** on the toast that offers it, or when you quit. Nothing restarts on its own.
+Rowkery is signed with an Apple Developer ID and notarized by Apple, and its updates are also signed by the Rowkery team. The public half of the signing key is built into the app (`plugins.updater.pubkey` in `tauri.conf.json`), and the updater downloads an update, checks its signature against that key, and refuses it if it doesn't match. An update is only installed when you choose **Restart** on the toast that offers it, or when you quit. Nothing restarts on its own.
 
 ## Open source
 
