@@ -1,5 +1,5 @@
 import { parseConnectionUrl } from "./connectionUrl";
-import { needsQuoting } from "./sqlKeywords";
+import { mysqlNeedsQuoting } from "./sqlKeywords";
 import type { SidebarSchema, SidebarTable } from "./schemaTree";
 import { formatRowCount } from "./types";
 
@@ -379,9 +379,8 @@ export function idleBuild<T>(build: () => T): { get: () => T; cancel: () => void
 
 /** Double-quote an identifier only when Postgres/SQLite would need it. */
 export function sqlIdent(name: string, engine?: string): string {
-  // MySQL keeps a name's case unquoted, and quotes with backticks (its
-  // reserved words too: they aren't names there unquoted).
-  if (engine === "mysql") return needsQuoting(name.toLowerCase()) ? `\`${name.replace(/`/g, "``")}\`` : name;
+  // MySQL quotes with backticks, its reserved words too (core's `quote_ident`).
+  if (engine === "mysql") return mysqlNeedsQuoting(name) ? `\`${name.replace(/`/g, "``")}\`` : name;
   return /^[a-z_][a-z0-9_$]*$/.test(name)
     ? name
     : `"${name.replace(/"/g, '""')}"`;

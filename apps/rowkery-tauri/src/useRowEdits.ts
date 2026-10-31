@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { browseTable } from "./api";
+import { quoteText } from "./filterChips";
 import type { KeyChoice } from "./CellEditor";
 import {
   addInserts,
@@ -271,11 +272,13 @@ export function useRowEdits(o: Options) {
     const searched = [fk.column, ...(ref?.columns ?? []).filter((c) => /char|text|clob/i.test(c.type_name)).map((c) => c.name)]
       .filter((c, i, all) => all.indexOf(c) === i)
       .slice(0, 4);
-    const q = query.trim().replace(/'/g, "''");
+    const q = query.trim();
     const like = eng === "postgres" ? "ILIKE" : "LIKE";
     // MySQL casts to CHAR, not TEXT.
     const asText = eng === "mysql" ? "CHAR" : "TEXT";
-    const filter = q ? searched.map((c) => `CAST(${quote(c)} AS ${asText}) ${like} '%${q}%'`).join(" OR ") : undefined;
+    // A literal that reads the same in every sql_mode (MySQL) or setting (Postgres).
+    const pattern = quoteText(`%${q}%`, eng);
+    const filter = q ? searched.map((c) => `CAST(${quote(c)} AS ${asText}) ${like} ${pattern}`).join(" OR ") : undefined;
     const res = await browseTable(windowId, PICKER_TAB + t.id, {
       engine: eng,
       schema: fk.schema,

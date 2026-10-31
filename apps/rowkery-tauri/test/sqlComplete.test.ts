@@ -311,7 +311,7 @@ test("MySQL: backticks, names in the session's database bare, others qualified",
     const caret = sql.indexOf("|");
     return complete(sql.slice(0, caret) + sql.slice(caret + 1), caret, my, none, {})?.items ?? [];
   };
-  assert.equal(run("select * from Ord|").find((i) => i.label === "Orders")?.insert, "Orders");
+  assert.equal(run("select * from Ord|").find((i) => i.label === "Orders")?.insert, "`Orders`");
   assert.equal(run("select * from even|").find((i) => i.label === "events")?.insert, "audit.events");
   assert.equal(run("select ord| from Orders").find((i) => i.label === "order")?.insert, "`order`");
   assert.ok(run("select group_con|").some((i) => i.label === "group_concat"));

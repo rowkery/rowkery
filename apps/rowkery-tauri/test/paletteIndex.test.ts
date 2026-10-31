@@ -87,8 +87,10 @@ describe("helpers", () => {
     expect(sqlIdent("users")).toBe("users");
     expect(sqlIdent("Users")).toBe('"Users"');
     expect(sqlIdent('we"ird')).toBe('"we""ird"');
-    // MySQL keeps an unquoted name's case; it quotes with backticks.
-    expect(sqlIdent("Users", "mysql")).toBe("Users");
+    // MySQL quotes with backticks, as core's quote_ident does.
+    expect(sqlIdent("users", "mysql")).toBe("users");
+    expect(sqlIdent("Users", "mysql")).toBe("`Users`");
+    expect(sqlIdent("rank", "mysql")).toBe("`rank`");
     expect(sqlIdent("my table", "mysql")).toBe("`my table`");
     expect(sqlIdent("a`b", "mysql")).toBe("`a``b`");
   });

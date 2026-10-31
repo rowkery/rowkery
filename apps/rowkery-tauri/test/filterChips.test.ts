@@ -355,15 +355,20 @@ describe("a fragment on a column the table doesn't have", () => {
 describe("chips on MySQL", () => {
   const pred = (op: FilterOp, value: string, type = "varchar(40)", column = "name"): FilterChip => ({ kind: "pred", column, type, op, value });
 
-  test("names take backticks only when they need them, and keep their case", () => {
-    expect(chipIdent("createdAt", "mysql")).toBe("createdAt");
+  test("names take backticks as core's quote_ident gives them: case, reserved words", () => {
+    expect(chipIdent("created_at", "mysql")).toBe("created_at");
+    expect(chipIdent("createdAt", "mysql")).toBe("`createdAt`");
     expect(chipIdent("order", "mysql")).toBe("`order`");
+    expect(chipIdent("rank", "mysql")).toBe("`rank`");
     expect(chipIdent("a`b c", "mysql")).toBe("`a``b c`");
   });
 
   test("contains is LIKE, escaped with ! so it reads the same in every sql_mode", () => {
     expect(chipsToWhere([pred("ILIKE", "ann")], "mysql")).toBe("name LIKE '%ann%'");
     expect(chipsToWhere([pred("ILIKE", "50%_off!")], "mysql")).toBe("name LIKE '%50!%!_off!!%' ESCAPE '!'");
+    // A backslash is LIKE's own escape unless another is named.
+    expect(chipsToWhere([pred("ILIKE", "a\\b")], "mysql")).toBe("name LIKE _utf8mb4 X'25615C6225' ESCAPE '!'");
+    expect(chipsToWhere([pred("ILIKE", "ann", "longtext")], "mysql")).toBe("name LIKE '%ann%'");
   });
 
   test("text with a backslash goes as hex, never as a backslash escape", () => {

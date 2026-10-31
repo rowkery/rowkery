@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import { SQL_KEYWORDS, needsQuoting } from "../src/sqlKeywords";
+import { MYSQL_RESERVED, SQL_KEYWORDS, mysqlNeedsQuoting, needsQuoting } from "../src/sqlKeywords";
 
 // The chips must quote a column exactly as core's SQL does: the TS list is
 // core's `KEYWORDS`, read here from the Rust source.
@@ -26,5 +26,15 @@ describe("sqlKeywords", () => {
     expect(needsQuoting("first name")).toBe(true);
     expect(needsQuoting("a$b")).toBe(true);
     expect(needsQuoting("")).toBe(true);
+  });
+
+  test("MYSQL_RESERVED equals core's, and MySQL quotes what core quotes", () => {
+    const src = readFileSync(RUST, "utf8");
+    const body = /const MYSQL_RESERVED: &str =\s*"([\s\S]*?)";/.exec(src)?.[1];
+    expect(body).toBeDefined();
+    expect([...MYSQL_RESERVED]).toEqual(body!.replace(/\\\n/g, " ").split(/\s+/).filter(Boolean));
+    expect(mysqlNeedsQuoting("rank")).toBe(true);
+    expect(mysqlNeedsQuoting("Usage")).toBe(true);
+    expect(mysqlNeedsQuoting("orders")).toBe(false);
   });
 });

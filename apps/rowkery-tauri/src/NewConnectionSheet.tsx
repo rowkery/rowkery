@@ -422,7 +422,12 @@ export function NewConnectionSheet({
     const read = parseConnectionUrl(text);
     // A saved connection keeps its engine: another engine's URL fills nothing.
     const parsed = read && (!editing || read.engine === engine) ? read.form : null;
-    if (read && parsed && read.engine !== engine) setEngine(read.engine);
+    // A string without a port takes the new engine's own, unless one was typed.
+    const port = read && parsed && read.engine !== engine && !parsed.port && !edited.has("port") ? { port: DEFAULT_PORT[read.engine] } : null;
+    if (read && parsed && read.engine !== engine) {
+      setEngine(read.engine);
+      setMariadb(false);
+    }
     // The hidden password, edited around, isn't a new one.
     if (parsed?.password === HIDDEN_PASSWORD) delete parsed.password;
     if (parsed) {
@@ -430,7 +435,7 @@ export function NewConnectionSheet({
       setEdited((prev) => new Set([...prev, ...(Object.keys(parsed) as (keyof PgForm)[])]));
       // Its own sslmode wins; without one, SSL follows its host.
       setPg((prev) => {
-        const next = { ...prev, ...parsed };
+        const next = { ...prev, ...port, ...parsed };
         return !parsed.ssl && sslFollowsHost ? { ...next, ssl: defaultSslMode(next.host) } : next;
       });
       if (parsed.ssl || parsed.sslRootCert) setAdvanced(true);
@@ -762,6 +767,7 @@ export function NewConnectionSheet({
     setDirty(false);
     setShowErrors(false);
     setEngine(k);
+    setMariadb(false);
     // The port follows the engine until it is typed in.
     if (k !== "sqlite" && !edited.has("port")) setPg((prev) => ({ ...prev, port: DEFAULT_PORT[k] }));
     // Cloud SQL is Postgres only in this version.

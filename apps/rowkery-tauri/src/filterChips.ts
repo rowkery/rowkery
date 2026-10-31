@@ -1,5 +1,5 @@
 import { nearestName } from "./queryError";
-import { needsQuoting } from "./sqlKeywords";
+import { mysqlNeedsQuoting, needsQuoting } from "./sqlKeywords";
 
 /**
  * A table tab's filter as chips: one per predicate, each reading as the SQL
@@ -128,18 +128,17 @@ export type ChipEngine = "postgres" | "sqlite" | "mysql";
 const NUMBER_TYPE =
   /^(int[248]?|integer|bigint|smallint|tinyint|mediumint|real|double|float[48]?|numeric|decimal|money|oid|serial[248]?|bigserial|smallserial)\b/i;
 const BOOL_TYPE = /^bool/i;
-const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string)\b/i;
+const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string|tinytext|mediumtext|longtext|enum|set)\b/i;
 const TIME_TYPE = /^(timestamp|date|time|datetime|interval)/i;
 const REAL_TYPE = /^(real|float4)$/i;
 const NUMBER_TEXT = /^-?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
 
 /**
  * An identifier as the line shows it: quoted only when it needs to be (core's
- * `quote_ident` rules). MySQL keeps an unquoted name's case and quotes with
- * backticks.
+ * `quote_ident` rules). MySQL quotes with backticks, its reserved words too.
  */
 export function chipIdent(name: string, engine: ChipEngine = "postgres"): string {
-  if (engine === "mysql") return needsQuoting(name.toLowerCase()) ? `\`${name.replace(/`/g, "``")}\`` : name;
+  if (engine === "mysql") return mysqlNeedsQuoting(name) ? `\`${name.replace(/`/g, "``")}\`` : name;
   return needsQuoting(name) ? `"${name.replace(/"/g, '""')}"` : name;
 }
 
@@ -212,8 +211,9 @@ const like = (engine: ChipEngine) => (engine === "postgres" ? "ILIKE" : "LIKE");
  */
 const containsPattern = (v: string, engine: ChipEngine) => {
   if (engine === "mysql") {
+    // A backslash is LIKE's escape unless another is named, so it takes one too.
     const bang = v.replace(/[!%_]/g, "!$&");
-    return bang === v ? quoteText(`%${v}%`, engine) : `${quoteText(`%${bang}%`, engine)} ESCAPE '!'`;
+    return bang === v && !v.includes("\\") ? quoteText(`%${v}%`, engine) : `${quoteText(`%${bang}%`, engine)} ESCAPE '!'`;
   }
   const escaped = v.replace(/[\\%_]/g, "\\$&");
   if (escaped === v) return quoteText(`%${v}%`, engine);
