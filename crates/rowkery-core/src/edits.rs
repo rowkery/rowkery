@@ -447,6 +447,7 @@ pub fn literal(engine: EngineKind, type_name: &str, value: &Value) -> Result<Str
     match engine {
         EngineKind::Postgres => pg_literal(pg_kind(type_name), value),
         EngineKind::Sqlite => sqlite_literal(value),
+        EngineKind::Mysql => Err(MYSQL_EDITS_LATER.into()),
     }
 }
 
@@ -496,8 +497,13 @@ pub fn typed_text(engine: EngineKind, type_name: &str, text: &str) -> Result<Str
     match engine {
         EngineKind::Postgres => pg_text(pg_kind(type_name), text),
         EngineKind::Sqlite => Ok(text.to_string()),
+        EngineKind::Mysql => Err(MYSQL_EDITS_LATER.into()),
     }
 }
+
+/// Until MySQL row edits and imports are written (their own change).
+const MYSQL_EDITS_LATER: &str =
+    "MySQL tables can't be edited or imported into in this version yet.";
 
 fn pg_text(kind: Kind, t: &str) -> Result<String, String> {
     Ok(match kind {

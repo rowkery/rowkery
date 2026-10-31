@@ -20,11 +20,14 @@ use crate::db::EngineKind;
 /// `[…]` as a quoted name up to the first `]` and has no `E'…'` strings;
 /// to Postgres `[` is a subscript or an array, and `E'\''` is one quote.
 /// `Either` (the engine isn't known) reads it both ways, and text the two
-/// read differently fails closed.
+/// read differently fails closed. `Mysql` (MySQL and MariaDB) is never part
+/// of `Either`: it has `#` comments, `--` only before a space, backslash
+/// escapes in `'…'` and `"…"`, and `/*! … */` comments the server runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dialect {
     Postgres,
     Sqlite,
+    Mysql,
     Either,
 }
 
@@ -33,6 +36,7 @@ impl From<EngineKind> for Dialect {
         match engine {
             EngineKind::Postgres => Dialect::Postgres,
             EngineKind::Sqlite => Dialect::Sqlite,
+            EngineKind::Mysql => Dialect::Mysql,
         }
     }
 }
@@ -644,6 +648,12 @@ fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::
                 toks.push(Tok::Quoted(sql[i..end].to_string()));
             }
             Lexeme::BlockComment { clear: false } => toks.push(Tok::Unclear),
+            Lexeme::Executable { inner, closed } => {
+                if !closed {
+                    toks.push(Tok::Unclear);
+                }
+                executable_tokens(sql, inner, dialect, toks);
+            }
             Lexeme::Dollar { closed } => {
                 if !closed {
                     toks.push(Tok::Unclear);
@@ -681,6 +691,18 @@ fn tokenize_spans(sql: &str, dialect: Dialect) -> (Vec<Vec<Tok>>, Vec<std::ops::
     (out, spans)
 }
 
+/// The tokens of the SQL inside a MySQL `/*! … */` comment, which the
+/// server runs as part of the statement around it. A `;`, or a comment of
+/// the same kind inside (where the outer one ends is then unclear), makes
+/// the statement unclear: no statement is checked by half.
+fn executable_tokens(sql: &str, (from, to): (usize, usize), dialect: Dialect, toks: &mut Vec<Tok>) {
+    let mut inner = tokenize(&sql[..to][from..], dialect);
+    if inner.len() > 1 || sql[from..to].contains("/*") {
+        toks.push(Tok::Unclear);
+    }
+    toks.extend(inner.drain(..).flatten());
+}
+
 /// Each statement's text as the editor splits `sql`, trimmed, empty ones
 /// left out: what the SQL file reader must agree with.
 #[cfg(test)]
@@ -715,6 +737,14 @@ pub(crate) enum Lexeme {
     },
     /// A `$` that opens no body: nothing.
     Skip,
+    /// MySQL's `/*! … */` (MariaDB's `/*M! … */` too), whose text the
+    /// server runs as SQL: `inner` is the range of that text, past the
+    /// marker and its version number. Never nested; unclosed, it reaches
+    /// the end.
+    Executable {
+        inner: (usize, usize),
+        closed: bool,
+    },
     /// A `[` read as Postgres reads it: a subscript or an array. With
     /// [`Dialect::Either`] SQLite may read a quoted name up to the first
     /// `]`; `clear` when both read the text up to that `]` alike
@@ -746,8 +776,60 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
     match c {
         b'\'' => {
             // Even a string closed by the last byte may go on: `''` is a quote.
-            let (end, clear, _) = skip_string(b, i, false, dialect);
+            let (end, clear, _) = skip_string(b, i, dialect == Dialect::Mysql, dialect);
             done(Lexeme::String { clear }, end, end == n)
+        }
+        // A MySQL `"…"` is a string with escapes, or a name under ANSI_QUOTES.
+        b'"' if dialect == Dialect::Mysql => {
+            let (end, clear, _) = skip_string(b, i, true, dialect);
+            done(Lexeme::String { clear }, end, end == n)
+        }
+        b'#' if dialect == Dialect::Mysql => {
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+            done(Lexeme::LineComment, i, i == n)
+        }
+        // MySQL starts a `--` comment only before a space or control byte:
+        // `1--1` is one minus minus one.
+        b'-' if dialect == Dialect::Mysql && b.get(i + 1) == Some(&b'-') => match b.get(i + 2) {
+            None if !eof => None,
+            Some(&next) if next > b' ' => Some((Lexeme::Other, i + 1)),
+            _ => {
+                while i < n && b[i] != b'\n' {
+                    i += 1;
+                }
+                done(Lexeme::LineComment, i, i == n)
+            }
+        },
+        b'/' if dialect == Dialect::Mysql && b.get(i + 1) == Some(&b'*') => {
+            let marker = match (b.get(i + 2), b.get(i + 3)) {
+                (Some(b'!'), _) => Some(i + 3),
+                (Some(b'M'), Some(b'!')) => Some(i + 4),
+                _ => None,
+            };
+            // No nesting: the comment ends at the first `*/`.
+            let close = memchr::memmem::find(&b[i + 2..], b"*/").map(|p| i + 2 + p);
+            let end = close.map_or(n, |c| c + 2);
+            if close.is_none() && !eof {
+                return None;
+            }
+            Some(match marker {
+                Some(mut from) => {
+                    while from < end && b[from].is_ascii_digit() {
+                        from += 1;
+                    }
+                    let inner = (from.min(close.unwrap_or(n)), close.unwrap_or(n));
+                    let closed = close.is_some();
+                    (Lexeme::Executable { inner, closed }, end)
+                }
+                None => (
+                    Lexeme::BlockComment {
+                        clear: close.is_some(),
+                    },
+                    end,
+                ),
+            })
         }
         b'"' | b'`' | b'[' if c != b'[' || dialect == Dialect::Sqlite => {
             // SQLite's `[…]` ends at the first `]`, with no escape.
@@ -772,7 +854,7 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
         b'-' | b'/' if i + 1 == n => done(Lexeme::Other, n, true),
         // SQLite has no dollar bodies: `$a` is a parameter name, and what
         // follows it is SQL.
-        b'$' if dialect == Dialect::Sqlite => Some((Lexeme::Skip, i + 1)),
+        b'$' if matches!(dialect, Dialect::Sqlite | Dialect::Mysql) => Some((Lexeme::Skip, i + 1)),
         b'$' => {
             // `$tag$ … $tag$`: the tag is empty or an identifier, so not
             // `$1`; never inside a word, which takes its own `$`.
@@ -792,7 +874,9 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
                 None => done(Lexeme::Dollar { closed: false }, n, true),
             }
         }
-        b'[' if dialect == Dialect::Postgres => Some((Lexeme::Bracket { clear: true }, i + 1)),
+        b'[' if matches!(dialect, Dialect::Postgres | Dialect::Mysql) => {
+            Some((Lexeme::Bracket { clear: true }, i + 1))
+        }
         b'[' => {
             let to = n.min(i + 1 + BRACKET_SPAN);
             let clear = match memchr::memchr(b']', &b[i + 1..to]) {
@@ -821,7 +905,7 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
             if i == start + 1
                 && (c == b'E' || c == b'e')
                 && b[i] == b'\''
-                && dialect != Dialect::Sqlite
+                && matches!(dialect, Dialect::Postgres | Dialect::Either)
             {
                 // `E'…'` takes backslash escapes: `E'\''` is one quote.
                 let (end, clear, _) = skip_string(b, i, true, dialect);
@@ -886,25 +970,32 @@ fn bracket_clear(b: &[u8], mut j: usize) -> bool {
 /// `standard_conforming_strings` off reads it as a quote that doesn't end a
 /// plain string (SQLite has no such escape); SQLite, which has no `E'…'`,
 /// ends an `E'…'` string at it.
+///
+/// A MySQL string (`'…'` or `"…"`, opening at `b[i]`) always takes `\`
+/// escapes, unless `NO_BACKSLASH_ESCAPES` is set: so one holding `\` before
+/// its own quote is unclear.
 fn skip_string(b: &[u8], mut i: usize, backslash: bool, dialect: Dialect) -> (usize, bool, bool) {
     let n = b.len();
+    let quote = b[i];
     let mut clear = true;
     i += 1;
     while i < n {
         match b[i] {
             b'\\' if backslash => {
-                if b.get(i + 1) == Some(&b'\'') && dialect == Dialect::Either {
+                if b.get(i + 1) == Some(&quote)
+                    && matches!(dialect, Dialect::Either | Dialect::Mysql)
+                {
                     clear = false;
                 }
                 i += 2;
                 continue;
             }
             b'\\' if b.get(i + 1) == Some(&b'\'') && dialect != Dialect::Sqlite => clear = false,
-            b'\'' if b.get(i + 1) == Some(&b'\'') => {
+            q if q == quote && b.get(i + 1) == Some(&quote) => {
                 i += 2;
                 continue;
             }
-            b'\'' => return (i + 1, clear, true),
+            q if q == quote => return (i + 1, clear, true),
             _ => {}
         }
         i += 1;
@@ -923,7 +1014,10 @@ fn skip_block_comment(b: &[u8], mut i: usize, dialect: Dialect) -> (usize, bool,
     let mut clear = true;
     i += 2;
     while i < n {
-        if dialect != Dialect::Sqlite && b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+        if matches!(dialect, Dialect::Postgres | Dialect::Either)
+            && b[i] == b'/'
+            && b.get(i + 1) == Some(&b'*')
+        {
             depth += 1;
             clear = false;
             i += 2;
@@ -1225,7 +1319,9 @@ fn check_statement(all: &[Tok]) -> StatementCheck {
         }
         let toks = &all[start..end];
         match toks[0].word() {
-            Some("EXPLAIN") => {
+            // MySQL's DESCRIBE and DESC are EXPLAIN too (`DESC t` lists a
+            // table's columns, `DESC ANALYZE …` runs the statement).
+            Some("EXPLAIN" | "DESCRIBE" | "DESC") => {
                 let (analyze, at) = explain_options(toks);
                 explain = Some(explain.unwrap_or(false) || analyze);
                 start += at;
@@ -1380,7 +1476,31 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
             }
         }
         "SHOW" | "VALUES" | "TABLE" | "FETCH" | "MOVE" | "DECLARE" | "CLOSE" | "LISTEN"
-        | "UNLISTEN" | "DESCRIBE" | "DESC" => read(),
+        | "UNLISTEN" => read(),
+        // MySQL: `SET GLOBAL` / `SET PERSIST` change the server for every
+        // session, and `RESET MASTER` and the like drop server state.
+        "SET"
+            if toks
+                .get(1)
+                .is_some_and(|t| t.is("GLOBAL") || t.is("PERSIST") || t.is("PERSIST_ONLY"))
+                || sets_global_variable(toks) =>
+        {
+            write_verb(&format!(
+                "SET {}",
+                toks.get(1).and_then(Tok::word).unwrap_or("GLOBAL")
+            ))
+        }
+        "RESET"
+            if toks.get(1).is_some_and(|t| {
+                ["MASTER", "SLAVE", "REPLICA", "BINARY", "PERSIST", "QUERY"]
+                    .iter()
+                    .any(|w| t.is(w))
+            }) =>
+        {
+            write_verb("RESET")
+        }
+        // MySQL's `USE db` picks the default database.
+        "USE" => session(false),
         "PRAGMA" => {
             // `PRAGMA [schema.]name`, then `= value` or `(value)` to set it,
             // except for the pragmas whose argument names what they read.
@@ -1420,7 +1540,7 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
         }
         "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "GRANT" | "REVOKE" | "COMMENT" | "REINDEX"
         | "VACUUM" | "CLUSTER" | "ANALYZE" | "ANALYSE" | "SECURITY" | "IMPORT" | "REASSIGN"
-        | "ATTACH" | "DETACH" | "REFRESH" => schema_check(toks, first),
+        | "ATTACH" | "DETACH" | "REFRESH" | "RENAME" => schema_check(toks, first),
         _ => StatementCheck {
             // CALL, DO, EXECUTE, LOCK, NOTIFY and anything unrecognised.
             kind: StatementKind::Write,
@@ -1526,6 +1646,17 @@ fn schema_check(toks: &[Tok], first: &str) -> StatementCheck {
     }
 }
 
+/// A MySQL `SET @@GLOBAL.x = …` (or `@@PERSIST.`): a setting for every
+/// session, so a write.
+fn sets_global_variable(toks: &[Tok]) -> bool {
+    toks.windows(4).any(|w| {
+        w[0] == Tok::Other('@')
+            && w[1] == Tok::Other('@')
+            && (w[2].is("GLOBAL") || w[2].is("PERSIST") || w[2].is("PERSIST_ONLY"))
+            && w[3] == Tok::Dot
+    })
+}
+
 /// Whether the `EXPLAIN` starting `toks` runs its statement (ANALYZE), and
 /// where in `toks` the statement starts.
 fn explain_options(toks: &[Tok]) -> (bool, usize) {
@@ -1570,6 +1701,8 @@ fn unlocks_writes(first: &str, toks: &[Tok]) -> bool {
             read_write
                 || has("TRANSACTION_READ_ONLY")
                 || has("DEFAULT_TRANSACTION_READ_ONLY")
+                // MariaDB's name for it.
+                || has("TX_READ_ONLY")
                 || (first == "RESET" && has("ALL"))
         }
         "BEGIN" | "START" => read_write,
@@ -2550,5 +2683,95 @@ mod tests {
             kind("WITH x AS (SELECT * FROM t FOR UPDATE) SELECT * INTO u FROM x"),
             Write
         );
+    }
+
+    /// MySQL's own text: `#` and `-- ` comments, backslash escapes in both
+    /// quotes, `/*! … */` that the server runs, and its statements.
+    #[test]
+    fn mysql_text_is_read_as_mysql_reads_it() {
+        use StatementKind::*;
+        let checks = |sql: &str| check_sql(sql, Dialect::Mysql);
+        let kinds = |sql: &str| checks(sql).iter().map(|c| c.kind).collect::<Vec<_>>();
+        let verbs = |sql: &str| checks(sql).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        // `--` before anything but a space is two minus signs, not a comment.
+        assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
+        assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
+        assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // Postgres reads `--1` as a comment.
+        assert_eq!(
+            check_sql("SELECT 1--1; DROP TABLE t", Dialect::Postgres).len(),
+            1
+        );
+        assert_eq!(
+            kinds("SELECT 1 # note; DELETE FROM t\n; SELECT 2"),
+            [Read, Read]
+        );
+        // A backslash before the quote: the string may end there or not.
+        assert_eq!(verbs("SELECT 'a\\'; DELETE FROM t; '"), [UNCLEAR_VERB]);
+        assert_eq!(verbs("SELECT \"a\\\"; DELETE FROM t; \""), [UNCLEAR_VERB]);
+        assert_eq!(
+            kinds("SELECT 'a\\\\', 'b' ; SELECT \"it\"\"s\""),
+            [Read, Read]
+        );
+        // `/*! … */` runs; its SQL is checked as part of the statement.
+        assert_eq!(verbs("/*!80000 DROP TABLE t */"), ["DROP TABLE"]);
+        assert_eq!(verbs("/*!40101 SET NAMES utf8mb4 */"), ["SET"]);
+        assert_eq!(verbs("/*M!100100 DELETE FROM t */"), ["DELETE"]);
+        assert_eq!(verbs("SELECT /*!50000 1; DELETE FROM t */"), [UNCLEAR_VERB]);
+        assert_eq!(verbs("SELECT 1 /*!50000 , 2"), [UNCLEAR_VERB]);
+        assert_eq!(kinds("SELECT /*+ NO_INDEX(t) */ * FROM t"), [Read]);
+        // Comments don't nest: this one ends at the first `*/`.
+        assert_eq!(kinds("SELECT /* /* */ 1; DELETE FROM t"), [Read, Write]);
+        assert_eq!(kinds("USE shop"), [Session]);
+        for sql in [
+            "SET GLOBAL max_connections = 10",
+            "SET PERSIST max_connections = 10",
+            "SET @@GLOBAL.read_only = 0",
+            "SET @@global.max_connections = 10",
+            "RESET MASTER",
+            "RESET REPLICA ALL",
+            "REPLACE INTO t VALUES (1)",
+            "LOAD DATA INFILE '/tmp/x' INTO TABLE t",
+            "SELECT * INTO OUTFILE '/tmp/x' FROM t",
+            "SELECT * FROM t INTO @a",
+            "CALL p()",
+            "DO SLEEP(1)",
+            "DESC ANALYZE DELETE FROM t",
+            "HANDLER t OPEN",
+            "KILL 12",
+            "FLUSH TABLES",
+        ] {
+            assert!(checks(sql)[0].changes_data(), "{sql}");
+        }
+        for sql in [
+            "SET SESSION sql_mode = ''",
+            "SET @x = 1",
+            "SET NAMES utf8mb4",
+            "DESC orders",
+            "DESCRIBE orders",
+            "EXPLAIN FORMAT=JSON DELETE FROM t",
+            "EXPLAIN ANALYZE SELECT * FROM t",
+            "SHOW CREATE TABLE t",
+            "SELECT * FROM t LOCK IN SHARE MODE",
+        ] {
+            assert!(!checks(sql)[0].changes_data(), "{sql}");
+        }
+        assert_eq!(verbs("RENAME TABLE a TO b"), ["RENAME"]);
+        assert_eq!(kinds("RENAME TABLE a TO b"), [Schema]);
+        for sql in [
+            "SET SESSION TRANSACTION READ WRITE",
+            "SET TRANSACTION READ WRITE",
+            "SET transaction_read_only = 0",
+            "SET @@SESSION.transaction_read_only = OFF",
+            "SET SESSION tx_read_only = 0",
+            "START TRANSACTION READ WRITE",
+        ] {
+            assert!(checks(sql)[0].unlocks_writes, "{sql}");
+            assert!(
+                hold_for(SafeMode::ReadOnly, sql, true, Dialect::Mysql).is_some(),
+                "{sql}"
+            );
+        }
+        assert!(hold_for(SafeMode::ReadOnly, "SELECT 1 # x", true, Dialect::Mysql).is_none());
     }
 }

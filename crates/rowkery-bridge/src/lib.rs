@@ -4478,6 +4478,8 @@ impl CoreBridge {
                 plan::parse_pg(&json)?
             }
             EngineKind::Sqlite => plan::parse_sqlite(&sqlite_plan_rows(&rows)),
+            // `explain_sql` refuses MySQL before anything runs.
+            EngineKind::Mysql => return Err("Plans for MySQL aren't in this version yet.".into()),
         };
         plan::add_hint(&mut plan, engine, &side.facts);
         Ok(ExplainOutcome::Plan { plan, elapsed_ms })
