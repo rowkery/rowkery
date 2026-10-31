@@ -344,3 +344,87 @@ fn mysql_sql_files_run_and_respect_safe_mode() {
     bridge.close_window("w");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// ⌘E: an estimate runs nothing (even for a write), a timed read runs and
+/// says what each step took, and a timed write is refused because MySQL
+/// can't roll back what ANALYZE ran.
+#[test]
+fn mysql_plans_read_as_steps_and_never_run_writes() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-plan", SafeMode::Off);
+    bridge.open_window("w", "my-plan", None).expect("open");
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_plan; CREATE TABLE bw_plan (id INT PRIMARY KEY, n INT);
+         INSERT INTO bw_plan VALUES (1, 1), (2, 2), (3, 3), (4, 4)",
+    );
+    assert_eq!(error, None);
+
+    let out = bridge
+        .explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n = 2".into(),
+            false,
+            false,
+        )
+        .expect("estimate");
+    let ExplainOutcome::Plan { plan, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(!plan.timed);
+    let scan = plan
+        .steps
+        .iter()
+        .find(|s| s.table.as_deref() == Some("bw_plan"))
+        .unwrap_or_else(|| panic!("{plan:?}"));
+    assert_eq!(scan.kind, "Table scan", "{plan:?}");
+
+    let out = bridge
+        .explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n > 1".into(),
+            true,
+            false,
+        )
+        .expect("timed");
+    let ExplainOutcome::Plan { plan, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(plan.timed, "{plan:?}");
+    assert!(plan.steps.iter().any(|s| s.own_ms.is_some()), "{plan:?}");
+
+    // The estimate of a write runs nothing.
+    let out = bridge
+        .explain(
+            "w",
+            1,
+            "DELETE FROM bw_plan WHERE id = 1".into(),
+            false,
+            false,
+        )
+        .expect("write estimate");
+    assert!(matches!(out, ExplainOutcome::Plan { .. }), "{out:?}");
+    let err = bridge
+        .explain(
+            "w",
+            1,
+            "DELETE FROM bw_plan WHERE id = 1".into(),
+            true,
+            true,
+        )
+        .expect_err("timed write");
+    assert!(err.contains("can't roll it back"), "{err}");
+    let (rows, _, _) = rows_of(&bridge, "w", 1, "SELECT count(*) FROM bw_plan");
+    assert_eq!(rows, [[Value::Int(4)]]);
+    let err = bridge
+        .explain("w", 1, "SELECT 1; SELECT 2".into(), false, false)
+        .expect_err("two statements");
+    assert_eq!(err, "Explain works on one statement at a time.");
+    bridge.close_window("w");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

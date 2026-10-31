@@ -58,6 +58,7 @@ pub(crate) fn run_query(
     cap: Option<u64>,
     events: SharedSink,
     interrupt_slot: CancelSlot,
+    explain: Option<bool>,
 ) {
     let start = Instant::now();
     let sql = match apply_limit {
@@ -90,10 +91,13 @@ pub(crate) fn run_query(
                 },
             );
         };
-        let may_open = !reads_only(&sql);
-        let changes_session = rowkery_core::safety::check_sql(&sql, Dialect::Mysql)
-            .iter()
-            .any(|c| c.kind == rowkery_core::safety::StatementKind::Session);
+        // ⌘E runs the statement's plan instead: a timed one only for a
+        // read (checked by the caller), so neither opens a transaction.
+        let may_open = explain.is_none() && !reads_only(&sql);
+        let changes_session = explain.is_none()
+            && rowkery_core::safety::check_sql(&sql, Dialect::Mysql)
+                .iter()
+                .any(|c| c.kind == rowkery_core::safety::StatementKind::Session);
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -147,7 +151,17 @@ pub(crate) fn run_query(
             }
             let mut fwd = Forward::new(&events, query_id, tab_id, cap);
             let mut first_row = None;
-            let streamed = session_query_stream(&mut session, &sql, |batch, first| {
+            // The plan's form depends on the server this session reached.
+            let text = match explain {
+                Some(timed) => rowkery_core::plan::mysql_explain_sql(
+                    session.flavor() == mysql::Flavor::Mariadb,
+                    &sql,
+                    timed,
+                )
+                .unwrap_or_default(),
+                None => sql.clone(),
+            };
+            let streamed = session_query_stream(&mut session, &text, |batch, first| {
                 if first_row.is_none() && !batch.rows.is_empty() {
                     first_row = Some(start.elapsed());
                 }

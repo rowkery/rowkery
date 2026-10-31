@@ -151,6 +151,21 @@ impl PlanFacts {
 /// The statement that asks for `sql`'s plan. `sql` is one statement; a
 /// trailing semicolon is dropped.
 pub fn explain_sql(engine: EngineKind, sql: &str, timed: bool) -> Result<String, String> {
+    let body = explain_body(sql)?;
+    Ok(match engine {
+        EngineKind::Postgres if timed => {
+            format!("EXPLAIN (FORMAT JSON, VERBOSE, ANALYZE, BUFFERS) {body}")
+        }
+        EngineKind::Postgres => format!("EXPLAIN (FORMAT JSON, VERBOSE) {body}"),
+        EngineKind::Sqlite => format!("EXPLAIN QUERY PLAN {body}"),
+        // The form depends on the server: `mysql_explain_sql`.
+        EngineKind::Mysql => return Err("Plans for MySQL are asked with mysql_explain_sql.".into()),
+    })
+}
+
+/// `sql` without its trailing `;`, refused when empty or already an
+/// EXPLAIN.
+fn explain_body(sql: &str) -> Result<&str, String> {
     let body = sql.trim().trim_end_matches(';').trim_end();
     if body.is_empty() {
         return Err("There's no statement to explain.".into());
@@ -162,14 +177,365 @@ pub fn explain_sql(engine: EngineKind, sql: &str, timed: bool) -> Result<String,
     if first.eq_ignore_ascii_case("explain") {
         return Err("This is already an EXPLAIN. Remove it and press ⌘E again.".into());
     }
-    Ok(match engine {
-        EngineKind::Postgres if timed => {
-            format!("EXPLAIN (FORMAT JSON, VERBOSE, ANALYZE, BUFFERS) {body}")
-        }
-        EngineKind::Postgres => format!("EXPLAIN (FORMAT JSON, VERBOSE) {body}"),
-        EngineKind::Sqlite => format!("EXPLAIN QUERY PLAN {body}"),
-        EngineKind::Mysql => return Err("Plans for MySQL aren't in this version yet.".into()),
+    Ok(body)
+}
+
+/// The statement that asks a MySQL server for `sql`'s plan: MySQL's tree
+/// (`EXPLAIN ANALYZE` when timed, which runs it), MariaDB's JSON
+/// (`ANALYZE FORMAT=JSON` when timed). Read by [`parse_mysql`].
+pub fn mysql_explain_sql(mariadb: bool, sql: &str, timed: bool) -> Result<String, String> {
+    let body = explain_body(sql)?;
+    // MariaDB's `ANALYZE FORMAT=JSON …` is its EXPLAIN ANALYZE.
+    if body
+        .get(..7)
+        .is_some_and(|w| w.eq_ignore_ascii_case("ANALYZE"))
+        && body.len() > 8
+        && body[7..]
+            .trim_start()
+            .get(..6)
+            .is_some_and(|w| w.eq_ignore_ascii_case("FORMAT"))
+    {
+        return Err("This is already an EXPLAIN. Remove it and press ⌘E again.".into());
+    }
+    Ok(match (mariadb, timed) {
+        // MySQL 8.0 and 8.4 have no tree for an UPDATE or DELETE; JSON
+        // covers every statement on both servers.
+        (_, false) => format!("EXPLAIN FORMAT=JSON {body}"),
+        (false, true) => format!("EXPLAIN ANALYZE {body}"),
+        (true, true) => format!("ANALYZE FORMAT=JSON {body}"),
     })
+}
+
+/// Marks a row guess that was far off, as Postgres plans do.
+fn tag_miss(step: &mut PlanStep) {
+    if let (Some(exp), Some(act)) = (step.expected_rows, step.actual_rows) {
+        let ratio = exp.max(1.0) / act.max(1.0);
+        let ratio = ratio.max(1.0 / ratio);
+        if ratio >= MISS_RATIO && (exp - act).abs() * step.loops.unwrap_or(1.0) >= MISS_ROWS {
+            step.miss = Some(ratio);
+        }
+    }
+}
+
+/// Reads a MySQL plan: MySQL's tree text or MariaDB's JSON, whichever the
+/// server sent (no hint: none are written for MySQL yet).
+pub fn parse_mysql(text: &str, timed: bool) -> Result<Plan, String> {
+    let text = text.trim();
+    let mut plan = if text.starts_with('{') {
+        let json: Json =
+            serde_json::from_str(text).map_err(|e| format!("Couldn't read the plan: {e}"))?;
+        parse_mysql_json(&json, timed)
+    } else if text.starts_with("->") {
+        parse_mysql_tree(text, timed)
+    } else {
+        // `<not executable by iterator executor>`: an INSERT … VALUES.
+        return Err("MySQL has no plan to show for this statement.".into());
+    };
+    if plan.steps.is_empty() {
+        return Err("MySQL has no plan to show for this statement.".into());
+    }
+    plan.slowest = slowest(&plan);
+    Ok(plan)
+}
+
+/// MySQL's `EXPLAIN FORMAT=TREE` / `EXPLAIN ANALYZE`: one `-> …` line per
+/// step, four spaces deeper per level. Costs and times there include the
+/// children; each step keeps its own.
+fn parse_mysql_tree(text: &str, timed: bool) -> Plan {
+    let mut steps: Vec<PlanStep> = Vec::new();
+    // Inclusive cost and time of each step, to take its children's out.
+    let mut totals: Vec<(Option<f64>, Option<f64>)> = Vec::new();
+    for line in text.lines() {
+        let Some(at) = line.find("-> ") else { continue };
+        let depth = line[..at].len() / 4;
+        let rest = &line[at + 3..];
+        let (head, figures) = match rest.find("  (") {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => match rest
+                .find(" (actual time=")
+                .or_else(|| rest.find(" (never executed)"))
+            {
+                Some(i) => (&rest[..i], &rest[i..]),
+                None => (rest, ""),
+            },
+        };
+        let figure = |key: &str| -> Option<(f64, f64)> {
+            let from = figures.find(key)? + key.len();
+            let value: String = figures[from..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | '-' | '+'))
+                .collect();
+            let (a, b) = value.split_once("..").unwrap_or((&value, &value));
+            Some((a.parse().ok()?, b.parse().ok()?))
+        };
+        let actual = figures.find("(actual ").map(|i| &figures[i..]);
+        let in_actual = |key: &str| -> Option<(f64, f64)> {
+            let a = actual?;
+            let from = a.find(key)? + key.len();
+            let value: String = a[from..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | '-' | '+'))
+                .collect();
+            let (x, y) = value.split_once("..").unwrap_or((&value, &value));
+            Some((x.parse().ok()?, y.parse().ok()?))
+        };
+        let mut step = PlanStep {
+            depth,
+            ..PlanStep::default()
+        };
+        let cost = figure("cost=").map(|c| c.1);
+        step.expected_rows = figure("rows=").map(|r| r.0);
+        if timed {
+            step.actual_rows = in_actual("rows=").map(|r| r.0);
+            step.loops = in_actual("loops=").map(|r| r.0);
+            if figures.contains("(never executed)") {
+                step.actual_rows = Some(0.0);
+                step.loops = Some(0.0);
+            }
+        }
+        let time = in_actual("actual time=").map(|t| t.1 * step.loops.unwrap_or(1.0));
+        mysql_tree_head(head, &mut step);
+        if timed {
+            tag_miss(&mut step);
+        }
+        steps.push(step);
+        totals.push((cost, time));
+    }
+    // Own = inclusive minus the direct children's inclusive.
+    for i in 0..steps.len() {
+        let depth = steps[i].depth;
+        let children: Vec<usize> = (i + 1..steps.len())
+            .take_while(|&j| steps[j].depth > depth)
+            .filter(|&j| steps[j].depth == depth + 1)
+            .collect();
+        let own = |k: fn(&(Option<f64>, Option<f64>)) -> Option<f64>| {
+            k(&totals[i])
+                .map(|t| (t - children.iter().filter_map(|&j| k(&totals[j])).sum::<f64>()).max(0.0))
+        };
+        steps[i].own_cost = own(|t| t.0);
+        steps[i].own_ms = if timed { own(|t| t.1) } else { None };
+    }
+    Plan {
+        execution_ms: if timed {
+            totals.first().and_then(|t| t.1)
+        } else {
+            None
+        },
+        rows: if timed {
+            steps
+                .first()
+                .and_then(|s| Some(s.actual_rows? * s.loops.unwrap_or(1.0)))
+        } else {
+            None
+        },
+        steps,
+        timed,
+        planning_ms: None,
+        slowest: None,
+        hint: None,
+    }
+}
+
+/// `Index scan on pl_b using PRIMARY`, `Filter: (a > 1)`,
+/// `Single-row index lookup on o using PRIMARY (id=c.order_id)`.
+fn mysql_tree_head(head: &str, step: &mut PlanStep) {
+    let unquote = |s: &str| s.trim_matches('`').to_string();
+    if let Some((kind, cond)) = head.split_once(": ") {
+        step.kind = kind.to_string();
+        step.details.push(Detail {
+            label: kind.to_string(),
+            value: cond.trim().to_string(),
+        });
+        return;
+    }
+    let Some((kind, rest)) = head.split_once(" on ") else {
+        step.kind = head.to_string();
+        return;
+    };
+    step.kind = kind.to_string();
+    let (table, rest) = match rest.split_once(" using ") {
+        Some((t, r)) => (t, Some(r)),
+        None => (rest, None),
+    };
+    let table = table.split_whitespace().next().unwrap_or(table);
+    if !table.starts_with('<') {
+        step.table = Some(unquote(table));
+    } else {
+        step.note = Some(table.to_string());
+    }
+    if let Some(rest) = rest {
+        let (index, cond) = match rest.split_once(" (") {
+            Some((i, c)) => (i, Some(c.trim_end_matches(')'))),
+            None => (rest, None),
+        };
+        step.index = Some(unquote(index.split_whitespace().next().unwrap_or(index)));
+        if let Some(cond) = cond {
+            step.details.push(Detail {
+                label: "Index Cond".into(),
+                value: cond.to_string(),
+            });
+        }
+    }
+}
+
+/// `EXPLAIN FORMAT=JSON` (both servers) and MariaDB's `ANALYZE FORMAT=JSON`:
+/// each `table` is a step, as are sorts, temporary tables and subqueries
+/// around them.
+fn parse_mysql_json(json: &Json, timed: bool) -> Plan {
+    fn walk(node: &Json, depth: usize, timed: bool, steps: &mut Vec<PlanStep>) {
+        match node {
+            Json::Array(items) => {
+                for item in items {
+                    walk(item, depth, timed, steps);
+                }
+            }
+            Json::Object(map) => {
+                for (key, value) in map {
+                    let kind = match key.as_str() {
+                        "table" => {
+                            steps.push(mariadb_table(value, depth, timed));
+                            walk_inner(value, depth + 1, timed, steps);
+                            continue;
+                        }
+                        "filesort" => Some("Sort"),
+                        // MySQL: an ORDER BY an index needs no sort step.
+                        "ordering_operation"
+                            if value.get("using_filesort").and_then(Json::as_bool)
+                                == Some(true) =>
+                        {
+                            Some("Sort")
+                        }
+                        "grouping_operation" => Some("Group"),
+                        "materialized_from_subquery" => Some("Materialize"),
+                        "temporary_table" => Some("Temporary table"),
+                        "duplicates_removal" => Some("Remove duplicates"),
+                        "materialized" => Some("Materialize"),
+                        "query_block" if depth > 0 => Some("Subquery"),
+                        "union_result" => Some("Union"),
+                        _ => None,
+                    };
+                    match kind {
+                        Some(kind) => {
+                            let mut step = PlanStep {
+                                depth,
+                                kind: kind.into(),
+                                note: value
+                                    .get("sort_key")
+                                    .and_then(Json::as_str)
+                                    .map(|k| format!("by {k}")),
+                                ..PlanStep::default()
+                            };
+                            if timed {
+                                step.loops = value.get("r_loops").and_then(Json::as_f64);
+                            }
+                            steps.push(step);
+                            walk(value, depth + 1, timed, steps);
+                        }
+                        None => walk(value, depth, timed, steps),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    /// A table's own subqueries (`materialized`, …), not its fields.
+    fn walk_inner(table: &Json, depth: usize, timed: bool, steps: &mut Vec<PlanStep>) {
+        if let Json::Object(map) = table {
+            for (key, value) in map {
+                if value.is_object() || value.is_array() {
+                    if matches!(
+                        key.as_str(),
+                        "r_engine_stats"
+                            | "possible_keys"
+                            | "used_key_parts"
+                            | "used_columns"
+                            | "ref"
+                            | "cost_info"
+                    ) {
+                        continue;
+                    }
+                    walk(
+                        &serde_json::json!({ key.clone(): value.clone() }),
+                        depth,
+                        timed,
+                        steps,
+                    );
+                }
+            }
+        }
+    }
+    let mut steps = Vec::new();
+    walk(json, 0, timed, &mut steps);
+    let total = json
+        .get("query_block")
+        .and_then(|q| q.get("r_total_time_ms"))
+        .and_then(Json::as_f64);
+    Plan {
+        steps,
+        timed,
+        execution_ms: if timed { total } else { None },
+        planning_ms: if timed {
+            json.get("query_optimization")
+                .and_then(|q| q.get("r_total_time_ms"))
+                .and_then(Json::as_f64)
+        } else {
+            None
+        },
+        rows: None,
+        slowest: None,
+        hint: None,
+    }
+}
+
+fn mariadb_table(t: &Json, depth: usize, timed: bool) -> PlanStep {
+    let text = |k: &str| t.get(k).and_then(Json::as_str).map(str::to_string);
+    let num = |k: &str| t.get(k).and_then(Json::as_f64);
+    // MySQL writes its costs as strings.
+    let figure = |v: Option<&Json>| match v? {
+        Json::String(s) => s.parse::<f64>().ok(),
+        v => v.as_f64(),
+    };
+    let access = text("access_type");
+    // The words MySQL's tree uses, so both servers read the same.
+    let kind = match access.as_deref() {
+        Some("ALL") => "Table scan",
+        Some("index") => "Index scan",
+        Some("range") => "Index range scan",
+        Some("ref" | "eq_ref" | "ref_or_null") => "Index lookup",
+        Some("const" | "system") => "Constant row",
+        Some("index_merge") => "Index merge",
+        Some("fulltext") => "Full-text search",
+        Some(other) => other,
+        None => "Table",
+    };
+    let mut step = PlanStep {
+        depth,
+        kind: kind.into(),
+        table: text("table_name"),
+        index: text("key"),
+        expected_rows: num("rows").or_else(|| num("rows_examined_per_scan")),
+        own_cost: num("cost").or_else(|| {
+            let info = t.get("cost_info")?;
+            Some(figure(info.get("read_cost"))? + figure(info.get("eval_cost")).unwrap_or(0.0))
+        }),
+        ..PlanStep::default()
+    };
+    if let Some(cond) = text("attached_condition") {
+        step.details.push(Detail {
+            label: "Filter".into(),
+            value: cond,
+        });
+    }
+    if timed {
+        step.actual_rows = num("r_rows");
+        step.loops = num("r_loops");
+        step.own_ms = match (num("r_table_time_ms"), num("r_other_time_ms")) {
+            (None, None) => num("r_total_time_ms"),
+            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        };
+        tag_miss(&mut step);
+    }
+    step
 }
 
 /// Reads Postgres's `EXPLAIN (FORMAT JSON)` output (no hint yet).
@@ -1372,5 +1738,127 @@ mod tests {
         assert_eq!(count(2_104_700.0), "2.1M");
         assert_eq!(count(312_000_000.0), "312M");
         assert_eq!(parse_count("2,104,388"), Some(2_104_388.0));
+    }
+
+    /// MySQL 8.0's `EXPLAIN ANALYZE` of a join, as the server sent it.
+    const MYSQL_ANALYZE: &str = "-> Nested loop inner join  (cost=1.6 rows=3) (actual time=0.0556..0.0622 rows=3 loops=1)\n    -> Filter: (pl_b.a is not null)  (cost=0.55 rows=3) (actual time=0.011..0.0142 rows=3 loops=1)\n        -> Index scan on pl_b using PRIMARY  (cost=0.55 rows=3) (actual time=0.0097..0.0126 rows=3 loops=1)\n    -> Filter: (pl_a.n > 0)  (cost=0.283 rows=1) (actual time=0.00336..0.0035 rows=1 loops=3)\n        -> Single-row index lookup on pl_a using PRIMARY (id=pl_b.a)  (cost=0.283 rows=1) (actual time=0.00261..0.00265 rows=1 loops=3)\n";
+
+    #[test]
+    fn mysql_trees_read_as_steps_with_their_own_share() {
+        let plan = parse_mysql(MYSQL_ANALYZE, true).unwrap();
+        let kinds: Vec<(usize, &str)> = plan
+            .steps
+            .iter()
+            .map(|s| (s.depth, s.kind.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (0, "Nested loop inner join"),
+                (1, "Filter"),
+                (2, "Index scan"),
+                (1, "Filter"),
+                (2, "Single-row index lookup"),
+            ]
+        );
+        let lookup = &plan.steps[4];
+        assert_eq!(
+            (lookup.table.as_deref(), lookup.index.as_deref()),
+            (Some("pl_a"), Some("PRIMARY"))
+        );
+        assert_eq!(lookup.details[0].value, "id=pl_b.a");
+        assert_eq!((lookup.actual_rows, lookup.loops), (Some(1.0), Some(3.0)));
+        // Times are per loop and include the children: own = all loops
+        // less the children's.
+        assert!((lookup.own_ms.unwrap() - 0.00795).abs() < 1e-9);
+        let filter = &plan.steps[3];
+        assert!((filter.own_ms.unwrap() - (0.0105 - 0.00795)).abs() < 1e-9);
+        assert_eq!(plan.steps[1].details[0].value, "(pl_b.a is not null)");
+        assert_eq!(plan.execution_ms, Some(0.0622));
+        assert_eq!(plan.rows, Some(3.0));
+        assert!(plan.slowest.is_some());
+        // An estimate: costs, no times.
+        let estimate = MYSQL_ANALYZE
+            .lines()
+            .map(|l| l.split(" (actual").next().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let plan = parse_mysql(&estimate, false).unwrap();
+        assert!(plan
+            .steps
+            .iter()
+            .all(|s| s.own_ms.is_none() && s.actual_rows.is_none()));
+        assert!((plan.steps[0].own_cost.unwrap() - (1.6 - 0.55 - 0.283)).abs() < 1e-9);
+        assert_eq!(
+            parse_mysql("<not executable by iterator executor>\n", false).unwrap_err(),
+            "MySQL has no plan to show for this statement."
+        );
+    }
+
+    #[test]
+    #[test]
+    fn mysql_json_estimates_read_as_steps() {
+        let json = r#"{"query_block":{"select_id":1,"cost_info":{"query_cost":"2.45"},"ordering_operation":{"using_filesort":true,"nested_loop":[{"table":{"table_name":"a","access_type":"ALL","rows_examined_per_scan":4,"cost_info":{"read_cost":"0.52","eval_cost":"0.13","prefix_cost":"0.65"},"used_columns":["id","n"],"attached_condition":"(`a`.`n` > 1)"}},{"table":{"table_name":"b","access_type":"eq_ref","key":"PRIMARY","ref":["rowkery.a.n"],"rows_examined_per_scan":1,"cost_info":{"read_cost":"0.33","eval_cost":"0.13"}}}]}}}"#;
+        let plan = parse_mysql(json, false).unwrap();
+        let kinds: Vec<_> = plan
+            .steps
+            .iter()
+            .map(|s| (s.depth, s.kind.as_str(), s.table.as_deref()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (0, "Sort", None),
+                (1, "Table scan", Some("a")),
+                (1, "Index lookup", Some("b"))
+            ]
+        );
+        assert_eq!(plan.steps[1].expected_rows, Some(4.0));
+        assert!((plan.steps[1].own_cost.unwrap() - 0.65).abs() < 1e-9);
+        assert_eq!(plan.steps[2].index.as_deref(), Some("PRIMARY"));
+        assert_eq!(plan.slowest, Some(1));
+        // An ORDER BY an index has no sort step.
+        let json = r#"{"query_block":{"ordering_operation":{"using_filesort":false,"table":{"table_name":"a","access_type":"index","key":"PRIMARY","rows_examined_per_scan":4}}}}"#;
+        let plan = parse_mysql(json, false).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].kind, "Index scan");
+    }
+
+    fn mariadb_json_reads_as_steps() {
+        let json = r#"{"query_optimization":{"r_total_time_ms":0.2},"query_block":{"select_id":1,"r_loops":1,"r_total_time_ms":0.11,"filesort":{"sort_key":"pl_a.n desc","r_loops":1,"temporary_table":{"nested_loop":[{"table":{"table_name":"pl_b","access_type":"ALL","r_loops":1,"rows":3,"r_rows":3,"r_table_time_ms":0.02,"r_other_time_ms":0.01,"r_engine_stats":{"pages_accessed":1},"filtered":100,"attached_condition":"pl_b.a is not null"}},{"table":{"table_name":"pl_a","access_type":"eq_ref","possible_keys":["PRIMARY","n"],"key":"PRIMARY","ref":["rowkery.pl_b.a"],"r_loops":3,"rows":1,"r_rows":1,"r_table_time_ms":0.03,"r_other_time_ms":0.01}}]}}}}"#;
+        let plan = parse_mysql(json, true).unwrap();
+        let kinds: Vec<(usize, &str)> = plan
+            .steps
+            .iter()
+            .map(|s| (s.depth, s.kind.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (0, "Sort"),
+                (1, "Temporary table"),
+                (2, "Table scan"),
+                (2, "Index lookup")
+            ]
+        );
+        assert_eq!(plan.steps[0].note.as_deref(), Some("by pl_a.n desc"));
+        let scan = &plan.steps[2];
+        assert_eq!(scan.table.as_deref(), Some("pl_b"));
+        assert_eq!(scan.details[0].value, "pl_b.a is not null");
+        assert!((scan.own_ms.unwrap() - 0.03).abs() < 1e-9);
+        assert_eq!(plan.slowest, Some(3));
+        assert_eq!(
+            (plan.execution_ms, plan.planning_ms),
+            (Some(0.11), Some(0.2))
+        );
+        assert_eq!(
+            mysql_explain_sql(true, "SELECT 1;", true).unwrap(),
+            "ANALYZE FORMAT=JSON SELECT 1"
+        );
+        assert_eq!(
+            mysql_explain_sql(false, "SELECT 1", false).unwrap(),
+            "EXPLAIN FORMAT=JSON SELECT 1"
+        );
+        assert!(mysql_explain_sql(true, "analyze format=json select 1", false).is_err());
     }
 }

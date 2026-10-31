@@ -3620,22 +3620,37 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         side.engine = Some(engine);
                     }
                     plan_rollback = run.timed && engine == EngineKind::Postgres;
-                    match plan::explain_sql(engine, &sql, run.timed) {
-                        Ok(explain_sql) => explain_sql,
-                        Err(e) => {
+                    if engine == EngineKind::Mysql {
+                        // MySQL can't roll a plan's run back, and a timed
+                        // plan runs the statement: reads only.
+                        if run.timed && checks[0].kind != StatementKind::Read {
+                            let _ = respond_to.send(Err("Run with timings runs the statement, and MySQL can't roll it back, so it works on reads only. The plan without timings runs nothing.".into()));
+                            return;
+                        }
+                        // The form depends on the server: the run picks it.
+                        if let Err(e) = plan::mysql_explain_sql(false, &sql, run.timed) {
                             let _ = respond_to.send(Err(e));
                             return;
+                        }
+                        sql
+                    } else {
+                        match plan::explain_sql(engine, &sql, run.timed) {
+                            Ok(explain_sql) => explain_sql,
+                            Err(e) => {
+                                let _ = respond_to.send(Err(e));
+                                return;
+                            }
                         }
                     }
                 }
             };
-            if !explain
-                .as_ref()
-                .is_some_and(|r| r.timed && engine == EngineKind::Postgres)
-            {
+            match &explain {
+                // A timed plan runs the statement: safe mode reads it.
+                Some(run) if run.timed && engine != EngineKind::Sqlite => {}
                 // An estimate never runs the statement; safe mode reads the
                 // EXPLAIN itself, which it counts as a read.
-                user_sql = sql.clone();
+                Some(_) if engine == EngineKind::Mysql => user_sql = format!("EXPLAIN {sql}"),
+                _ => user_sql = sql.clone(),
             }
             let reads_only = || {
                 let checks = check_sql(&sql, engine.into());
@@ -3761,6 +3776,7 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                         cap,
                         events,
                         slot,
+                        explain.as_ref().map(|r| r.timed),
                     );
                 }
                 WindowTarget::Sqlite {
@@ -4841,8 +4857,16 @@ impl CoreBridge {
                 plan::parse_pg(&json)?
             }
             EngineKind::Sqlite => plan::parse_sqlite(&sqlite_plan_rows(&rows)),
-            // `explain_sql` refuses MySQL before anything runs.
-            EngineKind::Mysql => return Err("Plans for MySQL aren't in this version yet.".into()),
+            EngineKind::Mysql => {
+                let text: String = rows
+                    .iter()
+                    .filter_map(|r| match r.first() {
+                        Some(Value::Text(t)) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                plan::parse_mysql(&text, timed)?
+            }
         };
         plan::add_hint(&mut plan, engine, &side.facts);
         Ok(ExplainOutcome::Plan { plan, elapsed_ms })
