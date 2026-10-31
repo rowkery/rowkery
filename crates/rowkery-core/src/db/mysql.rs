@@ -78,6 +78,8 @@ pub struct MysqlSession {
     version: String,
     /// In its `program_name` connect attribute, after `Rowkery `.
     tag: String,
+    /// Kept while the session lives (a place under the connection's cap).
+    guard: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -136,6 +138,34 @@ impl MysqlSession {
             ok.status_flags()
                 .contains(mysql_async::consts::StatusFlags::SERVER_STATUS_IN_TRANS)
         })
+    }
+
+    /// The socket is gone: nothing more can run on it.
+    pub fn is_closed(&self) -> bool {
+        self.conn.is_disconnected()
+    }
+
+    /// Keeps `guard` while the session lives.
+    pub fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
+        self.guard = Some(guard);
+    }
+
+    pub fn holds(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    pub fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.guard.take()
+    }
+}
+
+/// Asks the server whether a transaction is open: `DO 0` changes nothing
+/// and its OK carries the status flags. `None` when it doesn't answer
+/// within `limit`.
+pub async fn session_probe_txn(session: &mut MysqlSession, limit: Duration) -> Option<bool> {
+    match tokio::time::timeout(limit, session.conn.query_drop("DO 0")).await {
+        Ok(Ok(())) => Some(session.in_transaction()),
+        _ => None,
     }
 }
 
@@ -247,6 +277,7 @@ pub async fn open_session_via(
         flavor,
         version,
         tag,
+        guard: None,
     })
 }
 

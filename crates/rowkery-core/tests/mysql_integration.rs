@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use rowkery_core::connections::{MysqlConnection, PostgresSslMode};
 use rowkery_core::db::mysql::{
-    cancel, open_session_via, session_execute, session_introspect, session_query_stream, Flavor,
-    MysqlSession, CATALOG,
+    cancel, open_session_via, session_execute, session_introspect, session_probe_txn,
+    session_query_stream, Flavor, MysqlSession, CATALOG,
 };
 use rowkery_core::db::{
     table_browse_query, BrowseOptions, BrowseOrder, DriverError, EngineKind, RowBatch, RowEstimate,
@@ -404,8 +404,22 @@ async fn transactions_are_seen() {
     assert!(s.in_transaction());
     rows(&mut s, "SELECT 1").await;
     assert!(s.in_transaction());
+    // A failed statement keeps it open, and asking says so.
+    assert!(run(&mut s, "SELECT * FROM it_no_such_table")
+        .await
+        .1
+        .is_err());
+    assert_eq!(
+        session_probe_txn(&mut s, Duration::from_secs(2)).await,
+        Some(true)
+    );
     session_execute(&mut s, "ROLLBACK").await.unwrap();
     assert!(!s.in_transaction());
+    assert_eq!(
+        session_probe_txn(&mut s, Duration::from_secs(2)).await,
+        Some(false)
+    );
+    assert!(!s.is_closed());
 }
 
 #[tokio::test]
