@@ -24,17 +24,31 @@
 # APPLE_API_KEY_PATH) or an Apple ID (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID).
 # Without them it stops; ALLOW_UNSIGNED=1 builds an unsigned copy on purpose
 # (users then open it with System Settings > Privacy & Security > Open
-# Anyway). Usually run through `make release`.
+# Anyway). These variables are read from ~/.config/rowkery/release.env
+# (ROWKERY_RELEASE_ENV to use another file) when it exists, so they needn't be
+# in the shell. Usually run through `make release`.
 set -euo pipefail
+
+say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+release_env="${ROWKERY_RELEASE_ENV:-$HOME/.config/rowkery/release.env}"
+if [[ -f "$release_env" ]]; then
+  # set -a exports every line, so a line without `export` still reaches tauri build.
+  set -a
+  # shellcheck source=/dev/null
+  source "$release_env"
+  set +a
+  say "loaded $release_env"
+elif [[ -n "${ROWKERY_RELEASE_ENV:-}" ]]; then
+  die "no file at ROWKERY_RELEASE_ENV ($release_env)"
+fi
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 app="$root/apps/rowkery-tauri"
 conf="$app/src-tauri/tauri.conf.json"
 repo="${ROWKERY_RELEASES_REPO:-rowkery/rowkery}"
 key="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.tauri/rowkery-updater.key}"
-
-say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 publish=false
 case "${1:-}" in
@@ -68,7 +82,7 @@ notarise=false
 signed=true
 if [[ -z "$identity" ]] || ! $notarise; then
   [[ "${ALLOW_UNSIGNED:-}" == 1 ]] \
-    || die "no Apple signing identity or notarisation credentials (see the top of this script), so Gatekeeper would block the build (ALLOW_UNSIGNED=1 to build it anyway)"
+    || die "no Apple signing identity or notarisation credentials (set them in $release_env; see the top of this script), so Gatekeeper would block the build (ALLOW_UNSIGNED=1 to build it anyway)"
   signed=false
 fi
 if $signed; then
