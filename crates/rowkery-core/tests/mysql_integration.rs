@@ -1462,4 +1462,22 @@ async fn sql_files_stop_where_quotes_would_read_otherwise() {
         "{failed:?}"
     );
     assert_eq!(report.done, 2);
+    // A character set where `\` can end a character reads quotes otherwise.
+    session_execute(&mut s, "SET SESSION sql_mode = DEFAULT")
+        .await
+        .unwrap();
+    let (_, report) = run_file(
+        &mut s,
+        "SET @c = 'gbk';\nSET character_set_client = @c;\nSELECT 1;\n",
+        false,
+    )
+    .await;
+    let failed = report.failed.unwrap();
+    assert_eq!(failed.line, Some(2));
+    assert!(
+        failed.message.contains("character set is gbk"),
+        "{failed:?}"
+    );
+    let (_, report) = run_file(&mut s, "SELECT 1;\n", false).await;
+    assert!(report.failed.unwrap().message.contains("gbk"));
 }

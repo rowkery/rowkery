@@ -658,22 +658,36 @@ pub async fn session_run_file_statement(
     Ok(last)
 }
 
-/// The `sql_mode` flag of this session that changes how quotes or
-/// backslashes read (`ANSI_QUOTES`, `NO_BACKSLASH_ESCAPES`, …), if any:
-/// a SQL file is split without them.
+/// What of this session changes how quotes or backslashes read, if
+/// anything: an `sql_mode` flag (`ANSI_QUOTES`, `NO_BACKSLASH_ESCAPES`, …)
+/// or a client character set in which `\` can end a character (`gbk`, …).
+/// A SQL file is split without them. Said as "sql_mode has X" or
+/// "character set is x".
 pub async fn session_lexical_mode(
     session: &mut MysqlSession,
-) -> Result<Option<&'static str>, DriverError> {
-    let rows = text_rows(session, "SELECT @@SESSION.sql_mode").await?;
-    let mode = rows
-        .first()
-        .and_then(|r| r.first().cloned().flatten())
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    Ok(crate::sql_file::MYSQL_LEXICAL_MODES
+) -> Result<Option<String>, DriverError> {
+    let rows = text_rows(
+        session,
+        "SELECT @@SESSION.sql_mode, @@SESSION.character_set_client",
+    )
+    .await?;
+    let cell = |i: usize| {
+        rows.first()
+            .and_then(|r| r.get(i).cloned().flatten())
+            .unwrap_or_default()
+            .to_ascii_uppercase()
+    };
+    let mode = cell(0);
+    if let Some(flag) = crate::sql_file::MYSQL_LEXICAL_MODES
         .iter()
-        .copied()
-        .find(|flag| mode.split(',').any(|m| m.starts_with(flag))))
+        .find(|flag| mode.split(',').any(|m| m.starts_with(*flag)))
+    {
+        return Ok(Some(format!("sql_mode has {flag}")));
+    }
+    let charset = cell(1);
+    Ok(crate::sql_file::MYSQL_LEXICAL_CHARSETS
+        .contains(&charset.as_str())
+        .then(|| format!("character set is {}", charset.to_ascii_lowercase())))
 }
 
 /// Runs `sql`, no rows wanted.

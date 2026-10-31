@@ -167,7 +167,7 @@ impl Pending {
             self.my_routine = ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
                 .iter()
                 .any(|w| is(w));
-        } else if is("BEGIN") {
+        } else if is("BEGIN") && self.parens == 0 {
             self.my_compound = true;
         }
     }
@@ -367,7 +367,7 @@ impl<R: Read> Reader<R> {
                     }
                 }
             }
-            let Some((lexeme, end)) = lex(&self.buf, self.pos, self.eof, self.dialect) else {
+            let Some((lexeme, mut end)) = lex(&self.buf, self.pos, self.eof, self.dialect) else {
                 if !self.eof {
                     self.fill()?;
                     continue;
@@ -383,6 +383,30 @@ impl<R: Read> Reader<R> {
                 return Ok(piece.map(Piece::Statement));
             };
             let at = self.pos;
+            // The mysql client finds its delimiter anywhere outside strings,
+            // names and comments: inside a word (`END$$`) or a `/*! … */`
+            // too. The lexeme ends there; the delimiter is found next.
+            if self.delimiter != b";"
+                && end - at > 1
+                && matches!(
+                    lexeme,
+                    Lexeme::Word
+                        | Lexeme::Number
+                        | Lexeme::Executable { .. }
+                        | Lexeme::Other
+                        | Lexeme::Skip
+                        | Lexeme::Bracket { .. }
+                )
+            {
+                if !self.eof && self.buf.len() < end + self.delimiter.len() {
+                    self.fill()?;
+                    continue;
+                }
+                if let Some(k) = (at + 1..end).find(|&k| self.buf[k..].starts_with(&self.delimiter))
+                {
+                    end = k;
+                }
+            }
             match lexeme {
                 Lexeme::Space | Lexeme::LineComment | Lexeme::BlockComment { .. } => {}
                 Lexeme::Semicolon if self.stmt.begin_depth == 0 && self.delimiter == b";" => {
@@ -810,7 +834,7 @@ pub fn scan(
                 check.verb = "INSERT".into();
             }
         }
-        if engine == EngineKind::Mysql {
+        if engine == EngineKind::Mysql && check.verb.starts_with("SET") {
             if let Some(why) = mysql_mode_change(&statement.sql) {
                 refuse(
                     &mut scan,
@@ -867,11 +891,7 @@ pub fn scan(
             }
             InTransaction::Never if engine == EngineKind::Mysql => {
                 if scan.per_statement.is_none() {
-                    let reason = if check.verb == crate::safety::UNCLEAR_VERB {
-                        "Rowkery can't read this statement for sure, and MySQL commits by itself before most statements that don't just read or write rows".to_string()
-                    } else {
-                        format!("{} commits by itself on MySQL", check.verb)
-                    };
+                    let reason = mysql_never_reason(&check.verb, &statement.sql);
                     scan.per_statement = Some(PerStatement {
                         line: statement.line,
                         reason,
@@ -939,24 +959,81 @@ pub const MYSQL_LEXICAL_MODES: [&str; 7] = [
     "MAXDB",
 ];
 
-/// Why a MySQL file's statement `sql` can't run: it sets an `sql_mode`
-/// that reads the rest of the file differently from how Rowkery split it.
-/// A mode set from a variable is checked on the server as the run goes.
+/// Character sets in which a backslash byte can end a character
+/// (`0x5C` as a trail byte): text in them reads `\` otherwise.
+pub const MYSQL_LEXICAL_CHARSETS: [&str; 5] = ["BIG5", "CP932", "GBK", "SJIS", "GB18030"];
+
+/// Why a MySQL file's `SET` statement `sql` can't run: it sets an
+/// `sql_mode` or client character set that reads the rest of the file
+/// differently from how Rowkery split it. One set from a variable is
+/// checked on the server as the run goes.
 fn mysql_mode_change(sql: &str) -> Option<String> {
     let upper = sql.to_ascii_uppercase();
-    if !upper.contains("SQL_MODE") {
-        return None;
+    let words: Vec<&str> = upper
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.contains(&w);
+    if has("SQL_MODE") {
+        if let Some(flag) = MYSQL_LEXICAL_MODES
+            .iter()
+            .find(|f| words.iter().any(|w| w.starts_with(*f)))
+        {
+            return Some(format!("this sets sql_mode with {flag}, which changes how MySQL reads quotes or backslashes in the rest of the file. Rowkery splits a file the default way, so it can't run this one."));
+        }
+        // MariaDB's `SET STATEMENT sql_mode = … FOR …` holds the statement
+        // it reads under that mode.
+        if words.get(1) == Some(&"STATEMENT") && has("FOR") {
+            return Some("SET STATEMENT sql_mode = … FOR … can change how MySQL reads the statement inside it, so Rowkery can't run this file.".into());
+        }
     }
-    if let Some(flag) = MYSQL_LEXICAL_MODES.iter().find(|f| upper.contains(*f)) {
-        return Some(format!("this sets sql_mode with {flag}, which changes how MySQL reads quotes or backslashes in the rest of the file. Rowkery splits a file the default way, so it can't run this one."));
-    }
-    // MariaDB's `SET STATEMENT sql_mode = … FOR …` holds the statement it
-    // reads under that mode.
-    let words: Vec<&str> = upper.split_whitespace().take(2).collect();
-    if words.ends_with(&["STATEMENT"]) && words.len() == 2 && upper.contains(" FOR ") {
-        return Some("SET STATEMENT sql_mode = … FOR … can change how MySQL reads the statement inside it, so Rowkery can't run this file.".into());
+    if has("NAMES") || has("CHARACTER") || has("CHARSET") || has("CHARACTER_SET_CLIENT") {
+        if let Some(set) = MYSQL_LEXICAL_CHARSETS.iter().find(|c| has(c)) {
+            let set = set.to_ascii_lowercase();
+            return Some(format!("this sets the character set to {set}, in which a backslash can end a character, so MySQL reads quotes in the rest of the file differently. Save the file as UTF-8 (utf8mb4) to run it."));
+        }
     }
     None
+}
+
+/// Why a MySQL statement keeps the file from running as one transaction:
+/// the server's own words where they are sure, "may" where it depends.
+fn mysql_never_reason(verb: &str, sql: &str) -> String {
+    if verb == crate::safety::UNCLEAR_VERB {
+        return "Rowkery can't read this statement for sure, so it may be one MySQL commits by itself".into();
+    }
+    let upper = sql.to_ascii_uppercase();
+    match verb {
+        "SET" if upper.contains("AUTOCOMMIT") => "SET autocommit changes when MySQL commits".into(),
+        "SET" if upper.contains("TRANSACTION") => {
+            "SET … TRANSACTION changes the transaction itself".into()
+        }
+        "SET" if upper.contains("PASSWORD") || upper.contains("ROLE") => {
+            "SET PASSWORD and SET DEFAULT ROLE commit by themselves on MySQL".into()
+        }
+        _ if [
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "RENAME",
+            "TRUNCATE",
+            "LOCK",
+            "GRANT",
+            "REVOKE",
+            "ANALYZE",
+            "OPTIMIZE",
+            "REPAIR",
+            "FLUSH",
+            "RESET",
+            "INSTALL",
+            "UNINSTALL",
+        ]
+        .contains(&verb.split(' ').next().unwrap_or("")) =>
+        {
+            format!("{verb} commits by itself on MySQL")
+        }
+        _ => format!("{verb} may commit by itself on MySQL"),
+    }
 }
 
 /// Why a file that starts with `head` isn't a SQL file, if it isn't.
@@ -1683,8 +1760,8 @@ pub async fn run_mysql(
             return tally.finish(0);
         }
     };
-    let lexical = |flag: &str| {
-        format!("This connection's sql_mode has {flag}, which changes how MySQL reads quotes or backslashes. Rowkery reads a file the default way, so it can't run it here.")
+    let lexical = |what: String| {
+        format!("This connection's {what}, which changes how MySQL reads quotes or backslashes. Rowkery reads a file the default way, so it can't run it here.")
     };
     match session_lexical_mode(session).await {
         Ok(None) => {}
@@ -1725,12 +1802,16 @@ pub async fn run_mysql(
         };
         bytes = offset;
         tally.starting(&statement, offset);
+        let mut ran = false;
         match session_run_file_statement(session, &statement.sql).await {
-            Ok(rows) => tally.ran(if counts_rows(&statement.verb) {
-                rows
-            } else {
-                0
-            }),
+            Ok(rows) => {
+                ran = true;
+                tally.ran(if counts_rows(&statement.verb) {
+                    rows
+                } else {
+                    0
+                })
+            }
             Err(e) if is_cancel(&e) => {
                 tally.report.cancelled = true;
                 ok = false;
@@ -1749,8 +1830,12 @@ pub async fn run_mysql(
         let sets_mode = !matches!(
             statement.verb.as_str(),
             "INSERT" | "REPLACE" | "UPDATE" | "DELETE"
-        ) && (statement.verb == "EXECUTE"
-            || statement.sql.to_ascii_uppercase().contains("SQL_MODE"));
+        ) && (statement.verb == "EXECUTE" || {
+            let upper = statement.sql.to_ascii_uppercase();
+            ["SQL_MODE", "NAMES", "CHARACTER", "CHARSET"]
+                .iter()
+                .any(|w| upper.contains(w))
+        });
         if sets_mode {
             let flag = match session_lexical_mode(session).await {
                 Ok(flag) => flag.map(lexical),
@@ -1777,7 +1862,7 @@ pub async fn run_mysql(
                 return tally.finish(offset);
             }
             Some(false) => tally.open_since = None,
-            Some(true) if !options.whole_file => {
+            Some(true) if ran && !options.whole_file => {
                 let since = tally.progress.done.saturating_sub(1);
                 tally.open_since.get_or_insert(since);
             }
@@ -2086,6 +2171,29 @@ mod tests {
         // `-- ` needs its space, `#` is a comment.
         let got = mysql_statements("SELECT 1--1;\n# a; comment\nSELECT 2;");
         assert_eq!(got.len(), 2);
+        // The client finds a delimiter inside a word or a `/*! … */`, not
+        // in a plain comment or a string.
+        let texts = |sql: &str| -> Vec<String> {
+            mysql_statements(sql)
+                .into_iter()
+                .filter_map(|p| match p {
+                    Piece::Statement(s) => Some(s.sql),
+                    Piece::Meta { .. } => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            texts("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2;\n"),
+            ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 2"]
+        );
+        assert_eq!(
+            texts("DELIMITER ab\nSELECT cab SELECT 1"),
+            ["SELECT c", "SELECT 1"]
+        );
+        assert_eq!(
+            texts("DELIMITER $$\nSELECT /*!50000 1 $$\nSELECT /* 3 $$ */ 4$$\nSELECT 'x$$'$$"),
+            ["SELECT /*!50000 1", "SELECT /* 3 $$ */ 4", "SELECT 'x$$'"]
+        );
     }
 
     #[test]
@@ -2119,7 +2227,11 @@ mod tests {
         );
         assert_eq!((rows.per_statement, rows.skip), (None, vec![1, 4]));
         for (sql, reason) in [
-            ("INSERT INTO t VALUES (1);\nCALL p();\n", "CALL"),
+            ("INSERT INTO t VALUES (1);\nCALL p();\n", "CALL may commit"),
+            ("INSERT INTO t VALUES (1);\nSET TRANSACTION ISOLATION LEVEL SERIALIZABLE;\n", "SET … TRANSACTION changes"),
+            ("INSERT INTO t VALUES (1);\nSET STATEMENT max_statement_time = 10 FOR CREATE TABLE x (a int);\n", "SET STATEMENT may commit"),
+            ("INSERT INTO t VALUES (1);\nSET PASSWORD = 'x';\n", "SET PASSWORD"),
+            ("INSERT INTO t VALUES (1);\n/*!00000 SELECT 1; DELETE FROM t */;\n", "Rowkery can't read"),
             ("INSERT INTO t VALUES (1);\nSET autocommit = 1;\n", "SET"),
             ("INSERT INTO t VALUES (1);\nTRUNCATE t;\n", "TRUNCATE"),
         ] {
@@ -2151,6 +2263,20 @@ mod tests {
             "CREATE FUNCTION f() RETURNS int DETERMINISTIC RETURN 1;\n",
         ] {
             assert_eq!(scan_text(sql, EngineKind::Mysql).refused, None, "{sql}");
+        }
+        assert_eq!(
+            scan_text("INSERT INTO t VALUES ('sql_mode ANSI');\nCREATE FUNCTION f() RETURNS int RETURN (SELECT begin FROM t);\n", EngineKind::Mysql).refused,
+            None
+        );
+        for sql in [
+            "SET NAMES gbk;\n",
+            "/*!40101 SET character_set_client = sjis */;\n",
+            "SET CHARACTER SET big5;\n",
+        ] {
+            assert!(
+                refused(sql).message.contains("Save the file as UTF-8"),
+                "{sql}"
+            );
         }
         let client = refused("SELECT 1;\n\\G\n");
         assert!(

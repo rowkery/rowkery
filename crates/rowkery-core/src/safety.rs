@@ -519,10 +519,16 @@ pub fn check_file_statement(
 /// procedure, and a `SET` of `autocommit` or the next transaction's
 /// characteristics changes the transaction itself.
 fn mysql_role(toks: &[Tok], words: &[&str]) -> InTransaction {
+    if toks.contains(&Tok::Unclear) {
+        return InTransaction::Never;
+    }
     match words {
         ["BEGIN"] | ["BEGIN", "WORK"] | ["START", "TRANSACTION", ..] => InTransaction::Begins,
         ["COMMIT"] | ["COMMIT", "WORK"] => InTransaction::Commits,
         ["COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "XA", ..] => InTransaction::Controls,
+        // `SET PASSWORD`, `SET DEFAULT ROLE` commit; MariaDB's `SET
+        // STATEMENT … FOR` holds a statement that may.
+        ["SET", "STATEMENT" | "PASSWORD" | "DEFAULT", ..] => InTransaction::Never,
         ["SET", ..]
             if top_level(toks)
                 .filter_map(Tok::word)
@@ -531,7 +537,8 @@ fn mysql_role(toks: &[Tok], words: &[&str]) -> InTransaction {
             InTransaction::Never
         }
         ["INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "SELECT" | "WITH" | "VALUES" | "TABLE"
-        | "SET" | "DO" | "USE" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "HANDLER", ..]
+        | "SET" | "DO" | "USE" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "HANDLER"
+        | "PREPARE" | "DEALLOCATE", ..]
         | ["LOAD", "DATA" | "XML", ..]
         | ["CREATE" | "DROP", "TEMPORARY", "TABLE", ..] => InTransaction::Fine,
         _ => InTransaction::Never,
