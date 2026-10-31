@@ -521,9 +521,8 @@ async fn postgres_through_the_connector(_: &Google) {}
 #[cfg(feature = "postgres-integration")]
 async fn postgres_through_the_connector(google: &Google) {
     use rowkery_core::connections::{PostgresConnection, PostgresSslMode};
-    use rowkery_core::db::postgres::{
-        cancel_with_token, open_session_via, session_query_stream, Route,
-    };
+    use rowkery_core::db::postgres::{cancel_with_token, open_session_via, session_query_stream};
+    use rowkery_core::route::Route;
     use rowkery_core::ConnectionSecrets;
 
     let pg = PostgresConnection {

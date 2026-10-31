@@ -32,9 +32,10 @@ use std::time::{Duration, Instant, SystemTime};
 use rowkery_core::connections::PostgresConnection;
 use rowkery_core::db::postgres::{
     cancel_with_token, open_session_via, session_declare_cursor, session_execute,
-    session_query_stream_with, CancelVia, PostgresSession, Route, StreamOptions,
+    session_query_stream_with, CancelVia, PostgresSession, StreamOptions,
 };
 use rowkery_core::db::{DriverError, RowBatch};
+use rowkery_core::route::Route;
 use tokio_postgres::CancelToken;
 
 /// Rows a prefetch reads: the first `FETCH` of the cursor.
