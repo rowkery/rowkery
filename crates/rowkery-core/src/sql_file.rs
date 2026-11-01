@@ -959,9 +959,27 @@ pub const MYSQL_LEXICAL_MODES: [&str; 7] = [
     "MAXDB",
 ];
 
-/// Character sets in which a backslash byte can end a character
-/// (`0x5C` as a trail byte): text in them reads `\` otherwise.
-pub const MYSQL_LEXICAL_CHARSETS: [&str; 5] = ["BIG5", "CP932", "GBK", "SJIS", "GB18030"];
+/// MySQL's client character sets other than UTF-8. Rowkery's text is
+/// UTF-8, and the server reads it otherwise under any of these: in gbk,
+/// big5, sjis, cp932 and gb18030 a byte from 0x81 and the `\` after it are
+/// one character, and in macroman or hp8 a UTF-8 byte after `--` starts a
+/// comment.
+pub const MYSQL_NON_UTF8_CHARSETS: [&str; 35] = [
+    "ARMSCII8", "ASCII", "BIG5", "BINARY", "CP1250", "CP1251", "CP1256", "CP1257", "CP850",
+    "CP852", "CP866", "CP932", "DEC8", "EUCJPMS", "EUCKR", "GB18030", "GB2312", "GBK", "GEOSTD8",
+    "GREEK", "HEBREW", "HP8", "KEYBCS2", "KOI8R", "KOI8U", "LATIN1", "LATIN2", "LATIN5", "LATIN7",
+    "MACCE", "MACROMAN", "SJIS", "SWE7", "TIS620", "UJIS",
+];
+
+/// Whether the server reads Rowkery's UTF-8 text otherwise under the client
+/// character set `name`: anything but utf8mb4 and utf8mb3 (`utf8`), names
+/// this list doesn't know included.
+pub fn mysql_non_utf8(name: &str) -> bool {
+    !matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "utf8mb4" | "utf8mb3" | "utf8"
+    )
+}
 
 /// Why a MySQL file's `SET` statement `sql` can't run: it sets an
 /// `sql_mode` or client character set that reads the rest of the file
@@ -988,9 +1006,9 @@ fn mysql_mode_change(sql: &str) -> Option<String> {
         }
     }
     if has("NAMES") || has("CHARACTER") || has("CHARSET") || has("CHARACTER_SET_CLIENT") {
-        if let Some(set) = MYSQL_LEXICAL_CHARSETS.iter().find(|c| has(c)) {
+        if let Some(set) = MYSQL_NON_UTF8_CHARSETS.iter().find(|c| has(c)) {
             let set = set.to_ascii_lowercase();
-            return Some(format!("this sets the character set to {set}, in which a backslash can end a character, so MySQL reads quotes in the rest of the file differently. Save the file as UTF-8 (utf8mb4) to run it."));
+            return Some(format!("this sets the character set to {set}, in which MySQL reads the rest of the file differently from how Rowkery split it. Save the file as UTF-8 (utf8mb4) to run it."));
         }
     }
     None
@@ -1761,7 +1779,7 @@ pub async fn run_mysql(
         }
     };
     let lexical = |what: String| {
-        format!("This connection's {what}, which changes how MySQL reads quotes or backslashes. Rowkery reads a file the default way, so it can't run it here.")
+        format!("This connection's {what}, which changes how MySQL reads quotes, backslashes or comments. Rowkery reads a file the default way, so it can't run it here.")
     };
     match session_lexical_mode(session).await {
         Ok(None) => {}
@@ -1824,18 +1842,14 @@ pub async fn run_mysql(
                 }
             }
         }
-        // A `SET` of `sql_mode` (or a prepared one) may read the rest of
-        // the file otherwise: the server says. Rows can't change it, and
-        // a routine runs under its own mode.
+        // A `SET` of `sql_mode` or the character set may read the rest of
+        // the file otherwise, and so may one built at run time (EXECUTE,
+        // a MariaDB block): the server says, after anything but rows. A
+        // routine runs under its own mode.
         let sets_mode = !matches!(
             statement.verb.as_str(),
             "INSERT" | "REPLACE" | "UPDATE" | "DELETE"
-        ) && (statement.verb == "EXECUTE" || {
-            let upper = statement.sql.to_ascii_uppercase();
-            ["SQL_MODE", "NAMES", "CHARACTER", "CHARSET"]
-                .iter()
-                .any(|w| upper.contains(w))
-        });
+        );
         if sets_mode {
             let flag = match session_lexical_mode(session).await {
                 Ok(flag) => flag.map(lexical),
@@ -2272,6 +2286,8 @@ mod tests {
             "SET NAMES gbk;\n",
             "/*!40101 SET character_set_client = sjis */;\n",
             "SET CHARACTER SET big5;\n",
+            "/*!40101 SET NAMES latin1 */;\n",
+            "SET NAMES macroman;\n",
         ] {
             assert!(
                 refused(sql).message.contains("Save the file as UTF-8"),

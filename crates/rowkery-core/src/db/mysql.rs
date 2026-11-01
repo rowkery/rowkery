@@ -323,7 +323,7 @@ pub async fn open_session_via(
     if config.safe_mode != SafeMode::Off
         && charset
             .as_deref()
-            .is_some_and(crate::safety::mysql_wide_charset)
+            .is_some_and(crate::sql_file::mysql_non_utf8)
     {
         tokio::time::timeout_at(deadline, conn.query_drop("SET NAMES utf8mb4"))
             .await
@@ -589,9 +589,9 @@ where
 }
 
 /// With safe mode on, after anything that may have changed the session:
-/// puts a wide client character set (gbk, …; see `mysql_wide_charset`)
-/// back to utf8mb4, and says so. Under one, the server would read quotes
-/// in the next text where safe mode doesn't.
+/// puts a client character set other than UTF-8 (gbk, macroman, …; see
+/// `mysql_non_utf8`) back to utf8mb4, and says so. Under one, the server
+/// would read quotes or comments in the next text where safe mode doesn't.
 pub async fn settle_charset(session: &mut MysqlSession) -> Result<(), DriverError> {
     if !session.charset_due {
         return Ok(());
@@ -601,11 +601,11 @@ pub async fn settle_charset(session: &mut MysqlSession) -> Result<(), DriverErro
         .first()
         .and_then(|r| r.first().cloned().flatten())
         .unwrap_or_default();
-    if crate::safety::mysql_wide_charset(&charset) {
+    if crate::sql_file::mysql_non_utf8(&charset) {
         session_execute(session, "SET NAMES utf8mb4").await?;
         session.charset_due = false;
         return Err(DriverError::Message(format!(
-            "The session's character set became {charset}, in which MySQL reads quotes and backslashes differently from safe mode, so Rowkery set it back to utf8mb4 and ran nothing after that."
+            "The session's character set became {charset}, in which MySQL reads text differently from safe mode, so Rowkery set it back to utf8mb4 and ran nothing after that."
         )));
     }
     session.charset_due = false;
@@ -729,7 +729,7 @@ pub async fn session_run_file_statement(
 
 /// What of this session changes how quotes or backslashes read, if
 /// anything: an `sql_mode` flag (`ANSI_QUOTES`, `NO_BACKSLASH_ESCAPES`, …)
-/// or a client character set in which `\` can end a character (`gbk`, …).
+/// or a client character set other than UTF-8 (`gbk`, `latin1`, …).
 /// A SQL file is split without them. Said as "sql_mode has X" or
 /// "character set is x".
 pub async fn session_lexical_mode(
@@ -754,8 +754,7 @@ pub async fn session_lexical_mode(
         return Ok(Some(format!("sql_mode has {flag}")));
     }
     let charset = cell(1);
-    Ok(crate::sql_file::MYSQL_LEXICAL_CHARSETS
-        .contains(&charset.as_str())
+    Ok(crate::sql_file::mysql_non_utf8(&charset)
         .then(|| format!("character set is {}", charset.to_ascii_lowercase())))
 }
 

@@ -707,6 +707,16 @@ fn mysql_wide_charsets_never_hide_a_write() {
     let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_gbk");
     assert_eq!(rows, [[Value::Int(0)]], "the server ran the hidden DELETE");
     rows_of(&bridge, "w", 2, "INSERT INTO bw_gbk VALUES (1)");
+    rows_of(&bridge, "w", 1, "SET NAMES macroman");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "SELECT 1 --好 '\n; DELETE FROM bw_gbk; -- '",
+    );
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_gbk");
+    assert_eq!(rows, [[Value::Int(0)]], "macroman hid the DELETE too");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_gbk VALUES (1)");
     bridge.close_window("w");
 
     for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
@@ -736,6 +746,21 @@ fn mysql_wide_charsets_never_hide_a_write() {
             let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
             assert_eq!(rows, [[Value::Int(1)]], "{mode:?} {sql}");
         }
+        // Not only the wide sets: under macroman a UTF-8 byte after `--`
+        // starts a comment, which hid the DELETE on the next line.
+        let sql = "SET NAMES macroman; SELECT 1 --好 '\n; DELETE FROM bw_gbk; -- '";
+        let queue = bridge
+            .run_window_query("c", 1, sql.into(), None, true)
+            .expect("run");
+        let error = ended(&queue);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("set it back to utf8mb4") || e == "held: Refuse"),
+            "{mode:?} {sql}: {error:?}"
+        );
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?} {sql}");
         // A switch in its own run is put back when the run ends.
         if mode == SafeMode::Confirm {
             let queue = bridge

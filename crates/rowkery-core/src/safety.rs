@@ -146,18 +146,11 @@ pub fn hold_for(
     })
 }
 
-/// A MySQL client character set in which a byte from 0x81 and the `\` or
-/// `` ` `` after it are one character (gbk, big5, sjis, cp932, gb18030), so
-/// the server reads quotes in UTF-8 text where safe mode doesn't.
-pub fn mysql_wide_charset(name: &str) -> bool {
-    crate::sql_file::MYSQL_LEXICAL_CHARSETS.contains(&name.trim().to_ascii_uppercase().as_str())
-}
-
 /// How a MySQL tab with safe mode on sends `sql`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MysqlSend {
     /// As one text: nothing in it can read differently if a statement in
-    /// it switches the session to a wide character set.
+    /// it switches the session away from UTF-8.
     Whole,
     /// One statement at a time, the character set checked after each that
     /// may change the session.
@@ -167,18 +160,15 @@ pub enum MysqlSend {
     Refuse,
 }
 
-pub const MYSQL_SEND_REFUSED: &str = "With safe mode on, run this block on its own: it has a character followed by \\ or ` that MySQL reads differently if a statement before it switches to a character set such as gbk, and a BEGIN … END block can't be sent one statement at a time.";
+pub const MYSQL_SEND_REFUSED: &str = "With safe mode on, run this block on its own: it has a non-ASCII character, which MySQL reads differently if a statement before it switches to a character set such as gbk, and a BEGIN … END block can't be sent one statement at a time.";
 
-/// See [`MysqlSend`]. Only UTF-8 can put a byte from 0x80 right before a
-/// `\` or `` ` `` (`日\`), and only then can a statement switching to a wide
-/// set (see [`mysql_wide_charset`]) change how the rest of the text reads:
-/// `"`, `'`, `;`, `#`, `-`, `/` and `*` are never a character's second byte.
+/// See [`MysqlSend`]. Only a byte from 0x80 reads differently once a
+/// statement switches the session away from UTF-8 (see
+/// [`crate::sql_file::mysql_non_utf8`]): `日\` ends a string early under
+/// gbk, and `--` before `好` starts a comment under macroman. ASCII reads
+/// the same under every client character set.
 pub fn mysql_send(sql: &str) -> MysqlSend {
-    let wide_bytes = sql
-        .as_bytes()
-        .windows(2)
-        .any(|w| w[0] >= 0x80 && matches!(w[1], b'\\' | b'`'));
-    if !wide_bytes {
+    if sql.is_ascii() {
         return MysqlSend::Whole;
     }
     let texts = statement_texts(sql, Dialect::Mysql);
@@ -2888,9 +2878,14 @@ mod tests {
     /// character and a half: only text holding those, with a statement
     /// that may switch the set before it, is sent one statement at a time.
     #[test]
-    fn mysql_wide_bytes_decide_how_text_is_sent() {
+    fn mysql_non_ascii_decides_how_text_is_sent() {
         use MysqlSend::*;
-        assert_eq!(mysql_send("SET NAMES gbk; SELECT '日' FROM t"), Whole);
+        assert_eq!(mysql_send("SET NAMES gbk; SELECT 'a\\' FROM t"), Whole);
+        assert_eq!(mysql_send("SET NAMES gbk; SELECT '日' FROM t"), OneByOne);
+        assert_eq!(
+            mysql_send("SET NAMES macroman; SELECT 1 --好 '\n; DELETE FROM t; -- '"),
+            OneByOne
+        );
         assert_eq!(mysql_send("SELECT '日\\\\'; SELECT `表`"), Whole);
         assert_eq!(mysql_send("INSERT INTO `表` VALUES (1)"), Whole);
         assert_eq!(
@@ -2909,8 +2904,11 @@ mod tests {
             mysql_send("CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT '日\\\\'"),
             Refuse
         );
-        assert!(mysql_wide_charset("gbk") && mysql_wide_charset("SJIS"));
-        assert!(!mysql_wide_charset("utf8mb4") && !mysql_wide_charset("latin2"));
+        use crate::sql_file::mysql_non_utf8;
+        assert!(mysql_non_utf8("gbk") && mysql_non_utf8("MACROMAN") && mysql_non_utf8("latin1"));
+        assert!(
+            !mysql_non_utf8("utf8mb4") && !mysql_non_utf8("utf8mb3") && !mysql_non_utf8("UTF8")
+        );
     }
 
     /// MySQL's own text: `#` and `-- ` comments, backslash escapes in both
@@ -2925,6 +2923,13 @@ mod tests {
         assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
         assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
         assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // The server reads a vertical tab as space.
+        assert_eq!(kinds("\x0bDELETE FROM t"), [Write]);
+        assert_eq!(kinds("SELECT 1;\x0bDELETE\x0bFROM t"), [Read, Write]);
+        assert_eq!(
+            kinds("SELECT 1 --\x0b'\n; DELETE FROM t; -- '"),
+            [Read, Write]
+        );
         // DEL after `--` starts a comment too, so the quote after it is
         // commented out and the DELETE on the next line runs.
         assert_eq!(
