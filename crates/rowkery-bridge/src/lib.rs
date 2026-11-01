@@ -3691,6 +3691,16 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 WindowTarget::Postgres { config, .. } => config.safe_mode,
                 WindowTarget::Mysql { config, .. } => config.safe_mode,
             };
+            // Under gbk and the like MySQL reads quotes where safe mode
+            // doesn't, so with safe mode on a tab keeps a plain character set.
+            if engine == EngineKind::Mysql && safe_mode != SafeMode::Off {
+                if let Some(statement) = rowkery_core::safety::mysql_charset_change(&user_sql) {
+                    let _ = respond_to.send(Err(format!(
+                        "Safe mode keeps MySQL tabs in a character set it reads as the server does (utf8mb4, latin1 or ascii), so it doesn't run “{statement}”. In gbk, big5, sjis, cp932 or gb18030 a quote can mean something else to the server."
+                    )));
+                    return;
+                }
+            }
             // Safe mode: nothing reaches the database until the user confirms
             // (or ever, on a read-only connection).
             if let Some(hold) = hold_for(safe_mode, &user_sql, confirmed, engine.into()) {

@@ -146,6 +146,69 @@ pub fn hold_for(
     })
 }
 
+/// Character sets in which MySQL reads every quote and backslash where a
+/// UTF-8 reading puts them (no multi-byte character ends in `\` or `` ` ``).
+const MYSQL_PLAIN_CHARSETS: &[&str] = &["UTF8MB4", "UTF8MB3", "UTF8", "LATIN1", "ASCII", "BINARY"];
+
+/// The first MySQL statement in `sql` that sets the client character set
+/// to anything but a plain one (see [`MYSQL_PLAIN_CHARSETS`]): under gbk,
+/// big5, sjis, cp932 or gb18030 the server takes a byte from 0x81 and the
+/// `\` or `` ` `` after it as one character, so it would read the next
+/// statements' quotes where safe mode doesn't. Strict: any value it can't
+/// name as plain (`= 28`, `CONCAT('g','bk')`, `DEFAULT`) counts.
+/// A client character set in which MySQL reads quotes as safe mode does.
+pub fn mysql_plain_charset(name: &str) -> bool {
+    let upper = name.trim().to_ascii_uppercase();
+    MYSQL_PLAIN_CHARSETS.contains(&upper.as_str())
+}
+
+pub fn mysql_charset_change(sql: &str) -> Option<String> {
+    const SETS: &[&str] = &["NAMES", "CHARSET", "CHARACTER_SET_CLIENT"];
+    const KEYWORDS: &[&str] = &[
+        "SET",
+        "SESSION",
+        "LOCAL",
+        "NAMES",
+        "CHARSET",
+        "CHARACTER",
+        "CHARACTER_SET_CLIENT",
+        "COLLATE",
+    ];
+    statement_texts(sql, Dialect::Mysql)
+        .into_iter()
+        .find(|text| {
+            // A versioned comment (`/*!40101 SET NAMES … */`) runs its text.
+            let upper = text.trim().to_ascii_uppercase();
+            let body = match upper
+                .strip_prefix("/*!")
+                .or_else(|| upper.strip_prefix("/*M!"))
+            {
+                Some(rest) => rest
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .trim_end_matches("*/"),
+                None => upper.as_str(),
+            };
+            let words: Vec<&str> = body
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+                .collect();
+            let first = words.first().copied();
+            let sets = words.iter().enumerate().any(|(i, w)| {
+                SETS.contains(w) || (*w == "CHARACTER" && words.get(i + 1) == Some(&"SET"))
+            });
+            if first != Some("SET") || !sets {
+                return false;
+            }
+            !words.iter().all(|w| {
+                KEYWORDS.contains(w)
+                    || MYSQL_PLAIN_CHARSETS
+                        .iter()
+                        .any(|c| *w == *c || w.starts_with(&format!("{c}_")))
+            })
+        })
+        .map(|text| text.trim().to_string())
+}
+
 /// Checks every statement in `sql`.
 pub fn check_sql(sql: &str, dialect: Dialect) -> Vec<StatementCheck> {
     tokenize(sql, dialect)
@@ -1097,23 +1160,13 @@ fn bracket_clear(b: &[u8], mut j: usize) -> bool {
 ///
 /// A MySQL string (`'…'` or `"…"`, opening at `b[i]`) always takes `\`
 /// escapes, unless `NO_BACKSLASH_ESCAPES` is set: so one holding `\` before
-/// its own quote is unclear, as is one holding `\` right after a non-ASCII
-/// byte (see below).
+/// its own quote is unclear.
 fn skip_string(b: &[u8], mut i: usize, backslash: bool, dialect: Dialect) -> (usize, bool, bool) {
     let n = b.len();
     let quote = b[i];
     let mut clear = true;
     i += 1;
     while i < n {
-        // Under a client character set such as gbk or sjis, a byte from
-        // 0x81 up and the `\` after it are one character, so the server
-        // doesn't take that `\` as an escape (the session can be switched
-        // with `SET NAMES`). UTF-8 text puts such a byte there too
-        // (`日\\` ends in A5 5C), so this is only unclear, never read
-        // either way.
-        if dialect == Dialect::Mysql && b[i] == b'\\' && i > 0 && b[i - 1] >= 0x80 {
-            clear = false;
-        }
         match b[i] {
             b'\\' if backslash => {
                 if b.get(i + 1) == Some(&quote)
@@ -2837,27 +2890,37 @@ mod tests {
         );
     }
 
-    /// Under `SET NAMES gbk` the server reads `日\\'` (E6 97 A5 5C 5C 27) as
-    /// two characters and an escaped quote, so the string goes on past where
-    /// UTF-8 says it ends, and what UTF-8 reads as the next string runs.
+    /// Under gbk and the like the server reads quotes and backticks where
+    /// safe mode doesn't: any SET that may pick such a character set counts.
     #[test]
-    fn mysql_backslash_after_a_wide_byte_is_unclear() {
+    fn mysql_charset_changes_are_found() {
         for sql in [
-            "SELECT '日\\\\' '; DELETE FROM t; -- '",
-            "SELECT \"日\\\\\"; DELETE FROM t",
+            "SET NAMES gbk",
+            "SET NAMES 'big5'",
+            "SET character_set_client = 28",
+            "SET @@SESSION.character_set_client = CONCAT('g', 'bk')",
+            "SET NAMES DEFAULT",
+            "/*!40101 SET NAMES gbk */",
+            "SELECT 1; SET CHARACTER SET sjis",
+            "SET CHARSET cp932",
+            "SET STATEMENT character_set_client = gbk FOR SELECT 1",
+            "SET NAMES utf8mb4, character_set_client = gb18030",
         ] {
-            let c = check_sql(sql, Dialect::Mysql).remove(0);
-            assert_eq!(c.verb, UNCLEAR_VERB, "{sql}");
-            assert!(
-                hold_for(SafeMode::Confirm, sql, false, Dialect::Mysql).is_some(),
-                "{sql}"
-            );
+            assert!(mysql_charset_change(sql).is_some(), "{sql}");
         }
-        // ASCII before the backslash, or a wide character elsewhere, reads as before.
-        assert_eq!(
-            check_sql("SELECT 'a\\\\', 'é'", Dialect::Mysql)[0].kind,
-            StatementKind::Read
-        );
+        for sql in [
+            "SET NAMES utf8mb4",
+            "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_ai_ci'",
+            "SET CHARACTER SET latin1",
+            "/*!40101 SET NAMES utf8mb4 */",
+            "SELECT names, charset FROM t",
+            "SET @x = 1",
+            "SET sql_mode = ''",
+        ] {
+            assert_eq!(mysql_charset_change(sql), None, "{sql}");
+        }
+        assert!(mysql_plain_charset("utf8mb4") && mysql_plain_charset("LATIN1"));
+        assert!(!mysql_plain_charset("gbk") && !mysql_plain_charset(""));
     }
 
     /// MySQL's own text: `#` and `-- ` comments, backslash escapes in both

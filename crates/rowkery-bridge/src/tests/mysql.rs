@@ -667,10 +667,11 @@ fn mysql_sessions_list_ours_and_stop_through_safe_mode() {
 /// After `SET NAMES gbk` the server reads the UTF-8 bytes of `日\\` (E6 97
 /// A5 5C 5C) as two characters and a `\`, which escapes the quote after
 /// it: the string goes on, and the DELETE that UTF-8 reads inside the next
-/// string really runs (shown with safe mode off). Confirm writes holds the
-/// text instead of reading it as one SELECT.
+/// string really runs (shown with safe mode off). With safe mode on, a tab
+/// never gets there: `SET NAMES gbk` is refused, and a switch it can't see
+/// (a prepared statement) is undone before the next statement runs.
 #[test]
-fn mysql_wide_bytes_before_a_backslash_never_hide_a_write() {
+fn mysql_wide_charsets_never_hide_a_write() {
     let (_guard, _file, _path) = test_guard();
     let bridge = super::super::CoreBridge::spawn();
     let attack = "SELECT '日\\\\' '; DELETE FROM bw_gbk; -- '";
@@ -689,12 +690,54 @@ fn mysql_wide_bytes_before_a_backslash_never_hide_a_write() {
     rows_of(&bridge, "w", 2, "INSERT INTO bw_gbk VALUES (1)");
     bridge.close_window("w");
 
-    save_mysql(&bridge, "my-gbk", SafeMode::Confirm);
-    bridge.open_window("c", "my-gbk", None).expect("open");
-    assert_eq!(rows_of(&bridge, "c", 1, "SET NAMES gbk").1, None);
-    let (_, error, _) = rows_of(&bridge, "c", 1, attack);
-    assert!(error.is_some_and(|e| e.starts_with("held")), "not held");
-    let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
-    assert_eq!(rows, [[Value::Int(1)]]);
+    for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+        save_mysql(&bridge, "my-gbk", mode);
+        bridge.open_window("c", "my-gbk", None).expect("open");
+        let err = bridge
+            .run_window_query("c", 1, "SET NAMES gbk".into(), None, false)
+            .expect_err("refused");
+        assert!(err.starts_with("Safe mode keeps MySQL tabs"), "{err}");
+        // Switched where safe mode can't read it, then the hidden DELETE:
+        // stopped after the switch, and the session is utf8mb4 again.
+        let queue = bridge
+            .run_window_query(
+                "c",
+                1,
+                format!("PREPARE s FROM 'SET NAMES gbk'; EXECUTE s; {attack}"),
+                None,
+                true,
+            )
+            .expect("run");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let error = 'done: loop {
+            let drained: Vec<CoreEvent> = std::mem::take(&mut *queue.lock().unwrap());
+            for event in drained {
+                match event {
+                    CoreEvent::QueryFinished { error, .. } => break 'done error,
+                    CoreEvent::QueryHeld { hold, .. } => {
+                        break 'done Some(format!("held: {:?}", hold.action))
+                    }
+                    _ => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "not done");
+            thread::sleep(Duration::from_millis(5));
+        };
+        // Read-only refuses the EXECUTE outright; Confirm, confirmed, runs
+        // up to the switch.
+        let expected = match mode {
+            SafeMode::ReadOnly => "held: Refuse",
+            _ => "set it back to utf8mb4",
+        };
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains(expected)),
+            "{mode:?}: {error:?}"
+        );
+        let (rows, _, _) = rows_of(&bridge, "c", 1, "SELECT @@SESSION.character_set_client");
+        assert_eq!(rows, [[Value::Text("utf8mb4".into())]]);
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?}");
+        bridge.close_window("c");
+    }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
