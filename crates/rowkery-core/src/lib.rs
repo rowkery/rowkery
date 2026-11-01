@@ -16,6 +16,7 @@ pub mod plan;
 pub mod profile;
 pub mod query_util;
 pub mod reach;
+pub mod route;
 pub mod safety;
 pub mod sample;
 pub mod secrets;

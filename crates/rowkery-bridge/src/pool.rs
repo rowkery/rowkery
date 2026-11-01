@@ -51,10 +51,11 @@ use std::time::{Duration, Instant};
 
 use rowkery_core::connections::PostgresConnection;
 use rowkery_core::db::postgres::{
-    open_session_via, session_has_cursor, session_ping, session_probe_txn, PostgresSession, Route,
+    open_session_via, session_has_cursor, session_ping, session_probe_txn, PostgresSession,
     TxnState,
 };
 use rowkery_core::db::DriverError;
+use rowkery_core::route::Route;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::prefetch::Prefetcher;
