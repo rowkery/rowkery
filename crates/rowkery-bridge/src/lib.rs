@@ -3691,14 +3691,6 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 WindowTarget::Postgres { config, .. } => config.safe_mode,
                 WindowTarget::Mysql { config, .. } => config.safe_mode,
             };
-            // Under gbk and the like MySQL reads quotes where safe mode
-            // doesn't, so with safe mode on a tab keeps a plain character set.
-            if engine == EngineKind::Mysql && safe_mode != SafeMode::Off {
-                if let Some(why) = rowkery_core::safety::mysql_charset_change(&user_sql) {
-                    let _ = respond_to.send(Err(why));
-                    return;
-                }
-            }
             // Safe mode: nothing reaches the database until the user confirms
             // (or ever, on a read-only connection).
             if let Some(hold) = hold_for(safe_mode, &user_sql, confirmed, engine.into()) {

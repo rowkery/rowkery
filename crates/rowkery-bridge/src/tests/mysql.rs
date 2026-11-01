@@ -664,6 +664,25 @@ fn mysql_sessions_list_ours_and_stop_through_safe_mode() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// How a run ended: its error, or `held: …` when safe mode stopped it.
+fn ended(queue: &EventQueue) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let drained: Vec<CoreEvent> = std::mem::take(&mut *queue.lock().unwrap());
+        for event in drained {
+            match event {
+                CoreEvent::QueryFinished { error, .. } => return error,
+                CoreEvent::QueryHeld { hold, .. } => {
+                    return Some(format!("held: {:?}", hold.action))
+                }
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "not done");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// After `SET NAMES gbk` the server reads the UTF-8 bytes of `日\\` (E6 97
 /// A5 5C 5C) as two characters and a `\`, which escapes the quote after
 /// it: the string goes on, and the DELETE that UTF-8 reads inside the next
@@ -693,38 +712,49 @@ fn mysql_wide_charsets_never_hide_a_write() {
     for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
         save_mysql(&bridge, "my-gbk", mode);
         bridge.open_window("c", "my-gbk", None).expect("open");
-        let err = bridge
-            .run_window_query("c", 1, "SET NAMES gbk".into(), None, false)
-            .expect_err("refused");
-        assert!(err.starts_with("Safe mode keeps MySQL tabs"), "{err}");
-        // An EXECUTE (its prepared text may switch) runs on its own.
-        let err = bridge
-            .run_window_query("c", 1, format!("EXECUTE s; {attack}"), None, true)
-            .expect_err("refused");
-        assert!(err.contains("on its own"), "{err}");
-        // A switch safe mode can't read ends the run that made it, and the
-        // session is utf8mb4 again before anything else is sent.
+        // However the switch is spelled, it ends the run, and the session
+        // is utf8mb4 again before the text after it is sent.
+        for switch in [
+            "SET NAMES gbk",
+            "SET NAMES/**/gbk",
+            "SET @a = '\\'', character_set_client = gbk",
+        ] {
+            let sql = format!("{switch}; {attack}");
+            let queue = bridge
+                .run_window_query("c", 1, sql.clone(), None, true)
+                .expect("run");
+            let error = ended(&queue);
+            // (Read-only refuses text it can't read for sure outright.)
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("set it back to utf8mb4") || e == "held: Refuse"),
+                "{mode:?} {sql}: {error:?}"
+            );
+            let (rows, _, _) = rows_of(&bridge, "c", 1, "SELECT @@SESSION.character_set_client");
+            assert_eq!(rows, [[Value::Text("utf8mb4".into())]]);
+            let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
+            assert_eq!(rows, [[Value::Int(1)]], "{mode:?} {sql}");
+        }
+        // A switch in its own run is put back when the run ends.
         if mode == SafeMode::Confirm {
-            for sql in ["PREPARE s FROM 'SET NAMES gbk'", "EXECUTE s"] {
-                let queue = bridge
-                    .run_window_query("c", 1, sql.into(), None, true)
-                    .expect("run");
-                let (_, error, _) = wait_finished(&queue);
-                if sql == "EXECUTE s" {
-                    assert!(
-                        error
-                            .as_deref()
-                            .is_some_and(|e| e.contains("set it back to utf8mb4")),
-                        "{error:?}"
-                    );
-                }
-            }
-            rows_of(&bridge, "c", 1, attack);
+            let queue = bridge
+                .run_window_query(
+                    "c",
+                    1,
+                    "PREPARE s FROM 'SET NAMES gbk'; EXECUTE s".into(),
+                    None,
+                    true,
+                )
+                .expect("run");
+            let error = ended(&queue);
+            assert!(
+                error.as_deref().is_some_and(|e| e.contains("set it back")),
+                "{error:?}"
+            );
         }
         let (rows, _, _) = rows_of(&bridge, "c", 1, "SELECT @@SESSION.character_set_client");
         assert_eq!(rows, [[Value::Text("utf8mb4".into())]]);
-        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
-        assert_eq!(rows, [[Value::Int(1)]], "{mode:?}");
         bridge.close_window("c");
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");

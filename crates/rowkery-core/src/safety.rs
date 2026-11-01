@@ -146,150 +146,61 @@ pub fn hold_for(
     })
 }
 
-/// Character sets in which MySQL reads every quote and backslash where a
-/// UTF-8 reading puts them (no multi-byte character ends in `\` or `` ` ``).
-const MYSQL_PLAIN_CHARSETS: &[&str] = &["UTF8MB4", "UTF8MB3", "UTF8", "LATIN1", "ASCII", "BINARY"];
-
-/// A client character set in which MySQL reads quotes as safe mode does.
-pub fn mysql_plain_charset(name: &str) -> bool {
-    let upper = name.trim().to_ascii_uppercase();
-    MYSQL_PLAIN_CHARSETS.contains(&upper.as_str())
+/// A MySQL client character set in which a byte from 0x81 and the `\` or
+/// `` ` `` after it are one character (gbk, big5, sjis, cp932, gb18030), so
+/// the server reads quotes in UTF-8 text where safe mode doesn't.
+pub fn mysql_wide_charset(name: &str) -> bool {
+    crate::sql_file::MYSQL_LEXICAL_CHARSETS.contains(&name.trim().to_ascii_uppercase().as_str())
 }
 
-/// Why safe mode won't send this MySQL text, if it won't: under gbk, big5,
-/// sjis, cp932 or gb18030 the server takes a byte from 0x81 and the `\`
-/// or `` ` `` after it as one character, so it would read later quotes
-/// where safe mode doesn't. So no statement may set the client character
-/// set to anything but a plain one (see [`MYSQL_PLAIN_CHARSETS`]); a value
-/// it can't name (`= 28`, `CONCAT('g','bk')`, `@saved`, `DEFAULT`) counts.
-/// And `EXECUTE` (whose prepared text may be such a SET) runs on its own.
-pub fn mysql_charset_change(sql: &str) -> Option<String> {
+/// How a MySQL tab with safe mode on sends `sql`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MysqlSend {
+    /// As one text: nothing in it can read differently if a statement in
+    /// it switches the session to a wide character set.
+    Whole,
+    /// One statement at a time, the character set checked after each that
+    /// may change the session.
+    OneByOne,
+    /// Neither: it holds a routine body (`BEGIN … END`), which can't be
+    /// split, and text that would read differently.
+    Refuse,
+}
+
+pub const MYSQL_SEND_REFUSED: &str = "With safe mode on, run this block on its own: it has a character followed by \\ or ` that MySQL reads differently if a statement before it switches to a character set such as gbk, and a BEGIN … END block can't be sent one statement at a time.";
+
+/// See [`MysqlSend`]. Only UTF-8 can put a byte from 0x80 right before a
+/// `\` or `` ` `` (`日\`), and only then can a statement switching to a wide
+/// set (see [`mysql_wide_charset`]) change how the rest of the text reads:
+/// `"`, `'`, `;`, `#`, `-`, `/` and `*` are never a character's second byte.
+pub fn mysql_send(sql: &str) -> MysqlSend {
+    let wide_bytes = sql
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0] >= 0x80 && matches!(w[1], b'\\' | b'`'));
+    if !wide_bytes {
+        return MysqlSend::Whole;
+    }
     let texts = statement_texts(sql, Dialect::Mysql);
-    for text in &texts {
-        let body = mysql_statement_body(text);
-        let upper = body.to_ascii_uppercase();
-        let first = upper
+    if texts.len() < 2 || texts.iter().all(|t| plain_read(t, Dialect::Mysql)) {
+        return MysqlSend::Whole;
+    }
+    // `BEGIN NOT ATOMIC …`, `CREATE PROCEDURE … BEGIN …`, `IF … END IF`:
+    // a BEGIN after a statement's first word (a `begin` name counts too).
+    let block = texts.iter().any(|t| {
+        let upper = t.to_ascii_uppercase();
+        let words: Vec<&str> = upper
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .find(|w| !w.is_empty());
-        if first == Some("EXECUTE") && texts.len() > 1 {
-            return Some(format!(
-                "With safe mode on, run “{}” on its own: what it prepared could change how MySQL reads the statements after it.",
-                text.trim()
-            ));
-        }
-        if first == Some("SET") && !mysql_set_keeps_charset(&body) {
-            return Some(format!(
-                "Safe mode keeps MySQL tabs in a character set it reads as the server does (utf8mb4, latin1 or ascii), so it doesn't run “{}”. In gbk, big5, sjis, cp932 or gb18030 a quote can mean something else to the server.",
-                text.trim()
-            ));
-        }
+            .filter(|w| !w.is_empty())
+            .collect();
+        words.iter().skip(1).any(|w| *w == "BEGIN")
+            || (words.first() == Some(&"BEGIN") && words.get(1) == Some(&"NOT"))
+    });
+    if block {
+        MysqlSend::Refuse
+    } else {
+        MysqlSend::OneByOne
     }
-    None
-}
-
-/// The statement's own text: past leading comments, and inside a
-/// versioned comment (`/*!40101 SET … */`), which the server runs.
-fn mysql_statement_body(text: &str) -> String {
-    let mut rest = text.trim_start();
-    loop {
-        if let Some(r) = rest
-            .strip_prefix("/*!")
-            .or_else(|| rest.strip_prefix("/*M!"))
-        {
-            let r = r.trim_start_matches(|c: char| c.is_ascii_digit());
-            return r.trim_end().trim_end_matches("*/").trim().to_string();
-        }
-        if let Some(r) = rest.strip_prefix("/*") {
-            rest = r
-                .split_once("*/")
-                .map_or("", |(_, after)| after)
-                .trim_start();
-        } else if rest.starts_with("--") || rest.starts_with('#') {
-            rest = rest
-                .split_once('\n')
-                .map_or("", |(_, after)| after)
-                .trim_start();
-        } else {
-            return rest.to_string();
-        }
-    }
-}
-
-/// A `SET` whose every assignment leaves the client character set plain.
-fn mysql_set_keeps_charset(body: &str) -> bool {
-    let plain = |value: &str| {
-        // `utf8mb4`, `'utf8mb4'`, `utf8mb4 COLLATE utf8mb4_bin`.
-        let name = value
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c| c == '\'' || c == '"' || c == '`');
-        let rest: Vec<&str> = value.split_whitespace().skip(1).collect();
-        mysql_plain_charset(name)
-            && (rest.is_empty()
-                || (rest.len() == 2
-                    && rest[0].eq_ignore_ascii_case("COLLATE")
-                    && rest[1]
-                        .trim_matches(|c| c == '\'' || c == '"' || c == '`')
-                        .to_ascii_uppercase()
-                        .starts_with(&format!("{}_", name.to_ascii_uppercase()))))
-    };
-    let assignments = body.trim()[3..].trim_start();
-    // MariaDB's `SET STATEMENT … FOR …` takes no character set (both
-    // servers refuse it), so only plain assignment lists are read.
-    split_top_level(assignments, ',').into_iter().all(|a| {
-        let a = a.trim();
-        let upper = a.to_ascii_uppercase();
-        let words: Vec<&str> = upper.split_whitespace().collect();
-        match words.as_slice() {
-            ["NAMES", ..] => plain(a[5..].trim()),
-            ["CHARSET", ..] => plain(a[7..].trim()),
-            ["CHARACTER", "SET", ..] => plain(a[9..].trim_start()[3..].trim()),
-            _ => match a.split_once('=') {
-                Some((lhs, rhs)) => {
-                    let var = lhs
-                        .trim()
-                        .trim_end_matches(':')
-                        .to_ascii_uppercase()
-                        .replace(['`', ' '], "");
-                    let var = var
-                        .trim_start_matches("@@")
-                        .trim_start_matches("SESSION.")
-                        .trim_start_matches("LOCAL.")
-                        .trim_start_matches("SESSION")
-                        .trim_start_matches("LOCAL");
-                    var != "CHARACTER_SET_CLIENT" || plain(rhs.trim())
-                }
-                // `TRANSACTION …`, `ROLE …`: no value to read, and no
-                // character set unless it names one.
-                None => !words.iter().any(|w| {
-                    matches!(*w, "NAMES" | "CHARSET") || w.contains("CHARACTER_SET_CLIENT")
-                }),
-            },
-        }
-    })
-}
-
-/// `text` split at `sep` outside quotes and parentheses.
-fn split_top_level(text: &str, sep: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let (mut depth, mut quote, mut start) = (0i32, None::<char>, 0usize);
-    for (i, c) in text.char_indices() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '\'' | '"' | '`') => quote = Some(c),
-            (None, '(') => depth += 1,
-            (None, ')') => depth -= 1,
-            (None, c) if c == sep && depth == 0 => {
-                parts.push(&text[start..i]);
-                start = i + c.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(&text[start..]);
-    parts
 }
 
 /// Checks every statement in `sql`.
@@ -2973,47 +2884,33 @@ mod tests {
         );
     }
 
-    /// Under gbk and the like the server reads quotes and backticks where
-    /// safe mode doesn't: any SET that may pick such a character set counts.
+    /// Under gbk and the like the server reads `日\` and `日`` as one
+    /// character and a half: only text holding those, with a statement
+    /// that may switch the set before it, is sent one statement at a time.
     #[test]
-    fn mysql_charset_changes_are_found() {
-        for sql in [
-            "SET NAMES gbk",
-            "SET NAMES 'big5'",
-            "SET character_set_client = 28",
-            "SET @@SESSION.character_set_client = CONCAT('g', 'bk')",
-            "SET SESSION character_set_client = @saved",
-            "SET NAMES DEFAULT",
-            "/*!40101 SET NAMES gbk */",
-            "/* note */ SET NAMES gbk",
-            "-- note\nSET NAMES gbk",
-            "# note\nSET NAMES gbk",
-            "SELECT 1; SET CHARACTER SET sjis",
-            "SET CHARSET cp932",
-            "SET NAMES utf8mb4, character_set_client = gb18030",
-            "SET NAMES utf8mb4 COLLATE gbk_bin",
-            "PREPARE s FROM 'SET NAMES gbk'; EXECUTE s; SELECT 1",
-        ] {
-            assert!(mysql_charset_change(sql).is_some(), "{sql}");
-        }
-        for sql in [
-            "SET NAMES utf8mb4",
-            "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_ai_ci'",
-            "SET CHARACTER SET latin1",
-            "/*!40101 SET NAMES utf8mb4 */",
-            "/*!40101 SET @saved_cs_client = @@character_set_client */",
-            "SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT",
-            "SET NAMES utf8mb4, sql_mode = ''",
-            "SET @charset = 'x', @names = 1",
-            "SELECT names, charset FROM t",
-            "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
-            "SET autocommit = 1",
-            "EXECUTE s",
-        ] {
-            assert_eq!(mysql_charset_change(sql), None, "{sql}");
-        }
-        assert!(mysql_plain_charset("utf8mb4") && mysql_plain_charset("LATIN1"));
-        assert!(!mysql_plain_charset("gbk") && !mysql_plain_charset(""));
+    fn mysql_wide_bytes_decide_how_text_is_sent() {
+        use MysqlSend::*;
+        assert_eq!(mysql_send("SET NAMES gbk; SELECT '日' FROM t"), Whole);
+        assert_eq!(mysql_send("SELECT '日\\\\'; SELECT `表`"), Whole);
+        assert_eq!(mysql_send("INSERT INTO `表` VALUES (1)"), Whole);
+        assert_eq!(
+            mysql_send("SET NAMES/**/gbk; SELECT '日\\\\' '; DELETE FROM t; -- '"),
+            OneByOne
+        );
+        assert_eq!(
+            mysql_send("INSERT INTO `表` VALUES (1); UPDATE `表` SET a = 2"),
+            OneByOne
+        );
+        assert_eq!(
+            mysql_send("BEGIN NOT ATOMIC SET NAMES gbk; END; SELECT `表`"),
+            Refuse
+        );
+        assert_eq!(
+            mysql_send("CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT '日\\\\'"),
+            Refuse
+        );
+        assert!(mysql_wide_charset("gbk") && mysql_wide_charset("SJIS"));
+        assert!(!mysql_wide_charset("utf8mb4") && !mysql_wide_charset("latin2"));
     }
 
     /// MySQL's own text: `#` and `-- ` comments, backslash escapes in both
