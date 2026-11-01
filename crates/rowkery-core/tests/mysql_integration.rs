@@ -1480,4 +1480,19 @@ async fn sql_files_stop_where_quotes_would_read_otherwise() {
     );
     let (_, report) = run_file(&mut s, "SELECT 1;\n", false).await;
     assert!(report.failed.unwrap().message.contains("gbk"));
+    // So does any set but UTF-8 (macroman reads `--好` as a comment), and
+    // one switched to at run time is caught after its statement too.
+    session_execute(&mut s, "SET NAMES utf8mb4").await.unwrap();
+    let (_, report) = run_file(
+        &mut s,
+        "SET @q = CONCAT('SET NAMES mac', 'roman');\nPREPARE p FROM @q;\nEXECUTE p;\nSELECT 2;\n",
+        false,
+    )
+    .await;
+    let failed = report.failed.unwrap();
+    assert_eq!(failed.line, Some(3), "{failed:?}");
+    assert!(
+        failed.message.contains("character set is macroman"),
+        "{failed:?}"
+    );
 }

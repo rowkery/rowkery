@@ -663,3 +663,216 @@ fn mysql_sessions_list_ours_and_stop_through_safe_mode() {
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// How a run ended: its error, or `held: …` when safe mode stopped it.
+fn ended(queue: &EventQueue) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let drained: Vec<CoreEvent> = std::mem::take(&mut *queue.lock().unwrap());
+        for event in drained {
+            match event {
+                CoreEvent::QueryFinished { error, .. } => return error,
+                CoreEvent::QueryHeld { hold, .. } => {
+                    return Some(format!("held: {:?}", hold.action))
+                }
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "not done");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// After `SET NAMES gbk` the server reads the UTF-8 bytes of `日\\` (E6 97
+/// A5 5C 5C) as two characters and a `\`, which escapes the quote after
+/// it: the string goes on, and the DELETE that UTF-8 reads inside the next
+/// string really runs (shown with safe mode off). With safe mode on, a tab
+/// never gets there: `SET NAMES gbk` is refused, and a switch it can't see
+/// (a prepared statement) is undone before the next statement runs.
+#[test]
+fn mysql_wide_charsets_never_hide_a_write() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    let attack = "SELECT '日\\\\' '; DELETE FROM bw_gbk; -- '";
+    save_mysql(&bridge, "my-gbk-off", SafeMode::Off);
+    bridge.open_window("w", "my-gbk-off", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_gbk; CREATE TABLE bw_gbk (id INT); INSERT INTO bw_gbk VALUES (1)",
+    );
+    assert_eq!(rows_of(&bridge, "w", 1, "SET NAMES gbk").1, None);
+    rows_of(&bridge, "w", 1, attack);
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_gbk");
+    assert_eq!(rows, [[Value::Int(0)]], "the server ran the hidden DELETE");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_gbk VALUES (1)");
+    rows_of(&bridge, "w", 1, "SET NAMES macroman");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "SELECT 1 --好 '\n; DELETE FROM bw_gbk; -- '",
+    );
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_gbk");
+    assert_eq!(rows, [[Value::Int(0)]], "macroman hid the DELETE too");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_gbk VALUES (1)");
+    bridge.close_window("w");
+
+    for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+        save_mysql(&bridge, "my-gbk", mode);
+        bridge.open_window("c", "my-gbk", None).expect("open");
+        // However the switch is spelled, it ends the run, and the session
+        // is utf8mb4 again before the text after it is sent.
+        for switch in [
+            "SET NAMES gbk",
+            "SET NAMES/**/gbk",
+            "SET @a = '\\'', character_set_client = gbk",
+        ] {
+            let sql = format!("{switch}; {attack}");
+            let queue = bridge
+                .run_window_query("c", 1, sql.clone(), None, true)
+                .expect("run");
+            let error = ended(&queue);
+            // (Read-only refuses text it can't read for sure outright.)
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("set it back to utf8mb4") || e == "held: Refuse"),
+                "{mode:?} {sql}: {error:?}"
+            );
+            let (rows, _, _) = rows_of(&bridge, "c", 1, "SELECT @@SESSION.character_set_client");
+            assert_eq!(rows, [[Value::Text("utf8mb4".into())]]);
+            let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
+            assert_eq!(rows, [[Value::Int(1)]], "{mode:?} {sql}");
+        }
+        // Not only the wide sets: under macroman a UTF-8 byte after `--`
+        // starts a comment, which hid the DELETE on the next line.
+        let sql = "SET NAMES macroman; SELECT 1 --好 '\n; DELETE FROM bw_gbk; -- '";
+        let queue = bridge
+            .run_window_query("c", 1, sql.into(), None, true)
+            .expect("run");
+        let error = ended(&queue);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("set it back to utf8mb4") || e == "held: Refuse"),
+            "{mode:?} {sql}: {error:?}"
+        );
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?} {sql}");
+        // A switch in its own run is put back when the run ends.
+        if mode == SafeMode::Confirm {
+            let queue = bridge
+                .run_window_query(
+                    "c",
+                    1,
+                    "PREPARE s FROM 'SET NAMES gbk'; EXECUTE s".into(),
+                    None,
+                    true,
+                )
+                .expect("run");
+            let error = ended(&queue);
+            assert!(
+                error.as_deref().is_some_and(|e| e.contains("set it back")),
+                "{error:?}"
+            );
+        }
+        let (rows, _, _) = rows_of(&bridge, "c", 1, "SELECT @@SESSION.character_set_client");
+        assert_eq!(rows, [[Value::Text("utf8mb4".into())]]);
+        bridge.close_window("c");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// MySQL and MariaDB start a `--` comment before DEL (0x7F) as well as
+/// before a space, so the quote after it is commented out and the next line
+/// is SQL. Safe mode reads it the same way and sees the DELETE.
+#[test]
+fn mysql_dash_dash_before_del_is_a_comment() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    let attack =
+        "SELECT 1 --\x7f '\n; SET SESSION TRANSACTION READ WRITE; DELETE FROM bw_del; -- '";
+    save_mysql(&bridge, "my-del-off", SafeMode::Off);
+    bridge.open_window("w", "my-del-off", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_del; CREATE TABLE bw_del (id INT); INSERT INTO bw_del VALUES (1)",
+    );
+    rows_of(&bridge, "w", 1, attack);
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_del");
+    assert_eq!(rows, [[Value::Int(0)]], "the server ran the DELETE");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_del VALUES (1)");
+    bridge.close_window("w");
+
+    for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+        save_mysql(&bridge, "my-del", mode);
+        bridge.open_window("c", "my-del", None).expect("open");
+        let queue = bridge
+            .run_window_query("c", 1, attack.into(), None, false)
+            .expect("run");
+        let outcome = ended(&queue);
+        // Confirm asks first; read-only refuses outright.
+        let want = if mode == SafeMode::Confirm {
+            "held: Confirm"
+        } else {
+            "held: Refuse"
+        };
+        assert_eq!(outcome.as_deref(), Some(want), "{mode:?}");
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_del");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?}");
+        bridge.close_window("c");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// MariaDB's sql_mode MSSQL reads `[…]` as a quoted name, so `[']` holds
+/// a quote safe mode would read as a string's start. A bare `[` is unclear
+/// in safe mode: the DELETE behind it is held, not run.
+#[test]
+fn mysql_brackets_never_hide_a_write() {
+    if env("ROWKERY_MYSQL_FLAVOR", "") != "mariadb" {
+        return; // MySQL 8 has no MSSQL mode.
+    }
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    let attack = "SET SESSION sql_mode = 'MSSQL'; SELECT 1 AS [']; SET SESSION TRANSACTION READ WRITE; DELETE FROM bw_br; SELECT [']";
+    save_mysql(&bridge, "my-br-off", SafeMode::Off);
+    bridge.open_window("w", "my-br-off", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_br; CREATE TABLE bw_br (id INT); INSERT INTO bw_br VALUES (1)",
+    );
+    let queue = bridge
+        .run_window_query("w", 1, attack.into(), None, false)
+        .expect("run");
+    ended(&queue);
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_br");
+    assert_eq!(rows, [[Value::Int(0)]], "the server ran the DELETE");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_br VALUES (1)");
+    bridge.close_window("w");
+
+    for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+        save_mysql(&bridge, "my-br", mode);
+        bridge.open_window("c", "my-br", None).expect("open");
+        let queue = bridge
+            .run_window_query("c", 1, attack.into(), None, false)
+            .expect("run");
+        let outcome = ended(&queue);
+        let want = if mode == SafeMode::Confirm {
+            "held: Confirm"
+        } else {
+            "held: Refuse"
+        };
+        assert_eq!(outcome.as_deref(), Some(want), "{mode:?}");
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_br");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?}");
+        bridge.close_window("c");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

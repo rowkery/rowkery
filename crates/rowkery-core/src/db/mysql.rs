@@ -92,6 +92,9 @@ pub struct MysqlSession {
     /// A save's step didn't answer: the connection was killed at the
     /// server, and the session is dropped, never reused.
     abandoned: bool,
+    /// A run that may have changed the client character set hasn't been
+    /// checked yet (see `settle_charset`).
+    charset_due: bool,
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -306,12 +309,27 @@ pub async fn open_session_via(
             .map_err(|_| late())?;
     }
     let mut conn = opened.map_err(|e| DriverError::Message(humanize_mysql_error(&e, &config)))?;
-    let full: Option<String> =
-        tokio::time::timeout_at(deadline, conn.query_first("SELECT VERSION()"))
+    let first: Option<(String, Option<String>)> = tokio::time::timeout_at(
+        deadline,
+        conn.query_first("SELECT VERSION(), @@SESSION.character_set_client"),
+    )
+    .await
+    .map_err(|_| late())?
+    .map_err(|e| map_error(e, &config))?;
+    let (full, charset) = first.unwrap_or_default();
+    let (flavor, version) = parse_version(&full);
+    // The server's own default (or its init_connect) may pick gbk and the
+    // like: with safe mode on, sessions read text as safe mode does.
+    if config.safe_mode != SafeMode::Off
+        && charset
+            .as_deref()
+            .is_some_and(crate::sql_file::mysql_non_utf8)
+    {
+        tokio::time::timeout_at(deadline, conn.query_drop("SET NAMES utf8mb4"))
             .await
             .map_err(|_| late())?
             .map_err(|e| map_error(e, &config))?;
-    let (flavor, version) = parse_version(full.as_deref().unwrap_or_default());
+    }
     let tag = conn.id().to_string();
     Ok(MysqlSession {
         config,
@@ -322,6 +340,7 @@ pub async fn open_session_via(
         flavor,
         version,
         tag,
+        charset_due: false,
         guard: None,
         stateful: false,
         abandoned: false,
@@ -532,16 +551,65 @@ pub async fn session_query_stream<F>(
 where
     F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
 {
-    let pieces = if session.config.safe_mode == SafeMode::ReadOnly {
+    let guard = session.config.safe_mode != SafeMode::Off;
+    let send = if guard {
+        settle_charset(session).await?;
+        crate::safety::mysql_send(sql)
+    } else {
+        crate::safety::MysqlSend::Whole
+    };
+    if send == crate::safety::MysqlSend::Refuse {
+        return Err(DriverError::Message(
+            crate::safety::MYSQL_SEND_REFUSED.into(),
+        ));
+    }
+    let pieces = if session.config.safe_mode == SafeMode::ReadOnly
+        || send == crate::safety::MysqlSend::OneByOne
+    {
         statement_texts(sql, Dialect::Mysql)
     } else {
         vec![sql]
     };
     let mut last = 0u64;
     for piece in pieces {
+        // Checked once this piece has run (or, cut short, before the next
+        // run sends anything).
+        if guard && !crate::safety::plain_read(piece, Dialect::Mysql) {
+            session.charset_due = true;
+        }
         last = stream_statements(session, piece, &mut on_batch).await?;
+        if send == crate::safety::MysqlSend::OneByOne {
+            settle_charset(session).await?;
+        }
+    }
+    if guard {
+        settle_charset(session).await?;
     }
     Ok(last)
+}
+
+/// With safe mode on, after anything that may have changed the session:
+/// puts a client character set other than UTF-8 (gbk, macroman, …; see
+/// `mysql_non_utf8`) back to utf8mb4, and says so. Under one, the server
+/// would read quotes or comments in the next text where safe mode doesn't.
+pub async fn settle_charset(session: &mut MysqlSession) -> Result<(), DriverError> {
+    if !session.charset_due {
+        return Ok(());
+    }
+    let rows = text_rows(session, "SELECT @@SESSION.character_set_client").await?;
+    let charset = rows
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .unwrap_or_default();
+    if crate::sql_file::mysql_non_utf8(&charset) {
+        session_execute(session, "SET NAMES utf8mb4").await?;
+        session.charset_due = false;
+        return Err(DriverError::Message(format!(
+            "The session's character set became {charset}, in which MySQL reads text differently from safe mode, so Rowkery set it back to utf8mb4 and ran nothing after that."
+        )));
+    }
+    session.charset_due = false;
+    Ok(())
 }
 
 async fn stream_statements<F>(
@@ -661,7 +729,7 @@ pub async fn session_run_file_statement(
 
 /// What of this session changes how quotes or backslashes read, if
 /// anything: an `sql_mode` flag (`ANSI_QUOTES`, `NO_BACKSLASH_ESCAPES`, …)
-/// or a client character set in which `\` can end a character (`gbk`, …).
+/// or a client character set other than UTF-8 (`gbk`, `latin1`, …).
 /// A SQL file is split without them. Said as "sql_mode has X" or
 /// "character set is x".
 pub async fn session_lexical_mode(
@@ -686,8 +754,7 @@ pub async fn session_lexical_mode(
         return Ok(Some(format!("sql_mode has {flag}")));
     }
     let charset = cell(1);
-    Ok(crate::sql_file::MYSQL_LEXICAL_CHARSETS
-        .contains(&charset.as_str())
+    Ok(crate::sql_file::mysql_non_utf8(&charset)
         .then(|| format!("character set is {}", charset.to_ascii_lowercase())))
 }
 
@@ -782,6 +849,10 @@ pub async fn session_apply_changes_within(
     step: Option<Duration>,
     approved: Option<&Reach>,
 ) -> Result<ApplyCounts, ApplyFailure> {
+    // Its names may hold `日`` too: never sent under gbk and the like.
+    if let Err(err) = settle_charset(session).await {
+        return Err(ApplyFailure::other(err.into_message()));
+    }
     let limit = step.unwrap_or(Duration::MAX);
     let late = |what: &str| {
         format!(

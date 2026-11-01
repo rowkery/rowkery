@@ -146,6 +146,53 @@ pub fn hold_for(
     })
 }
 
+/// How a MySQL tab with safe mode on sends `sql`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MysqlSend {
+    /// As one text: nothing in it can read differently if a statement in
+    /// it switches the session away from UTF-8.
+    Whole,
+    /// One statement at a time, the character set checked after each that
+    /// may change the session.
+    OneByOne,
+    /// Neither: it holds a routine body (`BEGIN … END`), which can't be
+    /// split, and text that would read differently.
+    Refuse,
+}
+
+pub const MYSQL_SEND_REFUSED: &str = "With safe mode on, run this block on its own: it has a non-ASCII character, which MySQL reads differently if a statement before it switches to a character set such as gbk, and a BEGIN … END block can't be sent one statement at a time.";
+
+/// See [`MysqlSend`]. Only a byte from 0x80 reads differently once a
+/// statement switches the session away from UTF-8 (see
+/// [`crate::sql_file::mysql_non_utf8`]): `日\` ends a string early under
+/// gbk, and `--` before `好` starts a comment under macroman. ASCII reads
+/// the same under every client character set.
+pub fn mysql_send(sql: &str) -> MysqlSend {
+    if sql.is_ascii() {
+        return MysqlSend::Whole;
+    }
+    let texts = statement_texts(sql, Dialect::Mysql);
+    if texts.len() < 2 || texts.iter().all(|t| plain_read(t, Dialect::Mysql)) {
+        return MysqlSend::Whole;
+    }
+    // `BEGIN NOT ATOMIC …`, `CREATE PROCEDURE … BEGIN …`, `IF … END IF`:
+    // a BEGIN after a statement's first word (a `begin` name counts too).
+    let block = texts.iter().any(|t| {
+        let upper = t.to_ascii_uppercase();
+        let words: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        words.iter().skip(1).any(|w| *w == "BEGIN")
+            || (words.first() == Some(&"BEGIN") && words.get(1) == Some(&"NOT"))
+    });
+    if block {
+        MysqlSend::Refuse
+    } else {
+        MysqlSend::OneByOne
+    }
+}
+
 /// Checks every statement in `sql`.
 pub fn check_sql(sql: &str, dialect: Dialect) -> Vec<StatementCheck> {
     tokenize(sql, dialect)
@@ -914,11 +961,11 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
             }
             done(Lexeme::LineComment, i, i == n)
         }
-        // MySQL starts a `--` comment only before a space or control byte:
-        // `1--1` is one minus minus one.
+        // MySQL starts a `--` comment only before a space or control byte,
+        // and DEL (0x7F) counts as one: `1--1` is one minus minus one.
         b'-' if dialect == Dialect::Mysql && b.get(i + 1) == Some(&b'-') => match b.get(i + 2) {
             None if !eof => None,
-            Some(&next) if next > b' ' => Some((Lexeme::Other, i + 1)),
+            Some(&next) if next > b' ' && next != 0x7F => Some((Lexeme::Other, i + 1)),
             _ => {
                 while i < n && b[i] != b'\n' {
                     i += 1;
@@ -998,9 +1045,11 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
                 None => done(Lexeme::Dollar { closed: false }, n, true),
             }
         }
-        b'[' if matches!(dialect, Dialect::Postgres | Dialect::Mysql) => {
-            Some((Lexeme::Bracket { clear: true }, i + 1))
-        }
+        b'[' if dialect == Dialect::Postgres => Some((Lexeme::Bracket { clear: true }, i + 1)),
+        // MySQL reads a bare `[` as an error, but MariaDB's sql_mode MSSQL
+        // reads `[…]` as a quoted name, so a quote inside it is just a
+        // character. Safe mode can't know the mode as the text runs.
+        b'[' if dialect == Dialect::Mysql => Some((Lexeme::Bracket { clear: false }, i + 1)),
         b'[' => {
             let to = n.min(i + 1 + BRACKET_SPAN);
             let clear = match memchr::memchr(b']', &b[i + 1..to]) {
@@ -2827,6 +2876,43 @@ mod tests {
         );
     }
 
+    /// Under gbk and the like the server reads `日\` and `日`` as one
+    /// character and a half: only text holding those, with a statement
+    /// that may switch the set before it, is sent one statement at a time.
+    #[test]
+    fn mysql_non_ascii_decides_how_text_is_sent() {
+        use MysqlSend::*;
+        assert_eq!(mysql_send("SET NAMES gbk; SELECT 'a\\' FROM t"), Whole);
+        assert_eq!(mysql_send("SET NAMES gbk; SELECT '日' FROM t"), OneByOne);
+        assert_eq!(
+            mysql_send("SET NAMES macroman; SELECT 1 --好 '\n; DELETE FROM t; -- '"),
+            OneByOne
+        );
+        assert_eq!(mysql_send("SELECT '日\\\\'; SELECT `表`"), Whole);
+        assert_eq!(mysql_send("INSERT INTO `表` VALUES (1)"), Whole);
+        assert_eq!(
+            mysql_send("SET NAMES/**/gbk; SELECT '日\\\\' '; DELETE FROM t; -- '"),
+            OneByOne
+        );
+        assert_eq!(
+            mysql_send("INSERT INTO `表` VALUES (1); UPDATE `表` SET a = 2"),
+            OneByOne
+        );
+        assert_eq!(
+            mysql_send("BEGIN NOT ATOMIC SET NAMES gbk; END; SELECT `表`"),
+            Refuse
+        );
+        assert_eq!(
+            mysql_send("CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT '日\\\\'"),
+            Refuse
+        );
+        use crate::sql_file::mysql_non_utf8;
+        assert!(mysql_non_utf8("gbk") && mysql_non_utf8("MACROMAN") && mysql_non_utf8("latin1"));
+        assert!(
+            !mysql_non_utf8("utf8mb4") && !mysql_non_utf8("utf8mb3") && !mysql_non_utf8("UTF8")
+        );
+    }
+
     /// MySQL's own text: `#` and `-- ` comments, backslash escapes in both
     /// quotes, `/*! … */` that the server runs, and its statements.
     #[test]
@@ -2839,6 +2925,25 @@ mod tests {
         assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
         assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
         assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // MariaDB's MSSQL mode reads `[']` as a name: the DELETE runs.
+        assert_eq!(
+            verbs("SELECT 1 AS [']; DELETE FROM t; SELECT [']"),
+            [UNCLEAR_VERB]
+        );
+        assert_eq!(kinds("SELECT '[a]', `[b]` FROM t # [c"), [Read]);
+        // The server reads a vertical tab as space.
+        assert_eq!(kinds("\x0bDELETE FROM t"), [Write]);
+        assert_eq!(kinds("SELECT 1;\x0bDELETE\x0bFROM t"), [Read, Write]);
+        assert_eq!(
+            kinds("SELECT 1 --\x0b'\n; DELETE FROM t; -- '"),
+            [Read, Write]
+        );
+        // DEL after `--` starts a comment too, so the quote after it is
+        // commented out and the DELETE on the next line runs.
+        assert_eq!(
+            kinds("SELECT 1 --\x7f '\n; SET SESSION TRANSACTION READ WRITE; DELETE FROM t; -- '"),
+            [Read, Session, Write]
+        );
         // Postgres reads `--1` as a comment.
         assert_eq!(
             check_sql("SELECT 1--1; DROP TABLE t", Dialect::Postgres).len(),
