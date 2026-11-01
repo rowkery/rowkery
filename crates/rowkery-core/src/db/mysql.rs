@@ -490,6 +490,12 @@ pub async fn cancel(via: CancelVia) -> Result<(), DriverError> {
     kill(via, "KILL QUERY").await
 }
 
+/// Ends the session at the server (`KILL`): its statement stops and its
+/// transaction rolls back, whatever its client does.
+pub async fn kill_connection(via: CancelVia) -> Result<(), DriverError> {
+    kill(via, "KILL").await
+}
+
 /// `{what} <thread id>` from a second connection.
 async fn kill(via: CancelVia, what: &str) -> Result<(), DriverError> {
     let mut conn = tokio::time::timeout(CONNECT_TIMEOUT, Conn::new(via.opts.clone()))
@@ -615,6 +621,73 @@ where
         }
     }
     Ok(last)
+}
+
+/// Runs one statement of a SQL file, any rows it returns read and dropped:
+/// the rows the last result changed. A statement that is only a comment
+/// to this server (a dump's MariaDB `/*M! … */` line, on MySQL) runs
+/// nothing, as with the mysql client.
+pub async fn session_run_file_statement(
+    session: &mut MysqlSession,
+    sql: &str,
+) -> Result<u64, DriverError> {
+    let config = &session.config;
+    let mut result = match session.conn.query_iter(sql).await {
+        Ok(result) => result,
+        // ER_EMPTY_QUERY.
+        Err(mysql_async::Error::Server(e)) if e.code == 1065 => return Ok(0),
+        Err(e) => return Err(map_error(e, config)),
+    };
+    let mut last = 0;
+    while let Some(mut stream) = result
+        .stream::<Row>()
+        .await
+        .map_err(|e| map_error(e, config))?
+    {
+        if stream.columns().is_empty() {
+            last = stream.affected_rows();
+        } else {
+            while stream
+                .try_next()
+                .await
+                .map_err(|e| map_error(e, config))?
+                .is_some()
+            {}
+        }
+    }
+    Ok(last)
+}
+
+/// What of this session changes how quotes or backslashes read, if
+/// anything: an `sql_mode` flag (`ANSI_QUOTES`, `NO_BACKSLASH_ESCAPES`, …)
+/// or a client character set in which `\` can end a character (`gbk`, …).
+/// A SQL file is split without them. Said as "sql_mode has X" or
+/// "character set is x".
+pub async fn session_lexical_mode(
+    session: &mut MysqlSession,
+) -> Result<Option<String>, DriverError> {
+    let rows = text_rows(
+        session,
+        "SELECT @@SESSION.sql_mode, @@SESSION.character_set_client",
+    )
+    .await?;
+    let cell = |i: usize| {
+        rows.first()
+            .and_then(|r| r.get(i).cloned().flatten())
+            .unwrap_or_default()
+            .to_ascii_uppercase()
+    };
+    let mode = cell(0);
+    if let Some(flag) = crate::sql_file::MYSQL_LEXICAL_MODES
+        .iter()
+        .find(|flag| mode.split(',').any(|m| m.starts_with(*flag)))
+    {
+        return Ok(Some(format!("sql_mode has {flag}")));
+    }
+    let charset = cell(1);
+    Ok(crate::sql_file::MYSQL_LEXICAL_CHARSETS
+        .contains(&charset.as_str())
+        .then(|| format!("character set is {}", charset.to_ascii_lowercase())))
 }
 
 /// Runs `sql`, no rows wanted.

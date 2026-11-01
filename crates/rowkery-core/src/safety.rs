@@ -490,6 +490,9 @@ pub fn check_file_statement(
     let check = check_tokens(&toks);
     let words: Vec<&str> = top_level(&toks).filter_map(Tok::word).take(4).collect();
     let concurrently = || top_level(&toks).any(|t| t.is("CONCURRENTLY"));
+    if dialect == Dialect::Mysql {
+        return Some((check, mysql_role(&toks, &words)));
+    }
     let role = match words.as_slice() {
         ["BEGIN", ..] | ["START", "TRANSACTION", ..] => InTransaction::Begins,
         ["COMMIT", "PREPARED", ..] => InTransaction::Controls,
@@ -506,6 +509,40 @@ pub fn check_file_statement(
         _ => InTransaction::Fine,
     };
     Some((check, role))
+}
+
+/// How a MySQL statement sits with a transaction. MySQL commits by itself
+/// before (and after) most statements that aren't plain reads or writes
+/// of rows: any DDL, `LOCK TABLES`, `GRANT`, `ANALYZE TABLE`, … So only
+/// statements known to stay inside one are [`InTransaction::Fine`]; the
+/// rest are [`InTransaction::Never`]. A `CALL` may commit inside its
+/// procedure, and a `SET` of `autocommit` or the next transaction's
+/// characteristics changes the transaction itself.
+fn mysql_role(toks: &[Tok], words: &[&str]) -> InTransaction {
+    if toks.contains(&Tok::Unclear) {
+        return InTransaction::Never;
+    }
+    match words {
+        ["BEGIN"] | ["BEGIN", "WORK"] | ["START", "TRANSACTION", ..] => InTransaction::Begins,
+        ["COMMIT"] | ["COMMIT", "WORK"] => InTransaction::Commits,
+        ["COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "XA", ..] => InTransaction::Controls,
+        // `SET PASSWORD`, `SET DEFAULT ROLE` commit; MariaDB's `SET
+        // STATEMENT … FOR` holds a statement that may.
+        ["SET", "STATEMENT" | "PASSWORD" | "DEFAULT", ..] => InTransaction::Never,
+        ["SET", ..]
+            if top_level(toks)
+                .filter_map(Tok::word)
+                .any(|w| matches!(w, "AUTOCOMMIT" | "TRANSACTION")) =>
+        {
+            InTransaction::Never
+        }
+        ["INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "SELECT" | "WITH" | "VALUES" | "TABLE"
+        | "SET" | "DO" | "USE" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "HANDLER"
+        | "PREPARE" | "DEALLOCATE", ..]
+        | ["LOAD", "DATA" | "XML", ..]
+        | ["CREATE" | "DROP", "TEMPORARY", "TABLE", ..] => InTransaction::Fine,
+        _ => InTransaction::Never,
+    }
 }
 
 /// `CREATE [OR REPLACE] [TEMP] FUNCTION | PROCEDURE | TRIGGER`, whose body
@@ -755,18 +792,17 @@ fn tokenize_spans(
 /// The tokens of the SQL inside a MySQL `/*! … */` comment, which the
 /// server runs as part of the statement around it. A `;`, or a comment of
 /// the same kind inside (where the outer one ends is then unclear), makes
-/// the statement unclear: no statement is checked by half. So does a
-/// string, quoted name or line comment inside: the server reads those
-/// before it looks for the `*/`, so a `*/` in one doesn't end the comment
-/// for it (`/*!00000 # */ …` runs what follows).
+/// the statement unclear: no statement is checked by half. So does a line
+/// comment inside: the server reads it before it looks for the `*/`, so a
+/// `*/` in one doesn't end the comment for it (`/*!00000 # */ …` runs what
+/// follows). Strings and quoted names inside are read the same way, but
+/// `text` stops at the first `*/`: one that holds a `*/` (or reads
+/// differently by `sql_mode`) doesn't close in `text`, and an unclosed or
+/// unclear one is unclear here (`push_string`, `Lexeme::Quoted`).
 fn executable_tokens(sql: &str, (from, to): (usize, usize), dialect: Dialect, toks: &mut Vec<Tok>) {
     let text = &sql[..to][from..];
     let (mut inner, _, _) = tokenize_spans(text, dialect, u32::MAX);
-    if inner.len() > 1
-        || ["/*", "#", "--", "'", "\"", "`"]
-            .iter()
-            .any(|m| text.contains(m))
-    {
+    if inner.len() > 1 || ["/*", "#", "--"].iter().any(|m| text.contains(m)) {
         toks.push(Tok::Unclear);
     }
     toks.extend(inner.drain(..).flatten());
@@ -2858,6 +2894,22 @@ mod tests {
         assert_eq!(verbs("/*M!100100 DELETE FROM t */"), ["DELETE"]);
         assert_eq!(verbs("SELECT /*!50000 1; DELETE FROM t */"), [UNCLEAR_VERB]);
         assert_eq!(verbs("SELECT 1 /*!50000 , 2"), [UNCLEAR_VERB]);
+        // mysqldump's own lines: a quote that closes inside reads one way.
+        assert_eq!(verbs("/*!40103 SET TIME_ZONE='+00:00' */"), ["SET"]);
+        assert_eq!(
+            verbs("/*!40000 ALTER TABLE `t` DISABLE KEYS */"),
+            ["ALTER TABLE"]
+        );
+        assert_eq!(
+            verbs("/*!50003 DROP FUNCTION IF EXISTS `f` */"),
+            ["DROP FUNCTION"]
+        );
+        // One that holds a `*/`, or reads by `sql_mode`, doesn't.
+        assert_eq!(verbs("/*!00000 SELECT `*/` */ 1"), [UNCLEAR_VERB]);
+        assert_eq!(
+            verbs("/*!00000 SELECT 'a\\'' */ ; DELETE FROM t"),
+            [UNCLEAR_VERB, "DELETE"]
+        );
         assert_eq!(kinds("SELECT /*+ NO_INDEX(t) */ * FROM t"), [Read]);
         // Comments don't nest: this one ends at the first `*/`.
         assert_eq!(kinds("SELECT /* /* */ 1; DELETE FROM t"), [Read, Write]);

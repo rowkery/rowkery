@@ -251,3 +251,96 @@ fn mysql_force_stop_ends_the_run() {
     assert_eq!(rows_of(&bridge, "w", 1, "SELECT 5").0, [[Value::Int(5)]]);
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+#[test]
+fn mysql_quick_look_follows_keys_and_counts() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-follow", SafeMode::ReadOnly);
+    bridge.open_window("w", "my-follow", None).expect("open");
+    save_mysql(&bridge, "my-setup", SafeMode::Off);
+    bridge.open_window("s", "my-setup", None).expect("open");
+    let (_, error, _) = rows_of(
+        &bridge,
+        "s",
+        1,
+        "DROP TABLE IF EXISTS bf_c, bf_p; CREATE TABLE bf_p (id INT PRIMARY KEY, name TEXT);
+         CREATE TABLE bf_c (id INT PRIMARY KEY, p INT);
+         INSERT INTO bf_p VALUES (1, 'it''s'), (2, 'b'); INSERT INTO bf_c VALUES (1, 1), (2, 1), (3, 2)",
+    );
+    assert_eq!(error, None);
+    let lookup = |table: &str, column: &str, value: i64| FollowLookup {
+        schema: "rowkery".into(),
+        table: table.into(),
+        column: column.into(),
+        value: Value::Int(value),
+    };
+    let found = bridge
+        .follow_keys("w", vec![lookup("bf_p", "id", 1), lookup("bf_p", "id", 9)])
+        .expect("follow");
+    assert_eq!(
+        found[0].as_ref().map(|r| r.row.clone()),
+        Some(vec![Value::Int(1), Value::Text("it's".into())])
+    );
+    assert_eq!(found[1], None);
+    let counts = bridge
+        .count_incoming(
+            "w",
+            vec![
+                lookup("bf_c", "p", 1),
+                lookup("bf_c", "p", 2),
+                lookup("bf_c", "p", 3),
+            ],
+        )
+        .expect("count");
+    assert_eq!(counts, [Some(2), Some(1), Some(0)]);
+    bridge.close_window("w");
+    bridge.close_window("s");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+#[test]
+fn mysql_sql_files_run_and_respect_safe_mode() {
+    use rowkery_core::sql_file::{scan, RunOptions};
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-file", SafeMode::Confirm);
+    bridge.open_window("w", "my-file", None).expect("open");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.sql");
+    std::fs::write(
+        &path,
+        "DROP TABLE IF EXISTS bs_t;\nCREATE TABLE bs_t (id INT PRIMARY KEY, note TEXT);\nDELIMITER ;;\nINSERT INTO bs_t VALUES (1, 'a;b');;\nDELIMITER ;\nINSERT INTO bs_t VALUES (2, 'it\\'s');\n",
+    )
+    .unwrap();
+    let scanned = scan(&path, EngineKind::Mysql, |_| true).unwrap();
+    assert_eq!(scanned.statements, 4);
+    let per = RunOptions {
+        whole_file: false,
+        keep_going: false,
+    };
+    let sink = || ProgressSink(Box::new(|_| {}));
+    // Confirm writes: only the panel's Run (confirmed) runs it.
+    let held = bridge.run_sql_file("w", path.clone(), scanned.clone(), per, false, sink());
+    assert!(held.is_err_and(|e| e.contains("confirms writes")));
+    let whole = RunOptions {
+        whole_file: true,
+        keep_going: false,
+    };
+    let refused = bridge.run_sql_file("w", path.clone(), scanned.clone(), whole, true, sink());
+    assert_eq!(
+        refused.unwrap().failed.unwrap().message,
+        "This file can't run as one transaction."
+    );
+    let report = bridge
+        .run_sql_file("w", path.clone(), scanned, per, true, sink())
+        .expect("run");
+    assert_eq!((report.done, report.rows, report.failed), (4, 2, None));
+    let (rows, _, _) = rows_of(&bridge, "w", 1, "SELECT note FROM bs_t ORDER BY id");
+    assert_eq!(
+        rows,
+        [[Value::Text("a;b".into())], [Value::Text("it's".into())]]
+    );
+    bridge.close_window("w");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

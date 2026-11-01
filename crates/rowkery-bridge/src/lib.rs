@@ -2918,10 +2918,7 @@ fn run_sql_file(
     let safe_mode = match &target {
         WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
         WindowTarget::Postgres { config, .. } => config.safe_mode,
-        WindowTarget::Mysql { .. } => {
-            let _ = respond_to.send(Err(mysql::LATER.into()));
-            return;
-        }
+        WindowTarget::Mysql { config, .. } => config.safe_mode,
     };
     if safe_mode == SafeMode::ReadOnly {
         let _ = respond_to.send(Err(
@@ -2956,9 +2953,35 @@ fn run_sql_file(
     } = run;
     let held = state.busy.hold(Work::SqlFile);
     match target {
-        // Refused above.
-        WindowTarget::Mysql { .. } => {
-            let _ = respond_to.send(Err(mysql::LATER.into()));
+        WindowTarget::Mysql {
+            connection_id,
+            config,
+        } => {
+            let pool = state.mysql_pool.clone();
+            let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
+            let prefetch = state.pool.clone();
+            let runtime = state.runtime.clone();
+            state.runtime.spawn(async move {
+                let _held = held;
+                let target = mysql::MysqlSlot {
+                    pool,
+                    window_id: window_id.clone(),
+                    generation,
+                };
+                let report = mysql::run_sql_file(
+                    target,
+                    connection_id,
+                    config,
+                    path,
+                    *scan,
+                    options,
+                    slot,
+                    move |p| (on_progress.0)(p),
+                )
+                .await;
+                invalidate_prefetch(&prefetch, &window_id, &runtime);
+                let _ = respond_to.send(report);
+            });
         }
         WindowTarget::Sqlite { path: db, .. } => {
             thread::spawn(move || {
@@ -3375,8 +3398,34 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
                 None => {
                     let _ = respond_to.send(Err("This window is not connected".into()));
                 }
-                Some(WindowTarget::Mysql { .. }) => {
-                    let _ = respond_to.send(Err(mysql::LATER.into()));
+                Some(WindowTarget::Mysql {
+                    connection_id,
+                    config,
+                }) => {
+                    let pool = state.mysql_pool.clone();
+                    let (generation, latest) = pool
+                        .lock()
+                        .map(|mut p| (p.generation(&window_id), p.quick_look_seq(&window_id)))
+                        .unwrap_or_default();
+                    let seq = latest.fetch_add(1, Ordering::SeqCst) + 1;
+                    state.runtime.spawn(async move {
+                        let slot = mysql::MysqlSlot {
+                            pool,
+                            window_id,
+                            generation,
+                        };
+                        let superseded = || latest.load(Ordering::SeqCst) != seq;
+                        let result = mysql::follow_keys(
+                            slot,
+                            connection_id,
+                            config,
+                            lookups,
+                            count,
+                            superseded,
+                        )
+                        .await;
+                        let _ = respond_to.send(result);
+                    });
                 }
                 Some(WindowTarget::Sqlite { path, .. }) => {
                     thread::spawn(move || {
