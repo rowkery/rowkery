@@ -1097,13 +1097,23 @@ fn bracket_clear(b: &[u8], mut j: usize) -> bool {
 ///
 /// A MySQL string (`'…'` or `"…"`, opening at `b[i]`) always takes `\`
 /// escapes, unless `NO_BACKSLASH_ESCAPES` is set: so one holding `\` before
-/// its own quote is unclear.
+/// its own quote is unclear, as is one holding `\` right after a non-ASCII
+/// byte (see below).
 fn skip_string(b: &[u8], mut i: usize, backslash: bool, dialect: Dialect) -> (usize, bool, bool) {
     let n = b.len();
     let quote = b[i];
     let mut clear = true;
     i += 1;
     while i < n {
+        // Under a client character set such as gbk or sjis, a byte from
+        // 0x81 up and the `\` after it are one character, so the server
+        // doesn't take that `\` as an escape (the session can be switched
+        // with `SET NAMES`). UTF-8 text puts such a byte there too
+        // (`日\\` ends in A5 5C), so this is only unclear, never read
+        // either way.
+        if dialect == Dialect::Mysql && b[i] == b'\\' && i > 0 && b[i - 1] >= 0x80 {
+            clear = false;
+        }
         match b[i] {
             b'\\' if backslash => {
                 if b.get(i + 1) == Some(&quote)
@@ -2824,6 +2834,29 @@ mod tests {
         assert_eq!(
             kind("WITH x AS (SELECT * FROM t FOR UPDATE) SELECT * INTO u FROM x"),
             Write
+        );
+    }
+
+    /// Under `SET NAMES gbk` the server reads `日\\'` (E6 97 A5 5C 5C 27) as
+    /// two characters and an escaped quote, so the string goes on past where
+    /// UTF-8 says it ends, and what UTF-8 reads as the next string runs.
+    #[test]
+    fn mysql_backslash_after_a_wide_byte_is_unclear() {
+        for sql in [
+            "SELECT '日\\\\' '; DELETE FROM t; -- '",
+            "SELECT \"日\\\\\"; DELETE FROM t",
+        ] {
+            let c = check_sql(sql, Dialect::Mysql).remove(0);
+            assert_eq!(c.verb, UNCLEAR_VERB, "{sql}");
+            assert!(
+                hold_for(SafeMode::Confirm, sql, false, Dialect::Mysql).is_some(),
+                "{sql}"
+            );
+        }
+        // ASCII before the backslash, or a wide character elsewhere, reads as before.
+        assert_eq!(
+            check_sql("SELECT 'a\\\\', 'é'", Dialect::Mysql)[0].kind,
+            StatementKind::Read
         );
     }
 

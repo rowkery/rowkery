@@ -663,3 +663,38 @@ fn mysql_sessions_list_ours_and_stop_through_safe_mode() {
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// After `SET NAMES gbk` the server reads the UTF-8 bytes of `日\\` (E6 97
+/// A5 5C 5C) as two characters and a `\`, which escapes the quote after
+/// it: the string goes on, and the DELETE that UTF-8 reads inside the next
+/// string really runs (shown with safe mode off). Confirm writes holds the
+/// text instead of reading it as one SELECT.
+#[test]
+fn mysql_wide_bytes_before_a_backslash_never_hide_a_write() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    let attack = "SELECT '日\\\\' '; DELETE FROM bw_gbk; -- '";
+    save_mysql(&bridge, "my-gbk-off", SafeMode::Off);
+    bridge.open_window("w", "my-gbk-off", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_gbk; CREATE TABLE bw_gbk (id INT); INSERT INTO bw_gbk VALUES (1)",
+    );
+    assert_eq!(rows_of(&bridge, "w", 1, "SET NAMES gbk").1, None);
+    rows_of(&bridge, "w", 1, attack);
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_gbk");
+    assert_eq!(rows, [[Value::Int(0)]], "the server ran the hidden DELETE");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_gbk VALUES (1)");
+    bridge.close_window("w");
+
+    save_mysql(&bridge, "my-gbk", SafeMode::Confirm);
+    bridge.open_window("c", "my-gbk", None).expect("open");
+    assert_eq!(rows_of(&bridge, "c", 1, "SET NAMES gbk").1, None);
+    let (_, error, _) = rows_of(&bridge, "c", 1, attack);
+    assert!(error.is_some_and(|e| e.starts_with("held")), "not held");
+    let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");
+    assert_eq!(rows, [[Value::Int(1)]]);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
