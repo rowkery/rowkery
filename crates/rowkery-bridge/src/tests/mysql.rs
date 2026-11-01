@@ -759,3 +759,47 @@ fn mysql_wide_charsets_never_hide_a_write() {
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// MySQL and MariaDB start a `--` comment before DEL (0x7F) as well as
+/// before a space, so the quote after it is commented out and the next line
+/// is SQL. Safe mode reads it the same way and sees the DELETE.
+#[test]
+fn mysql_dash_dash_before_del_is_a_comment() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    let attack =
+        "SELECT 1 --\x7f '\n; SET SESSION TRANSACTION READ WRITE; DELETE FROM bw_del; -- '";
+    save_mysql(&bridge, "my-del-off", SafeMode::Off);
+    bridge.open_window("w", "my-del-off", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_del; CREATE TABLE bw_del (id INT); INSERT INTO bw_del VALUES (1)",
+    );
+    rows_of(&bridge, "w", 1, attack);
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_del");
+    assert_eq!(rows, [[Value::Int(0)]], "the server ran the DELETE");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_del VALUES (1)");
+    bridge.close_window("w");
+
+    for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+        save_mysql(&bridge, "my-del", mode);
+        bridge.open_window("c", "my-del", None).expect("open");
+        let queue = bridge
+            .run_window_query("c", 1, attack.into(), None, false)
+            .expect("run");
+        let outcome = ended(&queue);
+        // Confirm asks first; read-only refuses outright.
+        let want = if mode == SafeMode::Confirm {
+            "held: Confirm"
+        } else {
+            "held: Refuse"
+        };
+        assert_eq!(outcome.as_deref(), Some(want), "{mode:?}");
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_del");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?}");
+        bridge.close_window("c");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

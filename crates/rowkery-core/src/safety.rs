@@ -971,11 +971,11 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
             }
             done(Lexeme::LineComment, i, i == n)
         }
-        // MySQL starts a `--` comment only before a space or control byte:
-        // `1--1` is one minus minus one.
+        // MySQL starts a `--` comment only before a space or control byte,
+        // and DEL (0x7F) counts as one: `1--1` is one minus minus one.
         b'-' if dialect == Dialect::Mysql && b.get(i + 1) == Some(&b'-') => match b.get(i + 2) {
             None if !eof => None,
-            Some(&next) if next > b' ' => Some((Lexeme::Other, i + 1)),
+            Some(&next) if next > b' ' && next != 0x7F => Some((Lexeme::Other, i + 1)),
             _ => {
                 while i < n && b[i] != b'\n' {
                     i += 1;
@@ -2925,6 +2925,12 @@ mod tests {
         assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
         assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
         assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // DEL after `--` starts a comment too, so the quote after it is
+        // commented out and the DELETE on the next line runs.
+        assert_eq!(
+            kinds("SELECT 1 --\x7f '\n; SET SESSION TRANSACTION READ WRITE; DELETE FROM t; -- '"),
+            [Read, Session, Write]
+        );
         // Postgres reads `--1` as a comment.
         assert_eq!(
             check_sql("SELECT 1--1; DROP TABLE t", Dialect::Postgres).len(),
