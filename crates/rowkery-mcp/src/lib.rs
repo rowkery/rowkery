@@ -680,6 +680,9 @@ fn default_schema(record: &ConnectionRecord) -> &'static str {
 /// context; past this, it counts the rest per schema.
 const MAX_TABLES: usize = 500;
 
+/// MySQL isn't shared with agents until its guards are in.
+const MYSQL_NOT_SHARED: &str = "Refused: Rowkery doesn't share MySQL connections with agents yet.";
+
 async fn list_tables(
     store: &mut Store,
     target: &Target,
@@ -1107,6 +1110,7 @@ async fn run_read(
             refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }
+        EngineKind::Mysql => return Err(MYSQL_NOT_SHARED.into()),
         EngineKind::Sqlite => {
             let explain = store
                 .read(target, &format!("EXPLAIN QUERY PLAN {capped}"))
@@ -1316,6 +1320,7 @@ async fn run_read(
     if let Some(r) = refusal {
         match engine {
             EngineKind::Postgres => return Err(r),
+            EngineKind::Mysql => return Err(r),
             EngineKind::Sqlite => notes.push(r.replacen("Refused: the plan", "Note: this", 1)),
         }
     }
@@ -1448,6 +1453,7 @@ pub(crate) async fn masked_marks(
                 }
             }
         }
+        EngineKind::Mysql => return Err(MYSQL_NOT_SHARED.into()),
         EngineKind::Sqlite => {
             for (schema, table) in tables
                 .iter()

@@ -62,7 +62,8 @@ mod tests {
 /// doubled too: a plain `'…'` reads `\'` as a quote that doesn't end it on a
 /// server with `standard_conforming_strings` off, so a key value read from
 /// the table could break out of the literal. `E''` reads the same on every
-/// server.
+/// server. MySQL reads `\` as an escape unless `NO_BACKSLASH_ESCAPES` is
+/// set, so its text holding one is hex ([`mysql_text`]).
 pub fn sql_literal(engine: crate::db::EngineKind, value: &crate::db::Value) -> Option<String> {
     use crate::db::{EngineKind, Value};
     match value {
@@ -78,9 +79,23 @@ pub fn sql_literal(engine: crate::db::EngineKind, value: &crate::db::Value) -> O
             "E'{}'",
             t.replace('\\', "\\\\").replace('\'', "''")
         )),
+        Value::Text(t) if engine == EngineKind::Mysql => Some(mysql_text(t)),
         Value::Text(t) => Some(format!("'{}'", t.replace('\'', "''"))),
         Value::Bool(b) => Some(if *b { "TRUE" } else { "FALSE" }.into()),
         _ => None,
+    }
+}
+
+/// `text` as a MySQL string literal that reads the same whatever the
+/// session's `sql_mode`: `'…'` with quotes doubled, or, holding a backslash
+/// (an escape unless `NO_BACKSLASH_ESCAPES`), the UTF-8 bytes in hex with a
+/// charset introducer, which takes the column's collation like any string.
+pub fn mysql_text(text: &str) -> String {
+    if text.contains('\\') {
+        let hex: String = text.bytes().map(|b| format!("{b:02X}")).collect();
+        format!("_utf8mb4 X'{hex}'")
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
     }
 }
 
@@ -121,6 +136,14 @@ mod literal_tests {
         assert_eq!(
             pg(&Value::Text(r"C:\tmp".into())).as_deref(),
             Some(r"E'C:\\tmp'")
+        );
+        assert_eq!(
+            sql_literal(EngineKind::Mysql, &breakout).as_deref(),
+            Some("_utf8mb4 X'5C27204F5220313D31202D2D'")
+        );
+        assert_eq!(
+            sql_literal(EngineKind::Mysql, &Value::Text("it's".into())).as_deref(),
+            Some("'it''s'")
         );
         // SQLite has no escapes in strings: a backslash is a backslash.
         assert_eq!(

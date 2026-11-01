@@ -207,10 +207,11 @@ fn literal(engine: EngineKind, v: &Value) -> String {
         Value::Int(n) => n.to_string(),
         Value::Float(f) if f.is_finite() => f.to_string(),
         Value::Float(f) => format!("'{f}'"),
+        Value::Text(t) if engine == EngineKind::Mysql => crate::query_util::mysql_text(t),
         Value::Text(t) => format!("'{}'", t.replace('\'', "''")),
         Value::Bytes(b) => match engine {
             EngineKind::Postgres => format!("'{}'::bytea", hex(b)),
-            EngineKind::Sqlite => {
+            EngineKind::Sqlite | EngineKind::Mysql => {
                 let digits: String = b.iter().map(|x| format!("{x:02X}")).collect();
                 format!("X'{digits}'")
             }

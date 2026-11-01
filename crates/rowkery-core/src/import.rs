@@ -286,6 +286,13 @@ fn takes_empty_text(engine: EngineKind, type_name: &str) -> bool {
         EngineKind::Sqlite => {
             t.is_empty() || t.contains("char") || t.contains("clob") || t.contains("text")
         }
+        EngineKind::Mysql => {
+            let base = t.split('(').next().unwrap_or("").trim();
+            matches!(
+                base,
+                "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext"
+            )
+        }
         EngineKind::Postgres => {
             let base = t.split('(').next().unwrap_or("").trim();
             matches!(
