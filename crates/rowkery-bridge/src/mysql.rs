@@ -11,14 +11,17 @@ use rowkery_core::db::mysql::{
 };
 use rowkery_core::db::postgres::StreamStats;
 use rowkery_core::db::{DriverError, SchemaCatalog};
+use rowkery_core::edits::{ApplyCounts, ApplyFailure, RowStatement};
 use rowkery_core::query_util::apply_browse_limit;
+use rowkery_core::reach::{Name, Reach};
 use rowkery_core::safety::{plain_read, Dialect};
 use tokio::runtime::Handle;
 
 use crate::pool::{self, Lease, SharedPool, Slot};
 use crate::{
     arm_cancel, cancel_requested, disarm_cancel, finish_query_worker, push_event, CancelHandle,
-    CancelSlot, CoreEvent, Forward, QueryOutcome, SharedSink, CANCEL_SETTLE, FORCE_STOP_AFTER,
+    CancelSlot, CoreEvent, Forward, QueryOutcome, SharedSink, APPLY_STEP_TIMEOUT, CANCEL_SETTLE,
+    FORCE_STOP_AFTER,
 };
 
 /// What a MySQL window can't do in this version yet.
@@ -330,4 +333,72 @@ pub(crate) async fn reload_schema(
         session,
     );
     catalog
+}
+
+/// Staged row edits, as one transaction on the tab's own session (waiting,
+/// boundedly, for a run on it to end or for a free connection).
+pub(crate) async fn apply_changes(
+    slot: MysqlSlot,
+    tab_id: u64,
+    connection_id: String,
+    config: MysqlConnection,
+    table: &Name,
+    statements: &[RowStatement],
+    approved: Option<&Reach>,
+) -> Result<Result<ApplyCounts, ApplyFailure>, String> {
+    let no_room = std::sync::atomic::AtomicBool::new(false);
+    let leased = tokio::time::timeout(
+        APPLY_STEP_TIMEOUT,
+        pool::lease_or_wait(
+            &slot.pool,
+            &slot.window_id,
+            Slot::Tab(tab_id),
+            slot.generation,
+            connection_id,
+            config,
+            &|wait| {
+                if wait == Some(pool::WaitFor::Place) {
+                    no_room.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(DriverError::Message(if no_room.load(std::sync::atomic::Ordering::SeqCst) {
+            "Every connection this database allows Rowkery is busy; nothing was saved. Try again once a query ends."
+        } else {
+            "This tab is still busy with a query; nothing was saved. Try again once it ends."
+        }
+        .into()))
+    });
+    let Lease {
+        mut session,
+        out: _out,
+        ..
+    } = leased.map_err(|e| e.into_message())?;
+    let result = mysql::session_apply_changes_within(
+        &mut session,
+        table,
+        statements,
+        Some(APPLY_STEP_TIMEOUT),
+        approved,
+    )
+    .await;
+    if session.abandoned() {
+        // Killed at the server with only our transaction in it.
+        drop(session);
+    } else if session.txn_known().is_none() || session.is_closed() {
+        // It didn't say whether the user's transaction was open.
+        pool::drop_lost(&slot.pool, &slot.window_id, Slot::Tab(tab_id), session);
+    } else {
+        pool::give_back(
+            &slot.pool,
+            &slot.window_id,
+            Slot::Tab(tab_id),
+            slot.generation,
+            session,
+        );
+    }
+    Ok(result)
 }

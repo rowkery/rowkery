@@ -9,13 +9,14 @@ import type { Reach } from "./proposals";
 export function reachLine(changes: RowChange[], reach: Reach): string {
   const one = changes.length === 1;
   const lead = !one ? "these changes" : changes[0].op === "delete" ? "deleting this row" : changes[0].op === "insert" ? "adding this row" : "this edit";
-  const verb = (word: "delete" | "add" | "change") => (one ? `${word}s` : word);
+  const verb = (word: "delete" | "add" | "change" | "write") => (one ? `${word}s` : word);
   const rows = (n: number) => `${n.toLocaleString()} ${n === 1 ? "row" : "rows"}`;
   const deleted = reach.tables.filter((t) => t.deleted > 0).map((t) => `${t.deleted.toLocaleString()} ${t.table}`);
   const others = [
     ...reach.tables.filter((t) => t.inserted > 0).map((t) => `${verb("add")} ${rows(t.inserted)} to ${t.table}`),
     ...reach.tables.filter((t) => t.updated > 0).map((t) => `${verb("change")} ${rows(t.updated)} in ${t.table}`),
     reach.unnamed > 0 ? `${verb("change")} ${rows(reach.unnamed)} in tables Rowkery can't name` : null,
+    reach.uncounted?.length ? `${verb("write")} rows Rowkery can't count (${reach.uncounted.join(", ")})` : null,
   ].filter((c): c is string => !!c);
   // One "and" per line: the deleted tables take commas when more follows.
   const clauses = deleted.length ? [`${verb("delete")} ${others.length ? deleted.join(", ") : joinAnd(deleted)}`, ...others] : others;

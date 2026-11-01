@@ -902,7 +902,7 @@ async fn pg_reach(
     let after = reach::pg_counts(session).await?;
     let reach = after.as_ref().map(|after| Reach {
         tables: reach::diff(before, after),
-        unnamed: 0,
+        ..Reach::default()
     });
     Ok((reach, after))
 }

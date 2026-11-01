@@ -129,6 +129,20 @@ describe("who may edit", () => {
     expect(pg("bytea")).toBeNull();
     const lite = (type_name: string) => columnEditor({ name: "c", type_name, nullable: true }, "sqlite", [])?.kind;
     expect([lite("INTEGER"), lite("REAL"), lite("TEXT"), lite("BLOB")]).toEqual(["int", "number", "text", undefined]);
+    const my = (type_name: string) => columnEditor({ name: "c", type_name, nullable: true }, "mysql", []);
+    expect(["int unsigned", "bigint", "tinyint(1)", "decimal(10,2)", "double", "json", "varchar(40)", "set('a','b')"].map((t) => my(t)?.kind)).toEqual([
+      "int",
+      "int",
+      "bool",
+      "number",
+      "number",
+      "json",
+      "text",
+      "text",
+    ]);
+    expect(my("datetime(6)")).toMatchObject({ kind: "date", placeholder: "YYYY-MM-DD HH:MM:SS · now()" });
+    expect(my("enum('open','it''s','a\\\\b')")).toMatchObject({ kind: "enum", labels: ["open", "it's", "a\\b"] });
+    expect([my("varbinary(16)"), my("longblob")]).toEqual([null, null]);
   });
 });
 

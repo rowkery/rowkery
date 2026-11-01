@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{qualified_table_sql, quote_ident, EngineKind, Value};
+use crate::query_util::mysql_text;
 use crate::reach::Reach;
 
 /// The table the edits go to, as the webview's catalog describes it.
@@ -83,6 +84,9 @@ pub struct RowStatement {
     pub target: String,
     /// The key predicate (`id = 3`) of an UPDATE or DELETE.
     pub predicate: Option<String>,
+    /// The columns an UPDATE sets (MySQL: which keys it may cascade through).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set: Vec<String>,
 }
 
 impl RowStatement {
@@ -137,7 +141,7 @@ pub struct ApplyFailure {
     /// these rows too, so it stopped before COMMIT. Committing again with
     /// this reach approved commits, if the counts are the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reach: Option<Reach>,
+    pub reach: Option<Box<Reach>>,
 }
 
 impl ApplyFailure {
@@ -183,7 +187,7 @@ impl ApplyFailure {
     /// Stopped before COMMIT: the batch also writes `reach` in other rows.
     pub fn reaches(reach: Reach) -> Self {
         Self {
-            reach: Some(reach),
+            reach: Some(Box::new(reach)),
             ..Self::other("It also changes rows in other tables. Commit again to save them all.")
         }
     }
@@ -249,7 +253,11 @@ fn build_one(
         Change::Insert { values } => {
             unique(values)?;
             let sql = if values.is_empty() {
-                format!("INSERT INTO {target} DEFAULT VALUES")
+                // MySQL has no DEFAULT VALUES; an empty list says the same.
+                match engine {
+                    EngineKind::Mysql => format!("INSERT INTO {target} () VALUES ()"),
+                    _ => format!("INSERT INTO {target} DEFAULT VALUES"),
+                }
             } else {
                 let cols: Vec<String> = values.iter().map(|v| ident(&v.column)).collect();
                 let lits = values
@@ -267,6 +275,7 @@ fn build_one(
                 sql,
                 target: target.to_string(),
                 predicate: None,
+                set: Vec::new(),
             })
         }
         Change::Update { key, set } => {
@@ -290,6 +299,7 @@ fn build_one(
                 sql: format!("UPDATE {target} SET {} WHERE {predicate}", sets.join(", ")),
                 target: target.to_string(),
                 predicate: Some(predicate),
+                set: set.iter().map(|v| v.column.clone()).collect(),
             })
         }
         Change::Delete { key } => {
@@ -299,6 +309,7 @@ fn build_one(
                 sql: format!("DELETE FROM {target} WHERE {predicate}"),
                 target: target.to_string(),
                 predicate: Some(predicate),
+                set: Vec::new(),
             })
         }
     }
@@ -447,7 +458,22 @@ pub fn literal(engine: EngineKind, type_name: &str, value: &Value) -> Result<Str
     match engine {
         EngineKind::Postgres => pg_literal(pg_kind(type_name), value),
         EngineKind::Sqlite => sqlite_literal(value),
-        EngineKind::Mysql => Err(MYSQL_EDITS_LATER.into()),
+        EngineKind::Mysql => match (my_now(type_name), value) {
+            // The editor's `now()`, as Postgres reads `'now'`.
+            (Some(now), Value::Text(t)) if t.trim().eq_ignore_ascii_case("now") => Ok(now.into()),
+            _ => my_literal(my_kind(type_name), value),
+        },
+    }
+}
+
+/// The current time for a MySQL date or time column.
+fn my_now(type_name: &str) -> Option<&'static str> {
+    let t = type_name.trim().to_ascii_lowercase();
+    match t.split(['(', ' ']).next().unwrap_or("") {
+        "date" => Some("CURRENT_DATE"),
+        "time" => Some("CURRENT_TIME"),
+        "datetime" | "timestamp" => Some("CURRENT_TIMESTAMP"),
+        _ => None,
     }
 }
 
@@ -497,13 +523,92 @@ pub fn typed_text(engine: EngineKind, type_name: &str, text: &str) -> Result<Str
     match engine {
         EngineKind::Postgres => pg_text(pg_kind(type_name), text),
         EngineKind::Sqlite => Ok(text.to_string()),
-        EngineKind::Mysql => Err(MYSQL_EDITS_LATER.into()),
+        EngineKind::Mysql => my_text(my_kind(type_name), text),
     }
 }
 
-/// Until MySQL row edits and imports are written (their own change).
-const MYSQL_EDITS_LATER: &str =
-    "MySQL tables can't be edited or imported into in this version yet.";
+/// How a MySQL column (`COLUMN_TYPE`: `int unsigned`, `tinyint(1)`,
+/// `decimal(10,2)`, `varbinary(16)`) takes a value. `tinyint(1)` is a
+/// number like any other: MySQL's BOOLEAN is only its name.
+fn my_kind(type_name: &str) -> Kind {
+    let t = type_name.trim().to_ascii_lowercase();
+    let base = t.split(['(', ' ']).next().unwrap_or("");
+    match base {
+        "bool" | "boolean" => Kind::Bool,
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "bit" | "year" => {
+            Kind::Int
+        }
+        "decimal" | "numeric" | "dec" | "fixed" | "float" | "double" | "real" => Kind::Number,
+        "json" => Kind::Json,
+        "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob" => Kind::Bytes,
+        _ => Kind::Text,
+    }
+}
+
+/// A MySQL literal that reads the same in every `sql_mode`: text through
+/// [`mysql_text`] (hex when it holds a backslash), bytes as `X'…'`, no
+/// NaN or Infinity (MySQL has neither).
+fn my_literal(kind: Kind, value: &Value) -> Result<String, String> {
+    let text = |t: &str| -> Result<String, String> {
+        if t.contains('\0') {
+            return Err("text can't hold a NUL character".into());
+        }
+        Ok(mysql_text(t))
+    };
+    Ok(match value {
+        Value::Null => "NULL".into(),
+        Value::Bool(b) if matches!(kind, Kind::Text | Kind::Json) => text(&b.to_string())?,
+        Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
+        Value::Int(n) if matches!(kind, Kind::Text | Kind::Json) => text(&n.to_string())?,
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) if !f.is_finite() => return Err("MySQL can't store NaN or Infinity".into()),
+        Value::Float(f) if matches!(kind, Kind::Text | Kind::Json) => text(&float(*f))?,
+        Value::Float(f) => float(*f),
+        Value::Bytes(b) => format!("X'{}'", hex(b)),
+        Value::Text(t) => {
+            let raw = my_text(kind, t)?;
+            match kind {
+                Kind::Int | Kind::Number => raw,
+                Kind::Bool => raw.to_ascii_uppercase(),
+                Kind::Bytes => format!("X'{raw}'"),
+                Kind::Text | Kind::Json | Kind::Jsonb => text(&raw)?,
+            }
+        }
+    })
+}
+
+/// `t` checked and spelled for a MySQL column of `kind`, unquoted (bytes:
+/// their hex digits).
+fn my_text(kind: Kind, t: &str) -> Result<String, String> {
+    Ok(match kind {
+        Kind::Number => {
+            let t = t.trim();
+            if !is_number(t) {
+                return Err(format!("{} isn't a number", quote(t)?));
+            }
+            t.to_string()
+        }
+        Kind::Bytes => {
+            // As the grid shows it (`\x…`), or `0x…`.
+            let t = t.trim();
+            let digits = t
+                .strip_prefix("\\x")
+                .or_else(|| t.strip_prefix("0x"))
+                .unwrap_or(t);
+            if !digits.len().is_multiple_of(2) || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("bytes are written as \\x and hex digits".into());
+            }
+            digits.to_ascii_lowercase()
+        }
+        Kind::Json | Kind::Jsonb => {
+            if serde_json::from_str::<serde_json::Value>(t).is_err() {
+                return Err("not valid JSON".into());
+            }
+            t.to_string()
+        }
+        Kind::Int | Kind::Bool | Kind::Text => pg_text(kind, t)?,
+    })
+}
 
 fn pg_text(kind: Kind, t: &str) -> Result<String, String> {
     Ok(match kind {
@@ -945,6 +1050,7 @@ mod tests {
             sql: String::new(),
             target: "public.kiosks".into(),
             predicate: Some("id = 3".into()),
+            set: vec!["name".into()],
         };
         assert_eq!(
             ApplyFailure::count(1, &s, 2).message,
@@ -966,6 +1072,52 @@ mod tests {
                 key: vec![cell("id", Value::Int(3))],
                 set: vec![cell("city", Value::Null)],
             }
+        );
+    }
+
+    #[test]
+    fn mysql_literals_read_the_same_in_every_sql_mode() {
+        let my = |t: &str, v: Value| literal(EngineKind::Mysql, t, &v);
+        assert_eq!(
+            my("varchar(10)", Value::Text("it's".into())).unwrap(),
+            "'it''s'"
+        );
+        assert_eq!(
+            my("text", Value::Text("a\\b".into())).unwrap(),
+            "_utf8mb4 X'615C62'"
+        );
+        assert_eq!(my("tinyint(1)", Value::Bool(true)).unwrap(), "TRUE");
+        assert_eq!(
+            my("int unsigned", Value::Text("18446744073709551615".into())).unwrap(),
+            "18446744073709551615"
+        );
+        assert!(my("int", Value::Text("1; DROP".into())).is_err());
+        assert_eq!(
+            my("decimal(10,2)", Value::Text(" 12.50 ".into())).unwrap(),
+            "12.50"
+        );
+        assert!(my("double", Value::Float(f64::NAN)).is_err());
+        assert_eq!(
+            my("varbinary(4)", Value::Bytes(vec![0, 255])).unwrap(),
+            "X'00ff'"
+        );
+        assert_eq!(
+            my("blob", Value::Text("\\x00FF".into())).unwrap(),
+            "X'00ff'"
+        );
+        assert!(my("blob", Value::Text("zz".into())).is_err());
+        assert!(my("json", Value::Text("{a".into())).is_err());
+        assert_eq!(
+            my("datetime(6)", Value::Text("now".into())).unwrap(),
+            "CURRENT_TIMESTAMP"
+        );
+        assert_eq!(
+            my("date", Value::Text("now".into())).unwrap(),
+            "CURRENT_DATE"
+        );
+        assert_eq!(
+            my("varchar(5)", Value::Text("now".into())).unwrap(),
+            "'now'"
         );
     }
 }

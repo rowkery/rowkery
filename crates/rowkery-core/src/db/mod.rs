@@ -98,7 +98,12 @@ impl ValueWire {
             ValueWire::Float(f) => Value::Float(f),
             ValueWire::Text(t) => Value::Text(t),
             ValueWire::Bytes(b) => Value::Bytes(b),
-            ValueWire::BigInt(s) => Value::Int(s.parse().map_err(E::custom)?),
+            // Past i64 (a MySQL BIGINT UNSIGNED): its digits, as the grid reads them.
+            ValueWire::BigInt(s) => match s.parse() {
+                Ok(n) => Value::Int(n),
+                Err(_) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => Value::Text(s),
+                Err(e) => return Err(E::custom(e)),
+            },
         })
     }
 }

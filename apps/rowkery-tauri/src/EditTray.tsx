@@ -19,7 +19,8 @@ export type TrayState =
    * "Not saved yet · deleting this row also deletes 14 kiosk_sessions",
    * and Commit becomes "Commit all N".
    */
-  | { kind: "reach"; text: string; total: number }
+  /** `total` is null when some rows can't be counted (MySQL triggers, loops). */
+  | { kind: "reach"; text: string; total: number | null }
   /** "Updated 1 · Inserted 1 · Deleted 1 · 24 ms", for 1.6 s after a commit. */
   | { kind: "done"; text: string }
   /** ↵ where nothing can be edited, for 4 s. */
@@ -141,7 +142,9 @@ export function EditTray({
           : state.kind === "committing"
             ? "Committing…"
             : reach
-              ? `Commit all ${state.total.toLocaleString()}`
+              ? state.total === null
+                ? "Commit all"
+                : `Commit all ${state.total.toLocaleString()}`
               : "Commit"}{" "}
         <kbd><Keys text={commit} /></kbd>
       </button>

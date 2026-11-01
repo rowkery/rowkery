@@ -1541,7 +1541,7 @@ async fn reach_beyond(
     };
     let all = Reach {
         tables: reach::diff(before, &after),
-        unnamed: 0,
+        ..Reach::default()
     };
     Ok(reach::beyond(all, &own.0, &own.1, counts.rows()))
 }

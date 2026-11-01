@@ -15,6 +15,9 @@ use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, Row, SslOpts};
 
 use crate::connections::{expand_home, MysqlConnection, PostgresSslMode};
+use crate::edits::{ApplyCounts, ApplyFailure, RowStatement, Verb};
+use crate::query_util::mysql_text;
+use crate::reach::{self, MyForeignKey, MyPlan, MyRule, MyWrite, Name, Reach, TableRows};
 use crate::route::{self, Route};
 use crate::safety::{statement_texts, Dialect, SafeMode};
 use crate::secrets::{get_secret, ConnectionSecrets, SecretKind};
@@ -82,6 +85,9 @@ pub struct MysqlSession {
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
     /// See [`MysqlSession::keeps_state`].
     stateful: bool,
+    /// A save's step didn't answer: the connection was killed at the
+    /// server, and the session is dropped, never reused.
+    abandoned: bool,
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -142,6 +148,9 @@ impl MysqlSession {
     /// Whether a transaction is open, as the last OK said; `None` after
     /// an error, which carries no status (ask with [`session_probe_txn`]).
     pub fn txn_known(&self) -> Option<bool> {
+        if self.abandoned {
+            return None;
+        }
         self.status()
             .map(|s| s.contains(mysql_async::consts::StatusFlags::SERVER_STATUS_IN_TRANS))
     }
@@ -166,7 +175,13 @@ impl MysqlSession {
 
     /// The socket is gone: nothing more can run on it.
     pub fn is_closed(&self) -> bool {
-        self.conn.is_disconnected()
+        self.abandoned || self.conn.is_disconnected()
+    }
+
+    /// A save gave up on it (see [`session_apply_changes_within`]): the
+    /// server rolled its own transaction back, and no user's was open.
+    pub fn abandoned(&self) -> bool {
+        self.abandoned
     }
 
     /// Keeps `guard` while the session lives.
@@ -303,6 +318,7 @@ pub async fn open_session_via(
         tag,
         guard: None,
         stateful: false,
+        abandoned: false,
     })
 }
 
@@ -466,13 +482,18 @@ pub async fn session_ping(session: &mut MysqlSession, limit: Duration) -> bool {
 /// `KILL QUERY` for the session's running statement. The connection
 /// stays; the statement ends with a cancel.
 pub async fn cancel(via: CancelVia) -> Result<(), DriverError> {
+    kill(via, "KILL QUERY").await
+}
+
+/// `{what} <thread id>` from a second connection.
+async fn kill(via: CancelVia, what: &str) -> Result<(), DriverError> {
     let mut conn = tokio::time::timeout(CONNECT_TIMEOUT, Conn::new(via.opts.clone()))
         .await
         .map_err(|_| DriverError::Message("The server didn't take the cancel in time".into()))?
         .map_err(|e| DriverError::Message(e.to_string()))?;
     let killed = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        conn.query_drop(format!("KILL QUERY {}", via.thread_id)),
+        conn.query_drop(format!("{what} {}", via.thread_id)),
     )
     .await
     .map_err(|_| DriverError::Message("The server didn't take the cancel in time".into()))
@@ -599,6 +620,473 @@ pub async fn session_execute(session: &mut MysqlSession, sql: &str) -> Result<()
         .query_drop(sql)
         .await
         .map_err(|e| map_error(e, config))
+}
+
+/// Runs staged row edits as one transaction on the tab's session: every
+/// statement must change exactly one row (an UPDATE counts the row it
+/// matched, changed or not), or the whole batch rolls back and the failure
+/// names the statement. Never inside the user's own transaction (MySQL's
+/// `START TRANSACTION` would commit it): that is refused untouched.
+///
+/// MySQL keeps no per-table counts, so what the batch writes beyond its
+/// own rows is planned from the foreign keys before anything runs
+/// ([`reach::my_plan`]): the target's rows, then each table the deletes
+/// cascade into, are locked (`FOR UPDATE`, parents before children) and
+/// counted. With the parents locked, no other session can add or move a
+/// child until we end, so the counts are the rows the cascade writes.
+/// Writes that can't be counted (a trigger, a loop) are named instead. The
+/// batch stops before COMMIT unless that reach is exactly `approved`.
+///
+/// Each step gets `step` to answer. On a timeout the connection is killed
+/// at the server (which rolls the transaction back) and the session is
+/// marked [`MysqlSession::abandoned`] for the caller to drop. COMMIT has no
+/// limit and is never retried.
+pub async fn session_apply_changes_within(
+    session: &mut MysqlSession,
+    target: &Name,
+    statements: &[RowStatement],
+    step: Option<Duration>,
+    approved: Option<&Reach>,
+) -> Result<ApplyCounts, ApplyFailure> {
+    let limit = step.unwrap_or(Duration::MAX);
+    let late = |what: &str| {
+        format!(
+            "{what} didn't answer within {} s, so it was stopped and nothing was saved.",
+            limit.as_secs()
+        )
+    };
+    let open = match session.txn_known() {
+        Some(open) => Some(open),
+        None => session_probe_txn(session, limit).await,
+    };
+    match open {
+        Some(false) => {}
+        Some(true) => {
+            return Err(ApplyFailure::other(
+                "This tab has a transaction open. Commit or roll it back before saving edits.",
+            ))
+        }
+        // Left unknown: the caller drops the session.
+        None => return Err(ApplyFailure::other(late("The database"))),
+    }
+    // The catalog reads come first: inside the transaction the first plain
+    // read would fix its snapshot before the rows are locked.
+    let planned = match tokio::time::timeout(limit, my_plan_for(session, target, statements)).await
+    {
+        Ok(Ok(planned)) => planned,
+        Ok(Err(err)) => {
+            // With autocommit off the reads opened a transaction of ours.
+            if session.in_transaction() {
+                rollback(session, limit).await;
+            }
+            return Err(ApplyFailure::other(err.into_message()));
+        }
+        Err(_) => {
+            abandon(session);
+            return Err(ApplyFailure::other(late("The database")));
+        }
+    };
+    match tokio::time::timeout(limit, session.conn.query_drop("START TRANSACTION")).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(ApplyFailure::other(humanize(session, &err))),
+        Err(_) => {
+            abandon(session);
+            return Err(ApplyFailure::other(late("START TRANSACTION")));
+        }
+    }
+    let reach = match tokio::time::timeout(limit, my_count(session, planned)).await {
+        Ok(Ok(reach)) => reach,
+        Ok(Err(err)) => {
+            rollback(session, limit).await;
+            return Err(ApplyFailure::other(err.into_message()));
+        }
+        Err(_) => {
+            abandon(session);
+            return Err(ApplyFailure::other(late("The database")));
+        }
+    };
+    let mut counts = ApplyCounts::default();
+    for (index, statement) in statements.iter().enumerate() {
+        match tokio::time::timeout(limit, session.conn.query_drop(&statement.sql)).await {
+            Err(_) => {
+                abandon(session);
+                let named = statement.describe();
+                return Err(ApplyFailure {
+                    index: Some(index),
+                    message: late(&named),
+                    statement: Some(named),
+                    rows: None,
+                    unknown: false,
+                    reach: None,
+                });
+            }
+            Ok(Err(err)) => {
+                let message = humanize(session, &err);
+                rollback(session, limit).await;
+                return Err(ApplyFailure::error(index, statement, message));
+            }
+            Ok(Ok(())) => {
+                let rows = match statement.verb {
+                    Verb::Update => rows_matched(&session.conn.info())
+                        .unwrap_or_else(|| session.conn.affected_rows()),
+                    Verb::Insert | Verb::Delete => session.conn.affected_rows(),
+                };
+                if rows != 1 {
+                    rollback(session, limit).await;
+                    return Err(ApplyFailure::count(index, statement, rows));
+                }
+                counts.add(statement.verb, 1);
+            }
+        }
+    }
+    if !reach.is_empty() && approved != Some(&reach) {
+        rollback(session, limit).await;
+        return Err(ApplyFailure::reaches(reach));
+    }
+    if let Err(err) = session.conn.query_drop("COMMIT").await {
+        // Refused by the server: nothing was saved. Anything else (the
+        // socket went): it may have been.
+        if !matches!(err, mysql_async::Error::Server(_)) {
+            return Err(ApplyFailure::commit_lost());
+        }
+        let message = humanize(session, &err);
+        rollback(session, limit).await;
+        return Err(ApplyFailure::other(message));
+    }
+    Ok(counts)
+}
+
+fn humanize(session: &MysqlSession, err: &mysql_async::Error) -> String {
+    humanize_mysql_error(err, &session.config)
+}
+
+/// Kills the session's connection at the server, which rolls its
+/// transaction back (and stops a statement waiting on a lock), and marks
+/// the session for dropping.
+fn abandon(session: &mut MysqlSession) {
+    session.abandoned = true;
+    let via = session.cancel_via();
+    tokio::spawn(async move {
+        let _ = kill(via, "KILL").await;
+    });
+}
+
+/// Bounded: a ROLLBACK that doesn't answer abandons the session.
+async fn rollback(session: &mut MysqlSession, limit: Duration) {
+    let bound = limit.min(Duration::from_secs(5));
+    match tokio::time::timeout(bound, session.conn.query_drop("ROLLBACK")).await {
+        Ok(Ok(())) => {}
+        _ => abandon(session),
+    }
+}
+
+/// An UPDATE's `Rows matched: 1  Changed: 0  Warnings: 0`: the first
+/// number, which is the matched rows in every language the server speaks.
+fn rows_matched(info: &str) -> Option<u64> {
+    let start = info.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = info[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// The most tables a cascade walk loads keys for before giving up counting.
+const MAX_REACH_TABLES: usize = 200;
+
+/// A reach plan and the rows the batch's DELETEs name.
+struct Planned {
+    target: Name,
+    deleted: Option<String>,
+    plan: MyPlan,
+}
+
+/// `select` (a SELECT) without the session's `sql_select_limit`, which
+/// would cut a catalog read or a count short (or to nothing).
+fn unlimited(session: &MysqlSession, select: &str) -> String {
+    const ALL: &str = "18446744073709551615";
+    match session.flavor {
+        Flavor::Mariadb => format!("SET STATEMENT sql_select_limit = {ALL} FOR {select}"),
+        Flavor::Mysql => {
+            let rest = select.strip_prefix("SELECT ").unwrap_or(select);
+            format!("SELECT /*+ SET_VAR(sql_select_limit = {ALL}) */ {rest}")
+        }
+    }
+}
+
+async fn select_text(
+    session: &mut MysqlSession,
+    select: &str,
+) -> Result<Vec<Vec<Option<String>>>, DriverError> {
+    let sql = unlimited(session, select);
+    text_rows(session, &sql).await
+}
+
+/// What the batch can write beyond its own rows, from the catalog: the
+/// keys it cascades through (none while the tab has `foreign_key_checks`
+/// off: InnoDB cascades nothing then) and the target's triggers.
+async fn my_plan_for(
+    session: &mut MysqlSession,
+    target: &Name,
+    statements: &[RowStatement],
+) -> Result<Planned, DriverError> {
+    let deletes: Vec<&str> = statements
+        .iter()
+        .filter(|s| s.verb == Verb::Delete)
+        .filter_map(|s| s.predicate.as_deref())
+        .collect();
+    let deleted = match deletes.as_slice() {
+        [] => None,
+        [one] => Some(one.to_string()),
+        many => Some(
+            many.iter()
+                .map(|p| format!("({p})"))
+                .collect::<Vec<_>>()
+                .join(" OR "),
+        ),
+    };
+    let mut changed: Vec<String> = Vec::new();
+    for s in statements.iter().filter(|s| s.verb == Verb::Update) {
+        for c in &s.set {
+            if !changed.contains(c) {
+                changed.push(c.clone());
+            }
+        }
+    }
+    let settings = select_text(
+        session,
+        "SELECT @@foreign_key_checks, @@lower_case_table_names",
+    )
+    .await?;
+    let setting = |i: usize| settings.first().map(|r| cell(r, i)).unwrap_or_default();
+    let cascades = setting(0) != "0";
+    // Names compare without case when the server stores them so.
+    let fold = setting(1) != "0";
+    let name = |n: &Name| {
+        if fold {
+            (n.0.to_lowercase(), n.1.to_lowercase())
+        } else {
+            n.clone()
+        }
+    };
+    // The catalog's own spelling, for information_schema.
+    let (db, table) = (mysql_text(&target.0), mysql_text(&target.1));
+    // Several statements are one change only if the table can roll back.
+    if statements.len() > 1 {
+        let engine = select_text(
+            session,
+            &format!(
+                "SELECT t.ENGINE FROM information_schema.TABLES t \
+                 JOIN information_schema.ENGINES e ON e.ENGINE = t.ENGINE \
+                 WHERE t.TABLE_SCHEMA = {db} AND t.TABLE_NAME = {table} \
+                 AND COALESCE(e.TRANSACTIONS, 'NO') <> 'YES'"
+            ),
+        )
+        .await?;
+        if let Some(engine) = engine.first().map(|r| cell(r, 0)) {
+            return Err(DriverError::Message(format!(
+                "{} is a {engine} table, which can't roll back, so these changes can't be saved as one. Commit them one row at a time.",
+                target.1
+            )));
+        }
+    }
+    let target = name(target);
+    // The keys out of the target and every table they reach, a level per
+    // round.
+    let mut keys: Vec<MyForeignKey> = Vec::new();
+    let mut loaded: Vec<Name> = Vec::new();
+    let mut next = if cascades && (deleted.is_some() || !changed.is_empty()) {
+        vec![target.clone()]
+    } else {
+        Vec::new()
+    };
+    while !next.is_empty() && loaded.len() < MAX_REACH_TABLES {
+        let found = cascading_keys(session, &next).await?;
+        loaded.append(&mut next);
+        for mut key in found {
+            key.child = name(&key.child);
+            key.parent = name(&key.parent);
+            if !loaded.contains(&key.child) && !next.contains(&key.child) {
+                next.push(key.child.clone());
+            }
+            keys.push(key);
+        }
+    }
+    let mut plan = if next.is_empty() {
+        reach::my_plan(&target, deleted.as_deref(), &changed, &keys)
+    } else {
+        // Too far to follow: name what was seen, count nothing.
+        let mut all: Vec<String> = loaded.iter().chain(&next).map(reach::my_name).collect();
+        all.sort();
+        all.dedup();
+        MyPlan {
+            steps: Vec::new(),
+            uncounted: all,
+        }
+    };
+    // A trigger on the target writes what it likes. Cascaded rows fire
+    // none (InnoDB), so the target's are the only ones.
+    let verbs: Vec<&str> = statements
+        .iter()
+        .map(|s| match s.verb {
+            Verb::Insert => "'INSERT'",
+            Verb::Update => "'UPDATE'",
+            Verb::Delete => "'DELETE'",
+        })
+        .collect();
+    let triggers = select_text(
+        session,
+        &format!(
+            "SELECT 1 FROM information_schema.TRIGGERS \
+             WHERE EVENT_OBJECT_SCHEMA = {db} AND EVENT_OBJECT_TABLE = {table} \
+             AND EVENT_MANIPULATION IN ({}) LIMIT 1",
+            verbs.join(", ")
+        ),
+    )
+    .await?;
+    if !triggers.is_empty() {
+        plan.uncounted
+            .insert(0, format!("triggers on {}", reach::my_name(&target)));
+    } else {
+        // information_schema shows triggers only to a login with the
+        // TRIGGER privilege on the table: without it, there may be some.
+        const ME: &str = "CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '''@''', SUBSTRING_INDEX(CURRENT_USER(), '@', -1), '''')";
+        let sees = select_text(
+            session,
+            &format!(
+                "SELECT 1 FROM information_schema.USER_PRIVILEGES \
+                 WHERE PRIVILEGE_TYPE = 'TRIGGER' AND GRANTEE = {ME} \
+                 UNION ALL SELECT 1 FROM information_schema.SCHEMA_PRIVILEGES \
+                 WHERE PRIVILEGE_TYPE = 'TRIGGER' AND GRANTEE = {ME} AND TABLE_SCHEMA = {db} \
+                 UNION ALL SELECT 1 FROM information_schema.TABLE_PRIVILEGES \
+                 WHERE PRIVILEGE_TYPE = 'TRIGGER' AND GRANTEE = {ME} AND TABLE_SCHEMA = {db} \
+                 AND TABLE_NAME = {table}"
+            ),
+        )
+        .await?;
+        if sees.is_empty() {
+            plan.uncounted.insert(
+                0,
+                format!(
+                    "any triggers on {} this login can't see",
+                    reach::my_name(&target)
+                ),
+            );
+        }
+    }
+    Ok(Planned {
+        target,
+        deleted,
+        plan,
+    })
+}
+
+/// The plan's counts, with the rows locked: the target's, then each
+/// level's, parents before children (see [`session_apply_changes_within`]).
+/// Runs inside the batch's transaction, before its statements.
+async fn my_count(session: &mut MysqlSession, planned: Planned) -> Result<Reach, DriverError> {
+    let Planned {
+        target,
+        deleted,
+        plan,
+    } = planned;
+    let mut tables = Vec::new();
+    if let (Some(deleted), false) = (&deleted, plan.steps.is_empty()) {
+        let table = super::qualified_table_sql(super::EngineKind::Mysql, &target.0, &target.1);
+        let lock = unlimited(
+            session,
+            &format!("SELECT 1 FROM {table} WHERE {deleted} FOR UPDATE"),
+        );
+        session_execute(session, &lock).await?;
+        for step in &plan.steps {
+            let table =
+                super::qualified_table_sql(super::EngineKind::Mysql, &step.table.0, &step.table.1);
+            let rows = select_text(
+                session,
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {} FOR UPDATE",
+                    step.predicate
+                ),
+            )
+            .await?;
+            let n: u64 = rows
+                .first()
+                .map(|r| cell(r, 0))
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| DriverError::Message("The server didn't count the rows".into()))?;
+            if n == 0 {
+                continue;
+            }
+            let (updated, deleted) = match step.write {
+                MyWrite::Delete => (0, n),
+                MyWrite::Update(_) => (n, 0),
+            };
+            tables.push(TableRows {
+                schema: step.table.0.clone(),
+                table: step.table.1.clone(),
+                inserted: 0,
+                updated,
+                deleted,
+            });
+        }
+    }
+    tables.sort();
+    Ok(Reach {
+        tables,
+        unnamed: 0,
+        uncounted: plan.uncounted,
+    })
+}
+
+/// The keys that cascade or set NULL out of `parents`, columns in order.
+async fn cascading_keys(
+    session: &mut MysqlSession,
+    parents: &[Name],
+) -> Result<Vec<MyForeignKey>, DriverError> {
+    let pairs: Vec<String> = parents
+        .iter()
+        .map(|(s, t)| format!("({}, {})", mysql_text(s), mysql_text(t)))
+        .collect();
+    let rows = select_text(
+        session,
+        &format!(
+            "SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, \
+               k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, \
+               rc.DELETE_RULE, rc.UPDATE_RULE \
+             FROM information_schema.KEY_COLUMN_USAGE k \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+               ON rc.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND rc.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+               AND rc.TABLE_NAME = k.TABLE_NAME \
+             WHERE (k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME) IN ({}) \
+               AND (rc.DELETE_RULE IN ('CASCADE', 'SET NULL') OR rc.UPDATE_RULE IN ('CASCADE', 'SET NULL')) \
+             ORDER BY k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION",
+            pairs.join(", ")
+        ),
+    )
+    .await?;
+    let mut keys: Vec<(String, MyForeignKey)> = Vec::new();
+    for r in &rows {
+        let child = (cell(r, 0), cell(r, 1));
+        let name = cell(r, 2);
+        match keys.last_mut() {
+            Some((n, key)) if *n == name && key.child == child => {
+                key.child_columns.push(cell(r, 3));
+                key.parent_columns.push(cell(r, 6));
+            }
+            _ => keys.push((
+                name,
+                MyForeignKey {
+                    child,
+                    child_columns: vec![cell(r, 3)],
+                    parent: (cell(r, 4), cell(r, 5)),
+                    parent_columns: vec![cell(r, 6)],
+                    on_delete: MyRule::parse(&cell(r, 7)),
+                    on_update: MyRule::parse(&cell(r, 8)),
+                },
+            )),
+        }
+    }
+    Ok(keys.into_iter().map(|(_, k)| k).collect())
 }
 
 /// How a column's text-protocol cells become [`Value`]s.

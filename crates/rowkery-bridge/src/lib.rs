@@ -1921,7 +1921,7 @@ async fn keep_after_cancel(
 
 /// How long saving edits waits for the tab's session, for `BEGIN`, and for
 /// each statement, before it stops and rolls back. `COMMIT` has no limit.
-const APPLY_STEP_TIMEOUT: Duration = if cfg!(test) {
+pub(crate) const APPLY_STEP_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(2)
 } else {
     Duration::from_secs(20)
@@ -2043,10 +2043,10 @@ fn apply_changes_now(
             config,
             connection_id,
         } => (EngineKind::Postgres, config.safe_mode, connection_id),
-        WindowTarget::Mysql { .. } => {
-            let _ = respond_to.send(Err(mysql::LATER.into()));
-            return;
-        }
+        WindowTarget::Mysql {
+            config,
+            connection_id,
+        } => (EngineKind::Mysql, config.safe_mode, connection_id),
     };
     // Edits staged on one server never run on another the window moved to
     // (a table of the same name there is not the same rows).
@@ -2057,6 +2057,7 @@ fn apply_changes_now(
         ));
         return;
     }
+    let table_name = (table.schema.clone(), table.table.clone());
     let statements = match build_row_changes(engine, &table, &changes) {
         Ok(s) if s.is_empty() => {
             let _ = respond_to.send(Err("Nothing to commit".into()));
@@ -2096,9 +2097,37 @@ fn apply_changes_now(
     // Counts as running (a quit asks first) until it answers.
     let held = state.busy.hold(Work::Commit);
     match target {
-        // Refused above.
-        WindowTarget::Mysql { .. } => {
-            let _ = respond_to.send(Err(mysql::LATER.into()));
+        WindowTarget::Mysql {
+            connection_id,
+            config,
+        } => {
+            let slot = mysql::MysqlSlot {
+                pool: state.mysql_pool.clone(),
+                generation: state
+                    .mysql_pool
+                    .lock()
+                    .map(|p| p.generation(&window_id))
+                    .unwrap_or(0),
+                window_id,
+            };
+            let prefetch = state.pool.clone();
+            let runtime = state.runtime.clone();
+            state.runtime.spawn(async move {
+                let _held = held;
+                let window_id = slot.window_id.clone();
+                let result = mysql::apply_changes(
+                    slot,
+                    tab_id,
+                    connection_id,
+                    config,
+                    &table_name,
+                    &statements,
+                    reach.as_ref(),
+                )
+                .await;
+                invalidate_prefetch(&prefetch, &window_id, &runtime);
+                let _ = respond_to.send(result.map(outcome));
+            });
         }
         WindowTarget::Sqlite {
             path, safe_mode, ..
