@@ -151,6 +151,8 @@ export interface WindowOpened {
   catalog: SchemaCatalog;
   /** "16.4" for Postgres, the SQLite library's "3.46.0"; null if unknown. */
   server_version: string | null;
+  /** Which server a MySQL connection reached, as it says; null otherwise. */
+  server_flavor?: "MySQL" | "MariaDB" | null;
   elapsed_ms: number;
   /**
    * True when `catalog` came from the on-disk cache; a `catalog-update` event

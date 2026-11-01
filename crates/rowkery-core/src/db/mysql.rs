@@ -78,6 +78,10 @@ pub struct MysqlSession {
     version: String,
     /// In its `program_name` connect attribute, after `Rowkery `.
     tag: String,
+    /// Kept while the session lives (a place under the connection's cap).
+    guard: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// See [`MysqlSession::keeps_state`].
+    stateful: bool,
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -132,10 +136,60 @@ impl MysqlSession {
     /// The server said a transaction is open after the last statement
     /// (`SERVER_STATUS_IN_TRANS`).
     pub fn in_transaction(&self) -> bool {
-        self.conn.last_ok_packet().is_some_and(|ok| {
-            ok.status_flags()
-                .contains(mysql_async::consts::StatusFlags::SERVER_STATUS_IN_TRANS)
-        })
+        self.txn_known() == Some(true)
+    }
+
+    /// Whether a transaction is open, as the last OK said; `None` after
+    /// an error, which carries no status (ask with [`session_probe_txn`]).
+    pub fn txn_known(&self) -> Option<bool> {
+        self.status()
+            .map(|s| s.contains(mysql_async::consts::StatusFlags::SERVER_STATUS_IN_TRANS))
+    }
+
+    fn status(&self) -> Option<mysql_async::consts::StatusFlags> {
+        self.conn.last_ok_packet().map(|ok| ok.status_flags())
+    }
+
+    /// The session holds what a new one wouldn't: a `USE`, a `SET`
+    /// (autocommit off, a variable), so it isn't closed when idle.
+    pub fn keeps_state(&self) -> bool {
+        self.stateful
+            || self.status().is_some_and(|s| {
+                !s.contains(mysql_async::consts::StatusFlags::SERVER_STATUS_AUTOCOMMIT)
+            })
+    }
+
+    /// A statement that changes the session (`USE`, `SET`) ran on it.
+    pub fn note_state(&mut self) {
+        self.stateful = true;
+    }
+
+    /// The socket is gone: nothing more can run on it.
+    pub fn is_closed(&self) -> bool {
+        self.conn.is_disconnected()
+    }
+
+    /// Keeps `guard` while the session lives.
+    pub fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
+        self.guard = Some(guard);
+    }
+
+    pub fn holds(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    pub fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.guard.take()
+    }
+}
+
+/// Asks the server whether a transaction is open: `DO 0` changes nothing
+/// and its OK carries the status flags. `None` when it doesn't answer
+/// within `limit`.
+pub async fn session_probe_txn(session: &mut MysqlSession, limit: Duration) -> Option<bool> {
+    match tokio::time::timeout(limit, session.conn.query_drop("DO 0")).await {
+        Ok(Ok(())) => Some(session.in_transaction()),
+        _ => None,
     }
 }
 
@@ -247,6 +301,8 @@ pub async fn open_session_via(
         flavor,
         version,
         tag,
+        guard: None,
+        stateful: false,
     })
 }
 
@@ -254,12 +310,31 @@ pub async fn open_session_via(
 /// each transaction after it starts read-only, autocommit statements too.
 const READ_ONLY: &str = "SET SESSION TRANSACTION READ ONLY";
 
-/// Whether a run sends [`READ_ONLY`] ahead of itself. A stored function
-/// can turn the session's access mode back (MariaDB lets it), so it is set
-/// again before every run on a read-only connection. A transaction already
-/// open keeps the mode it started with: the user's `BEGIN` got one too.
-fn read_only_ahead(session: &MysqlSession) -> bool {
-    session.config.safe_mode == SafeMode::ReadOnly && !session.in_transaction()
+/// Sends [`READ_ONLY`] ahead of a run on a read-only connection. A stored
+/// function can turn the session's access mode back (MariaDB lets it), so
+/// it is set again before every statement. A transaction already open
+/// keeps the mode it started with (the user's `BEGIN` got one too), and
+/// the server refuses the SET inside one; after an error, which says
+/// nothing of it, the server is asked first.
+async fn read_only_ahead(session: &mut MysqlSession) -> Result<(), DriverError> {
+    if session.config.safe_mode != SafeMode::ReadOnly {
+        return Ok(());
+    }
+    if session.txn_known().is_none() {
+        session
+            .conn
+            .query_drop("DO 0")
+            .await
+            .map_err(|e| map_error(e, &session.config))?;
+    }
+    if session.txn_known() == Some(false) {
+        session
+            .conn
+            .query_drop(READ_ONLY)
+            .await
+            .map_err(|e| map_error(e, &session.config))?;
+    }
+    Ok(())
 }
 
 fn tls_opts(config: &MysqlConnection, tunneled: bool) -> Result<Option<SslOpts>, DriverError> {
@@ -444,13 +519,7 @@ async fn stream_statements<F>(
 where
     F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
 {
-    if read_only_ahead(session) {
-        session
-            .conn
-            .query_drop(READ_ONLY)
-            .await
-            .map_err(|e| map_error(e, &session.config))?;
-    }
+    read_only_ahead(session).await?;
     // A CALL ends with an OK of its own after the result sets it returned:
     // its count is the last result set's, not that OK's.
     let calls = statement_texts(sql, Dialect::Mysql)

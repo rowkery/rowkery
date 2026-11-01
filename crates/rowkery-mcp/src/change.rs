@@ -35,6 +35,7 @@ pub async fn check(
     let changes = safety::row_changes(sql)?;
     let marks = crate::masked_marks(store, target).await?;
     match &target.record {
+        ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
         ConnectionRecord::Postgres(_) => {
             for change in &changes {
                 // The statement as sent, before the planner evaluates any of
@@ -267,6 +268,7 @@ fn refuse_unshared(
     let default = match target.record {
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
+        ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
     };
     if rule.restricts() && crate::lineage::keeps_back(&rule, above, touched, default) {
         return Err(guard::HIDDEN_REFUSAL.into());
@@ -295,6 +297,7 @@ async fn masked_mention(
     let default = match target.record {
         ConnectionRecord::Postgres(_) => "public",
         ConnectionRecord::Sqlite(_) => "main",
+        ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
     };
     // A partition or child table counts as the tables it's part of, in
     // any schema.

@@ -563,6 +563,7 @@ pub async fn plan(id: &str) -> Result<Plan, String> {
     for change in changes {
         let events = trigger_events(&change);
         let triggers = match &target.record {
+            ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
             ConnectionRecord::Postgres(_) => {
                 let read = store
                     .read(
@@ -707,6 +708,7 @@ async fn preview(
     changes: &[RowChange],
 ) -> Result<(Vec<StatementPreview>, Option<Reach>), String> {
     match record {
+        ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
         ConnectionRecord::Postgres(pg) => pg_preview(pg, database, changes).await,
         ConnectionRecord::Sqlite(c) => {
             let path = c.path.clone();
@@ -729,6 +731,7 @@ pub async fn commit(id: &str, seen: &Seen) -> Result<CommitOutcome, String> {
     }
     let flight = std::sync::Arc::new(Flight::start(id));
     let ran = match &record {
+        ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
         ConnectionRecord::Postgres(pg) => {
             let target = Target {
                 record: record.clone(),

@@ -439,6 +439,8 @@ struct WindowDto {
     database: String,
     catalog: SchemaCatalog,
     server_version: Option<String>,
+    /// `MySQL` or `MariaDB` for a MySQL connection, as the server says.
+    server_flavor: Option<&'static str>,
     elapsed_ms: u64,
     /// From the disk cache: a `catalog-update` event with `open_seq` follows.
     cached: bool,
@@ -461,6 +463,7 @@ async fn open_window(
                 database: w.database,
                 catalog: w.catalog,
                 server_version: w.server_version,
+                server_flavor: w.server_flavor,
                 elapsed_ms: w.elapsed_ms,
                 cached: w.cached,
                 open_seq: w.open_seq,
@@ -1517,6 +1520,7 @@ fn review_changes(
 ) -> Result<rowkery_bridge::ReviewedChanges, String> {
     let kind = match engine.as_str() {
         "postgres" => EngineKind::Postgres,
+        "mysql" => EngineKind::Mysql,
         _ => EngineKind::Sqlite,
     };
     rowkery_bridge::review_changes(kind, &table, &changes)
@@ -1678,6 +1682,7 @@ fn browse_table_sql(
 ) -> String {
     let kind = match engine.as_str() {
         "postgres" => EngineKind::Postgres,
+        "mysql" => EngineKind::Mysql,
         _ => EngineKind::Sqlite,
     };
     let opts = BrowseOptions {
@@ -1706,6 +1711,7 @@ async fn count_rows(
 ) -> Result<Option<i64>, String> {
     let kind = match engine.as_str() {
         "postgres" => EngineKind::Postgres,
+        "mysql" => EngineKind::Mysql,
         _ => EngineKind::Sqlite,
     };
     let sql = rowkery_core::db::table_count_query(kind, &schema, &table, filter.as_deref());

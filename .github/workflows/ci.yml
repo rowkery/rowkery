@@ -135,6 +135,8 @@ jobs:
             echo "== port ${server%%:*}"
             ROWKERY_MYSQL_PORT=${server%%:*} ROWKERY_MYSQL_FLAVOR=${server##*:} \
               cargo test -p rowkery-core --features mysql-integration --test mysql_integration
+            ROWKERY_MYSQL_PORT=${server%%:*} ROWKERY_MYSQL_FLAVOR=${server##*:} \
+              cargo test -p rowkery-bridge --features mysql-integration mysql_
           done
       - name: Website build
         working-directory: apps/web

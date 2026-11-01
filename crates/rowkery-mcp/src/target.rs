@@ -97,6 +97,8 @@ pub fn any(config: &AppConfig, id: &str, database: Option<&str>) -> Result<Targe
     let database = match &record {
         ConnectionRecord::Postgres(pg) => database.unwrap_or(&pg.database).to_string(),
         ConnectionRecord::Sqlite(_) => "main".to_string(),
+        // Not shared with agents until its guards are in.
+        ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
     };
     Ok(Target { record, database })
 }
@@ -435,6 +437,7 @@ impl Store {
     ) -> Result<Vec<(String, Option<i64>)>, String> {
         match &target.record {
             ConnectionRecord::Sqlite(_) => Ok(vec![("main".into(), None)]),
+            ConnectionRecord::Mysql(_) => Err(crate::MYSQL_NOT_SHARED.into()),
             ConnectionRecord::Postgres(_) => {
                 let list = self
                     .guarded(target, "Timed out.", async |s| {
@@ -455,6 +458,7 @@ impl Store {
         let key = target.key();
         if refresh || !self.catalogs.contains_key(&key) {
             let catalog = match &target.record {
+                ConnectionRecord::Mysql(_) => return Err(crate::MYSQL_NOT_SHARED.into()),
                 ConnectionRecord::Sqlite(sqlite) => {
                     let mut driver = open_sqlite(&sqlite.path)?;
                     driver.introspect_catalog().map_err(|e| e.to_string())?
@@ -493,6 +497,7 @@ impl Store {
     /// [`crate::health::shape`] leaves out what isn't shared).
     pub async fn health(&mut self, target: &Target) -> Result<HealthReport, String> {
         match &target.record {
+            ConnectionRecord::Mysql(_) => Err(crate::MYSQL_NOT_SHARED.into()),
             ConnectionRecord::Sqlite(sqlite) => {
                 let (path, timeout) = (sqlite.path.clone(), target.timeout());
                 tokio::task::spawn_blocking(move || sqlite_health(&path, timeout))
@@ -611,6 +616,7 @@ impl Store {
         F: FnMut(&mut S, Vec<Value>) -> bool + Send + 'static,
     {
         match &target.record {
+            ConnectionRecord::Mysql(_) => Err(crate::MYSQL_NOT_SHARED.into()),
             ConnectionRecord::Sqlite(sqlite) => {
                 let path = sqlite.path.clone();
                 let (sql, timeout) = (sql.to_string(), target.timeout());

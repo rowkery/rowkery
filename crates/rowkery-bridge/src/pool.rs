@@ -49,16 +49,140 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rowkery_core::connections::PostgresConnection;
-use rowkery_core::db::postgres::{
-    open_session_via, session_has_cursor, session_ping, session_probe_txn, PostgresSession,
-    TxnState,
-};
+use std::future::Future;
+
+use rowkery_core::connections::{MysqlConnection, PostgresConnection};
+use rowkery_core::db::mysql::{self, MysqlSession};
+use rowkery_core::db::postgres::{self, PostgresSession, TxnState};
 use rowkery_core::db::DriverError;
 use rowkery_core::route::Route;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::prefetch::Prefetcher;
+
+/// What the pool needs of a server session: Postgres's, or MySQL's.
+pub(crate) trait PoolSession: Send + Sized + 'static {
+    /// The saved connection a new session is opened from.
+    type Config: Clone + Send + Sync + 'static;
+    fn connection_id(&self) -> &str;
+    fn is_closed(&self) -> bool;
+    fn route(&self) -> Option<Route>;
+    /// Names the session at the server (its `application_name` or
+    /// `program_name`), for the Sessions tab.
+    fn tag(&self) -> &str;
+    fn txn_state(&self) -> TxnState;
+    /// It holds a paged result whose Load more needs it.
+    fn has_cursor(&self) -> bool;
+    fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>);
+    fn holds(&self) -> bool;
+    fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>>;
+    fn open(
+        connection_id: String,
+        config: Self::Config,
+        route: Option<Route>,
+    ) -> impl Future<Output = Result<Self, DriverError>> + Send;
+    fn ping(&mut self, limit: Duration) -> impl Future<Output = bool> + Send;
+    /// Asks the server whether a transaction is open, when not known.
+    fn probe_txn(&mut self, limit: Duration) -> impl Future<Output = ()> + Send;
+}
+
+impl PoolSession for PostgresSession {
+    type Config = PostgresConnection;
+    fn connection_id(&self) -> &str {
+        PostgresSession::connection_id(self)
+    }
+    fn is_closed(&self) -> bool {
+        PostgresSession::is_closed(self)
+    }
+    fn route(&self) -> Option<Route> {
+        PostgresSession::route(self)
+    }
+    fn tag(&self) -> &str {
+        PostgresSession::tag(self)
+    }
+    fn txn_state(&self) -> TxnState {
+        PostgresSession::txn_state(self)
+    }
+    fn has_cursor(&self) -> bool {
+        postgres::session_has_cursor(self)
+    }
+    fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
+        PostgresSession::hold(self, guard)
+    }
+    fn holds(&self) -> bool {
+        PostgresSession::holds(self)
+    }
+    fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        PostgresSession::unhold(self)
+    }
+    fn open(
+        connection_id: String,
+        config: PostgresConnection,
+        route: Option<Route>,
+    ) -> impl Future<Output = Result<Self, DriverError>> + Send {
+        postgres::open_session_via(connection_id, config, None, route)
+    }
+    async fn ping(&mut self, limit: Duration) -> bool {
+        postgres::session_ping(self, limit).await
+    }
+    async fn probe_txn(&mut self, limit: Duration) {
+        postgres::session_probe_txn(self, limit).await;
+    }
+}
+
+/// MySQL's OK packets say after every statement whether a transaction is
+/// open; an error's packet doesn't.
+impl PoolSession for MysqlSession {
+    type Config = MysqlConnection;
+    fn connection_id(&self) -> &str {
+        MysqlSession::connection_id(self)
+    }
+    fn is_closed(&self) -> bool {
+        MysqlSession::is_closed(self)
+    }
+    fn route(&self) -> Option<Route> {
+        MysqlSession::route(self)
+    }
+    fn tag(&self) -> &str {
+        MysqlSession::tag(self)
+    }
+    /// Unknown after an error (its packet says nothing): `settle_txn`
+    /// asks the server.
+    fn txn_state(&self) -> TxnState {
+        match self.txn_known() {
+            Some(true) => TxnState::Users,
+            Some(false) => TxnState::None,
+            None => TxnState::Unknown,
+        }
+    }
+    /// No cursor, but a `USE` or `SET` the tab's next run counts on: kept
+    /// when idle like a paged result, and closed last.
+    fn has_cursor(&self) -> bool {
+        self.keeps_state()
+    }
+    fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
+        MysqlSession::hold(self, guard)
+    }
+    fn holds(&self) -> bool {
+        MysqlSession::holds(self)
+    }
+    fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        MysqlSession::unhold(self)
+    }
+    async fn open(
+        connection_id: String,
+        config: MysqlConnection,
+        route: Option<Route>,
+    ) -> Result<Self, DriverError> {
+        mysql::open_session_via(connection_id, config, None, route).await
+    }
+    async fn ping(&mut self, limit: Duration) -> bool {
+        mysql::session_ping(self, limit).await
+    }
+    async fn probe_txn(&mut self, limit: Duration) {
+        mysql::session_probe_txn(self, limit).await;
+    }
+}
 
 /// The most sessions one saved connection holds open at once, across its
 /// windows (2026-10-16): 50 tabs no longer mean 50 backends.
@@ -86,14 +210,14 @@ pub(crate) const LOST_TXN: &str = "This tab's connection was lost while a transa
 pub(crate) const LOST_MAYBE_TXN: &str = "This tab's connection was lost, and with it any transaction that was open in it (the server rolled it back). Nothing was run now; check what was saved and run your statements again.";
 
 /// The session may hold the user's transaction: never close it on our own.
-fn at_risk(session: &PostgresSession) -> bool {
+fn at_risk<S: PoolSession>(session: &S) -> bool {
     session.txn_state() != TxnState::None
 }
 
 /// Idle close leaves it: it may hold the user's transaction, or a paged
 /// result whose Load more would fail without it.
-fn kept_when_idle(session: &PostgresSession) -> bool {
-    at_risk(session) || session_has_cursor(session)
+fn kept_when_idle<S: PoolSession>(session: &S) -> bool {
+    at_risk(session) || session.has_cursor()
 }
 
 /// Which of a window's sessions.
@@ -121,15 +245,14 @@ fn waits(slot: Slot) -> bool {
     matches!(slot, Slot::Tab(_) | Slot::QuickLook)
 }
 
-struct Parked {
-    session: PostgresSession,
+struct Parked<S> {
+    session: S,
     generation: u64,
     last_used: Instant,
 }
 
-#[derive(Default)]
-pub(crate) struct SessionPool {
-    parked: HashMap<Key, Parked>,
+pub(crate) struct SessionPool<S = PostgresSession> {
+    parked: HashMap<Key, Parked<S>>,
     /// Bumped whenever a window is re-pointed or closed, so a session that
     /// was out running a query for the old target is dropped, not parked.
     generations: HashMap<String, u64>,
@@ -168,29 +291,51 @@ pub(crate) struct SessionPool {
     caps: HashMap<String, Arc<Semaphore>>,
 }
 
-pub(crate) type SharedPool = Arc<Mutex<SessionPool>>;
+impl<S> Default for SessionPool<S> {
+    fn default() -> Self {
+        Self {
+            parked: HashMap::new(),
+            generations: HashMap::new(),
+            tunnels: HashMap::new(),
+            prefetchers: HashMap::new(),
+            out: HashMap::new(),
+            replacing: HashSet::new(),
+            returned: Arc::default(),
+            lost: HashMap::new(),
+            out_risk: HashMap::new(),
+            closed: HashSet::new(),
+            closed_windows: HashSet::new(),
+            next_checkout: 0,
+            quick_look: HashMap::new(),
+            tags: HashMap::new(),
+            caps: HashMap::new(),
+        }
+    }
+}
+
+pub(crate) type SharedPool<S = PostgresSession> = Arc<Mutex<SessionPool<S>>>;
 
 /// A session taken from the pool (or freshly opened) for one piece of work.
-pub(crate) struct Lease {
-    pub session: PostgresSession,
+pub(crate) struct Lease<S = PostgresSession> {
+    pub session: S,
     /// True when the session was reused rather than opened for this lease.
     pub reused: bool,
     /// Holds the slot until the session is given back (or this is dropped).
-    pub out: Checkout,
+    pub out: Checkout<S>,
 }
 
 /// A slot's session is out. Ends with `give_back` (or ping's restore); if
 /// dropped first, the session went with it, and a tab that may have had a
 /// transaction open in it is marked lost.
-pub(crate) struct Checkout {
-    pool: Option<SharedPool>,
+pub(crate) struct Checkout<S = PostgresSession> {
+    pool: Option<SharedPool<S>>,
     key: Key,
     id: u64,
     /// The session may have held the user's transaction when it went out.
     risk: Option<bool>,
 }
 
-impl Checkout {
+impl<S> Checkout<S> {
     /// The session may hold the user's transaction from now on (`risk` as
     /// in [`risk_of`]), so a re-point or safe mode change waits for it, and
     /// if it is lost while out the tab's next statement says so.
@@ -222,7 +367,7 @@ impl Checkout {
     }
 }
 
-impl Drop for Checkout {
+impl<S> Drop for Checkout<S> {
     fn drop(&mut self) {
         let Some(pool) = self.pool.take() else {
             return;
@@ -246,7 +391,7 @@ impl Drop for Checkout {
     }
 }
 
-fn risk_of(session: &PostgresSession) -> Option<bool> {
+fn risk_of<S: PoolSession>(session: &S) -> Option<bool> {
     match session.txn_state() {
         TxnState::None => None,
         TxnState::Users => Some(true),
@@ -254,7 +399,7 @@ fn risk_of(session: &PostgresSession) -> Option<bool> {
     }
 }
 
-impl SessionPool {
+impl<S: PoolSession> SessionPool<S> {
     /// The window's query tabs whose session may hold the user's open
     /// transaction, which re-pointing the window would roll back: parked,
     /// or out (running, settling, or kept after a cancel) since a lease that
@@ -305,7 +450,7 @@ impl SessionPool {
     /// drops the returned sessions outside the lock. A tab whose session may
     /// have held the user's transaction is marked lost, so its next statement
     /// says so instead of running as if nothing happened.
-    pub fn reset_window(&mut self, window_id: &str) -> (u64, Vec<PostgresSession>) {
+    pub fn reset_window(&mut self, window_id: &str) -> (u64, Vec<S>) {
         let generation = self.generation(window_id) + 1;
         self.generations.insert(window_id.to_string(), generation);
         self.tunnels.remove(window_id);
@@ -337,7 +482,7 @@ impl SessionPool {
 
     /// Closes the window entirely (no new generation is needed afterwards,
     /// but bumping it keeps in-flight sessions from being parked).
-    pub fn close_window(&mut self, window_id: &str) -> Vec<PostgresSession> {
+    pub fn close_window(&mut self, window_id: &str) -> Vec<S> {
         let (_, dropped) = self.reset_window(window_id);
         self.lost.retain(|(w, _), _| w != window_id);
         self.closed_windows.insert(window_id.to_string());
@@ -346,7 +491,7 @@ impl SessionPool {
 
     /// Forgets the tab; its session, parked, is returned to drop, and one
     /// still out is dropped when it comes back.
-    pub fn close_tab(&mut self, window_id: &str, tab_id: u64) -> Option<PostgresSession> {
+    pub fn close_tab(&mut self, window_id: &str, tab_id: u64) -> Option<S> {
         let key = (window_id.to_string(), Slot::Tab(tab_id));
         self.lost.remove(&key);
         if self.out.contains_key(&key) {
@@ -390,7 +535,7 @@ impl SessionPool {
 
     /// Gives `session` a place under its connection's cap if it has none;
     /// false when every place is taken.
-    fn place(&mut self, session: &mut PostgresSession) -> bool {
+    fn place(&mut self, session: &mut S) -> bool {
         if session.holds() {
             return true;
         }
@@ -407,7 +552,7 @@ impl SessionPool {
     /// free its place: a dead one first, then the least recently used with
     /// no cursor, then one with a cursor of ours. Never one that may hold
     /// the user's transaction. The caller drops it outside the lock.
-    fn evict(&mut self, connection_id: &str) -> Option<PostgresSession> {
+    fn evict(&mut self, connection_id: &str) -> Option<S> {
         let key = self
             .parked
             .iter()
@@ -416,13 +561,7 @@ impl SessionPool {
                     && p.session.holds()
                     && (p.session.is_closed() || !at_risk(&p.session))
             })
-            .min_by_key(|(_, p)| {
-                (
-                    !p.session.is_closed(),
-                    session_has_cursor(&p.session),
-                    p.last_used,
-                )
-            })
+            .min_by_key(|(_, p)| (!p.session.is_closed(), p.session.has_cursor(), p.last_used))
             .map(|(k, _)| k.clone())?;
         let p = self.parked.remove(&key)?;
         let (w, slot) = key;
@@ -472,7 +611,7 @@ impl SessionPool {
 
     /// The slot's own session, else the window's spare (never for the
     /// Sessions tab, which would leave the next query a cold start).
-    fn take(&mut self, window_id: &str, slot: Slot, generation: u64) -> Option<Parked> {
+    fn take(&mut self, window_id: &str, slot: Slot, generation: u64) -> Option<Parked<S>> {
         let own = (window_id.to_string(), slot);
         let spare = (window_id.to_string(), Slot::Spare);
         let spare = (slot != Slot::Monitor).then_some(spare);
@@ -489,8 +628,8 @@ impl SessionPool {
         window_id: &str,
         slot: Slot,
         generation: u64,
-        mut session: PostgresSession,
-    ) -> Option<PostgresSession> {
+        mut session: S,
+    ) -> Option<S> {
         let key = (window_id.to_string(), slot);
         // Its tab closed while it was out: it goes, and its transaction.
         if self.closed.remove(&key) {
@@ -535,7 +674,7 @@ impl SessionPool {
     }
 
     /// A tab's session that may have held the user's transaction is gone.
-    fn note_lost(&mut self, window_id: &str, slot: Slot, session: &PostgresSession) {
+    fn note_lost(&mut self, window_id: &str, slot: Slot, session: &S) {
         // Nobody is left to tell.
         if self.closed_windows.contains(window_id) {
             return;
@@ -549,7 +688,7 @@ impl SessionPool {
     /// left with no parked session. A session that may hold the user's open
     /// transaction, or a paged result's cursor, stays (unless its socket is
     /// already gone).
-    pub fn sweep(&mut self, idle: Duration) -> Vec<PostgresSession> {
+    pub fn sweep(&mut self, idle: Duration) -> Vec<S> {
         let stale: Vec<Key> = self
             .parked
             .iter()
@@ -593,7 +732,7 @@ impl SessionPool {
     /// pinged (their slots marked out, so a run waits for the ping, though
     /// not for a dead one's replacement). Never a
     /// session that may hold the user's transaction.
-    fn take_idle(&mut self, window_id: &str, idle: Duration) -> Vec<(Slot, Parked, u64)> {
+    fn take_idle(&mut self, window_id: &str, idle: Duration) -> Vec<(Slot, Parked<S>, u64)> {
         let keys: Vec<Key> = self
             .parked
             .iter()
@@ -620,8 +759,8 @@ impl SessionPool {
         window_id: &str,
         slot: Slot,
         id: u64,
-        parked: Option<Parked>,
-    ) -> Option<PostgresSession> {
+        parked: Option<Parked<S>>,
+    ) -> Option<S> {
         let key = (window_id.to_string(), slot);
         let ours = self.out.get(&key) == Some(&id);
         let closed = ours && self.closed.remove(&key);
@@ -645,7 +784,7 @@ impl SessionPool {
 
     /// Marks the slot's own session out (one checkout at a time per slot that
     /// waits), and says whether the tab lost a transaction since.
-    fn check_out(&mut self, pool: &SharedPool, key: &Key) -> Checkout {
+    fn check_out(&mut self, pool: &SharedPool<S>, key: &Key) -> Checkout<S> {
         if !waits(key.1) {
             return Checkout::none();
         }
@@ -672,25 +811,25 @@ pub(crate) enum WaitFor {
 
 /// What a lease found in the pool (short-lived, so its size doesn't matter).
 #[allow(clippy::large_enum_variant)]
-enum Found {
+enum Found<S> {
     /// The slot's own session is out: wait for it.
     Busy,
     /// The tab's transaction went with its session.
     Lost(bool),
-    Ready(Option<Parked>, Option<Route>, Checkout),
+    Ready(Option<Parked<S>>, Option<Route>, Checkout<S>),
 }
 
 /// Takes the slot's warm session (or the window's spare), checking it is
 /// still alive, or opens a new one ([`lease_or_wait`], without being told
 /// of a wait for a free place).
-pub(crate) async fn lease(
-    pool: &SharedPool,
+pub(crate) async fn lease<S: PoolSession>(
+    pool: &SharedPool<S>,
     window_id: &str,
     slot: Slot,
     generation: u64,
     connection_id: String,
-    config: PostgresConnection,
-) -> Result<Lease, DriverError> {
+    config: S::Config,
+) -> Result<Lease<S>, DriverError> {
     lease_or_wait(
         pool,
         window_id,
@@ -707,15 +846,15 @@ pub(crate) async fn lease(
 /// is still out with an earlier run or a ping, or a new session needs a free
 /// place under the connection's cap), and `on_wait(None)` once it has one.
 /// Dropping the future while it waits gives nothing up.
-pub(crate) async fn lease_or_wait(
-    pool: &SharedPool,
+pub(crate) async fn lease_or_wait<S: PoolSession>(
+    pool: &SharedPool<S>,
     window_id: &str,
     slot: Slot,
     generation: u64,
     connection_id: String,
-    config: PostgresConnection,
+    config: S::Config,
     on_wait: &(dyn Fn(Option<WaitFor>) + Send + Sync),
-) -> Result<Lease, DriverError> {
+) -> Result<Lease<S>, DriverError> {
     let key = (window_id.to_string(), slot);
     // Waiting on the slot's own session (an earlier run still holds it) says
     // so too, so it never reads as a hang.
@@ -794,7 +933,7 @@ pub(crate) async fn lease_or_wait(
         _ => {}
     }
     let place = room(pool, &connection_id, waits(slot), on_wait).await;
-    let mut session = open_session_via(connection_id, config, None, tunnel).await?;
+    let mut session = S::open(connection_id, config, tunnel).await?;
     if let Some(place) = place {
         session.hold(Box::new(place));
     }
@@ -812,8 +951,8 @@ pub(crate) async fn lease_or_wait(
 /// session (or a prefetch session) to free one. With none to free, `wait`
 /// waits for one, telling `on_wait`; else `None`: the session opened is used
 /// once and not kept.
-async fn room(
-    pool: &SharedPool,
+async fn room<S: PoolSession>(
+    pool: &SharedPool<S>,
     connection_id: &str,
     wait: bool,
     on_wait: &(dyn Fn(Option<WaitFor>) + Send + Sync),
@@ -875,20 +1014,19 @@ async fn room(
 /// Pings the window's sessions idle for `idle` or longer, all at once and off
 /// any query's path; a dead one is replaced by a fresh session in its slot, so
 /// the next run finds it warm. Returns how many were replaced (and kept).
-pub(crate) async fn ping_idle(
-    pool: &SharedPool,
+pub(crate) async fn ping_idle<S: PoolSession>(
+    pool: &SharedPool<S>,
     window_id: &str,
     idle: Duration,
     connection_id: String,
-    config: PostgresConnection,
+    config: S::Config,
 ) -> usize {
     let taken = pool
         .lock()
         .map(|mut p| p.take_idle(window_id, idle))
         .unwrap_or_default();
-    let checks = taken.into_iter().map(|(slot, parked, id)| async move {
-        let alive =
-            !parked.session.is_closed() && session_ping(&parked.session, PING_TIMEOUT).await;
+    let checks = taken.into_iter().map(|(slot, mut parked, id)| async move {
+        let alive = !parked.session.is_closed() && parked.session.ping(PING_TIMEOUT).await;
         (slot, parked, id, alive)
     });
     // A dead one's slot is handed to a run that comes for it; replacements
@@ -928,7 +1066,7 @@ pub(crate) async fn ping_idle(
         let (connection_id, config) = (connection_id.clone(), config.clone());
         opens.push(async move {
             let opened = match place {
-                Some(place) => open_session_via(connection_id, config, None, tunnel)
+                Some(place) => S::open(connection_id, config, tunnel)
                     .await
                     .map(|mut fresh| {
                         fresh.hold(Box::new(place));
@@ -976,12 +1114,12 @@ pub(crate) async fn ping_idle(
 
 /// Parks a session after use, dropping it outside the lock if it isn't kept,
 /// and ends the slot's checkout so a run waiting for it goes ahead.
-pub(crate) fn give_back(
-    pool: &SharedPool,
+pub(crate) fn give_back<S: PoolSession>(
+    pool: &SharedPool<S>,
     window_id: &str,
     slot: Slot,
     generation: u64,
-    session: PostgresSession,
+    session: S,
 ) {
     let rejected = match pool.lock() {
         Ok(mut p) => {
@@ -1000,7 +1138,12 @@ pub(crate) fn give_back(
 
 /// Drops a tab's session that can't be kept; if it may have held the user's
 /// transaction, the tab's next statement says it was lost.
-pub(crate) fn drop_lost(pool: &SharedPool, window_id: &str, slot: Slot, session: PostgresSession) {
+pub(crate) fn drop_lost<S: PoolSession>(
+    pool: &SharedPool<S>,
+    window_id: &str,
+    slot: Slot,
+    session: S,
+) {
     if let Ok(mut p) = pool.lock() {
         p.note_lost(window_id, slot, &session);
     }
@@ -1009,14 +1152,14 @@ pub(crate) fn drop_lost(pool: &SharedPool, window_id: &str, slot: Slot, session:
 
 /// After a statement that may have opened or ended a transaction, asks the
 /// server which, so a session that holds none can be swept and pinged again.
-pub(crate) async fn settle_txn(session: &mut PostgresSession) {
+pub(crate) async fn settle_txn<S: PoolSession>(session: &mut S) {
     if session.txn_state() == TxnState::Unknown && !session.is_closed() {
-        session_probe_txn(session, PROBE_TIMEOUT).await;
+        session.probe_txn(PROBE_TIMEOUT).await;
     }
 }
 
 /// Closes idle sessions every [`SWEEP_EVERY`], for the life of the runtime.
-pub(crate) async fn sweep_forever(pool: SharedPool) {
+pub(crate) async fn sweep_forever<S: PoolSession>(pool: SharedPool<S>) {
     let mut tick = tokio::time::interval(SWEEP_EVERY);
     loop {
         tick.tick().await;
@@ -1331,7 +1474,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(session_has_cursor(&paged));
+            assert!(paged.has_cursor());
             give_back(&pool, "w", Slot::Tab(3), 0, paged);
 
             // Idle close keeps both, and closes the rest.
