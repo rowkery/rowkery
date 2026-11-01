@@ -828,3 +828,51 @@ fn mysql_dash_dash_before_del_is_a_comment() {
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// MariaDB's sql_mode MSSQL reads `[…]` as a quoted name, so `[']` holds
+/// a quote safe mode would read as a string's start. A bare `[` is unclear
+/// in safe mode: the DELETE behind it is held, not run.
+#[test]
+fn mysql_brackets_never_hide_a_write() {
+    if env("ROWKERY_MYSQL_FLAVOR", "") != "mariadb" {
+        return; // MySQL 8 has no MSSQL mode.
+    }
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    let attack = "SET SESSION sql_mode = 'MSSQL'; SELECT 1 AS [']; SET SESSION TRANSACTION READ WRITE; DELETE FROM bw_br; SELECT [']";
+    save_mysql(&bridge, "my-br-off", SafeMode::Off);
+    bridge.open_window("w", "my-br-off", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_br; CREATE TABLE bw_br (id INT); INSERT INTO bw_br VALUES (1)",
+    );
+    let queue = bridge
+        .run_window_query("w", 1, attack.into(), None, false)
+        .expect("run");
+    ended(&queue);
+    let (rows, _, _) = rows_of(&bridge, "w", 2, "SELECT count(*) FROM bw_br");
+    assert_eq!(rows, [[Value::Int(0)]], "the server ran the DELETE");
+    rows_of(&bridge, "w", 2, "INSERT INTO bw_br VALUES (1)");
+    bridge.close_window("w");
+
+    for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+        save_mysql(&bridge, "my-br", mode);
+        bridge.open_window("c", "my-br", None).expect("open");
+        let queue = bridge
+            .run_window_query("c", 1, attack.into(), None, false)
+            .expect("run");
+        let outcome = ended(&queue);
+        let want = if mode == SafeMode::Confirm {
+            "held: Confirm"
+        } else {
+            "held: Refuse"
+        };
+        assert_eq!(outcome.as_deref(), Some(want), "{mode:?}");
+        let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_br");
+        assert_eq!(rows, [[Value::Int(1)]], "{mode:?}");
+        bridge.close_window("c");
+    }
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

@@ -1045,9 +1045,11 @@ pub(crate) fn lex(b: &[u8], mut i: usize, eof: bool, dialect: Dialect) -> Option
                 None => done(Lexeme::Dollar { closed: false }, n, true),
             }
         }
-        b'[' if matches!(dialect, Dialect::Postgres | Dialect::Mysql) => {
-            Some((Lexeme::Bracket { clear: true }, i + 1))
-        }
+        b'[' if dialect == Dialect::Postgres => Some((Lexeme::Bracket { clear: true }, i + 1)),
+        // MySQL reads a bare `[` as an error, but MariaDB's sql_mode MSSQL
+        // reads `[…]` as a quoted name, so a quote inside it is just a
+        // character. Safe mode can't know the mode as the text runs.
+        b'[' if dialect == Dialect::Mysql => Some((Lexeme::Bracket { clear: false }, i + 1)),
         b'[' => {
             let to = n.min(i + 1 + BRACKET_SPAN);
             let clear = match memchr::memchr(b']', &b[i + 1..to]) {
@@ -2923,6 +2925,12 @@ mod tests {
         assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
         assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
         assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // MariaDB's MSSQL mode reads `[']` as a name: the DELETE runs.
+        assert_eq!(
+            verbs("SELECT 1 AS [']; DELETE FROM t; SELECT [']"),
+            [UNCLEAR_VERB]
+        );
+        assert_eq!(kinds("SELECT '[a]', `[b]` FROM t # [c"), [Read]);
         // The server reads a vertical tab as space.
         assert_eq!(kinds("\x0bDELETE FROM t"), [Write]);
         assert_eq!(kinds("SELECT 1;\x0bDELETE\x0bFROM t"), [Read, Write]);
