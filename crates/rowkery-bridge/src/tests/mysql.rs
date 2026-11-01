@@ -697,42 +697,30 @@ fn mysql_wide_charsets_never_hide_a_write() {
             .run_window_query("c", 1, "SET NAMES gbk".into(), None, false)
             .expect_err("refused");
         assert!(err.starts_with("Safe mode keeps MySQL tabs"), "{err}");
-        // Switched where safe mode can't read it, then the hidden DELETE:
-        // stopped after the switch, and the session is utf8mb4 again.
-        let queue = bridge
-            .run_window_query(
-                "c",
-                1,
-                format!("PREPARE s FROM 'SET NAMES gbk'; EXECUTE s; {attack}"),
-                None,
-                true,
-            )
-            .expect("run");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let error = 'done: loop {
-            let drained: Vec<CoreEvent> = std::mem::take(&mut *queue.lock().unwrap());
-            for event in drained {
-                match event {
-                    CoreEvent::QueryFinished { error, .. } => break 'done error,
-                    CoreEvent::QueryHeld { hold, .. } => {
-                        break 'done Some(format!("held: {:?}", hold.action))
-                    }
-                    _ => {}
+        // An EXECUTE (its prepared text may switch) runs on its own.
+        let err = bridge
+            .run_window_query("c", 1, format!("EXECUTE s; {attack}"), None, true)
+            .expect_err("refused");
+        assert!(err.contains("on its own"), "{err}");
+        // A switch safe mode can't read ends the run that made it, and the
+        // session is utf8mb4 again before anything else is sent.
+        if mode == SafeMode::Confirm {
+            for sql in ["PREPARE s FROM 'SET NAMES gbk'", "EXECUTE s"] {
+                let queue = bridge
+                    .run_window_query("c", 1, sql.into(), None, true)
+                    .expect("run");
+                let (_, error, _) = wait_finished(&queue);
+                if sql == "EXECUTE s" {
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|e| e.contains("set it back to utf8mb4")),
+                        "{error:?}"
+                    );
                 }
             }
-            assert!(Instant::now() < deadline, "not done");
-            thread::sleep(Duration::from_millis(5));
-        };
-        // Read-only refuses the EXECUTE outright; Confirm, confirmed, runs
-        // up to the switch.
-        let expected = match mode {
-            SafeMode::ReadOnly => "held: Refuse",
-            _ => "set it back to utf8mb4",
-        };
-        assert!(
-            error.as_deref().is_some_and(|e| e.contains(expected)),
-            "{mode:?}: {error:?}"
-        );
+            rows_of(&bridge, "c", 1, attack);
+        }
         let (rows, _, _) = rows_of(&bridge, "c", 1, "SELECT @@SESSION.character_set_client");
         assert_eq!(rows, [[Value::Text("utf8mb4".into())]]);
         let (rows, _, _) = rows_of(&bridge, "c", 2, "SELECT count(*) FROM bw_gbk");

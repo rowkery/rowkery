@@ -3694,10 +3694,8 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             // Under gbk and the like MySQL reads quotes where safe mode
             // doesn't, so with safe mode on a tab keeps a plain character set.
             if engine == EngineKind::Mysql && safe_mode != SafeMode::Off {
-                if let Some(statement) = rowkery_core::safety::mysql_charset_change(&user_sql) {
-                    let _ = respond_to.send(Err(format!(
-                        "Safe mode keeps MySQL tabs in a character set it reads as the server does (utf8mb4, latin1 or ascii), so it doesn't run “{statement}”. In gbk, big5, sjis, cp932 or gb18030 a quote can mean something else to the server."
-                    )));
+                if let Some(why) = rowkery_core::safety::mysql_charset_change(&user_sql) {
+                    let _ = respond_to.send(Err(why));
                     return;
                 }
             }

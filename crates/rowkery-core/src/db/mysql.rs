@@ -92,6 +92,9 @@ pub struct MysqlSession {
     /// A save's step didn't answer: the connection was killed at the
     /// server, and the session is dropped, never reused.
     abandoned: bool,
+    /// A run that may have changed the client character set hasn't been
+    /// checked yet (see `keep_plain_charset`).
+    charset_due: bool,
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -337,6 +340,7 @@ pub async fn open_session_via(
         flavor,
         version,
         tag,
+        charset_due: false,
         guard: None,
         stateful: false,
         abandoned: false,
@@ -547,37 +551,36 @@ pub async fn session_query_stream<F>(
 where
     F: FnMut(RowBatch, bool) -> Result<(), DriverError>,
 {
-    // With safe mode on, statements go one at a time, as safe mode split
-    // them, and after any that may change the session the client character
-    // set is checked: under gbk and the like the server would read the
-    // next one's quotes where safe mode didn't. A routine's body (`CREATE
-    // … BEGIN …; END`) is the exception: split, it wouldn't run.
     let guard = session.config.safe_mode != SafeMode::Off;
-    let texts = statement_texts(sql, Dialect::Mysql);
-    let compound = texts.iter().any(|t| {
-        let upper = t.trim_start().to_ascii_uppercase();
-        upper.starts_with("CREATE")
-            && upper
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|w| w == "BEGIN")
-    });
-    let pieces = if session.config.safe_mode == SafeMode::ReadOnly || (guard && !compound) {
-        texts
+    // A run that may have switched the character set and then failed or
+    // was stopped: checked before anything else is sent.
+    if guard && session.charset_due {
+        keep_plain_charset(session).await?;
+        session.charset_due = false;
+    }
+    if guard && !crate::safety::plain_read(sql, Dialect::Mysql) {
+        session.charset_due = true;
+    }
+    let pieces = if session.config.safe_mode == SafeMode::ReadOnly {
+        statement_texts(sql, Dialect::Mysql)
     } else {
         vec![sql]
     };
     let mut last = 0u64;
     for piece in pieces {
         last = stream_statements(session, piece, &mut on_batch).await?;
-        if guard && !crate::safety::plain_read(piece, Dialect::Mysql) {
-            keep_plain_charset(session).await?;
-        }
+    }
+    if session.charset_due {
+        session.charset_due = false;
+        keep_plain_charset(session).await?;
     }
     Ok(last)
 }
 
 /// Puts the session back to utf8mb4 when its client character set isn't
-/// one safe mode reads as the server does, and says so.
+/// one safe mode reads as the server does, and says so. Safe mode refuses
+/// a SET that switches it and runs `EXECUTE` alone, so a switch it couldn't
+/// see (a prepared `SET NAMES gbk`) ends the run that made it.
 async fn keep_plain_charset(session: &mut MysqlSession) -> Result<(), DriverError> {
     let rows = text_rows(session, "SELECT @@SESSION.character_set_client").await?;
     let charset = rows
@@ -589,7 +592,7 @@ async fn keep_plain_charset(session: &mut MysqlSession) -> Result<(), DriverErro
     }
     session_execute(session, "SET NAMES utf8mb4").await?;
     Err(DriverError::Message(format!(
-        "This set the session's character set to {charset}, in which MySQL reads quotes and backslashes differently from safe mode. Rowkery set it back to utf8mb4 and ran nothing after it."
+        "The session's character set became {charset}, in which MySQL reads quotes and backslashes differently from safe mode. Rowkery set it back to utf8mb4."
     )))
 }
 
