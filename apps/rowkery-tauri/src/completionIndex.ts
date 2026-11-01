@@ -16,7 +16,7 @@ import type {
 import { rowEstimateValue } from "./types";
 import type { HistoryEntry } from "./queryHistory";
 
-export type Engine = "postgres" | "sqlite";
+export type Engine = "postgres" | "sqlite" | "mysql";
 
 export interface RelEntry {
   schema: string;
@@ -87,9 +87,26 @@ const SQLITE_FUNCTIONS = `count sum avg min max total group_concat coalesce
   hex quote lag lead`;
 const SQLITE_NO_ARGS = "random changes last_insert_rowid row_number rank dense_rank";
 
+const MYSQL_FUNCTIONS = `count sum avg min max group_concat coalesce ifnull
+  nullif if greatest least lower upper length char_length trim ltrim rtrim
+  substring substring_index replace concat concat_ws left right locate instr
+  lpad rpad format date_format str_to_date date_add date_sub datediff
+  timestampdiff timestampadd extract year month day hour minute second
+  from_unixtime unix_timestamp convert_tz date time cast convert round ceil
+  floor abs mod truncate json_extract json_unquote json_object json_array
+  json_arrayagg json_objectagg json_contains json_length json_keys
+  json_set regexp_replace regexp_like lag lead first_value last_value
+  ntile md5 sha2 hex unhex find_in_set field elt`;
+const MYSQL_NO_ARGS = "now curdate curtime utc_timestamp rand uuid row_number rank dense_rank database version last_insert_id connection_id found_rows";
+
+const BUILTINS: Record<Engine, [string, string]> = {
+  postgres: [POSTGRES_FUNCTIONS, POSTGRES_NO_ARGS],
+  sqlite: [SQLITE_FUNCTIONS, SQLITE_NO_ARGS],
+  mysql: [MYSQL_FUNCTIONS, MYSQL_NO_ARGS],
+};
+
 function builtins(engine: Engine): FnEntry[] {
-  const withArgs = engine === "postgres" ? POSTGRES_FUNCTIONS : SQLITE_FUNCTIONS;
-  const noArgs = engine === "postgres" ? POSTGRES_NO_ARGS : SQLITE_NO_ARGS;
+  const [withArgs, noArgs] = BUILTINS[engine];
   const out: FnEntry[] = [];
   for (const [list, args] of [
     [withArgs, "…"],
@@ -104,7 +121,8 @@ function builtins(engine: Engine): FnEntry[] {
 
 function pathRankFor(engine: Engine, searchPath: string[], schema: string): number {
   if (engine === "sqlite") return schema === "main" ? 0 : 99;
-  if (searchPath.length === 0) return schema === "public" ? 0 : 99;
+  // MySQL's path is the session's database (`USE`); with none, every name needs one.
+  if (searchPath.length === 0) return engine === "postgres" && schema === "public" ? 0 : 99;
   const i = searchPath.indexOf(schema);
   return i < 0 ? 99 : i;
 }

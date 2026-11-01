@@ -1,4 +1,5 @@
-import { parsePostgresUrl } from "./connectionUrl";
+import { parseConnectionUrl } from "./connectionUrl";
+import { mysqlNeedsQuoting } from "./sqlKeywords";
 import type { SidebarSchema, SidebarTable } from "./schemaTree";
 import { formatRowCount } from "./types";
 
@@ -346,7 +347,7 @@ export function pastedItem(raw: string): PaletteItem | null {
   if (SQLITE_PATH.test(text)) {
     return item("connections", "paste:file", "Open SQLite file", { kind: "sqlite-path", path: text }, { detail: text });
   }
-  const form = parsePostgresUrl(text);
+  const form = parseConnectionUrl(text)?.form;
   if (!form || !(form.host || form.database)) return null;
   const where = [form.host, form.database].filter(Boolean).join("/");
   return item("connections", "paste:url", "New connection from URL", { kind: "connection-url", url: text }, { detail: where });
@@ -377,7 +378,9 @@ export function idleBuild<T>(build: () => T): { get: () => T; cancel: () => void
 }
 
 /** Double-quote an identifier only when Postgres/SQLite would need it. */
-export function sqlIdent(name: string): string {
+export function sqlIdent(name: string, engine?: string): string {
+  // MySQL quotes with backticks, its reserved words too (core's `quote_ident`).
+  if (engine === "mysql") return mysqlNeedsQuoting(name) ? `\`${name.replace(/`/g, "``")}\`` : name;
   return /^[a-z_][a-z0-9_$]*$/.test(name)
     ? name
     : `"${name.replace(/"/g, '""')}"`;

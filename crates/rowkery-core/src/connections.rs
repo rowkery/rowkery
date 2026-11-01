@@ -237,7 +237,7 @@ pub struct PostgresConnection {
 
 /// A MySQL or MariaDB server: one connection reaches every database on it
 /// that the user can see (each shows as a schema). Which of the two it is
-/// comes from the server, never from the record.
+/// comes from the server; the record only remembers it for its logo.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MysqlConnection {
     pub id: String,
@@ -275,6 +275,10 @@ pub struct MysqlConnection {
     pub mcp_access: Option<McpAccess>,
     #[serde(default, skip_serializing_if = "MaskedColumns::is_empty")]
     pub masked_columns: MaskedColumns,
+    /// The server said MariaDB when the form last tested it: the list shows
+    /// its seal. Nothing else reads it; a window asks the server.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mariadb: bool,
 }
 
 impl ConnectionRecord {

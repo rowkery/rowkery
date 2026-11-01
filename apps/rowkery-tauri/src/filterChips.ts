@@ -1,5 +1,5 @@
 import { nearestName } from "./queryError";
-import { needsQuoting } from "./sqlKeywords";
+import { mysqlNeedsQuoting, needsQuoting } from "./sqlKeywords";
 
 /**
  * A table tab's filter as chips: one per predicate, each reading as the SQL
@@ -122,19 +122,23 @@ export interface ChipColumn {
   type_name: string;
 }
 
-export type ChipEngine = "postgres" | "sqlite";
+export type ChipEngine = "postgres" | "sqlite" | "mysql";
 
 /** Number types by name: `int4`, `numeric(10,2)`, `double precision`; never `interval`. */
 const NUMBER_TYPE =
   /^(int[248]?|integer|bigint|smallint|tinyint|mediumint|real|double|float[48]?|numeric|decimal|money|oid|serial[248]?|bigserial|smallserial)\b/i;
 const BOOL_TYPE = /^bool/i;
-const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string)\b/i;
+const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string|tinytext|mediumtext|longtext|enum|set)\b/i;
 const TIME_TYPE = /^(timestamp|date|time|datetime|interval)/i;
 const REAL_TYPE = /^(real|float4)$/i;
 const NUMBER_TEXT = /^-?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
 
-/** An identifier as the line shows it: quoted only when it needs to be (core's `quote_ident` rules). */
-export function chipIdent(name: string): string {
+/**
+ * An identifier as the line shows it: quoted only when it needs to be (core's
+ * `quote_ident` rules). MySQL quotes with backticks, its reserved words too.
+ */
+export function chipIdent(name: string, engine: ChipEngine = "postgres"): string {
+  if (engine === "mysql") return mysqlNeedsQuoting(name) ? `\`${name.replace(/`/g, "``")}\`` : name;
   return needsQuoting(name) ? `"${name.replace(/"/g, '""')}"` : name;
 }
 
@@ -149,11 +153,18 @@ export const isNumberType = (type: string) => NUMBER_TYPE.test(type.trim());
  * `standard_conforming_strings` off a plain `'…'` reads `\'` as a quote that
  * doesn't end it, so a cell's value could break out. `E''` reads the same on
  * every server (core's `sql_literal` does the same). SQLite has no escapes.
+ * On MySQL a backslash is an escape unless `NO_BACKSLASH_ESCAPES`, so text
+ * holding one goes as its UTF-8 bytes in hex, which read the same in either
+ * mode (core's `mysql_text`).
  */
 export function quoteText(v: string, engine: ChipEngine = "postgres"): string {
   if (engine === "postgres" && v.includes("\\")) return `E'${v.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+  if (engine === "mysql" && v.includes("\\")) return `_utf8mb4 X'${utf8Hex(v)}'`;
   return `'${v.replace(/'/g, "''")}'`;
 }
+
+const utf8Hex = (v: string) =>
+  Array.from(new TextEncoder().encode(v), (b) => b.toString(16).padStart(2, "0").toUpperCase()).join("");
 
 /**
  * `'null'`, quoted: the text "null", which a bare `null` (SQL's NULL) can't
@@ -185,7 +196,8 @@ export function defaultOp(type: string): FilterOp {
   return "=";
 }
 
-const like = (engine: ChipEngine) => (engine === "sqlite" ? "LIKE" : "ILIKE");
+/** MySQL's LIKE already ignores case under its usual collations; it has no ILIKE. */
+const like = (engine: ChipEngine) => (engine === "postgres" ? "ILIKE" : "LIKE");
 
 /**
  * "contains": `'%x%'`, with `\`, `%` and `_` in the value escaped so they
@@ -193,9 +205,16 @@ const like = (engine: ChipEngine) => (engine === "sqlite" ? "LIKE" : "ILIKE");
  * must not match `user-name`), and then an ESCAPE of `\` (SQLite has no
  * escape without it). On Postgres the escaped pattern and the ESCAPE are
  * `E''` strings (see `quoteText`): `ESCAPE '\'` is an unclosed string with
- * `standard_conforming_strings` off. A plain value reads plainly.
+ * `standard_conforming_strings` off. A plain value reads plainly. MySQL
+ * escapes with `!` instead: `'\\'` there is an unclosed string unless
+ * `NO_BACKSLASH_ESCAPES`, and `'!'` reads the same in both.
  */
 const containsPattern = (v: string, engine: ChipEngine) => {
+  if (engine === "mysql") {
+    // A backslash is LIKE's escape unless another is named, so it takes one too.
+    const bang = v.replace(/[!%_]/g, "!$&");
+    return bang === v && !v.includes("\\") ? quoteText(`%${v}%`, engine) : `${quoteText(`%${bang}%`, engine)} ESCAPE '!'`;
+  }
   const escaped = v.replace(/[\\%_]/g, "\\$&");
   if (escaped === v) return quoteText(`%${v}%`, engine);
   return `${quoteText(`%${escaped}%`, engine)} ESCAPE ${engine === "postgres" ? "E'\\\\'" : "'\\'"}`;
@@ -272,11 +291,11 @@ function unquote(v: string): string {
 export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): string {
   if (chip.kind === "expr") return chip.sql.trim();
   if (chip.kind === "any") {
-    const parts = chip.columns.map((c) => `${chipIdent(c)} ${like(engine)} ${containsPattern(chip.value, engine)}`);
+    const parts = chip.columns.map((c) => `${chipIdent(c, engine)} ${like(engine)} ${containsPattern(chip.value, engine)}`);
     // Bracketed by chipFragments when another chip joins it (core's WHERE (…) brackets it alone).
     return parts.join(" OR ");
   }
-  const col = chipIdent(chip.column);
+  const col = chipIdent(chip.column, engine);
   const lit = (v: string) => chipLiteral(v, chip.type, engine, chip.text);
   switch (chip.op) {
     case "IS NULL":
@@ -295,6 +314,8 @@ export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): stri
     case "IS DISTINCT FROM":
       // Not equal, keeping the rows where it is NULL ("Hide rows where col = v").
       if (!chip.text && isNull(chip.value)) return `${col} IS NOT NULL`;
+      // MySQL has no IS DISTINCT FROM: NOT <=> (NULL-safe equals) says the same.
+      if (engine === "mysql") return `NOT (${col} <=> ${lit(chip.value)})`;
       return `${col} ${engine === "sqlite" ? "IS NOT" : "IS DISTINCT FROM"} ${lit(chip.value)}`;
     default: {
       // NULL never equals anything: = NULL means IS NULL.
@@ -345,7 +366,7 @@ export function chipsFromFilter(filter: string | undefined): FilterChip[] {
  * `pending`, `Berlin` or `admin@x.com` is never read as `pend IN g`.
  */
 const FRAGMENT =
-  /^("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*(=|<>|!=|>=|<=|>|<)\s*|\s+(ilike|like|in|between|is\s+distinct\s+from|is\s+not\s+null|is\s+null|is\s+not)(?:\s+|(?=\()|$))(.*)$/is;
+  /^("(?:[^"]|"")+"|`(?:[^`]|``)+`|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*(=|<>|!=|>=|<=|>|<)\s*|\s+(ilike|like|in|between|is\s+distinct\s+from|is\s+not\s+null|is\s+null|is\s+not)(?:\s+|(?=\()|$))(.*)$/is;
 /** A value that is plainly a value: a number, a quoted string, one word. */
 const SIMPLE_VALUE = /^(-?(\d+\.?\d*|\.\d+)|'(?:[^']|'')*'|[A-Za-z0-9_.:@-]+)$/;
 
@@ -358,7 +379,7 @@ const SIMPLE_VALUE = /^(-?(\d+\.?\d*|\.\d+)|'(?:[^']|'')*'|[A-Za-z0-9_.:@-]+)$/;
 export function parseFragment(text: string, columns: ChipColumn[]): FilterChip | null {
   const t = text.trim();
   const m = FRAGMENT.exec(t);
-  const name = m ? (m[1].startsWith('"') ? m[1].slice(1, -1).replace(/""/g, '"') : m[1]) : "";
+  const name = m ? unquoteIdent(m[1]) : "";
   const col = m
     ? (columns.find((c) => c.name === name) ?? columns.find((c) => c.name.toLowerCase() === name.toLowerCase()))
     : undefined;
@@ -402,6 +423,12 @@ export function parseFragment(text: string, columns: ChipColumn[]): FilterChip |
   return null;
 }
 
+/** `"a""b"` or `` `a``b` `` → the name; a bare one as is. */
+function unquoteIdent(t: string): string {
+  const q = t[0];
+  return q === '"' || q === "`" ? t.slice(1, -1).split(q + q).join(q) : t;
+}
+
 /**
  * A `col op value` fragment on a column the table doesn't have, and the
  * column it most likely meant: a near spelling, else the one column that
@@ -410,7 +437,7 @@ export function parseFragment(text: string, columns: ChipColumn[]): FilterChip |
  */
 export function unknownColumn(text: string, columns: ChipColumn[]): { name: string; suggestion: string } | null {
   const m = FRAGMENT.exec(text.trim());
-  if (!m || m[1].startsWith('"')) return null;
+  if (!m || /^["`]/.test(m[1])) return null;
   const name = m[1];
   const lower = name.toLowerCase();
   const names = columns.map((c) => c.name);

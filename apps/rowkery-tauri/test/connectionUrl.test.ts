@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { connectionUrlProblem, hidePassword, HIDDEN_PASSWORD, parsePostgresUrl } from "../src/connectionUrl";
+import { connectionUrlProblem, hidePassword, HIDDEN_PASSWORD, parseConnectionUrl, parseMysqlUrl, parsePostgresUrl } from "../src/connectionUrl";
 
 describe("parsePostgresUrl", () => {
   test("URL", () => {
@@ -147,5 +147,31 @@ describe("hidePassword (rowkery/reports#48)", () => {
 
   test("the hidden URL still reads, its password as the mask", () => {
     expect(parsePostgresUrl(hidePassword("postgres://app:pw@db/w"))).toMatchObject({ host: "db", password: HIDDEN_PASSWORD });
+  });
+});
+
+describe("MySQL and MariaDB URLs", () => {
+  test("mysql:// fills the form and says which engine", () => {
+    expect(parseConnectionUrl("mysql://app:s%40cret@db.internal:3307/shop?ssl-mode=REQUIRED")).toEqual({
+      engine: "mysql",
+      form: { host: "db.internal", port: "3307", database: "shop", username: "app", password: "s@cret", ssl: "require" },
+    });
+    expect(parseConnectionUrl("mariadb://root@localhost/")).toEqual({ engine: "mysql", form: { host: "localhost", port: "3306", username: "root" } });
+    expect(parseConnectionUrl("DATABASE_URL=mysql2://u@h/d")?.form).toMatchObject({ host: "h", database: "d", username: "u" });
+    expect(parseConnectionUrl("jdbc:mysql://h:3306/d?sslMode=VERIFY_IDENTITY")?.form).toMatchObject({ host: "h", database: "d", ssl: "verify" });
+    expect(parseConnectionUrl("mysql://h/d?require_ssl=true")?.form.ssl).toBe("require");
+  });
+
+  test("a postgres:// URL is still Postgres, and neither reads the other", () => {
+    expect(parseConnectionUrl("postgres://u@h/d")?.engine).toBe("postgres");
+    expect(parsePostgresUrl("mysql://u@h/d")).toBeNull();
+    expect(parseMysqlUrl("postgres://u@h/d")).toBeNull();
+    expect(parseConnectionUrl("mysql://")).toBeNull();
+  });
+
+  test("the password is hidden, and a / in it is explained", () => {
+    expect(hidePassword("mysql://app:secret@db/shop")).toBe(`mysql://app:${HIDDEN_PASSWORD}@db/shop`);
+    expect(hidePassword("mariadb://app:secret@db/shop")).toBe(`mariadb://app:${HIDDEN_PASSWORD}@db/shop`);
+    expect(connectionUrlProblem("mysql://app:a/b@db/shop")).toBe("A / in the password needs %2F");
   });
 });

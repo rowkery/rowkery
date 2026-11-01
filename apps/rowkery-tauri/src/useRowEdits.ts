@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { browseTable } from "./api";
+import { quoteText } from "./filterChips";
 import type { KeyChoice } from "./CellEditor";
 import {
   addInserts,
@@ -24,6 +25,7 @@ import { followLabel } from "./QuickLook";
 import { ResultRows, useResultRows } from "./resultStore";
 import type { EditTarget, GridEditing, RowEditState } from "./gridTypes";
 import type { EnumNode, QueryResultDto, SafeMode, TableNode, Value } from "./types";
+import type { EngineKind } from "./engines";
 
 const NO_ROWS = new ResultRows();
 
@@ -55,7 +57,7 @@ interface Options {
   table: TableNode | undefined;
   /** Another table of the catalog (the foreign key picker's). */
   findTable: (schema: string, table: string) => TableNode | undefined;
-  engine: "postgres" | "sqlite";
+  engine: EngineKind;
   safeMode: SafeMode;
   enums: EnumNode[];
   /** The Data view of a finished result is shown. */
@@ -266,13 +268,17 @@ export function useRowEdits(o: Options) {
     const fk = editors[col]?.fk;
     if (!fk || !t) return [];
     const ref = findTable(fk.schema, fk.table);
-    const quote = (n: string) => `"${n.replace(/"/g, '""')}"`;
+    const quote = (n: string) => (eng === "mysql" ? `\`${n.replace(/`/g, "``")}\`` : `"${n.replace(/"/g, '""')}"`);
     const searched = [fk.column, ...(ref?.columns ?? []).filter((c) => /char|text|clob/i.test(c.type_name)).map((c) => c.name)]
       .filter((c, i, all) => all.indexOf(c) === i)
       .slice(0, 4);
-    const q = query.trim().replace(/'/g, "''");
+    const q = query.trim();
     const like = eng === "postgres" ? "ILIKE" : "LIKE";
-    const filter = q ? searched.map((c) => `CAST(${quote(c)} AS TEXT) ${like} '%${q}%'`).join(" OR ") : undefined;
+    // MySQL casts to CHAR, not TEXT.
+    const asText = eng === "mysql" ? "CHAR" : "TEXT";
+    // A literal that reads the same in every sql_mode (MySQL) or setting (Postgres).
+    const pattern = quoteText(`%${q}%`, eng);
+    const filter = q ? searched.map((c) => `CAST(${quote(c)} AS ${asText}) ${like} ${pattern}`).join(" OR ") : undefined;
     const res = await browseTable(windowId, PICKER_TAB + t.id, {
       engine: eng,
       schema: fk.schema,

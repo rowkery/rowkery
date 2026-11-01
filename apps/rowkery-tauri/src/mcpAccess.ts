@@ -13,7 +13,7 @@ import type { ConnectionRecord, MaskedColumns, McpAccess, McpDbAccess } from "./
 
 /** The database a connection opens on; SQLite's one is `main`. */
 export function ownDatabase(c: ConnectionRecord): string {
-  return c.kind === "postgres" ? c.database : "main";
+  return c.kind === "sqlite" ? "main" : c.database;
 }
 
 /** What turning sharing on shares at first: the own database, no tables until they're listed. */

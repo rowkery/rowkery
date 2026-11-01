@@ -178,7 +178,8 @@ await page.fill(field("url"), "postgres://app@db.internal/wallet?sslmode=require
 check((await page.$('[data-testid="nc-advanced-body"] [data-ssl-choice=require][aria-checked=true]')) !== null, "sslmode=require opens Advanced on Require");
 
 // SQLite: Choose file… and a dropped file.
-await page.click("[data-engine-tab=sqlite]");
+await page.click("[data-engine-pick]");
+await page.click("[data-engine-option=sqlite]");
 check((await page.$("[data-drop-zone]")) !== null, "SQLite tab has a drop zone");
 check((await page.$("[data-env-choice=none][aria-checked=true]")) !== null, "SQLite environment starts None");
 await page.click("[data-choose-file]");

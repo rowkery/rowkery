@@ -33,6 +33,7 @@ fn save_mysql(bridge: &super::super::CoreBridge, id: &str, safe_mode: SafeMode) 
             mcp_timeout_s: None,
             mcp_access: None,
             masked_columns: Default::default(),
+            mariadb: false,
         }),
         ConnectionSecrets {
             db_password: Some(env("ROWKERY_MYSQL_PASSWORD", "rowkery")),

@@ -81,3 +81,18 @@ describe("formatSql", () => {
     expect(done).toEqual({ ok: true, sql: "SELECT    json_extract(data, '$.a')\nFROM      t" });
   });
 });
+
+describe("MySQL and MariaDB", () => {
+  test("backticks and # comments come back as written", async () => {
+    const sql = "select `order`, a from `my table` # note\nwhere a = 1";
+    for (const dialect of ["mysql", "mariadb"] as const) {
+      const out = await formatSql(sql, { start: 0, end: sql.length }, dialect);
+      expect(out.ok).toBe(true);
+      if (out.ok) {
+        expect(out.sql).toContain("`order`");
+        expect(out.sql).toContain("`my table`");
+        expect(out.sql).toContain("# note");
+      }
+    }
+  });
+});

@@ -87,6 +87,12 @@ describe("helpers", () => {
     expect(sqlIdent("users")).toBe("users");
     expect(sqlIdent("Users")).toBe('"Users"');
     expect(sqlIdent('we"ird')).toBe('"we""ird"');
+    // MySQL quotes with backticks, as core's quote_ident does.
+    expect(sqlIdent("users", "mysql")).toBe("users");
+    expect(sqlIdent("Users", "mysql")).toBe("`Users`");
+    expect(sqlIdent("rank", "mysql")).toBe("`rank`");
+    expect(sqlIdent("my table", "mysql")).toBe("`my table`");
+    expect(sqlIdent("a`b", "mysql")).toBe("`a``b`");
   });
   test("queryLabel flattens and truncates", () => {
     expect(queryLabel("select\n  1")).toBe("select 1");

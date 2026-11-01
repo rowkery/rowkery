@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ConnectionRecord } from "./types";
+import { engineLook } from "./engines";
 
 /** The relay's `/report` endpoint (apps/relay), set at build time; see its README. */
 export const REPORT_URL = (import.meta.env.VITE_ROWKERY_REPORT_URL as string | undefined) ?? "";
@@ -46,8 +47,8 @@ export function describeDatabase(
   serverVersion: string | null,
 ): string | null {
   if (!connection) return null;
-  const engine = connection.kind === "postgres" ? "PostgreSQL" : "SQLite";
-  const via = connection.kind === "postgres" && connection.ssh ? " · over SSH" : "";
+  const engine = engineLook(connection.kind, connection.kind === "mysql" && connection.mariadb).label;
+  const via = connection.kind !== "sqlite" && connection.ssh ? " · over SSH" : "";
   return `${[engine, serverVersion].filter(Boolean).join(" ")}${via}`;
 }
 
@@ -63,7 +64,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  */
 export function maskSensitive(text: string, connection: ConnectionRecord | null): string {
   const known: [string | undefined | null, string][] = [];
-  if (connection?.kind === "postgres") {
+  if (connection && connection.kind !== "sqlite") {
     known.push(
       [connection.host, MASKS.host],
       [connection.ssh?.host, MASKS.host],
@@ -71,7 +72,7 @@ export function maskSensitive(text: string, connection: ConnectionRecord | null)
       [connection.ssh?.username, MASKS.user],
       [connection.database, MASKS.database],
     );
-    const instance = connection.cloud_sql?.instance.trim().split(":") ?? [];
+    const instance = (connection.kind === "postgres" ? connection.cloud_sql?.instance.trim().split(":") : null) ?? [];
     if (instance.length >= 3) {
       const project = instance.slice(0, -2);
       known.push([project.join(":"), MASKS.project], [project[project.length - 1], MASKS.project], [instance[instance.length - 1], MASKS.host]);

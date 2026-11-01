@@ -107,9 +107,9 @@ export function EmptyWindow({
 
   const more = saved.length > SAVED_MAX;
   const rows: Row[] = [
-    { kind: "action", id: "new", label: "New connection", sub: "Postgres or SQLite", key: keysFor("new-connection", mac), run: onNewConnection },
+    { kind: "action", id: "new", label: "New connection", sub: "Postgres, MySQL or SQLite", key: keysFor("new-connection", mac), run: onNewConnection },
     { kind: "action", id: "file", label: "Open a SQLite file…", sub: "or drop one anywhere", key: keysFor("open-sqlite-file", mac), run: onOpenFile },
-    { kind: "action", id: "paste", label: "Paste a postgres:// URL", sub: "fills the form for you", key: `${mod}V`, run: onPaste },
+    { kind: "action", id: "paste", label: "Paste a database URL", sub: "fills the form for you", key: `${mod}V`, run: onPaste },
     // sample.sql: six CREATE TABLEs and one CREATE VIEW.
     { kind: "action", id: "sample", label: "Open the sample database", sub: "six tables, one view", key: "↵", run: onOpenSample },
     ...saved
@@ -201,7 +201,7 @@ export function EmptyWindow({
             onMouseMove={() => pointAt(i)}
             onClick={() => runRow(row)}
           >
-            <EngineTile kind={conn.kind} />
+            <EngineTile kind={conn.kind} mariadb={conn.kind === "mysql" && conn.mariadb} />
             <span className="ew-saved-text">
               <span className="ew-saved-title">
                 <span data-testid="ew-saved-name" className="ew-saved-name">{conn.name}</span>

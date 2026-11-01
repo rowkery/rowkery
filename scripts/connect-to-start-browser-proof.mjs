@@ -108,7 +108,7 @@ await fresh();
 // the key at its right under each title.
 const actions = await page.$$eval("[data-empty-action]", (els) => els.map((e) => `${e.querySelector(".ew-label").textContent} ${e.querySelector("kbd").textContent}`)); // Class on purpose: the card's title, apart from its sub-line.
 check(
-  actions.join(" | ") === "New connection Ctrl+N | Open a SQLite file… Ctrl+O | Paste a postgres:// URL Ctrl+V | Open the sample database ↵",
+  actions.join(" | ") === "New connection Ctrl+N | Open a SQLite file… Ctrl+O | Paste a database URL Ctrl+V | Open the sample database ↵",
   `four actions with keys: ${actions.join(" | ")}`,
 );
 check((await page.textContent('[data-testid="ew-title"]')) === "Connect to start", "titled Connect to start");

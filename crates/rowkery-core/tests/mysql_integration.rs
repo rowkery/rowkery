@@ -44,6 +44,7 @@ fn config() -> MysqlConnection {
         mcp_timeout_s: None,
         mcp_access: None,
         masked_columns: Default::default(),
+        mariadb: false,
     }
 }
 
@@ -534,4 +535,46 @@ async fn a_run_returns_its_last_statements_count() {
         let (_, result) = run(&mut s, sql).await;
         assert_eq!(result.unwrap(), n, "{sql}");
     }
+}
+
+/// A wrong password, an unknown database and one the user may not use each
+/// mark their own field in the form.
+#[tokio::test]
+async fn failed_logins_are_explained() {
+    use rowkery_core::explain::{explain_connect_error, Target};
+    let fail = |c: MysqlConnection, password: &str| {
+        let secrets = ConnectionSecrets {
+            db_password: Some(password.into()),
+            ..Default::default()
+        };
+        async move {
+            match open_session_via(c.id.clone(), c, Some(&secrets), None).await {
+                Ok(_) => panic!("signed in"),
+                Err(e) => e.to_string(),
+            }
+        }
+    };
+    let c = config();
+    let t = Target {
+        host: &c.host,
+        port: c.port,
+        username: &c.username,
+        ssh_host: None,
+        cloud_sql: None,
+    };
+    let wrong = fail(c.clone(), "not-the-password").await;
+    let x = explain_connect_error(&wrong, &t);
+    assert_eq!((x.class, x.field), ("auth", Some("password")), "{wrong}");
+
+    let mut missing = c.clone();
+    missing.database = "no_such_database_here".into();
+    let raw = fail(missing, &env("ROWKERY_MYSQL_PASSWORD", "rowkery")).await;
+    let x = explain_connect_error(&raw, &t);
+    assert_eq!((x.class, x.field), ("database", Some("database")), "{raw}");
+
+    let mut theirs = c.clone();
+    theirs.database = "mysql".into();
+    let raw = fail(theirs, &env("ROWKERY_MYSQL_PASSWORD", "rowkery")).await;
+    let x = explain_connect_error(&raw, &t);
+    assert_eq!((x.class, x.field), ("database", Some("database")), "{raw}");
 }

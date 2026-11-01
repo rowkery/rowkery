@@ -102,7 +102,7 @@ import { depthKey, lastTableView, mapDepthFor, setLastTableView, setMapDepth } f
 import { mapGuessOn, setMapGuess } from "./mapGuess";
 import { Sidebar, SidebarFoot } from "./Sidebar";
 import { createPortal } from "react-dom";
-import { ENGINES } from "./engines";
+import { connectionLook } from "./engines";
 import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEditor";
 import { completionIndexFor, usageFromHistory } from "./completionIndex";
 import { complete, expandStar, tableRead } from "./sqlComplete";
@@ -112,7 +112,7 @@ import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUnd
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { forgetTabTitles, noteTabTitles, transactionBlocksClose } from "./openTransactions";
 import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
-import { parsePostgresUrl } from "./connectionUrl";
+import { parseConnectionUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
 import { emptyWindowPose } from "./penguinPlacement";
 import { SqlLine, type LineWash } from "./SqlLine";
@@ -302,10 +302,14 @@ function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 
-/** A table's name as SQL, schema-qualified unless it is the default one (⌥↵ inserts it). */
-function tableIdent(schema: string, name: string): string {
-  const bare = schema === "public" || schema === "main";
-  return bare ? sqlIdent(name) : `${sqlIdent(schema)}.${sqlIdent(name)}`;
+/**
+ * A table's name as SQL, schema-qualified unless it is the default one (⌥↵
+ * inserts it): `public`, SQLite's `main`, or on MySQL the session's database
+ * (`home`, the catalog's search path).
+ */
+function tableIdent(schema: string, name: string, engine?: string, home?: string): string {
+  const bare = engine === "mysql" ? schema === home : schema === "public" || schema === "main";
+  return bare ? sqlIdent(name, engine) : `${sqlIdent(schema, engine)}.${sqlIdent(name, engine)}`;
 }
 
 /**
@@ -1078,13 +1082,13 @@ export function Workspace({
     setExplained(null);
     if (connState !== "error" || !session.error || !activeConnection) return;
     let live = true;
-    const pg = activeConnection.kind === "postgres" ? activeConnection : null;
+    const server = activeConnection.kind !== "sqlite" ? activeConnection : null;
     void explainConnectError(session.error, {
-      host: pg?.host ?? "",
-      port: pg?.port ?? 0,
-      username: pg?.username ?? "",
-      sshHost: pg?.ssh?.host ?? null,
-      cloudSql: pg?.cloud_sql?.instance ?? null,
+      host: server?.host ?? "",
+      port: server?.port ?? 0,
+      username: server?.username ?? "",
+      sshHost: server?.ssh?.host ?? null,
+      cloudSql: server?.kind === "postgres" ? (server.cloud_sql?.instance ?? null) : null,
     })
       .then((x) => live && setExplained(x))
       .catch(() => {});
@@ -1102,7 +1106,7 @@ export function Workspace({
   // the host as new; Undo puts it back.
   const [forgot, setForgot] = useState<string | null>(null);
   // Only this connection's own bastion (core forgets only a key its tunnel refused, too).
-  const tunnel = activeConnection?.kind === "postgres" ? activeConnection.ssh : null;
+  const tunnel = activeConnection && activeConnection.kind !== "sqlite" ? activeConnection.ssh : null;
   const shownKeys =
     explained?.host_keys && tunnel && explained.host_keys.host === tunnel.host && explained.host_keys.port === tunnel.port
       ? explained.host_keys
@@ -1179,6 +1183,8 @@ export function Workspace({
   // Editor completion reads the schema this window already loaded. The index
   // is built once per schema load, off the keystroke path when the app idles.
   const completionEngine = activeConnection ? engineForConnection(activeConnection) : null;
+  const identFor = (schemaName: string, name: string) =>
+    tableIdent(schemaName, name, completionEngine ?? undefined, schema?.search_path?.[0]);
   const usage = useMemo(() => usageFromHistory(history), [history]);
   useEffect(() => {
     if (!schema || !completionEngine) return;
@@ -1196,9 +1202,7 @@ export function Workspace({
   // The filter box completes as if it were `SELECT * FROM t WHERE …`.
   const filterCompletion = useMemo<EditorCompletion | undefined>(() => {
     if (!completion || !isTableTab || !activeTab?.table) return undefined;
-    const bare = activeTab.schema === "public" || activeTab.schema === "main";
-    const name = sqlIdent(activeTab.table);
-    const prefix = `SELECT * FROM ${bare ? name : `${sqlIdent(activeTab.schema ?? "")}.${name}`} WHERE `;
+    const prefix = `SELECT * FROM ${identFor(activeTab.schema ?? "", activeTab.table)} WHERE `;
     const n = prefix.length;
     return {
       complete: (text, caret, explicit): CompletionResult | null => {
@@ -1820,7 +1824,7 @@ export function Workspace({
   // Sensitive columns (marked on the Agents page or from a header): the ones
   // of the database this window shows, as the MCP server keys them.
   const marksDb = activeConnection
-    ? activeConnection.kind === "postgres"
+    ? activeConnection.kind !== "sqlite"
       ? (session.database ?? activeConnection.database)
       : "main"
     : null;
@@ -2737,7 +2741,11 @@ export function Workspace({
     const mark = runsRef.current[activeTabId]?.errorMark;
     if (!mark?.suggestion || !sqlEditorRef.current) return false;
     const plain = /^[a-z_][a-z0-9_$]*$/.test(mark.suggestion);
-    sqlEditorRef.current.replaceRange(mark.start, mark.end, plain ? mark.suggestion : sqlIdent(mark.suggestion));
+    sqlEditorRef.current.replaceRange(
+      mark.start,
+      mark.end,
+      plain ? mark.suggestion : sqlIdent(mark.suggestion, activeConnection ? engineForConnection(activeConnection) : undefined),
+    );
     // After the edit lands, run the statement the caret is in.
     requestAnimationFrame(() => void onRunRef.current());
     return true;
@@ -2764,7 +2772,7 @@ export function Workspace({
       if (!(ta instanceof HTMLTextAreaElement) || !ta.classList.contains("sql-editor")) return;
       if (!mainRef.current?.contains(ta)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (!parsePostgresUrl(text)) return;
+      if (!parseConnectionUrl(text)) return;
       const from = Math.min(ta.selectionStart, ta.selectionEnd);
       const replaced = ta.value.slice(from, Math.max(ta.selectionStart, ta.selectionEnd));
       showOfferToast("Looks like a connection URL", "Connect", "Esc keeps the text", {
@@ -4223,7 +4231,9 @@ export function Workspace({
   exportWholeRef.current = exportWhole;
 
   const formatEditorSql = async () => {
-    const error = await sqlEditorRef.current?.format(activeConnection?.kind === "sqlite" ? "sqlite" : "postgresql");
+    const kind = activeConnection?.kind;
+    const dialect = kind === "sqlite" ? "sqlite" : kind === "mysql" ? (session.serverFlavor === "MariaDB" ? "mariadb" : "mysql") : "postgresql";
+    const error = await sqlEditorRef.current?.format(dialect);
     if (error) showToast("Couldn't format", error, "error");
   };
 
@@ -4411,7 +4421,7 @@ export function Workspace({
     switch (t.kind) {
       case "table":
         if (insert) {
-          insertAtCaret(tableIdent(t.table.schema, t.table.name));
+          insertAtCaret(identFor(t.table.schema, t.table.name));
         } else {
           openTable(t.table, {
             keep: true,
@@ -4534,7 +4544,7 @@ export function Workspace({
           selectedKey={activeTable?.key ?? null}
           onOpenTable={(t, keep) => openTable(t, { keep, startView: lastTableView() })}
           onTableStructure={(t) => openTable(t, { view: "structure" })}
-          onInsertName={(t) => insertAtCaret(tableIdent(t.schema, t.name))}
+          onInsertName={(t) => insertAtCaret(identFor(t.schema, t.name))}
           onImportCsv={(t) => void startImportRef.current(t)}
           onHoverTable={hoverTable}
           onRefresh={connState === "connected" ? () => refreshSchemaRef.current() : undefined}
@@ -4550,7 +4560,7 @@ export function Workspace({
               ) : (
                 // Where it points; the database is the head's name (2026-10-13).
                 <span className="sb-sub" data-sb-sub title={connectionSubtitle({ ...activeConnection, database: session.database ?? activeConnection.database })}>
-                  {activeConnection.cloud_sql
+                  {activeConnection.kind === "postgres" && activeConnection.cloud_sql
                     ? instanceShortName(activeConnection.cloud_sql.instance)
                     : `${activeConnection.host}:${activeConnection.port}${activeConnection.ssh ? " · ssh" : ""}`}
                 </span>
@@ -4577,8 +4587,8 @@ export function Workspace({
                 className={`sb-status ${connState}`}
                 data-state={connState}
                 title={[
-                  session.serverVersion ? `${ENGINES[activeConnection.kind].label} ${session.serverVersion}` : null,
-                  activeConnection.kind === "postgres" && activeConnection.ssh ? "over SSH" : null,
+                  session.serverVersion ? `${connectionLook(activeConnection, session.serverFlavor).label} ${session.serverVersion}` : null,
+                  activeConnection.kind !== "sqlite" && activeConnection.ssh ? "over SSH" : null,
                 ]
                   .filter(Boolean)
                   .join(" · ")}

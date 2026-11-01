@@ -351,3 +351,36 @@ describe("a fragment on a column the table doesn't have", () => {
     expect(renameFragmentColumn(" balance > 500", "balance", "balance_cents")).toBe("balance_cents > 500");
   });
 });
+
+describe("chips on MySQL", () => {
+  const pred = (op: FilterOp, value: string, type = "varchar(40)", column = "name"): FilterChip => ({ kind: "pred", column, type, op, value });
+
+  test("names take backticks as core's quote_ident gives them: case, reserved words", () => {
+    expect(chipIdent("created_at", "mysql")).toBe("created_at");
+    expect(chipIdent("createdAt", "mysql")).toBe("`createdAt`");
+    expect(chipIdent("order", "mysql")).toBe("`order`");
+    expect(chipIdent("rank", "mysql")).toBe("`rank`");
+    expect(chipIdent("a`b c", "mysql")).toBe("`a``b c`");
+  });
+
+  test("contains is LIKE, escaped with ! so it reads the same in every sql_mode", () => {
+    expect(chipsToWhere([pred("ILIKE", "ann")], "mysql")).toBe("name LIKE '%ann%'");
+    expect(chipsToWhere([pred("ILIKE", "50%_off!")], "mysql")).toBe("name LIKE '%50!%!_off!!%' ESCAPE '!'");
+    // A backslash is LIKE's own escape unless another is named.
+    expect(chipsToWhere([pred("ILIKE", "a\\b")], "mysql")).toBe("name LIKE _utf8mb4 X'25615C6225' ESCAPE '!'");
+    expect(chipsToWhere([pred("ILIKE", "ann", "longtext")], "mysql")).toBe("name LIKE '%ann%'");
+  });
+
+  test("text with a backslash goes as hex, never as a backslash escape", () => {
+    expect(chipsToWhere([pred("=", "C:\\temp")], "mysql")).toBe("name = _utf8mb4 X'433A5C74656D70'");
+    expect(chipsToWhere([pred("=", "it's")], "mysql")).toBe("name = 'it''s'");
+  });
+
+  test("not equal keeps NULL rows with <=>", () => {
+    expect(chipsToWhere([pred("IS DISTINCT FROM", "7", "int", "qty")], "mysql")).toBe("NOT (qty <=> 7)");
+  });
+
+  test("a typed `col` fragment reads back as a chip", () => {
+    expect(parseFragment("`order` = 5", [{ name: "order", type_name: "int" }])).toEqual({ kind: "pred", column: "order", type: "int", op: "=", value: "5" });
+  });
+});
