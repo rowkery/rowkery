@@ -10,31 +10,59 @@ fn env(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.into())
 }
 
+/// Lets the test login make stored functions (MySQL 8.0 with binary
+/// logging asks for SUPER otherwise), as root.
+fn trust_function_creators() {
+    let mut root = record("root", SafeMode::Off);
+    root.username = "root".into();
+    let secrets = ConnectionSecrets {
+        db_password: Some(env("ROWKERY_MYSQL_ROOT_PASSWORD", "rowkery")),
+        ..Default::default()
+    };
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut s =
+            rowkery_core::db::mysql::open_session_via(root.id.clone(), root, Some(&secrets), None)
+                .await
+                .expect("root");
+        rowkery_core::db::mysql::session_execute(
+            &mut s,
+            "SET GLOBAL log_bin_trust_function_creators = 1",
+        )
+        .await
+        .expect("trust");
+    });
+}
+
+/// The test server's record.
+fn record(id: &str, safe_mode: SafeMode) -> MysqlConnection {
+    MysqlConnection {
+        id: id.into(),
+        name: id.into(),
+        host: env("ROWKERY_MYSQL_HOST", "127.0.0.1"),
+        port: env("ROWKERY_MYSQL_PORT", "3306").parse().unwrap(),
+        database: env("ROWKERY_MYSQL_DB", "rowkery"),
+        username: env("ROWKERY_MYSQL_USER", "rowkery"),
+        ssl_mode: PostgresSslMode::Disable,
+        ssl_root_cert: None,
+        ssh: None,
+        environment: None,
+        safe_mode,
+        allow_mcp: false,
+        mcp_hidden_tables: Vec::new(),
+        mcp_until: None,
+        mcp_samples_off: false,
+        mcp_timeout_s: None,
+        mcp_access: None,
+        masked_columns: Default::default(),
+        mariadb: false,
+    }
+}
+
 /// The test server saved under `id`, with `safe_mode`.
 fn save_mysql(bridge: &super::super::CoreBridge, id: &str, safe_mode: SafeMode) {
     CoreBridge::upsert_connection(
         bridge,
-        ConnectionRecord::Mysql(MysqlConnection {
-            id: id.into(),
-            name: id.into(),
-            host: env("ROWKERY_MYSQL_HOST", "127.0.0.1"),
-            port: env("ROWKERY_MYSQL_PORT", "3306").parse().unwrap(),
-            database: env("ROWKERY_MYSQL_DB", "rowkery"),
-            username: env("ROWKERY_MYSQL_USER", "rowkery"),
-            ssl_mode: PostgresSslMode::Disable,
-            ssl_root_cert: None,
-            ssh: None,
-            environment: None,
-            safe_mode,
-            allow_mcp: false,
-            mcp_hidden_tables: Vec::new(),
-            mcp_until: None,
-            mcp_samples_off: false,
-            mcp_timeout_s: None,
-            mcp_access: None,
-            masked_columns: Default::default(),
-            mariadb: false,
-        }),
+        ConnectionRecord::Mysql(record(id, safe_mode)),
         ConnectionSecrets {
             db_password: Some(env("ROWKERY_MYSQL_PASSWORD", "rowkery")),
             ..Default::default()
@@ -342,5 +370,296 @@ fn mysql_sql_files_run_and_respect_safe_mode() {
         [[Value::Text("a;b".into())], [Value::Text("it's".into())]]
     );
     bridge.close_window("w");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// ⌘E: an estimate runs nothing (even for a write), a timed read runs and
+/// says what each step took, and a timed write is refused because MySQL
+/// can't roll back what ANALYZE ran.
+#[test]
+fn mysql_plans_read_as_steps_and_never_run_writes() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-plan", SafeMode::Off);
+    bridge.open_window("w", "my-plan", None).expect("open");
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_plan; CREATE TABLE bw_plan (id INT PRIMARY KEY, n INT);
+         INSERT INTO bw_plan VALUES (1, 1), (2, 2), (3, 3), (4, 4)",
+    );
+    assert_eq!(error, None);
+
+    let out = bridge
+        .explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n = 2".into(),
+            false,
+            false,
+        )
+        .expect("estimate");
+    let ExplainOutcome::Plan { plan, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(!plan.timed);
+    let scan = plan
+        .steps
+        .iter()
+        .find(|s| s.table.as_deref() == Some("bw_plan"))
+        .unwrap_or_else(|| panic!("{plan:?}"));
+    assert_eq!(scan.kind, "Table scan", "{plan:?}");
+
+    let out = bridge
+        .explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n > 1".into(),
+            true,
+            false,
+        )
+        .expect("timed");
+    let ExplainOutcome::Plan { plan, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert!(plan.timed, "{plan:?}");
+    assert!(plan.steps.iter().any(|s| s.own_ms.is_some()), "{plan:?}");
+
+    // The estimate of a write runs nothing.
+    let out = bridge
+        .explain(
+            "w",
+            1,
+            "DELETE FROM bw_plan WHERE id = 1".into(),
+            false,
+            false,
+        )
+        .expect("write estimate");
+    assert!(matches!(out, ExplainOutcome::Plan { .. }), "{out:?}");
+    let err = bridge
+        .explain(
+            "w",
+            1,
+            "DELETE FROM bw_plan WHERE id = 1".into(),
+            true,
+            true,
+        )
+        .expect_err("timed write");
+    assert!(err.contains("can't roll it back"), "{err}");
+    let (rows, _, _) = rows_of(&bridge, "w", 1, "SELECT count(*) FROM bw_plan");
+    assert_eq!(rows, [[Value::Int(4)]]);
+    let err = bridge
+        .explain("w", 1, "SELECT 1; SELECT 2".into(), false, false)
+        .expect_err("two statements");
+    assert_eq!(err, "Explain works on one statement at a time.");
+
+    // A function that writes, reached while planning (a subquery the
+    // optimizer evaluates) or timing: the plan's read-only transaction
+    // stops it, on every server.
+    trust_function_creators();
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP FUNCTION IF EXISTS bw_plan_w;
+         CREATE FUNCTION bw_plan_w() RETURNS INT NOT DETERMINISTIC MODIFIES SQL DATA
+         BEGIN INSERT INTO bw_plan VALUES (100 + (SELECT count(*) FROM bw_plan), 0); RETURN 1; END",
+    );
+    assert_eq!(error, None);
+    for (sql, timed) in [
+        (
+            "SELECT * FROM bw_plan WHERE id = (SELECT max(id) FROM bw_plan WHERE bw_plan_w() = 1)",
+            false,
+        ),
+        ("SELECT bw_plan_w()", true),
+    ] {
+        let err = bridge
+            .explain("w", 1, sql.into(), timed, false)
+            .expect_err(sql);
+        assert_eq!(err, crate::PLAN_WOULD_WRITE, "{sql}");
+    }
+    // A write's plan can't be read-only: one calling a function isn't run.
+    let err = bridge
+        .explain(
+            "w",
+            1,
+            "DELETE FROM bw_plan WHERE id = bw_plan_w()".into(),
+            false,
+            false,
+        )
+        .expect_err("write calling a function");
+    assert_eq!(err, crate::mysql::PLAN_WRITE_CALLS);
+    let (rows, _, _) = rows_of(&bridge, "w", 1, "SELECT count(*) FROM bw_plan");
+    assert_eq!(rows, [[Value::Int(4)]]);
+    assert!(bridge.open_transactions().is_empty());
+
+    // Inside the tab's own transaction it would commit it: refused.
+    assert_eq!(rows_of(&bridge, "w", 1, "BEGIN").1, None);
+    let err = bridge
+        .explain("w", 1, "SELECT * FROM bw_plan".into(), false, false)
+        .expect_err("in a transaction");
+    assert_eq!(err, crate::mysql::PLAN_IN_TXN);
+    assert_eq!(bridge.open_transactions(), [("w".to_string(), 1)]);
+    assert_eq!(rows_of(&bridge, "w", 1, "ROLLBACK").1, None);
+    // A server set to another plan form still reads.
+    // (8.3+ only; elsewhere these SETs fail and change nothing.)
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "SET SESSION explain_json_format_version = 2",
+    );
+    assert!(matches!(
+        bridge.explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n > 1".into(),
+            false,
+            false
+        ),
+        Ok(ExplainOutcome::Plan { .. })
+    ));
+    if env("ROWKERY_MYSQL_PORT", "") == "33084" {
+        let (rows, _, _) = rows_of(
+            &bridge,
+            "w",
+            1,
+            "SELECT @@SESSION.explain_json_format_version",
+        );
+        assert_eq!(rows, [[Value::Int(2)]], "put back");
+    }
+    rows_of(&bridge, "w", 1, "SET SESSION explain_format = JSON");
+    assert!(matches!(
+        bridge.explain(
+            "w",
+            1,
+            "SELECT * FROM bw_plan WHERE n > 1".into(),
+            true,
+            false
+        ),
+        Ok(ExplainOutcome::Plan { .. })
+    ));
+    bridge.close_window("w");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
+/// The Sessions tab on MySQL: our tabs are labelled, a blocked statement
+/// is cancelled with `KILL QUERY`, ending a session asks first (`KILL`),
+/// and a read-only connection refuses both. Run as a login with PROCESS
+/// (`ROWKERY_MYSQL_USER=root`), it also says who blocks whom.
+#[test]
+fn mysql_sessions_list_ours_and_stop_through_safe_mode() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-sessions", SafeMode::Off);
+    bridge.open_window("w", "my-sessions", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_sess; CREATE TABLE bw_sess (id INT PRIMARY KEY, n INT) ENGINE=InnoDB;
+         INSERT INTO bw_sess VALUES (1, 0)",
+    );
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "BEGIN; SELECT n FROM bw_sess WHERE id = 1 FOR UPDATE",
+    );
+    assert_eq!(error, None);
+    let blocked = bridge
+        .run_window_query(
+            "w",
+            2,
+            "UPDATE bw_sess SET n = 2 WHERE id = 1".into(),
+            None,
+            false,
+        )
+        .expect("run");
+    let tab_row = |rows: &[SessionRow], tab: u64| {
+        rows.iter()
+            .find(|r| {
+                r.tab
+                    .as_ref()
+                    .is_some_and(|t| t.window_id == "w" && t.tab_id == tab)
+            })
+            .cloned()
+    };
+    // The UPDATE shows up waiting.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (holder, waiter) = loop {
+        let rows = bridge.sessions("w").expect("sessions");
+        if let (Some(h), Some(w)) = (tab_row(&rows, 1), tab_row(&rows, 2)) {
+            if w.session
+                .query
+                .as_deref()
+                .is_some_and(|q| q.contains("UPDATE"))
+            {
+                break (h, w);
+            }
+        }
+        assert!(Instant::now() < deadline, "{rows:?}");
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(waiter.session.state.as_deref(), Some("active"));
+    assert!(holder.session.can_stop && waiter.session.can_stop);
+    // Without PROCESS the server hides transactions; root has it.
+    let process = env("ROWKERY_MYSQL_USER", "rowkery") == "root";
+    assert_eq!(holder.session.xact_secs.is_some(), process, "{holder:?}");
+    if process {
+        assert_eq!(holder.session.state.as_deref(), Some("idle in transaction"));
+        assert_eq!(waiter.session.blocked_by, [holder.session.pid]);
+        assert!(
+            waiter
+                .session
+                .wait
+                .as_deref()
+                .is_some_and(|w| w.starts_with("Lock: ")),
+            "{waiter:?}"
+        );
+    }
+
+    // Cancel stops the UPDATE; its tab stays.
+    let out = bridge
+        .stop_session("w", waiter.session.pid, StopKind::Cancel, false)
+        .expect("cancel");
+    assert_eq!(out, StopOutcome::Stopped { gone: false });
+    let (_, error, cancelled) = wait_finished(&blocked);
+    assert!(cancelled || error.is_some(), "{error:?}");
+    assert_eq!(rows_of(&bridge, "w", 2, "SELECT 4").0, [[Value::Int(4)]]);
+
+    // Ending a session asks first, with exactly what runs.
+    let pid = holder.session.pid;
+    let out = bridge
+        .stop_session("w", pid, StopKind::End, false)
+        .expect("end");
+    assert_eq!(
+        out,
+        StopOutcome::Held {
+            sql: format!("KILL {pid}")
+        }
+    );
+    let out = bridge
+        .stop_session("w", pid, StopKind::End, true)
+        .expect("end");
+    assert_eq!(out, StopOutcome::Stopped { gone: false });
+    // Its transaction rolled back: the row is free for another tab.
+    let (_, error, _) = rows_of(&bridge, "w", 2, "UPDATE bw_sess SET n = 3 WHERE id = 1");
+    assert_eq!(error, None);
+    let out = bridge
+        .stop_session("w", pid, StopKind::End, true)
+        .expect("end again");
+    assert_eq!(out, StopOutcome::Stopped { gone: true });
+    bridge.close_window("w");
+
+    save_mysql(&bridge, "my-sessions-ro", SafeMode::ReadOnly);
+    bridge
+        .open_window("r", "my-sessions-ro", None)
+        .expect("open");
+    for kind in [StopKind::Cancel, StopKind::End] {
+        let out = bridge.stop_session("r", 1, kind, true).expect("stop");
+        assert!(matches!(out, StopOutcome::Refused { .. }), "{out:?}");
+    }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }

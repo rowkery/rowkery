@@ -28,6 +28,9 @@ use super::introspect::{
 };
 use super::{Column, DriverError, RowBatch, Value, BATCH_BYTES};
 
+mod activity;
+pub use activity::{session_activity, session_stop};
+
 /// The one catalog a MySQL server has (`information_schema`'s
 /// `TABLE_CATALOG`): the catalog's single database. Its databases are the
 /// catalog's schemas.
@@ -79,7 +82,8 @@ pub struct MysqlSession {
     opts: Opts,
     flavor: Flavor,
     version: String,
-    /// In its `program_name` connect attribute, after `Rowkery `.
+    /// The server's id for the connection, as text: what the Sessions
+    /// tab knows it by (`PROCESSLIST.ID`).
     tag: String,
     /// Kept while the session lives (a place under the connection's cap).
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
@@ -116,8 +120,8 @@ impl MysqlSession {
         &self.version
     }
 
-    /// Names this session's connection in `performance_schema`
-    /// (`program_name` = `Rowkery <tag>`).
+    /// Names this session's connection in the Sessions tab: its
+    /// `PROCESSLIST.ID`.
     pub fn tag(&self) -> &str {
         &self.tag
     }
@@ -245,7 +249,6 @@ pub async fn open_session_via(
         None if secrets.is_some() => String::new(),
         None => stored_password(&connection_id).await?,
     };
-    let tag = super::postgres::new_tag();
     let builder = |tls: Option<SslOpts>| {
         let mut b = OptsBuilder::default()
             // Through a tunnel the socket goes to the local end; the
@@ -264,10 +267,7 @@ pub async fn open_session_via(
             .prefer_socket(false)
             .tcp_keepalive(Some(Duration::from_secs(30)))
             .stmt_cache_size(0)
-            .connect_attribute(
-                "program_name",
-                format!("{} {tag}", super::postgres::APP_NAME),
-            )
+            .connect_attribute("program_name", super::postgres::APP_NAME)
             .ssl_opts(tls);
         // Read-only connections are read-only at the server too, so a write
         // the text check misses (a function in a SELECT) still fails.
@@ -312,6 +312,7 @@ pub async fn open_session_via(
             .map_err(|_| late())?
             .map_err(|e| map_error(e, &config))?;
     let (flavor, version) = parse_version(full.as_deref().unwrap_or_default());
+    let tag = conn.id().to_string();
     Ok(MysqlSession {
         config,
         connection_id,
@@ -688,6 +689,61 @@ pub async fn session_lexical_mode(
     Ok(crate::sql_file::MYSQL_LEXICAL_CHARSETS
         .contains(&charset.as_str())
         .then(|| format!("character set is {}", charset.to_ascii_lowercase())))
+}
+
+/// Before ⌘E: a transaction of its own, rolled back after, so what the
+/// server evaluates while planning or timing (a function in a subquery)
+/// keeps nothing. `read_only` (for a read) refuses any write outright;
+/// the server won't explain a write in one, so a write's plan has a
+/// read-write one. On MySQL 8.3+ also JSON plans in the form Rowkery
+/// reads. Only outside a transaction: `START TRANSACTION` would commit the
+/// user's. Returns what [`session_plan_end`] puts back.
+pub async fn session_plan_begin(
+    session: &mut MysqlSession,
+    read_only: bool,
+) -> Result<Option<u32>, DriverError> {
+    let mut restore = None;
+    if session.flavor == Flavor::Mysql {
+        // Unknown before 8.3, where version 1 is the only form.
+        let version = text_rows(session, "SELECT @@SESSION.explain_json_format_version")
+            .await
+            .ok()
+            .and_then(|rows| {
+                rows.first()?
+                    .first()?
+                    .as_deref()?
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            });
+        if let Some(v) = version.filter(|v| *v != 1) {
+            session_execute(session, "SET SESSION explain_json_format_version = 1").await?;
+            restore = Some(v);
+        }
+    }
+    let begin = if read_only {
+        "START TRANSACTION READ ONLY"
+    } else {
+        "START TRANSACTION"
+    };
+    if let Err(e) = session_execute(session, begin).await {
+        session_plan_end(session, restore).await;
+        return Err(e);
+    }
+    Ok(restore)
+}
+
+/// After ⌘E: rolls its transaction back and puts the session's plan
+/// form back.
+pub async fn session_plan_end(session: &mut MysqlSession, restore: Option<u32>) {
+    let _ = session_execute(session, "ROLLBACK").await;
+    if let Some(v) = restore {
+        let _ = session_execute(
+            session,
+            &format!("SET SESSION explain_json_format_version = {v}"),
+        )
+        .await;
+    }
 }
 
 /// Runs `sql`, no rows wanted.

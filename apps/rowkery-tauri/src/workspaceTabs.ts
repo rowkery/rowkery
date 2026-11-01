@@ -24,7 +24,7 @@ export type SortState = SortKey;
 export interface QueryTab {
   id: number;
   /**
-   * "sessions": the server's sessions (SessionsView.tsx), Postgres only.
+   * "sessions": the server's sessions (SessionsView.tsx), Postgres and MySQL.
    * "health": the database's health (HealthView.tsx).
    * "import": Import CSV's preview, beside its panel; never saved.
    */

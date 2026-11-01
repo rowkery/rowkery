@@ -34,6 +34,45 @@ pub(crate) struct MysqlSlot {
     pub generation: u64,
 }
 
+/// What ⌘E runs on `session`, after opening its own transaction (see
+/// `session_plan_begin`); and what to put back after. Refused inside the
+/// tab's own transaction, which `START TRANSACTION` would commit, and for
+/// a write that calls a function: its transaction can't be read-only, and
+/// a function's write to a MyISAM table isn't rolled back.
+async fn plan_start(
+    session: &mut MysqlSession,
+    sql: &str,
+    timed: bool,
+) -> Result<(String, Option<u32>), crate::QueryFailure> {
+    let text = rowkery_core::plan::mysql_explain_sql(
+        session.flavor() == mysql::Flavor::Mariadb,
+        sql,
+        timed,
+    )
+    .map_err(crate::QueryFailure::from)?;
+    let read = reads_only(sql);
+    if !read && !rowkery_core::safety::calls_only_builtins(sql, Dialect::Mysql) {
+        return Err(PLAN_WRITE_CALLS.to_string().into());
+    }
+    let in_txn = match session.txn_known() {
+        Some(known) => known,
+        None => mysql::session_probe_txn(session, crate::INCOMING_TIMEOUT)
+            .await
+            .unwrap_or(true),
+    };
+    if in_txn {
+        return Err(PLAN_IN_TXN.to_string().into());
+    }
+    let restore = mysql::session_plan_begin(session, read)
+        .await
+        .map_err(crate::QueryFailure::from)?;
+    Ok((text, restore))
+}
+
+pub(crate) const PLAN_WRITE_CALLS: &str = "MySQL runs parts of a statement to plan it, and this one calls a function that may change data, so Rowkery doesn't explain it.";
+
+pub(crate) const PLAN_IN_TXN: &str = "This tab has an open transaction, and starting the plan's own read-only one would commit it. Commit or roll back first, or press ⌘E in another tab.";
+
 /// Every statement only reads: it can't open or end a transaction.
 fn reads_only(sql: &str) -> bool {
     let checks = rowkery_core::safety::check_sql(sql, Dialect::Mysql);
@@ -58,6 +97,7 @@ pub(crate) fn run_query(
     cap: Option<u64>,
     events: SharedSink,
     interrupt_slot: CancelSlot,
+    explain: Option<bool>,
 ) {
     let start = Instant::now();
     let sql = match apply_limit {
@@ -90,10 +130,13 @@ pub(crate) fn run_query(
                 },
             );
         };
-        let may_open = !reads_only(&sql);
-        let changes_session = rowkery_core::safety::check_sql(&sql, Dialect::Mysql)
-            .iter()
-            .any(|c| c.kind == rowkery_core::safety::StatementKind::Session);
+        // ⌘E runs the statement's plan instead: a timed one only for a
+        // read (checked by the caller), so neither opens a transaction.
+        let may_open = explain.is_none() && !reads_only(&sql);
+        let changes_session = explain.is_none()
+            && rowkery_core::safety::check_sql(&sql, Dialect::Mysql)
+                .iter()
+                .any(|c| c.kind == rowkery_core::safety::StatementKind::Session);
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -147,7 +190,29 @@ pub(crate) fn run_query(
             }
             let mut fwd = Forward::new(&events, query_id, tab_id, cap);
             let mut first_row = None;
-            let streamed = session_query_stream(&mut session, &sql, |batch, first| {
+            // ⌘E: the plan's form depends on the server this session
+            // reached, and it runs in a read-only transaction of its own.
+            let planned = match explain {
+                Some(timed) => match plan_start(&mut session, &sql, timed).await {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        disarm_cancel(&interrupt_slot);
+                        finish_query_worker(Err(err), query_id, tab_id, start, &events);
+                        pool::give_back(
+                            &pooled.pool,
+                            &pooled.window_id,
+                            Slot::Tab(tab_id),
+                            pooled.generation,
+                            session,
+                        );
+                        drop(out);
+                        return;
+                    }
+                },
+                None => None,
+            };
+            let text = planned.as_ref().map_or(sql.as_str(), |p| p.0.as_str());
+            let streamed = session_query_stream(&mut session, text, |batch, first| {
                 if first_row.is_none() && !batch.rows.is_empty() {
                     first_row = Some(start.elapsed());
                 }
@@ -155,6 +220,9 @@ pub(crate) fn run_query(
                 Ok(())
             })
             .await;
+            if let Some((_, restore)) = planned {
+                mysql::session_plan_end(&mut session, restore).await;
+            }
             let sent_rows = fwd.had_result_set;
             let result = fwd.outcome(streamed.map(|rows| StreamStats { rows, first_row }));
             // A warm session whose socket died while parked fails before

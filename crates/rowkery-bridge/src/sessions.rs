@@ -1,8 +1,11 @@
 //! The Sessions tab: the server's sessions read on a session of the window's
 //! own (never a tab's, so a tab's transaction is never touched), and
 //! stopping one through safe mode. The Health tab reads on the same session.
+//! MySQL and MariaDB windows have the Sessions tab too; Health is Postgres
+//! and SQLite only for now.
 
-use rowkery_core::connections::PostgresConnection;
+use rowkery_core::connections::{MysqlConnection, PostgresConnection};
+use rowkery_core::db::mysql::{self, MysqlSession};
 use rowkery_core::db::postgres::{
     session_activity, session_cancel_tagged, session_health, session_locks_held, session_stop,
     HeldLock, PostgresSession, ServerSession, StopKind,
@@ -12,6 +15,7 @@ use rowkery_core::health::HealthReport;
 use rowkery_core::safety::SafeMode;
 use serde::{Deserialize, Serialize};
 
+use crate::mysql::MysqlSlot;
 use crate::pool::{self, Lease, SharedPool, Slot};
 
 /// A server session, and the Rowkery tab it belongs to when it's one of ours.
@@ -45,10 +49,11 @@ pub(crate) const READ_ONLY: &str =
 
 /// What safe mode does with a stop. Ending a session always asks first: it
 /// rolls back someone's open transaction, which no Undo can bring back.
+/// `sql` is what the stop runs, for Review SQL.
 pub(crate) fn stop_gate(
     mode: SafeMode,
-    pid: i32,
     kind: StopKind,
+    sql: String,
     confirmed: bool,
 ) -> Option<StopOutcome> {
     if mode == SafeMode::ReadOnly {
@@ -57,7 +62,7 @@ pub(crate) fn stop_gate(
         });
     }
     if !confirmed && (mode == SafeMode::Confirm || kind == StopKind::End) {
-        return Some(StopOutcome::Held { sql: kind.sql(pid) });
+        return Some(StopOutcome::Held { sql });
     }
     None
 }
@@ -104,9 +109,21 @@ pub(crate) async fn list(target: Target) -> Result<Vec<SessionRow>, DriverError>
     let read = target
         .on_session(async |s| session_activity(s).await)
         .await?;
-    let tabs = pool.lock().map(|p| p.tag_tabs()).unwrap_or_default();
-    Ok(read
-        .into_iter()
+    Ok(label_tabs(&pool, None, read))
+}
+
+/// Joins each server session to the Rowkery tab whose tag it carries;
+/// with `window`, only that window's tabs.
+fn label_tabs<S: pool::PoolSession>(
+    pool: &SharedPool<S>,
+    window: Option<&str>,
+    read: Vec<ServerSession>,
+) -> Vec<SessionRow> {
+    let mut tabs = pool.lock().map(|p| p.tag_tabs()).unwrap_or_default();
+    if let Some(window) = window {
+        tabs.retain(|_, (w, _)| w == window);
+    }
+    read.into_iter()
         .map(|session| {
             let tab = session
                 .rowkery_tag
@@ -118,7 +135,68 @@ pub(crate) async fn list(target: Target) -> Result<Vec<SessionRow>, DriverError>
                 });
             SessionRow { session, tab }
         })
-        .collect())
+        .collect()
+}
+
+/// A MySQL window's Sessions call: its pool and how to reach its server.
+pub(crate) struct MysqlTarget {
+    pub slot: MysqlSlot,
+    pub connection_id: String,
+    pub config: MysqlConnection,
+}
+
+impl MysqlTarget {
+    /// Runs `work` on the window's Sessions session, then parks it again.
+    async fn on_session<T>(
+        self,
+        work: impl AsyncFnOnce(&mut MysqlSession) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        let MysqlSlot {
+            pool,
+            window_id,
+            generation,
+        } = self.slot;
+        let Lease { mut session, .. } = pool::lease(
+            &pool,
+            &window_id,
+            Slot::Monitor,
+            generation,
+            self.connection_id,
+            self.config,
+        )
+        .await?;
+        let done = work(&mut session).await;
+        pool::give_back(&pool, &window_id, Slot::Monitor, generation, session);
+        done
+    }
+}
+
+/// Every other session this login may see on the server, ours labelled.
+pub(crate) async fn mysql_list(target: MysqlTarget) -> Result<Vec<SessionRow>, DriverError> {
+    let pool = target.slot.pool.clone();
+    let window = target.slot.window_id.clone();
+    let read = target
+        .on_session(async |s| mysql::session_activity(s).await)
+        .await?;
+    // A MySQL id is only unique on its server, and other windows may be on
+    // other servers: only this window's tabs are named.
+    Ok(label_tabs(&pool, Some(&window), read))
+}
+
+/// Stops session `id` (`KILL QUERY` / `KILL`) once safe mode allows it.
+pub(crate) async fn mysql_stop(
+    target: MysqlTarget,
+    id: i32,
+    kind: StopKind,
+    confirmed: bool,
+) -> Result<StopOutcome, DriverError> {
+    if let Some(gated) = stop_gate(target.config.safe_mode, kind, kind.mysql_sql(id), confirmed) {
+        return Ok(gated);
+    }
+    let sent = target
+        .on_session(async |s| mysql::session_stop(s, id, kind).await)
+        .await?;
+    Ok(StopOutcome::Stopped { gone: !sent })
 }
 
 /// The database's health, for the Health tab.
@@ -139,7 +217,7 @@ pub(crate) async fn stop(
     kind: StopKind,
     confirmed: bool,
 ) -> Result<StopOutcome, DriverError> {
-    if let Some(gated) = stop_gate(target.config.safe_mode, pid, kind, confirmed) {
+    if let Some(gated) = stop_gate(target.config.safe_mode, kind, kind.sql(pid), confirmed) {
         return Ok(gated);
     }
     let sent = target
@@ -165,14 +243,15 @@ mod tests {
     fn safe_mode_gates_stops() {
         use StopKind::*;
         let held = |kind: StopKind| Some(StopOutcome::Held { sql: kind.sql(7) });
-        assert_eq!(stop_gate(SafeMode::Off, 7, Cancel, false), None);
-        assert_eq!(stop_gate(SafeMode::Off, 7, End, false), held(End));
-        assert_eq!(stop_gate(SafeMode::Off, 7, End, true), None);
-        assert_eq!(stop_gate(SafeMode::Confirm, 7, Cancel, false), held(Cancel));
-        assert_eq!(stop_gate(SafeMode::Confirm, 7, Cancel, true), None);
+        let gate = |mode, kind: StopKind, confirmed| stop_gate(mode, kind, kind.sql(7), confirmed);
+        assert_eq!(gate(SafeMode::Off, Cancel, false), None);
+        assert_eq!(gate(SafeMode::Off, End, false), held(End));
+        assert_eq!(gate(SafeMode::Off, End, true), None);
+        assert_eq!(gate(SafeMode::Confirm, Cancel, false), held(Cancel));
+        assert_eq!(gate(SafeMode::Confirm, Cancel, true), None);
         for kind in [Cancel, End] {
             assert!(matches!(
-                stop_gate(SafeMode::ReadOnly, 7, kind, true),
+                gate(SafeMode::ReadOnly, kind, true),
                 Some(StopOutcome::Refused { .. })
             ));
         }

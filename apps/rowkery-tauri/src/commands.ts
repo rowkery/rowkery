@@ -33,6 +33,8 @@ export interface CommandState {
   /** The picked connection's record, once loaded. */
   connection: {
     postgres: boolean;
+    /** MySQL or MariaDB. */
+    mysql?: boolean;
     environment: ConnectionEnv | null;
     safeMode: SafeMode;
     /** Shared with the MCP server (`Rowkery --mcp`). */
@@ -482,7 +484,8 @@ export const COMMANDS: Command[] = [
     title: "Explain with timings",
     synonyms: ["explain analyze", "plan"],
     section: "Query",
-    canRun: (s) => s.connected && !s.busy && !s.tableTab && !s.connectionForm && !s.failed && !!s.connection?.postgres,
+    canRun: (s) =>
+      s.connected && !s.busy && !s.tableTab && !s.connectionForm && !s.failed && !!(s.connection?.postgres || s.connection?.mysql),
   },
   {
     id: "open-in-query",
@@ -557,15 +560,16 @@ export const COMMANDS: Command[] = [
     id: "show-sessions",
     title: "Show sessions",
     menuTitle: "Sessions",
-    synonyms: ["running", "activity", "locks", "blocking", "blocked", "slow", "kill", "cancel", "terminate", "processes", "pg_stat_activity"],
-    canRun: (s) => s.connected && !!s.connection?.postgres,
+    synonyms: ["running", "activity", "locks", "blocking", "blocked", "slow", "kill", "cancel", "terminate", "processes", "pg_stat_activity", "processlist"],
+    canRun: (s) => s.connected && !!(s.connection?.postgres || s.connection?.mysql),
   },
   {
     id: "show-health",
     title: "Show health",
     menuTitle: "Health",
     synonyms: ["health", "bloat", "vacuum", "unused indexes", "duplicate indexes", "wraparound", "slow queries", "pg_stat_statements", "size", "doctor"],
-    canRun: (s) => s.connected,
+    // Not on MySQL yet.
+    canRun: (s) => s.connected && !s.connection?.mysql,
   },
   {
     id: "presenting",
