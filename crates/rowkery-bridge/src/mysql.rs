@@ -402,3 +402,36 @@ pub(crate) async fn apply_changes(
     }
     Ok(result)
 }
+
+/// A CSV import on the window's import connection (never a tab's, so never
+/// inside the user's transaction).
+pub(crate) async fn import_csv(
+    slot: MysqlSlot,
+    connection_id: String,
+    config: MysqlConnection,
+    spec: &rowkery_core::import::ImportSpec,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    progress: crate::ImportProgress,
+) -> Result<crate::ImportOutcome, String> {
+    let Lease { mut session, .. } = pool::lease(
+        &slot.pool,
+        &slot.window_id,
+        Slot::Import,
+        slot.generation,
+        connection_id,
+        config,
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let result = rowkery_core::import::import_mysql(&mut session, spec, cancel, &*progress.0).await;
+    if session.txn_known() == Some(false) && !session.is_closed() {
+        pool::give_back(
+            &slot.pool,
+            &slot.window_id,
+            Slot::Import,
+            slot.generation,
+            session,
+        );
+    }
+    Ok(result.into())
+}

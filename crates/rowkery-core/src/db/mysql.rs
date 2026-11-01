@@ -184,6 +184,11 @@ impl MysqlSession {
         self.abandoned
     }
 
+    /// The driver's connection, for core's own statements (an import).
+    pub(crate) fn conn(&mut self) -> &mut Conn {
+        &mut self.conn
+    }
+
     /// Keeps `guard` while the session lives.
     pub fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
         self.guard = Some(guard);
@@ -782,7 +787,7 @@ async fn rollback(session: &mut MysqlSession, limit: Duration) {
 
 /// An UPDATE's `Rows matched: 1  Changed: 0  Warnings: 0`: the first
 /// number, which is the matched rows in every language the server speaks.
-fn rows_matched(info: &str) -> Option<u64> {
+pub(crate) fn rows_matched(info: &str) -> Option<u64> {
     let start = info.find(|c: char| c.is_ascii_digit())?;
     let digits: String = info[start..]
         .chars()
@@ -814,7 +819,7 @@ fn unlimited(session: &MysqlSession, select: &str) -> String {
     }
 }
 
-async fn select_text(
+pub(crate) async fn select_text(
     session: &mut MysqlSession,
     select: &str,
 ) -> Result<Vec<Vec<Option<String>>>, DriverError> {
@@ -1267,7 +1272,7 @@ fn type_name(col: &mysql_async::Column) -> String {
 }
 
 /// Rows of one catalog query, each cell as text (NULL: `None`).
-async fn text_rows(
+pub(crate) async fn text_rows(
     session: &mut MysqlSession,
     sql: &str,
 ) -> Result<Vec<Vec<Option<String>>>, DriverError> {
@@ -1294,7 +1299,7 @@ async fn text_rows(
         .collect())
 }
 
-fn cell(row: &[Option<String>], i: usize) -> String {
+pub(crate) fn cell(row: &[Option<String>], i: usize) -> String {
     row.get(i).cloned().flatten().unwrap_or_default()
 }
 

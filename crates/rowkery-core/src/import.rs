@@ -27,6 +27,9 @@ use crate::db::postgres::{cancel_with_token, humanize_postgres_error, PostgresSe
 use crate::db::{qualified_table_sql, quote_ident, EngineKind};
 use crate::edits::typed_text;
 
+mod mysql;
+pub use mysql::import_mysql;
+
 /// Rows the panel shows from the top of the file (the grid's preview).
 pub const PREVIEW_ROWS: usize = 20;
 /// Rows between progress reports and cancel checks.

@@ -2243,10 +2243,7 @@ fn import_csv_now(
     let safe_mode = match &target {
         WindowTarget::Sqlite { safe_mode, .. } => *safe_mode,
         WindowTarget::Postgres { config, .. } => config.safe_mode,
-        WindowTarget::Mysql { .. } => {
-            let _ = respond_to.send(Err(mysql::LATER.into()));
-            return;
-        }
+        WindowTarget::Mysql { config, .. } => config.safe_mode,
     };
     if safe_mode == SafeMode::ReadOnly {
         let _ = respond_to.send(Ok(ImportOutcome::Refused));
@@ -2255,9 +2252,29 @@ fn import_csv_now(
     invalidate_prefetch(&state.pool, &window_id, &state.runtime);
     let held = state.busy.hold(Work::Import);
     match target {
-        // Refused above.
-        WindowTarget::Mysql { .. } => {
-            let _ = respond_to.send(Err(mysql::LATER.into()));
+        WindowTarget::Mysql {
+            connection_id,
+            config,
+        } => {
+            let slot = mysql::MysqlSlot {
+                pool: state.mysql_pool.clone(),
+                generation: state
+                    .mysql_pool
+                    .lock()
+                    .map(|p| p.generation(&window_id))
+                    .unwrap_or(0),
+                window_id,
+            };
+            let prefetch = state.pool.clone();
+            let runtime = state.runtime.clone();
+            state.runtime.spawn(async move {
+                let _held = held;
+                let window_id = slot.window_id.clone();
+                let result =
+                    mysql::import_csv(slot, connection_id, config, &spec, cancel, progress).await;
+                invalidate_prefetch(&prefetch, &window_id, &runtime);
+                let _ = respond_to.send(result);
+            });
         }
         WindowTarget::Sqlite { path, .. } => {
             thread::spawn(move || {
