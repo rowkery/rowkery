@@ -1674,6 +1674,30 @@ pub(crate) fn cell(row: &[Option<String>], i: usize) -> String {
     row.get(i).cloned().flatten().unwrap_or_default()
 }
 
+/// The databases this login can see, the server's own left out (as in the
+/// catalog), with their tables' size on disk.
+pub async fn session_list_databases(
+    session: &mut MysqlSession,
+) -> Result<Vec<crate::db::postgres::DatabaseInfo>, DriverError> {
+    let rows = text_rows(
+        session,
+        &format!(
+            "SELECT s.SCHEMA_NAME, (SELECT COALESCE(SUM(t.DATA_LENGTH + t.INDEX_LENGTH), 0) \
+             FROM information_schema.TABLES t WHERE t.TABLE_SCHEMA = s.SCHEMA_NAME) \
+             FROM information_schema.SCHEMATA s \
+             WHERE s.SCHEMA_NAME NOT IN ({SYSTEM_SCHEMAS}) ORDER BY s.SCHEMA_NAME"
+        ),
+    )
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| crate::db::postgres::DatabaseInfo {
+            name: cell(row, 0),
+            size_bytes: cell(row, 1).parse().ok(),
+        })
+        .collect())
+}
+
 /// The server's databases (minus its own) as schemas of [`CATALOG`], with
 /// their tables, views, columns, keys, indexes and foreign keys, from
 /// `information_schema`. Row counts are the server's estimates.

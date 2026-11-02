@@ -1034,7 +1034,8 @@ export function Workspace({
     await flushTimings();
   };
 
-  const schemaTree = useMemo(() => buildSchemaTree(schema), [schema]);
+  const currentDb = connections.find((c) => c.id === activeId)?.kind === "mysql" ? session.database || null : null;
+  const schemaTree = useMemo(() => buildSchemaTree(schema, currentDb), [schema, currentDb]);
   /**
    * Row counts this window saw itself, by table key: a table tab that loaded
    * every row with no filter, an exact count (#) with none, a commit's

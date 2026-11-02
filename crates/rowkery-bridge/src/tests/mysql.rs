@@ -1170,3 +1170,47 @@ fn mysql_tab_settings_lost_with_their_session_are_named() {
     bridge.close_window("w");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// The database picker: the list is the databases this login can see (the
+/// server's own left out), and a window opened on one has it as the default
+/// database of every session.
+#[test]
+fn mysql_database_picker_lists_and_switches() {
+    let (_guard, _file, _path) = test_guard();
+    as_root(&[
+        "DROP DATABASE IF EXISTS bw_pick",
+        "CREATE DATABASE bw_pick",
+        "GRANT ALL ON bw_pick.* TO 'rowkery'@'%'",
+    ]);
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-pick", SafeMode::Off);
+    bridge.open_window("w", "my-pick", None).expect("open");
+    let names: Vec<String> = bridge
+        .list_databases("w")
+        .expect("list")
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(names.contains(&"rowkery".to_string()), "{names:?}");
+    assert!(names.contains(&"bw_pick".to_string()), "{names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n == "mysql" || n == "information_schema"),
+        "{names:?}"
+    );
+    let (rows, _, _) = rows_of(&bridge, "w", 1, "SELECT DATABASE()");
+    assert_eq!(rows, [[Value::Text("rowkery".into())]]);
+
+    let opened = bridge
+        .open_window("w", "my-pick", Some("bw_pick".into()))
+        .expect("switch");
+    assert_eq!(opened.database, "bw_pick");
+    for tab in [1, 2] {
+        let (rows, _, _) = rows_of(&bridge, "w", tab, "SELECT DATABASE()");
+        assert_eq!(rows, [[Value::Text("bw_pick".into())]], "tab {tab}");
+    }
+    bridge.close_window("w");
+    as_root(&["DROP DATABASE IF EXISTS bw_pick"]);
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

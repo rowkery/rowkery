@@ -225,7 +225,7 @@ export function TitleBar({
         items={railTileMenu({
           hasConnection: !!menuConn,
           connected: menuWindow?.state === "connected",
-          postgres: menuConn?.kind === "postgres",
+          switchesDatabase: menuConn?.kind === "postgres" || menuConn?.kind === "mysql",
         })}
         onPick={(id) => menuWindow && onTilePick(menuWindow.id, id)}
         onClose={tileMenu.close}

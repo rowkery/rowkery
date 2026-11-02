@@ -677,7 +677,7 @@ export const COMMANDS: Command[] = [
     title: "Switch database…",
     menuTitle: "Switch Database…",
     chord: { mac: "Mod+Shift+D" },
-    canRun: (s) => s.connected && !!s.connection?.postgres,
+    canRun: (s) => s.connected && !!(s.connection?.postgres || s.connection?.mysql),
   },
   { id: "new-window", title: "New window", menuTitle: "New Window", chord: { mac: "Mod+T" }, canRun: always },
   {

@@ -2401,11 +2401,17 @@ fn window_target(
             })
         }
         // Every database on the server is in the catalog already; `database`
-        // is only the default one, which `USE` changes in a tab.
-        ConnectionRecord::Mysql(my) => Ok(WindowTarget::Mysql {
-            connection_id: connection_id.to_string(),
-            config: my,
-        }),
+        // is the window's default one (the picker's), which `USE` changes in
+        // a tab.
+        ConnectionRecord::Mysql(mut my) => {
+            if let Some(db) = database.filter(|d| !d.trim().is_empty()) {
+                my.database = db;
+            }
+            Ok(WindowTarget::Mysql {
+                connection_id: connection_id.to_string(),
+                config: my,
+            })
+        }
     }
 }
 
@@ -4264,10 +4270,24 @@ fn dispatch_command(state: &mut CoreState, command: Command) {
             None => {
                 let _ = respond_to.send(Err("This window is not connected".into()));
             }
-            // A MySQL server's databases are its catalog's schemas: there
-            // is no other database to switch to.
-            Some(WindowTarget::Sqlite { .. } | WindowTarget::Mysql { .. }) => {
+            Some(WindowTarget::Sqlite { .. }) => {
                 let _ = respond_to.send(Ok(Vec::new()));
+            }
+            Some(WindowTarget::Mysql {
+                connection_id,
+                config,
+            }) => {
+                let pool = state.mysql_pool.clone();
+                let generation = pool.lock().map(|p| p.generation(&window_id)).unwrap_or(0);
+                let slot = mysql::MysqlSlot {
+                    pool,
+                    window_id,
+                    generation,
+                };
+                state.runtime.spawn(async move {
+                    let list = mysql::list_databases(slot, connection_id, config).await;
+                    let _ = respond_to.send(list.map_err(driver_error_message));
+                });
             }
             Some(WindowTarget::Postgres {
                 connection_id,

@@ -156,9 +156,9 @@ export function tabMenu(o: { table: boolean; preview: boolean; tabCount: number;
 }
 
 /** Right-click a window's pill in the title bar (it is selected first). */
-export function railTileMenu(o: { hasConnection: boolean; connected: boolean; postgres: boolean }): MenuRow[] {
+export function railTileMenu(o: { hasConnection: boolean; connected: boolean; switchesDatabase: boolean }): MenuRow[] {
   const rows: MenuRow[] = [];
-  if (o.connected && o.postgres) rows.push({ id: "switch-database", label: "Switch database…", command: "switch-database" });
+  if (o.connected && o.switchesDatabase) rows.push({ id: "switch-database", label: "Switch database…", command: "switch-database" });
   if (o.hasConnection) {
     rows.push(
       { id: "switch-connection", label: "Switch connection…", command: "switch-connection" },

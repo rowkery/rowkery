@@ -1488,8 +1488,9 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [newConnOpen, report, shortcutsOpen, noticesOpen, toggleSidebar]);
 
-  // The database picker only makes sense on a Postgres window.
-  const canSwitchDb = activeConnection?.kind === "postgres";
+  // The database picker: a Postgres window's database, a MySQL window's
+  // default one (SQLite has one).
+  const canSwitchDb = activeConnection?.kind === "postgres" || activeConnection?.kind === "mysql";
   useEffect(() => {
     if (popover === "database" && !canSwitchDb) setPopover(null);
   }, [popover, canSwitchDb]);
@@ -1527,7 +1528,7 @@ function App() {
             windowId={activeWindow.id}
             // Before the first connect (or after a failed one) the head still
             // names the database the connection opens on.
-            database={activeWindow.database ?? (head && activeConnection?.kind === "postgres" ? activeConnection.database : null)}
+            database={activeWindow.database || (head && activeConnection && "database" in activeConnection ? activeConnection.database || null : null)}
             nameless={!head && !!activeWindow.database && activeConnection?.name === activeWindow.database}
             connected={activeWindow.state === "connected"}
             open={live && popover === "database"}

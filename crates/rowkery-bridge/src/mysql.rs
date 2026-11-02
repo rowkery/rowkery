@@ -9,7 +9,7 @@ use rowkery_core::db::mysql::{
     self, open_session_via, session_introspect, session_probe_txn, session_query_stream, CancelVia,
     MysqlSession,
 };
-use rowkery_core::db::postgres::StreamStats;
+use rowkery_core::db::postgres::{DatabaseInfo, StreamStats};
 use rowkery_core::db::{DriverError, SchemaCatalog};
 use rowkery_core::edits::{ApplyCounts, ApplyFailure, RowStatement};
 use rowkery_core::query_util::apply_browse_limit;
@@ -449,6 +449,32 @@ pub(crate) async fn reload_schema(
         session,
     );
     catalog
+}
+
+/// The databases the window's login can see, read on its spare session.
+pub(crate) async fn list_databases(
+    slot: MysqlSlot,
+    connection_id: String,
+    config: MysqlConnection,
+) -> Result<Vec<DatabaseInfo>, DriverError> {
+    let Lease { mut session, .. } = pool::lease(
+        &slot.pool,
+        &slot.window_id,
+        Slot::Spare,
+        slot.generation,
+        connection_id,
+        config,
+    )
+    .await?;
+    let list = rowkery_core::db::mysql::session_list_databases(&mut session).await;
+    pool::give_back(
+        &slot.pool,
+        &slot.window_id,
+        Slot::Spare,
+        slot.generation,
+        session,
+    );
+    list
 }
 
 /// Staged row edits, as one transaction on the tab's own session (waiting,
