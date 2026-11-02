@@ -984,6 +984,9 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
         )
     };
     for sql in [
+        // A comment nested in a versioned one: safe mode can't be sure how
+        // the server reads it, so it's held before the function check.
+        "SELECT bw_ro_fn/*!99999 /* a */ bw_ro*/()",
         "TABLE bw_ro INTO OUTFILE '/tmp/bw_ro_x'",
         "(SELECT 1) INTO OUTFILE '/tmp/bw_ro_x'",
         "VALUES (1) INTO OUTFILE '/tmp/bw_ro_x'",

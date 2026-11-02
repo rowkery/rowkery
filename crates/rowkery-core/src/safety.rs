@@ -438,6 +438,33 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
             list.push(name.to_string());
         }
     };
+    // Where the comment opening at `i` may end: the first `*/`, and each one
+    // after it up to where nested `/* … */` pairs close it (the server
+    // nests them inside a `/*!…*/`). Never empty.
+    let comment_ends = |i: usize| -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut depth = 0usize;
+        let mut k = i;
+        while k + 1 < n {
+            if b[k] == b'/' && b[k + 1] == b'*' {
+                depth += 1;
+                k += 2;
+            } else if b[k] == b'*' && b[k + 1] == b'/' {
+                k += 2;
+                ends.push(k);
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            } else {
+                k += 1;
+            }
+        }
+        if ends.is_empty() {
+            ends.push(n);
+        }
+        ends
+    };
     // Where the next code may start past spaces and comments from `i`.
     // The server runs a `/*!…*/` (MariaDB `/*M!…*/`) or skips it whole by
     // its version number, so both readings are kept.
@@ -461,7 +488,7 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
                     None
                 };
                 if let Some(mut j) = versioned {
-                    todo.push(sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2));
+                    todo.extend(comment_ends(i));
                     while j < n && b[j].is_ascii_digit() {
                         j += 1;
                     }
@@ -469,7 +496,9 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
                 } else if b[i..].starts_with(b"*/") {
                     i += 2;
                 } else if b[i..].starts_with(b"/*") {
-                    i = sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2);
+                    let ends = comment_ends(i);
+                    i = ends[0];
+                    todo.extend(&ends[1..]);
                 } else if b[i..].starts_with(b"#") || b[i..].starts_with(b"--") {
                     i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
                 } else {
@@ -3190,7 +3219,13 @@ mod tests {
         );
         // A versioned comment the server's version skips whole: the ( after
         // it is the call's.
-        for sql in ["SELECT f/*!99999 junk*/()", "SELECT f/*M!999999 junk*/()"] {
+        for sql in [
+            "SELECT f/*!99999 junk*/()",
+            "SELECT f/*M!999999 junk*/()",
+            "SELECT f/*!99999 /* a */ b*/()",
+            "SELECT f/*!99999 /*!80000 a*/ b*/()",
+            "SELECT f/* /* a */ b*/()",
+        ] {
             assert!(mysql_calls(sql).names.contains(&"f".to_string()), "{sql}");
         }
         // A string's parentheses don't make a call's arguments a column list.
