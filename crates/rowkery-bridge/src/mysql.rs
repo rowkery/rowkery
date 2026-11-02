@@ -241,16 +241,14 @@ pub(crate) fn run_query(
                 disarm_cancel(&interrupt_slot);
                 // Forgotten before the tab hears, so its next run can't
                 // be told twice.
-                let key = Slot::Tab(tab_id);
-                pool::give_back(
+                pool::give_back_told(
                     &pooled.pool,
                     &pooled.window_id,
-                    key,
+                    Slot::Tab(tab_id),
                     pooled.generation,
                     session,
                 );
                 drop(out);
-                pool::forget_lost(&pooled.pool, &pooled.window_id, key);
                 finish_query_worker(
                     Err(DriverError::Message(pool::LOST_STATE.into()).into()),
                     query_id,
@@ -258,6 +256,31 @@ pub(crate) fn run_query(
                     start,
                     &events,
                 );
+                return;
+            }
+            // Anything else whose session died with the tab's USE / SET in
+            // it: its own error says whether it ran, and the loss is said
+            // with it, once, instead of on the next run.
+            if result.is_err()
+                && session.is_closed()
+                && session.txn_known() == Some(false)
+                && session.keeps_state()
+                && !cancel_requested(&interrupt_slot)
+            {
+                disarm_cancel(&interrupt_slot);
+                pool::give_back_told(
+                    &pooled.pool,
+                    &pooled.window_id,
+                    Slot::Tab(tab_id),
+                    pooled.generation,
+                    session,
+                );
+                drop(out);
+                let result = result.map_err(|mut f| {
+                    f.message = format!("{} {}", f.message.trim_end(), pool::LOST_STATE_TOO);
+                    f
+                });
+                finish_query_worker(result, query_id, tab_id, start, &events);
                 return;
             }
             if died_parked {

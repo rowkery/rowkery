@@ -902,7 +902,8 @@ fn mysql_tab_settings_lost_with_their_session_are_named() {
         [[Value::Null]]
     );
 
-    // A write after the same loss: refused with the same words, not run.
+    // A write after the same loss: its own error says whether it ran, and
+    // the loss with it, once.
     let (rows, error, _) = rows_of(
         &bridge,
         "w",
@@ -922,18 +923,21 @@ fn mysql_tab_settings_lost_with_their_session_are_named() {
         "CREATE TABLE IF NOT EXISTS rowkery.bw_state_lost (id INT)",
     );
     let first = error.expect("an error");
+    assert!(first.ends_with(pool::LOST_STATE_TOO), "{first}");
     let (rows, error, _) = rows_of(&bridge, "w", 1, "SELECT DATABASE()");
-    // The write's own error is the driver's; the tab hears of its lost
-    // USE no later than its next run.
-    if first != pool::LOST_STATE {
-        assert_eq!(error.as_deref(), Some(pool::LOST_STATE), "{first}");
-        let (rows, error, _) = rows_of(&bridge, "w", 1, "SELECT DATABASE()");
-        assert_eq!(error, None);
-        assert_eq!(rows, [[Value::Text("rowkery".into())]]);
-    } else {
-        assert_eq!(error, None);
-        assert_eq!(rows, [[Value::Text("rowkery".into())]]);
-    }
+    assert_eq!(error, None);
+    assert_eq!(rows, [[Value::Text("rowkery".into())]]);
+
+    // Picking another database drops the tab's SET on purpose: nothing to say.
+    assert_eq!(rows_of(&bridge, "w", 1, "SET @rk_mark = 1").1, None);
+    bridge
+        .open_window("w", "my-state", Some("information_schema".into()))
+        .expect("re-point");
+    // (Re-opening the window starts its sessions over, as a safe mode
+    // change does.)
+    let (rows, error, _) = rows_of(&bridge, "w", 1, "SELECT @rk_mark");
+    assert_eq!(error, None);
+    assert_eq!(rows, [[Value::Null]]);
     bridge.close_window("w");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
