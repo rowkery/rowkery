@@ -364,7 +364,8 @@ export function chipFragments(chips: FilterChip[], engine: ChipEngine = "postgre
 export function chipsToWhere(chips: FilterChip[], engine: ChipEngine = "postgres"): string {
   const parts = chipFragments(chips, engine).filter((s) => s !== "");
   return parts
-    .map((s) => (parts.length > 1 && /--|#/.test(s) && s.endsWith(")") ? `${s.slice(0, -1)}\n)` : s))
+    // `chips.length`, as chipFragments brackets by it (an empty chip counts).
+    .map((s) => (chips.length > 1 && /--|#/.test(s) && s.endsWith(")") ? `${s.slice(0, -1)}\n)` : s))
     .join(" AND ");
 }
 

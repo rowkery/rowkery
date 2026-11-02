@@ -69,8 +69,8 @@ const freshHead = (): Head => ({ stage: "", depth: 0, parens: 0, afterBegin: fal
 const ROUTINES: Record<string, string> = { FUNCTION: "F0", PROCEDURE: "P0", TRIGGER: "T0" };
 /** MySQL's too: an event's `DO BEGIN … END` is a body like a trigger's. */
 const MY_ROUTINES: Record<string, string> = { ...ROUTINES, EVENT: "T0" };
-/** MySQL blocks that end with `END <word>` and open no `BEGIN`. */
-const MY_END_WORDS = new Set(["IF", "LOOP", "WHILE", "REPEAT"]);
+/** MySQL blocks that end with `END <word>` and open no `BEGIN` (`FOR` is MariaDB's). */
+const MY_END_WORDS = new Set(["IF", "LOOP", "WHILE", "REPEAT", "FOR"]);
 
 /** Feeds the head one upper-cased word outside quotes and comments. */
 function headWord(h: Head, w: string, dialect: SqlDialect): void {
@@ -206,6 +206,8 @@ export function sqlStatementRanges(text: string, dialect?: SqlDialect): CharRang
         i++;
       }
     } else if (c === ";") {
+      // `END;` closed a block: the next statement's IF (…) opens its own.
+      head.afterEnd = false;
       if (head.depth === 0) {
         push(i + 1);
         start = i + 1;
@@ -344,6 +346,8 @@ function statementLine(line: string, base: number, entry: string, semis: number[
         i++;
       }
     } else if (c === ";") {
+      // `END;` closed a block: the next statement's IF (…) opens its own.
+      head.afterEnd = false;
       if (head.depth === 0) {
         semis.push(base + i + 1);
         Object.assign(head, freshHead());

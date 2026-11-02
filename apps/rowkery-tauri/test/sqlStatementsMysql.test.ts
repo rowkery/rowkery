@@ -62,6 +62,18 @@ describe("MySQL statement split", () => {
     ]);
   });
 
+  test("a block closed by END; doesn't eat the next block's IF, CASE or WHILE", () => {
+    const procs = [
+      "CREATE PROCEDURE p() BEGIN BEGIN SELECT 1; END; IF 1 THEN SELECT 2; END IF; END;",
+      "CREATE PROCEDURE p() BEGIN SET @x = CASE WHEN 1 THEN 1 END; IF @x THEN SELECT 1; END IF; END;",
+      "CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN SET @d = 1; END; WHILE 0 DO SELECT 1; END WHILE; END;",
+      "CREATE PROCEDURE p() BEGIN BEGIN SELECT 1; END; CASE 1 WHEN 1 THEN SELECT 1; END CASE; SELECT 3; END;",
+      // MariaDB's FOR … END FOR.
+      "CREATE PROCEDURE p() BEGIN FOR i IN 1..3 DO SELECT i; END FOR; SELECT 2; END;",
+    ];
+    for (const proc of procs) expect(split(`${proc} select 9;`)).toEqual([proc, "select 9;"]);
+  });
+
   test("a transaction's BEGIN is no body", () => {
     expect(split("BEGIN; UPDATE t SET a = 1; COMMIT;")).toEqual(["BEGIN;", "UPDATE t SET a = 1;", "COMMIT;"]);
   });

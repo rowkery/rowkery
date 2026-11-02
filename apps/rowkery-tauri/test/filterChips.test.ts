@@ -149,6 +149,12 @@ describe("chipsToWhere", () => {
     );
   });
 
+  test("a comment's bracket closes on its own line even beside an empty chip", () => {
+    expect(chipsToWhere([{ kind: "expr", sql: "a = 1 # c" }, { kind: "any", columns: [], value: "x" } as FilterChip], "mysql")).toBe(
+      "(a = 1 # c\n)",
+    );
+  });
+
   test("a comment in a chip can't swallow the chips after it", () => {
     expect(chipsToWhere([{ kind: "expr", sql: "a = 1 -- why" }, pred("amount", "numeric", ">", "5")])).toBe(
       "(a = 1 -- why\n) AND amount > 5",

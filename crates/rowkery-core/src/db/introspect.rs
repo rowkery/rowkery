@@ -735,7 +735,7 @@ pub fn table_browse_query(
     let filter = filter.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
     if !filter.is_empty() {
         // A `--` (or MySQL `#`) comment would swallow the closing parenthesis.
-        let close = if filter.contains("--") || filter.contains('#') {
+        let close = if filter.contains("--") || (engine == EngineKind::Mysql && filter.contains('#')) {
             "\n)"
         } else {
             ")"
@@ -792,7 +792,7 @@ pub fn table_count_query(
     if filter.is_empty() {
         format!("SELECT count(*) FROM {from};")
     } else {
-        let close = if filter.contains("--") || filter.contains('#') {
+        let close = if filter.contains("--") || (engine == EngineKind::Mysql && filter.contains('#')) {
             "\n)"
         } else {
             ")"
