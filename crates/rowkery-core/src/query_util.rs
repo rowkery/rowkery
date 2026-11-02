@@ -73,6 +73,7 @@ pub fn sql_literal(engine: crate::db::EngineKind, value: &crate::db::Value) -> O
         Value::Float(f) if f.is_finite() && engine == EngineKind::Postgres => {
             Some(format!("'{f}'"))
         }
+        Value::Float(f) if f.is_finite() && engine == EngineKind::Mysql => Some(mysql_float(*f)),
         Value::Float(f) if f.is_finite() => Some(f.to_string()),
         Value::Text(t) if t.contains('\0') => None,
         Value::Text(t) if engine == EngineKind::Postgres && t.contains('\\') => Some(format!(
@@ -83,6 +84,19 @@ pub fn sql_literal(engine: crate::db::EngineKind, value: &crate::db::Value) -> O
         Value::Text(t) => Some(format!("'{}'", t.replace('\'', "''"))),
         Value::Bool(b) => Some(if *b { "TRUE" } else { "FALSE" }.into()),
         _ => None,
+    }
+}
+
+/// A finite `f` as a MySQL literal that reads back as the same double. A
+/// literal without an exponent is DECIMAL, which holds 65 digits at most
+/// (`1e300` would be stored as `1e65`, `1e-40` as 0), so a value whose plain
+/// form is long is written with one.
+pub fn mysql_float(f: f64) -> String {
+    let a = f.abs();
+    if a == 0.0 || (1e-6..1e15).contains(&a) {
+        format!("{f}")
+    } else {
+        format!("{f:e}")
     }
 }
 
@@ -140,6 +154,18 @@ mod literal_tests {
         assert_eq!(
             sql_literal(EngineKind::Mysql, &breakout).as_deref(),
             Some("_utf8mb4 X'5C27204F5220313D31202D2D'")
+        );
+        assert_eq!(
+            sql_literal(EngineKind::Mysql, &Value::Float(1e300)).as_deref(),
+            Some("1e300")
+        );
+        assert_eq!(
+            sql_literal(EngineKind::Mysql, &Value::Float(-2.5e-10)).as_deref(),
+            Some("-2.5e-10")
+        );
+        assert_eq!(
+            sql_literal(EngineKind::Mysql, &Value::Float(0.1)).as_deref(),
+            Some("0.1")
         );
         assert_eq!(
             sql_literal(EngineKind::Mysql, &Value::Text("it's".into())).as_deref(),

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{qualified_table_sql, quote_ident, EngineKind, Value};
-use crate::query_util::mysql_text;
+use crate::query_util::{mysql_float, mysql_text};
 use crate::reach::Reach;
 
 /// The table the edits go to, as the webview's catalog describes it.
@@ -563,7 +563,7 @@ fn my_literal(kind: Kind, value: &Value) -> Result<String, String> {
         Value::Int(n) => n.to_string(),
         Value::Float(f) if !f.is_finite() => return Err("MySQL can't store NaN or Infinity".into()),
         Value::Float(f) if matches!(kind, Kind::Text | Kind::Json) => text(&float(*f))?,
-        Value::Float(f) => float(*f),
+        Value::Float(f) => mysql_float(*f),
         Value::Bytes(b) => format!("X'{}'", hex(b)),
         Value::Text(t) => {
             let raw = my_text(kind, t)?;

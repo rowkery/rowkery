@@ -876,3 +876,68 @@ fn mysql_brackets_never_hide_a_write() {
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// A tab's `SET` (or `USE`) lives in its session: when that session dies
+/// while parked, the tab's next run says so instead of running on a fresh
+/// one without it, and the run after that starts clean.
+#[test]
+fn mysql_tab_settings_lost_with_their_session_are_named() {
+    let (_guard, _file, _path) = test_guard();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-state", SafeMode::Off);
+    bridge.open_window("w", "my-state", None).expect("open");
+    let (rows, error, _) = rows_of(&bridge, "w", 1, "SET @rk_mark = 42; SELECT CONNECTION_ID()");
+    assert_eq!(error, None);
+    let Value::Int(pid) = rows[0][0] else {
+        panic!("{rows:?}")
+    };
+    assert_eq!(rows_of(&bridge, "w", 2, &format!("KILL {pid}")).1, None);
+    thread::sleep(Duration::from_millis(300));
+    // A read: it would be retried on a fresh session, reading NULL.
+    let (rows, error, _) = rows_of(&bridge, "w", 1, "SELECT @rk_mark");
+    assert_eq!(error.as_deref(), Some(pool::LOST_STATE), "{rows:?}");
+    // Said once: the next run is on a fresh session, without the SET.
+    assert_eq!(
+        rows_of(&bridge, "w", 1, "SELECT @rk_mark").0,
+        [[Value::Null]]
+    );
+
+    // A write after the same loss: its own error says whether it ran, and
+    // the loss with it, once.
+    let (rows, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "USE information_schema; SELECT CONNECTION_ID()",
+    );
+    assert_eq!(error, None);
+    let Value::Int(pid) = rows[0][0] else {
+        panic!("{rows:?}")
+    };
+    assert_eq!(rows_of(&bridge, "w", 2, &format!("KILL {pid}")).1, None);
+    thread::sleep(Duration::from_millis(300));
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "CREATE TABLE IF NOT EXISTS rowkery.bw_state_lost (id INT)",
+    );
+    let first = error.expect("an error");
+    assert!(first.ends_with(pool::LOST_STATE_TOO), "{first}");
+    let (rows, error, _) = rows_of(&bridge, "w", 1, "SELECT DATABASE()");
+    assert_eq!(error, None);
+    assert_eq!(rows, [[Value::Text("rowkery".into())]]);
+
+    // Picking another database drops the tab's SET on purpose: nothing to say.
+    assert_eq!(rows_of(&bridge, "w", 1, "SET @rk_mark = 1").1, None);
+    bridge
+        .open_window("w", "my-state", Some("information_schema".into()))
+        .expect("re-point");
+    // (Re-opening the window starts its sessions over, as a safe mode
+    // change does.)
+    let (rows, error, _) = rows_of(&bridge, "w", 1, "SELECT @rk_mark");
+    assert_eq!(error, None);
+    assert_eq!(rows, [[Value::Null]]);
+    bridge.close_window("w");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}

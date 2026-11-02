@@ -1496,3 +1496,91 @@ async fn sql_files_stop_where_quotes_would_read_otherwise() {
         "{failed:?}"
     );
 }
+
+/// FLOAT cells come back widened to f64, and no literal of that double
+/// matches the stored float exactly: pages by such a sort walk by OFFSET.
+#[tokio::test]
+async fn browse_by_a_float_sort_walks_every_row_once() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_float_pages;
+         CREATE TABLE it_float_pages (id INT PRIMARY KEY, f FLOAT, d DOUBLE);
+         INSERT INTO it_float_pages VALUES
+           (1, 0.1, 1e300), (2, 0.1, 1e-300), (3, 0.2, 0.1), (4, 3.3e38, -1e300),
+           (5, 1e-30, 1.5), (6, 0.7, 2.5e-10)",
+    )
+    .await
+    .unwrap();
+    for column in ["f", "d"] {
+        let mut opts = BrowseOptions::first_page(2);
+        opts.key = vec!["id".into()];
+        opts.order = vec![BrowseOrder {
+            column: column.into(),
+            desc: false,
+        }];
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            let sql = table_browse_query(EngineKind::Mysql, "rowkery", "it_float_pages", &opts);
+            let page = rows(&mut s, &sql).await;
+            if page.is_empty() {
+                break;
+            }
+            let last = page.last().unwrap().clone();
+            seen.extend(page.iter().map(|r| r[0].clone()));
+            opts.offset += page.len() as u32;
+            opts.after = Some(
+                [
+                    ("id".to_string(), last[0].clone()),
+                    (
+                        column.to_string(),
+                        last[if column == "f" { 1 } else { 2 }].clone(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+        }
+        seen.sort_by_key(|v| match v {
+            Value::Int(n) => *n,
+            _ => 0,
+        });
+        assert_eq!(
+            seen,
+            (1..=6).map(Value::Int).collect::<Vec<_>>(),
+            "by {column}"
+        );
+    }
+}
+
+/// A double is written so the server reads the same double back: no
+/// 301-digit decimal (capped at 65 digits) and no tiny value rounded to 0.
+#[tokio::test]
+async fn edits_write_doubles_that_read_back_the_same() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ed_doubles; CREATE TABLE it_ed_doubles (id INT PRIMARY KEY, d DOUBLE)",
+    )
+    .await
+    .unwrap();
+    let table = edit_table("it_ed_doubles", &[("id", "int"), ("d", "double")]);
+    for (id, f) in [
+        (1, 1e300),
+        (2, 1e-300),
+        (3, 0.1),
+        (4, -2.5e-10),
+        (5, 123456.75),
+    ] {
+        let insert = Change::Insert {
+            values: vec![cell("id", Value::Int(id)), cell("d", Value::Float(f))],
+        };
+        apply(&mut s, &table, &[insert], None).await.unwrap();
+        let got = rows(
+            &mut s,
+            &format!("SELECT d FROM it_ed_doubles WHERE id = {id}"),
+        )
+        .await;
+        assert_eq!(got[0][0], Value::Float(f), "{f}");
+    }
+}
