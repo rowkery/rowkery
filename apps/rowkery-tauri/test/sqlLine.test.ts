@@ -41,6 +41,12 @@ describe("the SQL line", () => {
     else expect(textOf(p.headHtml)).toMatch(/WHERE \($/);
   });
 
+  test("a filter whose bracket closes on the next line (after a comment) keeps its slot", () => {
+    const p = sqlLineParts("SELECT * FROM t\nWHERE (a = 1 # c\n)\nORDER BY id\nLIMIT 1000;", "a = 1 # c");
+    expect(p.where).toBe("a = 1 # c");
+    expect(textOf(p.tailHtml)).toMatch(/^ ORDER BY id/);
+  });
+
   test("the line follows the chips before the new page is back", () => {
     const ran = "SELECT * FROM public.wallet_tx\nWHERE (status = 'pending')\nORDER BY id\nLIMIT 1000;";
     expect(lineWithFilter(ran, "status = 'pending'", "status = 'pending' AND amount > 1")).toBe(

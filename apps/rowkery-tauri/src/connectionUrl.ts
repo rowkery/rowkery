@@ -34,7 +34,8 @@ export function parseMysqlUrl(text: string): Partial<PgForm> | null {
   if (!read || read.socket) return null;
   const { url } = read;
   const out: Partial<PgForm> = {};
-  const host = decode(url.hostname);
+  // `[::1]` is how a URL writes an IPv6 host; the host field takes it bare.
+  const host = decode(url.hostname).replace(/^\[(.*)\]$/, "$1");
   if (host) out.host = host;
   out.port = url.port || "3306";
   // The first path segment; `/db?…` and `/db/` alike.
@@ -162,7 +163,7 @@ function parseUrl(trimmed: string): Partial<PgForm> | null {
   const { url, socket } = read;
   const out: Partial<PgForm> = {};
   const q = (key: string) => url.searchParams.get(key) || undefined;
-  const host = q("host") ?? (socket ? undefined : decode(url.hostname));
+  const host = q("host") ?? (socket ? undefined : decode(url.hostname).replace(/^\[(.*)\]$/, "$1"));
   if (host) out.host = host;
   const port = q("port");
   out.port = port && /^\d+$/.test(port) ? port : url.port || "5432";

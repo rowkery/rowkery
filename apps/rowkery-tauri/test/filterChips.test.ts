@@ -139,9 +139,40 @@ describe("chipsToWhere", () => {
     expect(chipsToWhere([{ kind: "expr", sql: "a = 1 OR b = 2" }, pred("amount", "numeric", ">", "5")])).toBe(
       "(a = 1 OR b = 2) AND amount > 5",
     );
+    // Any free SQL is bracketed among others: a quote or comment a scan
+    // could misread stays inside its own chip.
     expect(chipsToWhere([{ kind: "expr", sql: sql }, pred("amount", "numeric", ">", "5")])).toBe(
-      `${sql} AND amount > 5`,
+      `(${sql}) AND amount > 5`,
     );
+    expect(chipsToWhere([{ kind: "expr", sql: "note = 'it\\'s' OR 1" }, pred("amount", "numeric", ">", "5")], "mysql")).toBe(
+      "(note = 'it\\'s' OR 1) AND amount > 5",
+    );
+  });
+
+  test("a comment's bracket closes on its own line even beside an empty chip", () => {
+    expect(chipsToWhere([{ kind: "expr", sql: "a = 1 # c" }, { kind: "any", columns: [], value: "x" } as FilterChip], "mysql")).toBe(
+      "(a = 1 # c\n)",
+    );
+  });
+
+  test("a comment in a chip can't swallow the chips after it", () => {
+    expect(chipsToWhere([{ kind: "expr", sql: "a = 1 -- why" }, pred("amount", "numeric", ">", "5")])).toBe(
+      "(a = 1 -- why\n) AND amount > 5",
+    );
+    expect(chipsToWhere([{ kind: "expr", sql: "a = 1 # why" }, pred("amount", "numeric", ">", "5")], "mysql")).toBe(
+      "(a = 1 # why\n) AND amount > 5",
+    );
+  });
+
+  test("MySQL: TINYINT(1) takes true and false, and a word never matches a number's zeros", () => {
+    expect(chipsToWhere([pred("on_air", "tinyint(1)", "=", "true")], "mysql")).toBe("on_air = TRUE");
+    expect(chipsToWhere([pred("on_air", "tinyint(1)", "=", "1")], "mysql")).toBe("on_air = 1");
+    expect(chipsToWhere([pred("amount", "decimal(10,2)", "=", "abc")], "mysql")).toBe(
+      "CAST(amount AS CHAR) = 'abc'",
+    );
+    expect(chipsToWhere([pred("amount", "decimal(10,2)", "=", "1.5")], "mysql")).toBe("amount = 1.5");
+    // Postgres reports a bad number itself.
+    expect(chipsToWhere([pred("amount", "numeric", "=", "abc")])).toBe("amount = 'abc'");
   });
 
   test("chips join with AND in clause order", () => {
