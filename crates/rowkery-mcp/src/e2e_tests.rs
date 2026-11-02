@@ -1495,6 +1495,7 @@ async fn a_commit_refuses_rows_whose_values_moved() {
     // Changed while the commit waits for the row's lock: the commit's
     // snapshot predates it, so it fails rather than writing 70 + 5.
     let run = proposals::dry_run(bump).await.expect("bump dry run");
+    store_secret("mcp-e2e-holder", SecretKind::DbPassword, &password).expect("store password");
     let holder = open_session("mcp-e2e-holder".into(), pg_config())
         .await
         .expect("connect");
