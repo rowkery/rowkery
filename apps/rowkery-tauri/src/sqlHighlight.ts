@@ -8,12 +8,14 @@
 
 import {
   createStatementScanner,
+  lineCommentAt,
   lineDiff,
   quoteCloseIn,
   quotedEnd,
   type CharRange,
   type LineDiff,
   type LineState,
+  type SqlDialect,
 } from "./sqlStatements";
 
 const KEYWORDS = new Set(
@@ -52,7 +54,7 @@ function escapeHtml(text: string): string {
 }
 
 /** HTML for each line of `sql`, split on `\n` (so `lines.length` = line count). */
-export function highlightSqlLines(sql: string): string[] {
+export function highlightSqlLines(sql: string, dialect?: SqlDialect): string[] {
   const lines: string[] = [];
   let line = "";
   const emit = (cls: string | null, text: string) => {
@@ -83,8 +85,8 @@ export function highlightSqlLines(sql: string): string[] {
       emit(null, sql.slice(i, j));
       i = j;
       continue;
-    } else if (ch === "-" && sql[i + 1] === "-") {
-      const nl = sql.indexOf("\n", i + 2);
+    } else if (lineCommentAt(sql, i, dialect)) {
+      const nl = sql.indexOf("\n", i + 1);
       j = nl < 0 ? n : nl;
       cls = "c";
     } else if (ch === "/" && sql[i + 1] === "*") {
@@ -92,13 +94,13 @@ export function highlightSqlLines(sql: string): string[] {
       j = close < 0 ? n : close + 2;
       cls = "c";
     } else if (ch === "'") {
-      j = quotedEnd(sql, i);
+      j = quotedEnd(sql, i, dialect);
       cls = "s";
     } else if (ch === '"' || ch === "`") {
       // Quoted identifiers read as names, not strings.
-      j = quotedEnd(sql, i);
+      j = quotedEnd(sql, i, dialect);
     } else if (ch === "$") {
-      const tag = /^\$[A-Za-z_]*\$/.exec(sql.slice(i, i + 64));
+      const tag = dialect === "mysql" ? null : /^\$[A-Za-z_]*\$/.exec(sql.slice(i, i + 64));
       if (tag && !/\w/.test(sql[i - 1] ?? "")) {
         const close = sql.indexOf(tag[0], i + tag[0].length);
         j = close < 0 ? n : close + tag[0].length;
@@ -176,7 +178,12 @@ const wrap = (cls: string | null, part: string) =>
  * last line), the one thing past a line's end the whole-text pass reads
  * (`1e` at a line's end is a number only when the next line starts with a digit).
  */
-function highlightLine(line: string, entry: LineState, next: string | null): [string, LineState] {
+function highlightLine(
+  line: string,
+  entry: LineState,
+  next: string | null,
+  dialect: SqlDialect,
+): [string, LineState] {
   const n = line.length;
   let out = "";
   let i = 0;
@@ -193,7 +200,7 @@ function highlightLine(line: string, entry: LineState, next: string | null): [st
       const close = line.indexOf(entry);
       j = close < 0 ? -1 : close + entry.length;
     } else {
-      j = quoteCloseIn(line, 0, entry);
+      j = quoteCloseIn(line, 0, entry, dialect);
       if (entry !== "'") cls = null;
     }
     if (j < 0) return [wrap(cls, line), entry];
@@ -213,7 +220,7 @@ function highlightLine(line: string, entry: LineState, next: string | null): [st
       out += escapeHtml(line.slice(i, j));
       i = j;
       continue;
-    } else if (ch === "-" && line[i + 1] === "-") {
+    } else if (lineCommentAt(line, i, dialect)) {
       j = n;
       cls = "c";
     } else if (ch === "/" && line[i + 1] === "*") {
@@ -223,11 +230,11 @@ function highlightLine(line: string, entry: LineState, next: string | null): [st
       cls = "c";
     } else if (ch === "'" || ch === '"' || ch === "`") {
       cls = ch === "'" ? "s" : null;
-      const end = quoteCloseIn(line, i + 1, ch);
+      const end = quoteCloseIn(line, i + 1, ch, dialect);
       if (end < 0) return [out + wrap(cls, line.slice(i)), ch];
       j = end;
     } else if (ch === "$") {
-      const tag = /^\$[A-Za-z_]*\$/.exec(line.slice(i, i + 64));
+      const tag = dialect === "mysql" ? null : /^\$[A-Za-z_]*\$/.exec(line.slice(i, i + 64));
       if (tag && !/\w/.test(line[i - 1] ?? "")) {
         const close = line.indexOf(tag[0], i + tag[0].length);
         if (close < 0) return [out + wrap("s", line.slice(i)), tag[0]];
@@ -287,7 +294,7 @@ export interface SqlHighlighter {
 }
 
 /** A per-editor highlighter: caches each line's HTML and the state it starts in. */
-export function createSqlHighlighter(): SqlHighlighter {
+export function createSqlHighlighter(dialect?: SqlDialect): SqlHighlighter {
   let text: string | null = null;
   let src: string[] = [];
   let html: string[] = [];
@@ -324,7 +331,7 @@ export function createSqlHighlighter(): SqlHighlighter {
         }
         if (k >= stopAt) break;
         const after = k + 1 < lines.length ? (lines[k + 1][0] ?? "") : null;
-        const [h, exit] = highlightLine(lines[k], state, after);
+        const [h, exit] = highlightLine(lines[k], state, after, dialect);
         outHtml.push(h);
         outStates.push(exit);
         state = exit;
@@ -357,9 +364,9 @@ export interface SqlScan {
 }
 
 /** The editor's scanners: highlight and statement ranges, sharing one split and line diff per edit. */
-export function createSqlScan(): SqlScan {
-  const hl = createSqlHighlighter();
-  const st = createStatementScanner();
+export function createSqlScan(dialect?: SqlDialect): SqlScan {
+  const hl = createSqlHighlighter(dialect);
+  const st = createStatementScanner(dialect);
   let text: string | null = null;
   let src: string[] = [""];
   let ranges: CharRange[] = [];

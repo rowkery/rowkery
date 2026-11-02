@@ -128,6 +128,8 @@ export type ChipEngine = "postgres" | "sqlite" | "mysql";
 const NUMBER_TYPE =
   /^(int[248]?|integer|bigint|smallint|tinyint|mediumint|real|double|float[48]?|numeric|decimal|money|oid|serial[248]?|bigserial|smallserial)\b/i;
 const BOOL_TYPE = /^bool/i;
+/** MySQL's BOOLEAN is TINYINT(1): `true` there is 1, not the text 'true' (which equals 0). */
+const MY_BOOL_TYPE = /^tinyint\(1\)/i;
 const TEXT_TYPE = /^(text|varchar|character|char|citext|bpchar|name|nvarchar|nchar|clob|string|tinytext|mediumtext|longtext|enum|set)\b/i;
 const TIME_TYPE = /^(timestamp|date|time|datetime|interval)/i;
 const REAL_TYPE = /^(real|float4)$/i;
@@ -186,9 +188,24 @@ export function chipLiteral(value: string, type: string, engine: ChipEngine = "p
   if (isNumberType(type) && NUMBER_TEXT.test(v)) {
     return engine === "postgres" && REAL_TYPE.test(type.trim()) ? `'${v}'` : v;
   }
-  if (BOOL_TYPE.test(type) && /^(true|false)$/i.test(v)) return v.toUpperCase();
+  const bool = BOOL_TYPE.test(type) || (engine === "mysql" && MY_BOOL_TYPE.test(type.trim()));
+  if (bool && /^(true|false)$/i.test(v)) return v.toUpperCase();
   return quoteText(value, engine);
 }
+
+/**
+ * MySQL reads text that isn't a number as 0 next to a number column, so
+ * `amount = 'abc'` would find the zeros: such a value is compared with the
+ * column's text instead, which no number equals. Postgres and SQLite say so
+ * or compare as text themselves.
+ */
+const textOnNumber = (chip: Extract<FilterChip, { kind: "pred" }>, engine: ChipEngine, v: string) =>
+  engine === "mysql" &&
+  !chip.text &&
+  isNumberType(chip.type) &&
+  !NUMBER_TEXT.test(v.trim()) &&
+  !isNull(v) &&
+  !(MY_BOOL_TYPE.test(chip.type.trim()) && /^(true|false)$/i.test(v.trim()));
 
 /** The operator a column gets by default: text contains, everything else equals. */
 export function defaultOp(type: string): FilterOp {
@@ -320,39 +337,36 @@ export function chipSql(chip: FilterChip, engine: ChipEngine = "postgres"): stri
     default: {
       // NULL never equals anything: = NULL means IS NULL.
       if (!chip.text && isNull(chip.value)) return `${col} ${chip.op === "<>" ? "IS NOT NULL" : "IS NULL"}`;
+      if (textOnNumber(chip, engine, chip.value)) return `CAST(${col} AS CHAR) ${chip.op} ${lit(chip.value)}`;
       return `${col} ${chip.op} ${lit(chip.value)}`;
     }
   }
 }
 
-/** A free expression with a top-level OR is bracketed when other chips join it with AND. */
-function needsParens(sql: string): boolean {
-  // The text outside strings and brackets.
-  let depth = 0;
-  let q = false;
-  let top = "";
-  for (const ch of sql) {
-    if (ch === "'") q = !q;
-    else if (!q && ch === "(") depth++;
-    else if (!q && ch === ")") depth--;
-    else if (!q && depth === 0) top += ch;
-    else continue;
-    if (ch === "'" || ch === "(" || ch === ")") top += " ";
-  }
-  return /\bor\b/i.test(top);
-}
-
-/** Each chip's SQL in its place in the WHERE clause (what the line renders). */
+/**
+ * Each chip's SQL in its place in the WHERE clause (what the line renders).
+ * Free SQL and any-column chips are bracketed when other chips join them
+ * with AND: a top-level OR, or a quote or comment a scan could misread,
+ * stays inside its own chip.
+ */
 export function chipFragments(chips: FilterChip[], engine: ChipEngine = "postgres"): string[] {
   return chips.map((c) => {
     const sql = chipSql(c, engine);
-    return chips.length > 1 && c.kind !== "pred" && needsParens(sql) ? `(${sql})` : sql;
+    return chips.length > 1 && c.kind !== "pred" && sql !== "" ? `(${sql})` : sql;
   });
 }
 
-/** The chips as the tab's `filter` string: core wraps it in `WHERE (…)`. */
+/**
+ * The chips as the tab's `filter` string: core wraps it in `WHERE (…)`. A
+ * chip's `--` or `#` comment runs to the line's end, so its bracket closes
+ * on the next line instead of inside the comment, with the chips after it.
+ */
 export function chipsToWhere(chips: FilterChip[], engine: ChipEngine = "postgres"): string {
-  return chipFragments(chips, engine).filter((s) => s !== "").join(" AND ");
+  const parts = chipFragments(chips, engine).filter((s) => s !== "");
+  return parts
+    // `chips.length`, as chipFragments brackets by it (an empty chip counts).
+    .map((s) => (chips.length > 1 && /--|#/.test(s) && s.endsWith(")") ? `${s.slice(0, -1)}\n)` : s))
+    .join(" AND ");
 }
 
 /** A tab saved before chips: its filter text is one expression chip. */

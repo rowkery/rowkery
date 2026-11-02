@@ -227,7 +227,8 @@ const envCommands = (): Command[] => [
     id: "mcp:on",
     title: "Share this connection with agents",
     synonyms: ["mcp", "claude", "agent", "share"],
-    canRun: (s) => !!s.connection && !s.connection.allowMcp,
+    // The MCP server can't share MySQL yet.
+    canRun: (s) => !!s.connection && !s.connection.allowMcp && !s.connection.mysql,
   },
   {
     id: "mcp:off",
@@ -251,7 +252,7 @@ const envCommands = (): Command[] => [
     id: "mcp-edit-access",
     title: "Edit MCP access: databases and tables",
     synonyms: ["mcp", "claude", "agent", "tables", "databases", "whitelist", "share", "pick"],
-    canRun: (s) => !!s.connection?.allowMcp,
+    canRun: (s) => !!s.connection?.allowMcp && !s.connection.mysql,
   },
   {
     id: "mcp-connect",

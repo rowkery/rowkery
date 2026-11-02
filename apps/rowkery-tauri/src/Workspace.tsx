@@ -82,7 +82,7 @@ import { escLeftSelection, markReveal, ResultsGrid } from "./ResultsGrid";
 import type { KeyColumns, QuickLookView } from "./gridTypes";
 import { QuickLook, followLabel, sqlLiteral, type FollowKey, type IncomingRef, type KeyTarget, type QuickLookLinks } from "./QuickLook";
 import { resultsToText } from "./resultsExport";
-import { sqlStatementRanges, type CharRange } from "./sqlStatements";
+import { sqlStatementRanges, type CharRange, type SqlDialect } from "./sqlStatements";
 import {
   allTables,
   buildSchemaTree,
@@ -1183,6 +1183,8 @@ export function Workspace({
   // Editor completion reads the schema this window already loaded. The index
   // is built once per schema load, off the keystroke path when the app idles.
   const completionEngine = activeConnection ? engineForConnection(activeConnection) : null;
+  /** How the editor splits statements and reads comments and quotes. */
+  const sqlDialect: SqlDialect = completionEngine === "mysql" ? "mysql" : undefined;
   const identFor = (schemaName: string, name: string) =>
     tableIdent(schemaName, name, completionEngine ?? undefined, schema?.search_path?.[0]);
   const usage = useMemo(() => usageFromHistory(history), [history]);
@@ -2433,7 +2435,7 @@ export function Workspace({
     // A selection of several statements (a script with BEGIN … COMMIT) runs
     // as Run All does: a server prepares one statement at a time.
     if (!browse && !paging && !tableRun && !confirmed && !part) {
-      const ranges = sqlStatementRanges(text);
+      const ranges = sqlStatementRanges(text, sqlDialect);
       if (ranges.length > 1)
         return runStatements(text, ranges, target && target.sql === text ? target.start : null, tabId);
     }
@@ -2667,7 +2669,7 @@ export function Workspace({
   const onExplain = async (timed: boolean, sqlText?: string, confirmed = false, tabId = activeTabId) => {
     const text = (sqlText ?? sqlEditorRef.current?.getSqlToRun() ?? activeSql).trim();
     if (!text || runsRef.current[tabId]?.startedAt != null) return;
-    if (sqlStatementRanges(text).length > 1) return flash("Explain works on one statement at a time.");
+    if (sqlStatementRanges(text, sqlDialect).length > 1) return flash("Explain works on one statement at a time.");
     patchRun(tabId, { error: null, cancelling: false, held: null, outcome: null, startedAt: Date.now() });
     setNotice(null);
     let outcome: TabRun["outcome"] = "done";
@@ -2716,7 +2718,7 @@ export function Workspace({
   /** Run All Statements: every statement of the editor. */
   const runAll = async () => {
     const text = activeSql;
-    await runStatements(text, sqlStatementRanges(text), 0, activeTabId);
+    await runStatements(text, sqlStatementRanges(text, sqlDialect), 0, activeTabId);
   };
 
   /**
@@ -2805,7 +2807,7 @@ export function Workspace({
     if (!runOnConnect || ranOnConnect.current || connState !== "connected") return;
     ranOnConnect.current = true;
     const tab = tabs.find((t) => t.id === activeTabId);
-    const first = tab ? sqlStatementRanges(tab.sql)[0] : undefined;
+    const first = tab ? sqlStatementRanges(tab.sql, sqlDialect)[0] : undefined;
     if (tab && first) void onRunRef.current(tab.sql.slice(first.start, first.end), false, undefined, tab.id);
   }, [runOnConnect, connState]);
 
@@ -4233,7 +4235,9 @@ export function Workspace({
 
   const formatEditorSql = async () => {
     const kind = activeConnection?.kind;
-    const dialect = kind === "sqlite" ? "sqlite" : kind === "mysql" ? (session.serverFlavor === "MariaDB" ? "mariadb" : "mysql") : "postgresql";
+    // MariaDB too: sql-formatter's mariadb dialect splits `N'abc'` into
+    // `N 'abc'` (a column N aliased as a string), which changes the query.
+    const dialect = kind === "sqlite" ? "sqlite" : kind === "mysql" ? "mysql" : "postgresql";
     const error = await sqlEditorRef.current?.format(dialect);
     if (error) showToast("Couldn't format", error, "error");
   };
@@ -4852,6 +4856,7 @@ export function Workspace({
               completion={completion}
               mark={activeRun.errorMark ?? null}
               onMarkEnter={applySuggestion}
+              dialect={sqlDialect}
             />
           )}
           {!isTableTab && !ownTab && (

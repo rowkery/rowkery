@@ -147,7 +147,8 @@ export function sqlLineParts(sql: string, filter?: string | null): SqlLineParts 
   let head = before;
   let where: string | null = null;
   let tail = "";
-  const clause = f ? ` WHERE (${f})` : null;
+  // Core closes the bracket on a new line after a comment: flattened, ` )`.
+  const clause = !f ? null : [` WHERE (${f})`, ` WHERE (${f} )`].find((c) => before.includes(c)) ?? ` WHERE (${f})`;
   const at = clause ? before.indexOf(clause) : -1;
   if (clause && at >= 0) {
     head = before.slice(0, at + " WHERE (".length);

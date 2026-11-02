@@ -169,6 +169,11 @@ describe("MySQL and MariaDB URLs", () => {
     expect(parseConnectionUrl("mysql://")).toBeNull();
   });
 
+  test("an IPv6 host comes without its URL brackets", () => {
+    expect(parseMysqlUrl("mysql://u@[::1]:3307/d")).toMatchObject({ host: "::1", port: "3307" });
+    expect(parsePostgresUrl("postgres://u@[2001:db8::5]/d")?.host).toBe("2001:db8::5");
+  });
+
   test("the password is hidden, and a / in it is explained", () => {
     expect(hidePassword("mysql://app:secret@db/shop")).toBe(`mysql://app:${HIDDEN_PASSWORD}@db/shop`);
     expect(hidePassword("mariadb://app:secret@db/shop")).toBe(`mariadb://app:${HIDDEN_PASSWORD}@db/shop`);
