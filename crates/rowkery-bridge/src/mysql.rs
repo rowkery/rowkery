@@ -228,14 +228,39 @@ pub(crate) fn run_query(
             // A warm session whose socket died while parked fails before
             // anything ran: once more on a fresh one, for a plain read only,
             // and never when it may have held the user's transaction.
-            if result.is_err()
+            let died_parked = result.is_err()
                 && reused
                 && attempt == 1
                 && !sent_rows
                 && session.is_closed()
                 && session.txn_known() == Some(false)
-                && plain_read(&sql, Dialect::Mysql)
-            {
+                && plain_read(&sql, Dialect::Mysql);
+            // Nor when it held the tab's `USE` / `SET`: a fresh session
+            // would read without them. The read says so, once.
+            if died_parked && session.keeps_state() {
+                disarm_cancel(&interrupt_slot);
+                // Forgotten before the tab hears, so its next run can't
+                // be told twice.
+                let key = Slot::Tab(tab_id);
+                pool::give_back(
+                    &pooled.pool,
+                    &pooled.window_id,
+                    key,
+                    pooled.generation,
+                    session,
+                );
+                drop(out);
+                pool::forget_lost(&pooled.pool, &pooled.window_id, key);
+                finish_query_worker(
+                    Err(DriverError::Message(pool::LOST_STATE.into()).into()),
+                    query_id,
+                    tab_id,
+                    start,
+                    &events,
+                );
+                return;
+            }
+            if died_parked {
                 disarm_cancel(&interrupt_slot);
                 if cancel_requested(&interrupt_slot) {
                     finish_query_worker(

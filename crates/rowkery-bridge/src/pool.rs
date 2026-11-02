@@ -73,6 +73,9 @@ pub(crate) trait PoolSession: Send + Sized + 'static {
     fn txn_state(&self) -> TxnState;
     /// It holds a paged result whose Load more needs it.
     fn has_cursor(&self) -> bool;
+    /// It holds a `USE` or `SET` the tab's next run counts on, which a new
+    /// session wouldn't have.
+    fn keeps_state(&self) -> bool;
     fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>);
     fn holds(&self) -> bool;
     fn unhold(&mut self) -> Option<Box<dyn std::any::Any + Send + Sync>>;
@@ -105,6 +108,9 @@ impl PoolSession for PostgresSession {
     }
     fn has_cursor(&self) -> bool {
         postgres::session_has_cursor(self)
+    }
+    fn keeps_state(&self) -> bool {
+        false
     }
     fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
         PostgresSession::hold(self, guard)
@@ -160,6 +166,9 @@ impl PoolSession for MysqlSession {
     fn has_cursor(&self) -> bool {
         self.keeps_state()
     }
+    fn keeps_state(&self) -> bool {
+        MysqlSession::keeps_state(self)
+    }
     fn hold(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
         MysqlSession::hold(self, guard)
     }
@@ -208,6 +217,20 @@ pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const LOST_TXN: &str = "This tab's connection was lost while a transaction was open in it, so the server rolled that transaction back: nothing since BEGIN was saved. Nothing was run now; run your statements again.";
 /// The same, when we only know a statement that can open one had run.
 pub(crate) const LOST_MAYBE_TXN: &str = "This tab's connection was lost, and with it any transaction that was open in it (the server rolled it back). Nothing was run now; check what was saved and run your statements again.";
+
+/// The same, when no transaction can have been open but the tab had run a
+/// `USE` or `SET` on it, which a fresh session wouldn't have.
+pub(crate) const LOST_STATE: &str = "This tab's connection was closed (lost, or closed to free a connection for another tab), and with it the USE or SET run in it. Nothing was run now; run them again, then your statements.";
+
+/// What the tab's next statement says once `session` is gone: its
+/// transaction, else its `USE` / `SET`; `None` when nothing went with it.
+fn loss<S: PoolSession>(session: &S) -> Option<&'static str> {
+    match risk_of(session) {
+        Some(true) => Some(LOST_TXN),
+        Some(false) => Some(LOST_MAYBE_TXN),
+        None => session.keeps_state().then_some(LOST_STATE),
+    }
+}
 
 /// The session may hold the user's transaction: never close it on our own.
 fn at_risk<S: PoolSession>(session: &S) -> bool {
@@ -271,7 +294,8 @@ pub(crate) struct SessionPool<S = PostgresSession> {
     returned: Arc<tokio::sync::Notify>,
     /// Tabs whose session went while it may have held a transaction:
     /// `true` when it surely did.
-    lost: HashMap<Key, bool>,
+    /// What a tab's next statement says, its session gone with what it held.
+    lost: HashMap<Key, &'static str>,
     /// Checkouts (by id) whose session may hold the user's transaction:
     /// one counts while `out` still holds the same id. `true` when it went
     /// out holding one (not just on a statement that may open one).
@@ -333,6 +357,8 @@ pub(crate) struct Checkout<S = PostgresSession> {
     id: u64,
     /// The session may have held the user's transaction when it went out.
     risk: Option<bool>,
+    /// It held a `USE` or `SET` when it went out.
+    state: bool,
 }
 
 impl<S> Checkout<S> {
@@ -352,6 +378,12 @@ impl<S> Checkout<S> {
         }
     }
 
+    /// The session went out holding a `USE` or `SET`: if it is lost while
+    /// out the tab's next statement says so.
+    pub fn mark_state(&mut self, state: bool) {
+        self.state |= state;
+    }
+
     /// The statement about to run may open a transaction (it isn't a read).
     pub fn may_open_transaction(&mut self) {
         self.mark_risk(Some(false));
@@ -363,6 +395,7 @@ impl<S> Checkout<S> {
             key: (String::new(), Slot::Spare),
             id: 0,
             risk: None,
+            state: false,
         }
     }
 }
@@ -377,8 +410,13 @@ impl<S> Drop for Checkout<S> {
                 if p.out.get(&self.key) == Some(&self.id) {
                     p.out.remove(&self.key);
                     let gone = p.closed.remove(&self.key) || p.closed_windows.contains(&self.key.0);
-                    if let (Some(sure), Slot::Tab(_), false) = (self.risk, self.key.1, gone) {
-                        p.lost.insert(self.key.clone(), sure);
+                    let said = match self.risk {
+                        Some(true) => Some(LOST_TXN),
+                        Some(false) => Some(LOST_MAYBE_TXN),
+                        None => self.state.then_some(LOST_STATE),
+                    };
+                    if let (Some(said), Slot::Tab(_), false) = (said, self.key.1, gone) {
+                        p.lost.insert(self.key.clone(), said);
                     }
                 }
                 Some(p.returned.clone())
@@ -550,8 +588,9 @@ impl<S: PoolSession> SessionPool<S> {
 
     /// Takes out a parked session of `connection_id` that can be closed to
     /// free its place: a dead one first, then the least recently used with
-    /// no cursor, then one with a cursor of ours. Never one that may hold
-    /// the user's transaction. The caller drops it outside the lock.
+    /// no cursor, then one with a cursor of ours or a tab's `USE` / `SET`
+    /// (whose next statement then says so). Never one that may hold the
+    /// user's transaction. The caller drops it outside the lock.
     fn evict(&mut self, connection_id: &str) -> Option<S> {
         let key = self
             .parked
@@ -565,9 +604,7 @@ impl<S: PoolSession> SessionPool<S> {
             .map(|(k, _)| k.clone())?;
         let p = self.parked.remove(&key)?;
         let (w, slot) = key;
-        if p.session.is_closed() {
-            self.note_lost(&w, slot, &p.session);
-        }
+        self.note_lost(&w, slot, &p.session);
         if let Slot::Tab(tab_id) = slot {
             self.tags.retain(|_, t| *t != (w.clone(), tab_id));
         }
@@ -680,14 +717,21 @@ impl<S: PoolSession> SessionPool<S> {
         old.map(|p| p.session)
     }
 
-    /// A tab's session that may have held the user's transaction is gone.
+    /// A tab's session is gone: if it may have held the user's transaction,
+    /// or a `USE` / `SET`, the tab's next statement says so.
     fn note_lost(&mut self, window_id: &str, slot: Slot, session: &S) {
+        if let Some(said) = loss(session) {
+            self.mark_lost(window_id, slot, said);
+        }
+    }
+
+    fn mark_lost(&mut self, window_id: &str, slot: Slot, said: &'static str) {
         // Nobody is left to tell.
         if self.closed_windows.contains(window_id) {
             return;
         }
-        if let (Some(sure), Slot::Tab(_)) = (risk_of(session), slot) {
-            self.lost.insert((window_id.to_string(), slot), sure);
+        if let Slot::Tab(_) = slot {
+            self.lost.insert((window_id.to_string(), slot), said);
         }
     }
 
@@ -804,6 +848,7 @@ impl<S: PoolSession> SessionPool<S> {
             key: key.clone(),
             id,
             risk: None,
+            state: false,
         }
     }
 }
@@ -822,7 +867,7 @@ enum Found<S> {
     /// The slot's own session is out: wait for it.
     Busy,
     /// The tab's transaction went with its session.
-    Lost(bool),
+    Lost(&'static str),
     Ready(Option<Parked<S>>, Option<Route>, Checkout<S>),
 }
 
@@ -883,8 +928,8 @@ pub(crate) async fn lease_or_wait<S: PoolSession>(
                 if waits(slot) && p.out.contains_key(&key) && p.generation(window_id) == generation
                 {
                     Found::Busy
-                } else if let Some(sure) = p.lost.remove(&key) {
-                    Found::Lost(sure)
+                } else if let Some(said) = p.lost.remove(&key) {
+                    Found::Lost(said)
                 } else {
                     let out = p.check_out(pool, &key);
                     Found::Ready(
@@ -907,11 +952,7 @@ pub(crate) async fn lease_or_wait<S: PoolSession>(
                     None => tokio::task::yield_now().await,
                 }
             }
-            Found::Lost(sure) => {
-                return Err(DriverError::Message(
-                    if sure { LOST_TXN } else { LOST_MAYBE_TXN }.into(),
-                ))
-            }
+            Found::Lost(said) => return Err(DriverError::Message(said.into())),
             Found::Ready(parked, tunnel, out) => break (parked, tunnel, out),
         }
     };
@@ -924,6 +965,7 @@ pub(crate) async fn lease_or_wait<S: PoolSession>(
     match parked {
         Some(parked) if !parked.session.is_closed() => {
             out.mark_risk(risk_of(&parked.session));
+            out.mark_state(parked.session.keeps_state());
             return Ok(Lease {
                 session: parked.session,
                 reused: true,
@@ -931,10 +973,8 @@ pub(crate) async fn lease_or_wait<S: PoolSession>(
             });
         }
         Some(parked) if matches!(slot, Slot::Tab(_)) => {
-            if let Some(sure) = risk_of(&parked.session) {
-                return Err(DriverError::Message(
-                    if sure { LOST_TXN } else { LOST_MAYBE_TXN }.into(),
-                ));
+            if let Some(said) = loss(&parked.session) {
+                return Err(DriverError::Message(said.into()));
             }
         }
         _ => {}
@@ -1063,12 +1103,20 @@ pub(crate) async fn ping_idle<S: PoolSession>(
             last_used,
             session,
         } = parked;
+        let held = loss(&session);
         drop(session);
         // The dead one's place, unless a waiting run took it first. Nothing
-        // to replace once the slot isn't ours (the window was re-pointed).
+        // to replace once the slot isn't ours (the window was re-pointed),
+        // nor when it held a tab's `USE` / `SET`: a fresh one would run the
+        // tab's next statement without them, so that statement says so.
         let taken = pool.lock().map(|mut p| {
             let key = (window_id.to_string(), slot);
             if p.out.get(&key) != Some(&id) {
+                return None;
+            }
+            if let Some(said) = held {
+                p.mark_lost(window_id, slot, said);
+                drop(p.restore(window_id, slot, id, None));
                 return None;
             }
             p.replacing.insert(key);
@@ -1164,6 +1212,14 @@ pub(crate) fn drop_lost<S: PoolSession>(
         p.note_lost(window_id, slot, &session);
     }
     drop(session);
+}
+
+/// The tab was already told what its lost session held: its next
+/// statement runs on a fresh one.
+pub(crate) fn forget_lost<S: PoolSession>(pool: &SharedPool<S>, window_id: &str, slot: Slot) {
+    if let Ok(mut p) = pool.lock() {
+        p.lost.remove(&(window_id.to_string(), slot));
+    }
 }
 
 /// After a statement that may have opened or ended a transaction, asks the

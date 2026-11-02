@@ -640,7 +640,7 @@ fn is_type_placeholder(text: &str) -> bool {
 /// expanded chain `c1 ▷ v1 OR (c1 = v1 AND c2 ▷ v2) OR …`, or a row
 /// comparison `(k1, k2) > (v1, v2)` when the order is only the key. `None`
 /// when a value can't be written as a literal (bytes, NaN, a `<type name>`
-/// placeholder): page by OFFSET.
+/// placeholder, a MySQL float): page by OFFSET.
 fn keyset_predicate(
     engine: EngineKind,
     order: &[BrowseOrder],
@@ -655,6 +655,9 @@ fn keyset_predicate(
             // A cell shown as `<type name>` (a type the core doesn't decode)
             // is no value to compare with.
             Value::Text(t) if is_type_placeholder(t) => return None,
+            // A MySQL FLOAT comes back widened to a double no literal
+            // equals, so `f = v` misses the row and pages repeat or skip.
+            Value::Float(_) if engine == EngineKind::Mysql => return None,
             v => Some(sql_literal(engine, v)?),
         };
         let not_null = key.contains(&o.column);
