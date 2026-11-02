@@ -1175,12 +1175,14 @@ function App() {
     const list = await refreshConnections();
     const after = list.find((c) => c.id === id);
     if (!after) return;
-    // A window keeps its database only while it still points at the same server.
+    // A window keeps its database only while it still points at the same
+    // server and the edit left the connection's own database alone.
     const sameServer =
       before && before.kind !== "sqlite" &&
       after.kind === before.kind &&
       before.host === after.host &&
-      before.port === after.port;
+      before.port === after.port &&
+      before.database === (after as typeof before).database;
     for (const w of windowsRef.current) {
       if (w.connectionId !== id || w.state === "idle") continue;
       void connectWindow(w.id, id, sameServer ? w.database : null);

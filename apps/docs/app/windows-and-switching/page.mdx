@@ -110,7 +110,7 @@ On a Postgres, MySQL or MariaDB connection, press <kbd>⇧⌘D</kbd> (**Connecti
 - Type to filter. An exact name comes first, then names that start with what you typed, then names that contain it, so <kbd>↵</kbd> takes what you typed.
 - <kbd>↵</kbd> switches this window to the database. <kbd>⌘↵</kbd>, or <kbd>⌘</kbd>-click, opens it in a new window.
 
-On MySQL and MariaDB the list is every database your login can see, without the server's own (`mysql`, `sys`, `information_schema`, `performance_schema`). Picking one makes it the default database for the window's queries, and the schema column lists it first, even before it has tables. The other databases stay in the schema column below it.
+On MySQL and MariaDB the list is every database your login can see, without the server's own (`mysql`, `sys`, `information_schema`, `performance_schema`). Picking one makes it the default database for the window's queries, and the schema column lists it first, even while it has no tables (a server with no tables at all says **No tables**). The other databases stay in the schema column below it.
 
 Switch database needs a connected window. A SQLite file has one database, so the head of the schema column shows the file's name instead.
 
