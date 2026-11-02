@@ -1369,6 +1369,163 @@ async fn masked_columns_hold_against_a_real_postgres() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A commit changes the rows the dry run showed, holding the values it
+/// showed (UPDATE and DELETE on a table with a key), or saves nothing.
+// The env lock spans the whole test, awaits included: each test has its own runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_commit_refuses_rows_whose_values_moved() {
+    use crate::proposals::{self, tests::seen_all, CommitOutcome};
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-moved-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_v_orders, mcp_v_log CASCADE;
+         CREATE TABLE mcp_v_orders (id int PRIMARY KEY, status text, total int);
+         INSERT INTO mcp_v_orders VALUES (1, 'pending', 10), (2, 'pending', 20);
+         CREATE TABLE mcp_v_log (msg text, n int);
+         INSERT INTO mcp_v_log VALUES ('a', 1);",
+    )
+    .await
+    .expect("fixtures");
+    let mut pg = pg_config();
+    pg.allow_mcp = true;
+    pg.mcp_access = Some(
+        [(
+            pg.database.clone(),
+            McpDbAccess {
+                mode: McpTableMode::Picked,
+                tables: vec!["public.mcp_v_orders".into(), "public.mcp_v_log".into()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    save(pg);
+    let mcp = RowkeryMcp::default();
+    let propose = |sql: &str| {
+        call(
+            &mcp,
+            "propose_change",
+            json!({ "connection": ID, "sql": sql, "reason": "test" }),
+        )
+    };
+    let total_of_1 = || async {
+        query(&mcp, "SELECT total FROM mcp_v_orders WHERE id = 1")
+            .await
+            .unwrap()["rows"]
+            .clone()
+    };
+
+    // The same row, but its values moved since the dry run: the user saw
+    // 10 → 15, so writing 100 → 105 is refused and a fresh dry run comes
+    // back.
+    let bump = propose("UPDATE mcp_v_orders SET total = total + 5 WHERE id = 1")
+        .await
+        .expect("bump");
+    let bump = bump["id"].as_str().unwrap();
+    let run = proposals::dry_run(bump).await.expect("bump dry run");
+    let row = &run.statements[0].shown[0];
+    assert_eq!(
+        (
+            &row.before.as_ref().unwrap()[2],
+            &row.after.as_ref().unwrap()[2]
+        ),
+        (&json!(10), &json!(15))
+    );
+    session_execute(&setup, "UPDATE mcp_v_orders SET total = 100 WHERE id = 1")
+        .await
+        .unwrap();
+    match proposals::commit(bump, &seen_all(&run)).await.unwrap() {
+        CommitOutcome::Moved { dry_run } => {
+            let row = &dry_run.statements[0].shown[0];
+            assert_eq!(
+                (
+                    &row.before.as_ref().unwrap()[2],
+                    &row.after.as_ref().unwrap()[2]
+                ),
+                (&json!(100), &json!(105))
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(total_of_1().await, json!([[100]]), "nothing was saved");
+
+    // A value the change sets outright: the user saw 100 → 50, so
+    // overwriting someone's 70 is refused too.
+    let set = propose("UPDATE mcp_v_orders SET total = 50 WHERE id = 1")
+        .await
+        .expect("set");
+    let set = set["id"].as_str().unwrap();
+    let run_set = proposals::dry_run(set).await.expect("set dry run");
+    session_execute(&setup, "UPDATE mcp_v_orders SET total = 70 WHERE id = 1")
+        .await
+        .unwrap();
+    assert!(matches!(
+        proposals::commit(set, &seen_all(&run_set)).await.unwrap(),
+        CommitOutcome::Moved { .. }
+    ));
+    assert_eq!(total_of_1().await, json!([[70]]), "nothing was saved");
+    proposals::reject(set, None).expect("reject");
+
+    // A DELETE of a row that changed since the dry run.
+    let gone = propose("DELETE FROM mcp_v_orders WHERE id = 1")
+        .await
+        .expect("delete");
+    let gone = gone["id"].as_str().unwrap();
+    let run_gone = proposals::dry_run(gone).await.expect("delete dry run");
+    session_execute(
+        &setup,
+        "UPDATE mcp_v_orders SET status = 'shipped' WHERE id = 1",
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        proposals::commit(gone, &seen_all(&run_gone)).await.unwrap(),
+        CommitOutcome::Moved { .. }
+    ));
+    assert_eq!(total_of_1().await, json!([[70]]), "nothing was deleted");
+    proposals::reject(gone, None).expect("reject");
+
+    // Unchanged since the dry run: it commits.
+    let run = proposals::dry_run(bump).await.expect("bump dry run");
+    match proposals::commit(bump, &seen_all(&run)).await.unwrap() {
+        CommitOutcome::Committed { rows } => assert_eq!(rows, vec![1]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(total_of_1().await, json!([[75]]));
+
+    // A table without a key keeps the count-only check: no digest, and a
+    // moved value still commits.
+    let log = propose("UPDATE mcp_v_log SET n = n + 1 WHERE msg = 'a'")
+        .await
+        .expect("log");
+    let log = log["id"].as_str().unwrap();
+    let run = proposals::dry_run(log).await.expect("log dry run");
+    assert_eq!(run.statements[0].digest, None);
+    session_execute(&setup, "UPDATE mcp_v_log SET n = 9")
+        .await
+        .unwrap();
+    assert!(matches!(
+        proposals::commit(log, &seen_all(&run)).await.unwrap(),
+        CommitOutcome::Committed { .. }
+    ));
+
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_v_orders, mcp_v_log CASCADE",
+    )
+    .await
+    .expect("cleanup");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]

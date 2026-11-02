@@ -403,9 +403,10 @@ pub struct StatementPreview {
     /// `[schema, table]` the statement's own rows count under in `reach`
     /// (a partition's top parent).
     pub table: Option<[String; 2]>,
-    /// Which rows an UPDATE or DELETE changed, as a digest of their primary
-    /// keys: a commit must change the same rows, not just as many. None for
-    /// an INSERT (its rows are new), a table without a key, or no rows.
+    /// Which rows an UPDATE or DELETE changed and what they held before it,
+    /// as a digest of each whole row: a commit must change the same rows
+    /// with the same values, not just as many. None for an INSERT (its rows
+    /// are new), a table without a key, or no rows.
     pub digest: Option<String>,
 }
 
@@ -951,8 +952,8 @@ async fn pg_preview_one(
     let quote = quote_ident;
     let join_old = change.verb != "DELETE" && !key.is_empty();
     // One row whatever the change returns: the digest aggregates them.
-    let seen = match pg_digest(&change.verb, &key) {
-        Some(digest) => format!("SELECT {digest} AS d FROM rk_change"),
+    let seen = match pg_digest(change, &key) {
+        Some((digest, from)) => format!("SELECT {digest} AS d FROM {from}"),
         None => "SELECT NULL::text AS d".into(),
     };
     let sql = if join_old {
@@ -1028,25 +1029,39 @@ fn quote_ident(c: &str) -> String {
     format!("\"{}\"", c.replace('"', "\"\""))
 }
 
-/// The SQL of a statement's `digest` over `rk_change` (its RETURNING rows):
-/// each row's primary key hashed (SHA-256), the hashes summed in two 64-bit
-/// halves, so no order and no string of every key is needed. NULL for no
-/// rows; None where a digest says nothing.
-fn pg_digest(verb: &str, key: &[String]) -> Option<String> {
-    if !digested(verb, key) {
+/// The SQL of a statement's `digest`, and the FROM it reads: each row the
+/// change touched (`rk_change`, its RETURNING rows), whole and as it was
+/// before the change (`rk_old`), hashed (SHA-256), the hashes summed in two
+/// 64-bit halves, so no order and no string of every row is needed. NULL
+/// for no rows; None where a digest says nothing.
+///
+/// A DELETE returns the old rows. For an UPDATE the main query still sees
+/// the table as it was (the CTE's writes aren't visible to it), so the old
+/// row is joined back by key; the key can't change (`sets_no_key`).
+fn pg_digest(change: &RowChange, key: &[String]) -> Option<(String, String)> {
+    if !digested(&change.verb, key) {
         return None;
     }
-    let row: Vec<String> = key
-        .iter()
-        .map(|k| format!("rk_change.{}", quote_ident(k)))
-        .collect();
-    let hash = format!(
-        "encode(sha256(convert_to(row({})::text, 'UTF8')), 'hex')",
-        row.join(", ")
-    );
+    let from = if change.verb == "DELETE" {
+        "rk_change AS rk_old".to_string()
+    } else {
+        let on = |side: &str| {
+            key.iter()
+                .map(|k| format!("{side}.{}", quote_ident(k)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "rk_change LEFT JOIN {} rk_old ON ({}) = ({})",
+            change.target,
+            on("rk_old"),
+            on("rk_change")
+        )
+    };
+    let hash = "encode(sha256(convert_to(row(rk_old.*)::text, 'UTF8')), 'hex')";
     let half =
         |at: usize| format!("sum(('x' || substr({hash}, {at}, 16))::bit(64)::bigint::numeric)");
-    Some(format!("({} || ':' || {})", half(1), half(17)))
+    Some((format!("({} || ':' || {})", half(1), half(17)), from))
 }
 
 /// Refuses an UPDATE that sets a primary key column: the commit is checked
@@ -1217,17 +1232,18 @@ async fn pg_commit_run(
     for (i, (change, want)) in changes.iter().zip(&seen.rows).enumerate() {
         let wanted = seen.digests.get(i).cloned().flatten();
         let (n, digest) = match &wanted {
-            // The same rows as the dry run's, not just as many: their keys.
+            // The same rows as the dry run's, not just as many, holding
+            // what the dry run showed before the change.
             Some(_) => {
                 let key = pg_key(session, &change.target).await?;
                 sets_no_key(change, &key)?;
-                let Some(digest) = pg_digest(&change.verb, &key) else {
+                let Some((digest, from)) = pg_digest(change, &key) else {
                     return Ok(None);
                 };
                 let (_, rows) = pg_rows(
                     session,
                     &format!(
-                        "WITH rk_change AS ({}\nRETURNING *) SELECT count(*), {digest} FROM rk_change",
+                        "WITH rk_change AS ({}\nRETURNING *) SELECT count(*), {digest} FROM {from}",
                         change.sql
                     ),
                 )
@@ -1297,7 +1313,8 @@ fn sqlite_run(
                 // With RETURNING as in the dry run: a bare `DELETE FROM t`
                 // would take SQLite's truncate path, which the hook never
                 // sees, and the counts would never match.
-                // The same rows as the dry run's, not just as many: their keys.
+                // The same rows as the dry run's, not just as many, holding
+                // what the dry run showed before the change.
                 let wanted = seen.digests.get(i).cloned().flatten();
                 let key = match wanted {
                     Some(_) => sqlite_key(&conn, &change.target).map_err(err)?,
@@ -1307,41 +1324,48 @@ fn sqlite_run(
                 if wanted.is_some() && !digested(&change.verb, &key) {
                     return Ok((Vec::new(), Some(RunResult::Moved)));
                 }
-                let returning = if key.is_empty() {
-                    "1".to_string()
+                let (n, digest) = if wanted.is_none() {
+                    (sqlite_returning(&conn, &change.sql, "1", |_| Ok(()))?, None)
+                } else if change.verb == "DELETE" {
+                    // A DELETE returns the rows as they were.
+                    let mut digest = RowDigest::default();
+                    sqlite_returning(&conn, &change.sql, "*", |row| {
+                        digest.add(sqlite_row(row));
+                        Ok(())
+                    })?;
+                    (digest.n, digest.finish())
                 } else {
-                    key.iter()
+                    // An UPDATE returns the new rows: find its rows, read
+                    // them as they were, then run it again for real.
+                    let returning = key
+                        .iter()
                         .map(|k| quote_ident(k))
                         .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let (n, digest) = (|| -> rusqlite::Result<(u64, Option<String>)> {
-                    let mut stmt =
-                        conn.prepare(&format!("{}\nRETURNING {returning}", change.sql))?;
-                    let mut rows = stmt.query([])?;
-                    let mut digest = KeyDigest::default();
-                    while let Some(row) = rows.next()? {
-                        digest.add(
-                            (0..key.len())
-                                .map(|i| {
-                                    row.get_ref(i)
-                                        .map(sqlite_value_to_core)
-                                        .unwrap_or(Value::Null)
-                                })
-                                .collect(),
-                        );
+                        .join(", ");
+                    conn.execute_batch("SAVEPOINT rk_commit").map_err(err)?;
+                    let mut keys = Vec::new();
+                    sqlite_returning(&conn, &change.sql, &returning, |row| {
+                        keys.push(sqlite_row(row));
+                        Ok(())
+                    })?;
+                    conn.execute_batch("ROLLBACK TO rk_commit").map_err(err)?;
+                    let mut digest = RowDigest::default();
+                    sqlite_old_rows(&conn, &change.target, &key, &keys, |_, old| {
+                        digest.add(old.unwrap_or_default())
+                    })
+                    .map_err(err)?;
+                    counter.mark(&conn).map_err(err)?;
+                    let mut again = Vec::with_capacity(keys.len());
+                    sqlite_returning(&conn, &change.sql, &returning, |row| {
+                        again.push(sqlite_row(row));
+                        Ok(())
+                    })?;
+                    conn.execute_batch("RELEASE rk_commit").map_err(err)?;
+                    if again != keys {
+                        return Ok((Vec::new(), Some(RunResult::Moved)));
                     }
-                    let n = digest.n;
-                    Ok((
-                        n,
-                        if key.is_empty() {
-                            None
-                        } else {
-                            digest.finish()
-                        },
-                    ))
-                })()
-                .map_err(err)?;
+                    (digest.n, digest.finish())
+                };
                 let reach = Some(counter.reach(&conn).map_err(err)?);
                 if n != *want
                     || digest != wanted
@@ -1373,14 +1397,19 @@ fn sqlite_run(
                 .filter_map(|k| columns.iter().position(|c| c.eq_ignore_ascii_case(k)))
                 .collect();
             let digested = digested(&change.verb, &key) && key_at.len() == key.len();
-            let mut digest = KeyDigest::default();
+            let mut digest = RowDigest::default();
+            // An UPDATE's rows by key, read as they were once it's undone.
+            let mut keys: Vec<Vec<Value>> = Vec::new();
             let mut returned: Vec<Vec<Value>> = Vec::new();
             let mut total = 0u64;
             let mut rows = stmt.query([]).map_err(err)?;
             while let Some(row) = rows.next().map_err(err)? {
                 total += 1;
-                if digested {
-                    digest.add(
+                if digested && change.verb == "DELETE" {
+                    // As the commit's `RETURNING *`.
+                    digest.add(sqlite_row(row));
+                } else if digested {
+                    keys.push(
                         key_at
                             .iter()
                             .map(|&i| {
@@ -1406,36 +1435,16 @@ fn sqlite_run(
             drop(rows);
             drop(stmt);
             let mut old: Vec<Option<Vec<Value>>> = vec![None; returned.len()];
-            if change.verb == "UPDATE" && !key.is_empty() && key_at.len() == key.len() {
+            if change.verb == "UPDATE" && digested {
                 conn.execute_batch("ROLLBACK TO rk_preview").map_err(err)?;
-                let filter: Vec<String> = key
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| format!("\"{}\" IS ?{}", k.replace('"', "\"\""), i + 1))
-                    .collect();
-                let mut select = conn
-                    .prepare(&format!(
-                        "SELECT * FROM {} WHERE {}",
-                        change.target,
-                        filter.join(" AND ")
-                    ))
-                    .map_err(err)?;
-                for (slot, row) in old.iter_mut().zip(&returned) {
-                    let params: Vec<rusqlite::types::Value> =
-                        key_at.iter().map(|&i| to_sqlite(&row[i])).collect();
-                    *slot = select
-                        .query_row(rusqlite::params_from_iter(params), |r| {
-                            Ok((0..columns.len())
-                                .map(|i| {
-                                    r.get_ref(i)
-                                        .map(sqlite_value_to_core)
-                                        .unwrap_or(Value::Null)
-                                })
-                                .collect())
-                        })
-                        .ok();
-                }
-                drop(select);
+                // Every row as it was: the digest, and the first shown.
+                sqlite_old_rows(&conn, &change.target, &key, &keys, |i, row| {
+                    if let Some(slot) = old.get_mut(i) {
+                        slot.clone_from(&row);
+                    }
+                    digest.add(row.unwrap_or_default());
+                })
+                .map_err(err)?;
                 // Counted from the run that stays, not the one rolled back.
                 counter.mark(&conn).map_err(err)?;
                 conn.execute(&change.sql, []).map_err(err)?;
@@ -1476,25 +1485,86 @@ fn sqlite_key(conn: &rusqlite::Connection, target: &str) -> rusqlite::Result<Vec
         .and_then(|mut s| s.query_map([unquote_last(target)], |r| r.get(0))?.collect())
 }
 
+/// Runs `sql` with `RETURNING {returning}`, each row to `each`; how many.
+fn sqlite_returning(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    returning: &str,
+    mut each: impl FnMut(&rusqlite::Row) -> rusqlite::Result<()>,
+) -> Result<u64, String> {
+    (|| {
+        let mut stmt = conn.prepare(&format!("{sql}\nRETURNING {returning}"))?;
+        let mut rows = stmt.query([])?;
+        let mut n = 0;
+        while let Some(row) = rows.next()? {
+            n += 1;
+            each(row)?;
+        }
+        Ok(n)
+    })()
+    .map_err(|e: rusqlite::Error| e.to_string())
+}
+
+/// Every cell of a row.
+fn sqlite_row(row: &rusqlite::Row) -> Vec<Value> {
+    use rowkery_core::db::sqlite::sqlite_value_to_core;
+    (0..row.as_ref().column_count())
+        .map(|i| {
+            row.get_ref(i)
+                .map(sqlite_value_to_core)
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+/// Each of `keys`' rows in `target` as it is now (None if gone), to `each`
+/// with its index.
+fn sqlite_old_rows(
+    conn: &rusqlite::Connection,
+    target: &str,
+    key: &[String],
+    keys: &[Vec<Value>],
+    mut each: impl FnMut(usize, Option<Vec<Value>>),
+) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let filter: Vec<String> = key
+        .iter()
+        .enumerate()
+        .map(|(i, k)| format!("{} IS ?{}", quote_ident(k), i + 1))
+        .collect();
+    let mut select = conn.prepare(&format!(
+        "SELECT * FROM {target} WHERE {}",
+        filter.join(" AND ")
+    ))?;
+    for (i, k) in keys.iter().enumerate() {
+        let params: Vec<rusqlite::types::Value> = k.iter().map(to_sqlite).collect();
+        let row = select
+            .query_row(rusqlite::params_from_iter(params), |r| Ok(sqlite_row(r)))
+            .optional()?;
+        each(i, row);
+    }
+    Ok(())
+}
+
 /// Whether a statement gets a `digest`: an UPDATE or DELETE on a table
 /// with a key (as `pg_digest`).
 fn digested(verb: &str, key: &[String]) -> bool {
     matches!(verb, "UPDATE" | "DELETE") && !key.is_empty()
 }
 
-/// A statement's rows by primary key, in any order: each key's SHA-256,
-/// summed in 64-bit lanes (as `pg_digest`), so no key is kept.
+/// A statement's rows, whole, in any order: each row's SHA-256, summed in
+/// 64-bit lanes (as `pg_digest`), so no row is kept.
 #[derive(Default)]
-struct KeyDigest {
+struct RowDigest {
     sums: [u64; 4],
     n: u64,
 }
 
-impl KeyDigest {
-    fn add(&mut self, key: Vec<Value>) {
+impl RowDigest {
+    fn add(&mut self, row: Vec<Value>) {
         use sha2::{Digest, Sha256};
         self.n += 1;
-        let hash = Sha256::digest(format!("{key:?}").as_bytes());
+        let hash = Sha256::digest(format!("{row:?}").as_bytes());
         for (i, sum) in self.sums.iter_mut().enumerate() {
             let lane: [u8; 8] = hash[i * 8..i * 8 + 8].try_into().unwrap();
             *sum = sum.wrapping_add(u64::from_be_bytes(lane));
@@ -1535,6 +1605,17 @@ pub(crate) mod tests {
         Seen {
             rows: rows.to_vec(),
             ..Seen::default()
+        }
+    }
+
+    /// What the review screen sends back for this dry run (as
+    /// `commitProposal` in proposals.ts).
+    pub(crate) fn seen_all(run: &DryRun) -> Seen {
+        Seen {
+            rows: run.statements.iter().map(|s| s.rows).collect(),
+            reach: run.statements.iter().map(|s| s.reach.clone()).collect(),
+            at_commit: run.at_commit.clone(),
+            digests: run.statements.iter().map(|s| s.digest.clone()).collect(),
         }
     }
     use rowkery_core::connections::{McpDbAccess, McpTableMode, SqliteConnection};
@@ -1750,6 +1831,94 @@ pub(crate) mod tests {
         assert_eq!(refunded, 3);
         assert_eq!(status(&p.id).unwrap()["state"], "committed");
         assert!(commit(&p.id, &seen(&[3])).await.is_err(), "decided once");
+
+        // The same row, but its values moved since the dry run: the user
+        // saw 10 → 15, so writing 100 → 105 is refused and a fresh dry
+        // run comes back.
+        let total = |conn: &rusqlite::Connection| -> f64 {
+            conn.query_row("SELECT total FROM orders WHERE id = 1", [], |r| r.get(0))
+                .unwrap()
+        };
+        let bump = submit(
+            "shop",
+            "main",
+            "UPDATE orders SET total = total + 5 WHERE id = 1",
+            "Shipping fee",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let run = dry_run(&bump.id).await.unwrap();
+        let s = &run.statements[0];
+        assert_eq!(
+            (
+                &s.shown[0].before.as_ref().unwrap()[2],
+                &s.shown[0].after.as_ref().unwrap()[2]
+            ),
+            (&json!(10.0), &json!(15.0))
+        );
+        conn.execute("UPDATE orders SET total = 100 WHERE id = 1", [])
+            .unwrap();
+        match commit(&bump.id, &tests::seen_all(&run)).await.unwrap() {
+            CommitOutcome::Moved { dry_run } => {
+                let row = &dry_run.statements[0].shown[0];
+                assert_eq!(
+                    (
+                        &row.before.as_ref().unwrap()[2],
+                        &row.after.as_ref().unwrap()[2]
+                    ),
+                    (&json!(100.0), &json!(105.0))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(total(&conn), 100.0, "nothing was saved");
+        // A value the change sets outright: the user saw 100 → 50, so
+        // overwriting someone's 70 is refused too.
+        let set = submit(
+            "shop",
+            "main",
+            "UPDATE orders SET total = 50 WHERE id = 1",
+            "Fix the total",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let run = dry_run(&set.id).await.unwrap();
+        conn.execute("UPDATE orders SET total = 70 WHERE id = 1", [])
+            .unwrap();
+        assert!(matches!(
+            commit(&set.id, &tests::seen_all(&run)).await.unwrap(),
+            CommitOutcome::Moved { .. }
+        ));
+        assert_eq!(total(&conn), 70.0, "nothing was saved");
+        // A DELETE of a row that changed since the dry run.
+        let gone = submit(
+            "shop",
+            "main",
+            "DELETE FROM orders WHERE id = 1",
+            "Duplicate",
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let run = dry_run(&gone.id).await.unwrap();
+        conn.execute("UPDATE orders SET status = 'shipped' WHERE id = 1", [])
+            .unwrap();
+        assert!(matches!(
+            commit(&gone.id, &tests::seen_all(&run)).await.unwrap(),
+            CommitOutcome::Moved { .. }
+        ));
+        assert_eq!(total(&conn), 70.0, "nothing was deleted");
+        // Unchanged since the dry run: it commits.
+        let run = dry_run(&bump.id).await.unwrap();
+        match commit(&bump.id, &tests::seen_all(&run)).await.unwrap() {
+            CommitOutcome::Committed { rows } => assert_eq!(rows, vec![1]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(total(&conn), 75.0);
+        reject(&set.id, None).unwrap();
+        reject(&gone.id, None).unwrap();
         // An UPDATE that sets the key is refused: its keys say nothing of
         // which rows it hit.
         let rekey = submit(
