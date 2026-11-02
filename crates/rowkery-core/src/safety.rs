@@ -403,51 +403,103 @@ fn call_sites(toks: &[Tok]) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-/// A name as MySQL reads it: a bare word as written, a backticked one
-/// without its quotes. `None` for anything else.
-fn mysql_name(tok: &Tok) -> Option<String> {
-    match tok {
-        Tok::Word(_, text) => Some(text.clone()),
-        Tok::Quoted(text) if text.len() >= 2 => {
-            let q = &text[..1];
-            let inner = text[1..].strip_suffix(q).unwrap_or(&text[1..]);
-            Some(inner.replace(&format!("{q}{q}"), q))
-        }
-        _ => None,
-    }
+/// What MySQL text may call, for Read-only's check of stored and loadable
+/// functions ([`mysql_calls`]). Every name lower-cased.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MysqlCalls {
+    /// Names followed by `(` (spaces and comments between allowed).
+    pub names: Vec<String>,
+    /// Of those, the ones written in backticks: in a view's stored
+    /// definition only a stored function's call is (`` `f`() ``, never
+    /// `count(0)`).
+    pub quoted: Vec<String>,
+    /// Names followed by `.`: a database or a MariaDB package.
+    pub qualifiers: Vec<String>,
+    /// Every name: the views the text may read.
+    pub words: Vec<String>,
 }
 
-/// The functions MySQL text may call that aren't plain built-ins, as
-/// `(database, name)` (`None` when unqualified: the current database). A
-/// stored function can't be called bare by a built-in's name, so each is a
-/// stored function, a loadable one, or a built-in Rowkery doesn't list.
-pub fn mysql_called_functions(sql: &str) -> Vec<(Option<String>, String)> {
-    let mut out = Vec::new();
-    for toks in tokenize(sql, Dialect::Mysql) {
-        // A doubled backtick (`` `a``b` ``) lexes as two quoted names in a row.
-        let joined = |mut k: usize| -> (usize, Option<String>) {
-            let mut name = mysql_name(&toks[k]);
-            while k > 0 && matches!((&toks[k - 1], &toks[k]), (Tok::Quoted(_), Tok::Quoted(_))) {
-                k -= 1;
-                name = mysql_name(&toks[k])
-                    .zip(name)
-                    .map(|(a, b)| format!("{a}`{b}"));
+/// Every name in MySQL text that may be a function call, over-inclusive on
+/// purpose: the text isn't lexed, so no string, comment, `/*! … */` or
+/// quoting trick can hide one (a name in a string or comment counts too,
+/// which costs at most a refusal naming it). Unquoted names are runs of
+/// letters, digits, `_`, `$` and non-ASCII (`9f`, `$x`); each backtick or
+/// double quote is also tried as the start of a quoted name.
+pub fn mysql_calls(sql: &str) -> MysqlCalls {
+    let b = sql.as_bytes();
+    let n = b.len();
+    let mut out = MysqlCalls::default();
+    let add = |list: &mut Vec<String>, name: &str| {
+        let name = name.to_lowercase();
+        if !name.is_empty() && !list.contains(&name) {
+            list.push(name);
+        }
+    };
+    // Past spaces and comments from `i`.
+    let skip = |mut i: usize| -> usize {
+        loop {
+            while i < n && (b[i].is_ascii_whitespace() || b[i] == 0x0b) {
+                i += 1;
             }
-            (k, name)
-        };
-        for k in call_sites(&toks) {
-            let (k, name) = joined(k);
-            let Some(name) = name else {
-                continue;
-            };
-            let schema = (k >= 2 && toks[k - 1] == Tok::Dot)
-                .then(|| joined(k - 2).1)
-                .flatten();
-            let call = (schema, name);
-            if !out.contains(&call) {
-                out.push(call);
+            if b[i..].starts_with(b"/*") {
+                i = sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2);
+            } else if b[i..].starts_with(b"#") || b[i..].starts_with(b"--") {
+                i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
+            } else {
+                return i;
             }
         }
+    };
+    let note = |name: &str, end: usize, quoted: bool, out: &mut MysqlCalls| {
+        add(&mut out.words, name);
+        let next = skip(end);
+        match b.get(next) {
+            Some(b'(') => {
+                add(&mut out.names, name);
+                if quoted {
+                    add(&mut out.quoted, name);
+                }
+            }
+            Some(b'.') => add(&mut out.qualifiers, name),
+            _ => {}
+        }
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii();
+    let mut i = 0;
+    while i < n {
+        let c = sql[i..].chars().next().unwrap_or(' ');
+        if word(c) {
+            let end = sql[i..]
+                .char_indices()
+                .find(|&(_, c)| !word(c))
+                .map_or(n, |(k, _)| i + k);
+            note(&sql[i..end], end, false, &mut out);
+            i = end;
+            continue;
+        }
+        if c == '`' || c == '"' {
+            // To the matching quote (a doubled one stays inside); every
+            // quote is tried, so a pairing a string throws off can't hide one.
+            let q = c as u8;
+            let mut j = i + 1;
+            let mut name = Vec::new();
+            while j < n {
+                if b[j] == q {
+                    if b.get(j + 1) == Some(&q) {
+                        name.push(q);
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                name.push(b[j]);
+                j += 1;
+            }
+            if j < n {
+                note(&String::from_utf8_lossy(&name), j + 1, c == '`', &mut out);
+            }
+        }
+        i += c.len_utf8();
     }
     out
 }
@@ -2996,17 +3048,33 @@ mod tests {
             kinds("TABLE t; VALUES ROW(1); (SELECT 1) UNION SELECT 2"),
             [Read, Read, Read]
         );
-        assert_eq!(
-            mysql_called_functions(
-                "SELECT f(1), db.g(), `h``x`(), NOW(), COUNT(*) FROM t; SET @a = `d`.`k`()"
-            ),
-            [
-                (None, "f".to_string()),
-                (Some("db".to_string()), "g".to_string()),
-                (None, "h`x".to_string()),
-                (Some("d".to_string()), "k".to_string()),
-            ]
+        let calls = mysql_calls(
+            "SELECT f(1), db.g (), `h``x`(), NOW(), 9f(), $z(), age /* c */ (), x # (\n() FROM t; \
+             SET @a = `d`.`k`(); SELECT 'a\"', `my f`(), '\"'",
         );
+        for name in ["f", "g", "h`x", "now", "9f", "$z", "age", "x", "k", "my f"] {
+            assert!(calls.names.contains(&name.to_string()), "{name}: {calls:?}");
+        }
+        // Every backtick is tried as a start, so `x` (inside `h``x`) counts too.
+        for name in ["h`x", "k", "my f"] {
+            assert!(
+                calls.quoted.contains(&name.to_string()),
+                "{name}: {calls:?}"
+            );
+        }
+        assert!(!calls.quoted.contains(&"f".to_string()));
+        assert!(
+            calls.qualifiers.contains(&"db".to_string())
+                && calls.qualifiers.contains(&"d".to_string())
+        );
+        assert!(calls.words.contains(&"t".to_string()));
+        // A name split from its ( only by a comment still counts.
+        assert!(mysql_calls("SELECT f/**/()")
+            .names
+            .contains(&"f".to_string()));
+        assert!(mysql_calls("SELECT rowkery.rk_pkg.pf()")
+            .qualifiers
+            .contains(&"rk_pkg".to_string()));
         // MariaDB's MSSQL mode reads `[']` as a name: the DELETE runs.
         assert_eq!(
             verbs("SELECT 1 AS [']; DELETE FROM t; SELECT [']"),

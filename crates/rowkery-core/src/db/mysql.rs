@@ -570,15 +570,17 @@ where
     } else {
         vec![sql]
     };
+    // Once for the whole run, before anything is sent: a lookup between
+    // statements would reset what the last one left (FOUND_ROWS()).
+    if session.config.safe_mode == SafeMode::ReadOnly {
+        refuse_stored_functions(session, sql).await?;
+    }
     let mut last = 0u64;
     for piece in pieces {
         // Checked once this piece has run (or, cut short, before the next
         // run sends anything).
         if guard && !crate::safety::plain_read(piece, Dialect::Mysql) {
             session.charset_due = true;
-        }
-        if session.config.safe_mode == SafeMode::ReadOnly {
-            refuse_stored_functions(session, piece).await?;
         }
         last = stream_statements(session, piece, &mut on_batch).await?;
         if send == crate::safety::MysqlSend::OneByOne {
@@ -591,56 +593,134 @@ where
     Ok(last)
 }
 
-/// Read-only: refuses `sql` when it calls a stored or loadable function. A
-/// read-only transaction stops a function's row writes but not the rest of
-/// what it may do (`SET GLOBAL`, `SELECT … INTO OUTFILE`). Asked of the
-/// server just before `sql` runs, so an earlier `USE` counts.
+/// Read-only: refuses `sql` when it may call a stored or loadable function,
+/// itself or through a view it reads. A read-only transaction stops a
+/// function's row writes but not the rest of what it may do (`SET GLOBAL`,
+/// `SELECT … INTO OUTFILE`).
+///
+/// Over-inclusive by design ([`crate::safety::mysql_calls`]): any name
+/// followed by `(` that is a function's name in any database the login can
+/// see, a loadable function's, or a MariaDB package's (`pkg.f()`) refuses
+/// it, whatever the text around it. A view's stored definition writes a
+/// stored function's call in backticks, so one is refused even when the
+/// login can't see that function. Not seen: a view whose definition the
+/// login can't read (no SHOW VIEW).
 async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Result<(), DriverError> {
     use crate::db::{EngineKind, Value};
-    let lit = |s: &str| {
-        crate::query_util::sql_literal(EngineKind::Mysql, &Value::Text(s.to_string()))
-            .unwrap_or_else(|| "NULL".into())
+    use crate::safety::{mysql_calls, MysqlCalls};
+    let list = |names: &[String]| {
+        names
+            .iter()
+            .filter_map(|n| {
+                crate::query_util::sql_literal(EngineKind::Mysql, &Value::Text(n.clone()))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     };
-    for (schema, name) in crate::safety::mysql_called_functions(sql) {
-        let db = schema
-            .as_deref()
-            .map_or_else(|| "DATABASE()".to_string(), lit);
-        let found = text_rows(
+    let refuse = |what: String| {
+        DriverError::Message(format!(
+            "Read-only refused this: it calls {what}, and a function can change what a read-only transaction doesn't guard (server settings, files). Run it with safe mode set to Confirm writes or off."
+        ))
+    };
+    let mut calls = mysql_calls(sql);
+    // Views it may read, and the views those read.
+    let mut asked: Vec<String> = Vec::new();
+    for _ in 0..8 {
+        let new: Vec<String> = calls
+            .words
+            .iter()
+            .filter(|w| !asked.contains(w))
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        asked.extend(new.iter().cloned());
+        let views = text_rows(
             session,
             &format!(
-                "SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_TYPE = 'FUNCTION' \
-                 AND ROUTINE_SCHEMA = {db} AND ROUTINE_NAME = {}",
-                lit(&name)
+                "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+                 WHERE LOWER(TABLE_NAME) IN ({})",
+                list(&new)
             ),
         )
         .await?;
-        let stored = found
-            .first()
-            .and_then(|r| r.first().cloned().flatten())
-            .is_some_and(|n| n != "0");
-        // Loadable functions sit in mysql.func, which most logins can't
-        // read: then this can't tell, and the call runs (installing one
-        // takes an admin).
-        let loadable = schema.is_none()
-            && !stored
-            && text_rows(
-                session,
-                &format!(
-                    "SELECT COUNT(*) FROM mysql.func WHERE name = {}",
-                    lit(&name)
-                ),
-            )
-            .await
-            .is_ok_and(|r| {
-                r.first()
-                    .and_then(|r| r.first().cloned().flatten())
-                    .is_some_and(|n| n != "0")
-            });
-        if stored || loadable {
-            let shown = schema.map_or_else(|| name.clone(), |s| format!("{s}.{name}"));
-            return Err(DriverError::Message(format!(
-                "Read-only refused this: it calls the function {shown}, and a function can change what a read-only transaction doesn't guard (server settings, files). Run it with safe mode set to Confirm writes or off."
-            )));
+        for row in views {
+            let name = format!(
+                "{}.{}",
+                row.first().cloned().flatten().unwrap_or_default(),
+                row.get(1).cloned().flatten().unwrap_or_default()
+            );
+            let body = row.get(2).cloned().flatten().unwrap_or_default();
+            let MysqlCalls {
+                names,
+                quoted,
+                qualifiers,
+                words,
+            } = mysql_calls(&body);
+            if let Some(f) = quoted.first() {
+                return Err(refuse(format!("the function {f} through the view {name}")));
+            }
+            for (to, from) in [
+                (&mut calls.names, names),
+                (&mut calls.qualifiers, qualifiers),
+                (&mut calls.words, words),
+            ] {
+                for w in from {
+                    if !to.contains(&w) {
+                        to.push(w);
+                    }
+                }
+            }
+        }
+    }
+    if calls.names.is_empty() {
+        return Ok(());
+    }
+    let qualifiers = if calls.qualifiers.is_empty() {
+        "NULL".to_string()
+    } else {
+        list(&calls.qualifiers)
+    };
+    let found = text_rows(
+        session,
+        &format!(
+            "SELECT ROUTINE_SCHEMA, ROUTINE_NAME FROM information_schema.ROUTINES \
+             WHERE (ROUTINE_TYPE = 'FUNCTION' AND LOWER(ROUTINE_NAME) IN ({})) \
+             OR (ROUTINE_TYPE LIKE 'PACKAGE%' AND LOWER(ROUTINE_NAME) IN ({qualifiers})) LIMIT 1",
+            list(&calls.names)
+        ),
+    )
+    .await?;
+    if let Some(row) = found.first() {
+        let schema = row.first().cloned().flatten().unwrap_or_default();
+        let name = row.get(1).cloned().flatten().unwrap_or_default();
+        return Err(refuse(format!("the function {schema}.{name}")));
+    }
+    // Loadable functions: in mysql.func, or (MySQL 8 components)
+    // performance_schema. Most logins can read neither: then this can't
+    // tell, and the call runs (installing one takes an admin).
+    for table in [
+        "SELECT name FROM mysql.func",
+        "SELECT UDF_NAME FROM performance_schema.user_defined_functions",
+    ] {
+        let column = if table.contains("UDF_NAME") {
+            "UDF_NAME"
+        } else {
+            "name"
+        };
+        if let Ok(rows) = text_rows(
+            session,
+            &format!(
+                "{table} WHERE LOWER({column}) IN ({}) LIMIT 1",
+                list(&calls.names)
+            ),
+        )
+        .await
+        {
+            if let Some(name) = rows.first().and_then(|r| r.first().cloned().flatten()) {
+                return Err(refuse(format!("the loadable function {name}")));
+            }
         }
     }
     Ok(())

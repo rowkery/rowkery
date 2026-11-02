@@ -899,8 +899,41 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
         &bridge,
         "w",
         1,
-        "DROP TABLE IF EXISTS bw_ro; CREATE TABLE bw_ro (id INT)",
+        "DROP TABLE IF EXISTS bw_ro; CREATE TABLE bw_ro (id INT); INSERT INTO bw_ro VALUES (1), (2), (3)",
     );
+    // Names a lexer could read as something else: a Postgres built-in's,
+    // a keyword's, a leading digit or `$`.
+    for name in ["age", "ilike", "`9bw`", "`$bwz`"] {
+        rows_of(&bridge, "w", 1, &format!("DROP FUNCTION IF EXISTS {name}"));
+        let (_, error, _) = rows_of(
+            &bridge,
+            "w",
+            1,
+            &format!("CREATE FUNCTION {name}() RETURNS INT DETERMINISTIC RETURN 1"),
+        );
+        assert_eq!(error, None, "{name}");
+    }
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "CREATE OR REPLACE VIEW bw_ro_v AS SELECT bw_ro_fn() AS a FROM dual;
+         CREATE OR REPLACE VIEW bw_ro_v2 AS SELECT a FROM bw_ro_v",
+    );
+    assert_eq!(error, None);
+    // Packages outside Oracle mode came with MariaDB 11.4: on 10.11 the
+    // CREATE fails, and those calls aren't tried.
+    let mut packages = env("ROWKERY_MYSQL_FLAVOR", "") == "mariadb";
+    if packages {
+        let (_, error, _) = rows_of(
+            &bridge,
+            "w",
+            1,
+            "CREATE OR REPLACE PACKAGE bw_pkg FUNCTION pf() RETURNS INT; END;
+             CREATE OR REPLACE PACKAGE BODY bw_pkg FUNCTION pf() RETURNS INT RETURN 1; END",
+        );
+        packages = error.is_none();
+    }
     bridge.close_window("w");
 
     save_mysql(&bridge, "my-ro", SafeMode::ReadOnly);
@@ -924,6 +957,13 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
         "SELECT `bw_ro_fn`() FROM bw_ro",
         "SELECT rowkery.bw_ro_fn()",
         "SET @x = bw_ro_fn()",
+        "SELECT age()",
+        "SELECT ilike()",
+        "SELECT 9bw()",
+        "SELECT $bwz()",
+        "SELECT bw_ro_fn/* c */()",
+        "SELECT * FROM bw_ro_v",
+        "SELECT * FROM rowkery.bw_ro_v2",
     ] {
         let error = outcome(sql);
         assert!(
@@ -933,6 +973,17 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
             "{sql}: {error:?}"
         );
     }
+    if packages {
+        for sql in ["SELECT bw_pkg.pf()", "SELECT rowkery.bw_pkg.pf()"] {
+            let error = outcome(sql);
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("calls the function")),
+                "{sql}: {error:?}"
+            );
+        }
+    }
     let (rows, _, _) = rows_of(
         &bridge,
         "c",
@@ -940,6 +991,34 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
         "SELECT CONCAT('a', 'b'), DATE_FORMAT(NOW(), '%Y') > '2000', JSON_EXTRACT('[1]', '$[0]')",
     );
     assert_eq!(rows[0][0], Value::Text("ab".into()));
+    // The check runs once, before the run: it doesn't reset FOUND_ROWS()
+    // between its statements.
+    let (rows, error, _) = rows_of(
+        &bridge,
+        "c",
+        1,
+        "SELECT SQL_CALC_FOUND_ROWS * FROM bw_ro LIMIT 1; SELECT FOUND_ROWS()",
+    );
+    assert_eq!(error, None);
+    assert_eq!(
+        rows.last().map(|r| r[0].clone()),
+        Some(Value::Int(3)),
+        "{rows:?}"
+    );
     bridge.close_window("c");
+
+    save_mysql(&bridge, "my-ro-setup", SafeMode::Off);
+    bridge.open_window("w", "my-ro-setup", None).expect("open");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP VIEW IF EXISTS bw_ro_v2; DROP VIEW IF EXISTS bw_ro_v; DROP FUNCTION IF EXISTS age;
+         DROP FUNCTION IF EXISTS ilike; DROP FUNCTION IF EXISTS `9bw`; DROP FUNCTION IF EXISTS `$bwz`",
+    );
+    if packages {
+        rows_of(&bridge, "w", 1, "DROP PACKAGE IF EXISTS bw_pkg");
+    }
+    bridge.close_window("w");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
