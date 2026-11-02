@@ -45,7 +45,7 @@ export interface StatementPreview {
   reach: Reach | null;
   /** `[schema, table]` its own rows count under in `reach` (a partition's parent). */
   table: [string, string] | null;
-  /** Which rows an UPDATE / DELETE changed (a digest of their keys): Commit must change the same ones. */
+  /** Which rows an UPDATE / DELETE changed and what they held (a digest of each whole row): Commit must find them unchanged. */
   digest: string | null;
 }
 

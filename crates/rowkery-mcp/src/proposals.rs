@@ -405,8 +405,9 @@ pub struct StatementPreview {
     pub table: Option<[String; 2]>,
     /// Which rows an UPDATE or DELETE changed and what they held before it,
     /// as a digest of each whole row: a commit must change the same rows
-    /// with the same values, not just as many. None for an INSERT (its rows
-    /// are new), a table without a key, or no rows.
+    /// holding the same values, not just as many. Only the target's rows:
+    /// a value the change reads from another table isn't covered. None for
+    /// an INSERT (its rows are new), a table without a key, or no rows.
     pub digest: Option<String>,
 }
 
@@ -934,7 +935,6 @@ async fn pg_preview_one(
     )
     .await?
     .1;
-    // In key order, as the commit reads it, so both digest the same row().
     let key = pg_key(session, &change.target).await?;
     sets_no_key(change, &key)?;
     let triggers: Vec<String> = facts
@@ -953,7 +953,7 @@ async fn pg_preview_one(
     let join_old = change.verb != "DELETE" && !key.is_empty();
     // One row whatever the change returns: the digest aggregates them.
     let seen = match pg_digest(change, &key) {
-        Some((digest, from)) => format!("SELECT {digest} AS d FROM {from}"),
+        Some(digest) => format!("SELECT {digest} AS d"),
         None => "SELECT NULL::text AS d".into(),
     };
     let sql = if join_old {
@@ -1029,39 +1029,39 @@ fn quote_ident(c: &str) -> String {
     format!("\"{}\"", c.replace('"', "\"\""))
 }
 
-/// The SQL of a statement's `digest`, and the FROM it reads: each row the
-/// change touched (`rk_change`, its RETURNING rows), whole and as it was
-/// before the change (`rk_old`), hashed (SHA-256), the hashes summed in two
-/// 64-bit halves, so no order and no string of every row is needed. NULL
-/// for no rows; None where a digest says nothing.
+/// The SQL of a statement's `digest`: each row the change touched
+/// (`rk_change`, its RETURNING rows), whole and as it was before the change
+/// (`rk_old`), hashed (SHA-256), the hashes summed in two 64-bit halves, so
+/// no order and no string of every row is needed. NULL for no rows; None
+/// where a digest says nothing.
 ///
-/// A DELETE returns the old rows. For an UPDATE the main query still sees
-/// the table as it was (the CTE's writes aren't visible to it), so the old
-/// row is joined back by key; the key can't change (`sets_no_key`).
-fn pg_digest(change: &RowChange, key: &[String]) -> Option<(String, String)> {
+/// The old row is joined back by key: the main query still sees the table
+/// as it was (the CTE's writes aren't visible to it), the key can't change
+/// (`sets_no_key`), and only the target's columns count (a `DELETE … USING`
+/// returns the other table's too). The commit runs in REPEATABLE READ, so
+/// a row changed while it waited for the lock fails it rather than being
+/// written over (`pg_commit`).
+fn pg_digest(change: &RowChange, key: &[String]) -> Option<String> {
     if !digested(&change.verb, key) {
         return None;
     }
-    let from = if change.verb == "DELETE" {
-        "rk_change AS rk_old".to_string()
-    } else {
-        let on = |side: &str| {
-            key.iter()
-                .map(|k| format!("{side}.{}", quote_ident(k)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        format!(
-            "rk_change LEFT JOIN {} rk_old ON ({}) = ({})",
-            change.target,
-            on("rk_old"),
-            on("rk_change")
-        )
+    let on = |side: &str| {
+        key.iter()
+            .map(|k| format!("{side}.{}", quote_ident(k)))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
-    let hash = "encode(sha256(convert_to(row(rk_old.*)::text, 'UTF8')), 'hex')";
     let half =
-        |at: usize| format!("sum(('x' || substr({hash}, {at}, 16))::bit(64)::bigint::numeric)");
-    Some((format!("({} || ':' || {})", half(1), half(17)), from))
+        |at: usize| format!("sum(('x' || substr(rk_h, {at}, 16))::bit(64)::bigint::numeric)");
+    Some(format!(
+        "(SELECT {} || ':' || {} FROM (SELECT encode(sha256(convert_to(row(rk_old.*)::text, 'UTF8')), 'hex') AS rk_h \
+         FROM rk_change LEFT JOIN {} rk_old ON ({}) = ({})) rk_hashed)",
+        half(1),
+        half(17),
+        change.target,
+        on("rk_old"),
+        on("rk_change"),
+    ))
 }
 
 /// Refuses an UPDATE that sets a primary key column: the commit is checked
@@ -1167,9 +1167,18 @@ async fn pg_commit(
     let session = open_session(pg.id.clone(), pg_config(pg, &target.database))
         .await
         .map_err(|e| e.into_message())?;
-    session_execute(&session, &format!("BEGIN; {}", timeouts_sql(LOCK_TIMEOUT)))
-        .await
-        .map_err(|e| e.into_message())?;
+    // REPEATABLE READ: a row another session changes while the commit
+    // waits for its lock fails the statement (then Moved) instead of
+    // taking the change on top of a value the digest never saw.
+    session_execute(
+        &session,
+        &format!(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ; {}",
+            timeouts_sql(LOCK_TIMEOUT)
+        ),
+    )
+    .await
+    .map_err(|e| e.into_message())?;
     // Checked again in the transaction that runs it: planned at another
     // moment, `'now'` can fold into a plan that reads what the check never
     // saw (`Store::begin`).
@@ -1237,17 +1246,22 @@ async fn pg_commit_run(
             Some(_) => {
                 let key = pg_key(session, &change.target).await?;
                 sets_no_key(change, &key)?;
-                let Some((digest, from)) = pg_digest(change, &key) else {
+                let Some(digest) = pg_digest(change, &key) else {
                     return Ok(None);
                 };
-                let (_, rows) = pg_rows(
-                    session,
-                    &format!(
-                        "WITH rk_change AS ({}\nRETURNING *) SELECT count(*), {digest} FROM {from}",
-                        change.sql
-                    ),
-                )
-                .await?;
+                let sql = format!(
+                    "WITH rk_change AS ({}\nRETURNING *) SELECT count(*), {digest} FROM rk_change",
+                    change.sql
+                );
+                let mut rows = Vec::new();
+                let ran = session_query_stream(session, &sql, |batch, _| {
+                    rows.extend(batch.rows);
+                    Ok(())
+                })
+                .await;
+                if let Err(e) = ran {
+                    return moved_or(e);
+                }
                 let row = rows.first();
                 let n = match row.and_then(|r| r.first()) {
                     Some(Value::Int(n)) => *n as u64,
@@ -1255,12 +1269,10 @@ async fn pg_commit_run(
                 };
                 (n, row.map(|r| text(r.get(1))))
             }
-            None => {
-                let n = session_query_stream(session, &change.sql, |_, _| Ok(()))
-                    .await
-                    .map_err(|e| e.into_message())?;
-                (n, None)
-            }
+            None => match session_query_stream(session, &change.sql, |_, _| Ok(())).await {
+                Ok(n) => (n, None),
+                Err(e) => return moved_or(e),
+            },
         };
         let (reach, after) = pg_reach(session, tables.as_ref()).await?;
         if n != *want
@@ -1274,6 +1286,16 @@ async fn pg_commit_run(
     }
     let at_commit = pg_fire_deferred(session, tables.as_ref()).await?;
     Ok(matches(seen.at_commit.as_ref(), &at_commit).then_some(counts))
+}
+
+/// A commit statement's error: a row another session changed after the
+/// commit's snapshot (REPEATABLE READ) means the data moved; anything else
+/// is an error.
+fn moved_or<T>(e: rowkery_core::db::DriverError) -> Result<Option<T>, String> {
+    match &e {
+        rowkery_core::db::DriverError::Server { sqlstate, .. } if sqlstate == "40001" => Ok(None),
+        _ => Err(e.into_message()),
+    }
 }
 
 /// A run's reach against the dry run's: equal, when the dry run counted.

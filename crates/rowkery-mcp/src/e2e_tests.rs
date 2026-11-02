@@ -1492,6 +1492,36 @@ async fn a_commit_refuses_rows_whose_values_moved() {
     assert_eq!(total_of_1().await, json!([[70]]), "nothing was deleted");
     proposals::reject(gone, None).expect("reject");
 
+    // Changed while the commit waits for the row's lock: the commit's
+    // snapshot predates it, so it fails rather than writing 70 + 5.
+    let run = proposals::dry_run(bump).await.expect("bump dry run");
+    let holder = open_session("mcp-e2e-holder".into(), pg_config())
+        .await
+        .expect("connect");
+    session_execute(
+        &holder,
+        "BEGIN; UPDATE mcp_v_orders SET total = 200 WHERE id = 1",
+    )
+    .await
+    .unwrap();
+    let waiting = tokio::spawn({
+        let (id, saw) = (bump.to_string(), seen_all(&run));
+        async move { proposals::commit(&id, &saw).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    session_execute(&holder, "COMMIT").await.unwrap();
+    match waiting.await.unwrap().unwrap() {
+        CommitOutcome::Moved { dry_run } => {
+            let row = &dry_run.statements[0].shown[0];
+            assert_eq!(row.before.as_ref().unwrap()[2], json!(200));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(total_of_1().await, json!([[200]]), "nothing was saved");
+    session_execute(&setup, "UPDATE mcp_v_orders SET total = 70 WHERE id = 1")
+        .await
+        .unwrap();
+
     // Unchanged since the dry run: it commits.
     let run = proposals::dry_run(bump).await.expect("bump dry run");
     match proposals::commit(bump, &seen_all(&run)).await.unwrap() {
@@ -1724,7 +1754,7 @@ async fn proposed_changes_hold_against_a_real_postgres() {
     assert!(refused.contains("sets the primary key (id)"), "{refused}");
     proposals::reject(rekey, None).expect("reject");
     // A key in another order than its columns: the dry run and the commit
-    // digest the same row(b, a).
+    // join the old rows back by it the same way.
     let pair = propose("UPDATE mcp_p_pair SET n = 1 WHERE a = 1")
         .await
         .expect("pair");
