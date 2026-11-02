@@ -6,19 +6,38 @@ export interface CharRange {
 const isSpace = (c: number) => c === 32 || c === 9 || c === 10 || c === 13;
 
 /**
+ * MySQL and MariaDB read SQL as the mysql client does: `#` starts a comment
+ * to the line's end, `--` only when a space, control character or the
+ * text's end follows it (`1--1` is 1 minus -1), a backslash escapes the next
+ * character inside '…' and "…", and there are no `$tag$` bodies. A routine's
+ * `BEGIN` … `END` is a body (`END IF`, `END LOOP`, … close their own block).
+ */
+export type SqlDialect = "mysql" | undefined;
+
+/** `text[i]` starts a comment running to the line's end. */
+export function lineCommentAt(text: string, i: number, dialect: SqlDialect): boolean {
+  const c = text[i];
+  if (dialect === "mysql") {
+    if (c === "#") return true;
+    if (c !== "-" || text[i + 1] !== "-") return false;
+    const after = text.charCodeAt(i + 2);
+    // NaN past the end: a comment too.
+    return !(after > 32 && after !== 127);
+  }
+  return c === "-" && text[i + 1] === "-";
+}
+
+/** A backslash escapes the next character inside a run quoted by `q`. */
+const escapes = (q: string, dialect: SqlDialect) => dialect === "mysql" && q !== "`";
+
+/**
  * End (exclusive) of the quoted run opening at `text[start]`. A doubled quote
  * (`'it''s'`, `"a""b"`) stays inside it; an unclosed run ends at the text's end.
  * Shared with `sqlHighlight.ts` so colours and statement ranges agree.
  */
-export function quotedEnd(text: string, start: number): number {
-  const q = text[start];
-  let i = start + 1;
-  for (;;) {
-    const close = text.indexOf(q, i);
-    if (close < 0) return text.length;
-    if (text[close + 1] !== q) return close + 1;
-    i = close + 2;
-  }
+export function quotedEnd(text: string, start: number, dialect?: SqlDialect): number {
+  const end = quoteCloseIn(text, start + 1, text[start], dialect);
+  return end < 0 ? text.length : end;
 }
 
 /**
@@ -41,14 +60,22 @@ interface Head {
   parens: number;
   /** The last word was `BEGIN` in a function or procedure: a body only when `ATOMIC` follows. */
   afterBegin: boolean;
+  /** MySQL: the last word was an `END` that closed a block; `END IF` (…) closed no `BEGIN`. */
+  afterEnd: boolean;
 }
 
-const freshHead = (): Head => ({ stage: "", depth: 0, parens: 0, afterBegin: false });
+const freshHead = (): Head => ({ stage: "", depth: 0, parens: 0, afterBegin: false, afterEnd: false });
 
 const ROUTINES: Record<string, string> = { FUNCTION: "F0", PROCEDURE: "P0", TRIGGER: "T0" };
+/** MySQL's too: an event's `DO BEGIN … END` is a body like a trigger's. */
+const MY_ROUTINES: Record<string, string> = { ...ROUTINES, EVENT: "T0" };
+/** MySQL blocks that end with `END <word>` and open no `BEGIN` (`FOR` is MariaDB's). */
+const MY_END_WORDS = new Set(["IF", "LOOP", "WHILE", "REPEAT", "FOR"]);
 
 /** Feeds the head one upper-cased word outside quotes and comments. */
-function headWord(h: Head, w: string): void {
+function headWord(h: Head, w: string, dialect: SqlDialect): void {
+  const mysql = dialect === "mysql";
+  const routine = (mysql ? MY_ROUTINES : ROUTINES)[w];
   switch (h.stage) {
     case "x":
       return;
@@ -62,10 +89,16 @@ function headWord(h: Head, w: string): void {
     case "cor":
       if (h.stage === "c" && w === "OR") h.stage = "co";
       else if (w === "TEMP" || w === "TEMPORARY") h.stage = "ct";
-      else h.stage = ROUTINES[w] ?? "x";
+      // `CREATE DEFINER = user PROCEDURE`, `CREATE AGGREGATE FUNCTION`:
+      // words until the routine's.
+      else if (mysql && (w === "DEFINER" || w === "AGGREGATE")) h.stage = "cd";
+      else h.stage = routine ?? "x";
       return;
     case "ct":
-      h.stage = ROUTINES[w] ?? "x";
+      h.stage = routine ?? "x";
+      return;
+    case "cd":
+      if (routine) h.stage = routine;
       return;
   }
   if (h.stage.length === 2) {
@@ -73,18 +106,31 @@ function headWord(h: Head, w: string): void {
     return;
   }
   if (h.parens !== 0) return;
+  if (h.afterEnd) {
+    h.afterEnd = false;
+    // `END IF`: the END closed the IF, not a BEGIN; `END CASE` closed its CASE.
+    if (MY_END_WORDS.has(w)) {
+      h.depth++;
+      return;
+    }
+    if (w === "CASE") return;
+  }
   let opens = false;
   if (h.afterBegin) {
     h.afterBegin = false;
     opens = w === "ATOMIC";
   } else if (w === "BEGIN") {
-    opens = h.stage === "T";
+    // MySQL's routines have no ATOMIC: BEGIN is the body.
+    opens = h.stage === "T" || mysql;
     h.afterBegin = !opens;
   } else {
     opens = w === "CASE" && h.depth > 0;
   }
   if (opens) h.depth++;
-  else if (w === "END" && h.depth > 0) h.depth--;
+  else if (w === "END" && h.depth > 0) {
+    h.depth--;
+    h.afterEnd = mysql;
+  }
 }
 
 /** Counts a top-level paren; only a routine's need counting. */
@@ -123,7 +169,7 @@ const startsWord = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) 
  * range is trimmed of surrounding whitespace and includes its trailing `;`.
  * Empty statements are dropped. Single pass, O(n).
  */
-export function sqlStatementRanges(text: string): CharRange[] {
+export function sqlStatementRanges(text: string, dialect?: SqlDialect): CharRange[] {
   const ranges: CharRange[] = [];
   const n = text.length;
   let start = 0;
@@ -144,14 +190,14 @@ export function sqlStatementRanges(text: string): CharRange[] {
   while (i < n) {
     const c = text[i];
     if (c === "'" || c === '"' || c === "`") {
-      i = quotedEnd(text, i);
-    } else if (c === "-" && text[i + 1] === "-") {
-      const nl = text.indexOf("\n", i + 2);
+      i = quotedEnd(text, i, dialect);
+    } else if (lineCommentAt(text, i, dialect)) {
+      const nl = text.indexOf("\n", i + 1);
       i = nl < 0 ? n : nl + 1;
     } else if (c === "/" && text[i + 1] === "*") {
       const close = text.indexOf("*/", i + 2);
       i = close < 0 ? n : close + 2;
-    } else if (c === "$") {
+    } else if (c === "$" && dialect !== "mysql") {
       const m = /^\$[A-Za-z_]*\$/.exec(text.slice(i, i + 64));
       if (m && !/\w/.test(text[i - 1] ?? "")) {
         const close = text.indexOf(m[0], i + m[0].length);
@@ -160,6 +206,8 @@ export function sqlStatementRanges(text: string): CharRange[] {
         i++;
       }
     } else if (c === ";") {
+      // `END;` closed a block: the next statement's IF (…) opens its own.
+      head.afterEnd = false;
       if (head.depth === 0) {
         push(i + 1);
         start = i + 1;
@@ -168,7 +216,7 @@ export function sqlStatementRanges(text: string): CharRange[] {
       i++;
     } else if (head.stage !== "x" && startsWord(text.charCodeAt(i))) {
       const end = wordEnd(text, i);
-      if (!namePart(text[i - 1])) headWord(head, text.slice(i, end).toUpperCase());
+      if (!namePart(text[i - 1])) headWord(head, text.slice(i, end).toUpperCase(), dialect);
       i = end;
     } else {
       if (c === "(" || c === ")") headParen(head, c);
@@ -196,12 +244,24 @@ export function sqlStatementRanges(text: string): CharRange[] {
  */
 export type LineState = string;
 
-/** Index after the quote closing a run that continues at `line[from]`; -1 when this line doesn't close it. */
-export function quoteCloseIn(line: string, from: number, q: string): number {
+/**
+ * Index after the quote closing a run that continues at `line[from]`; -1 when
+ * this line doesn't close it. On MySQL a backslash escapes the next character
+ * (a backslash ending a line escapes its newline: the run goes on).
+ */
+export function quoteCloseIn(line: string, from: number, q: string, dialect?: SqlDialect): number {
+  const esc = escapes(q, dialect);
   let i = from;
   for (;;) {
     const close = line.indexOf(q, i);
     if (close < 0) return -1;
+    if (esc) {
+      const slash = line.indexOf("\\", i);
+      if (slash >= 0 && slash < close) {
+        i = slash + 2;
+        continue;
+      }
+    }
     if (line[close + 1] !== q) return close + 1;
     i = close + 2;
   }
@@ -225,13 +285,13 @@ export function lineDiff(prev: readonly string[], next: readonly string[]): Line
 /** `h` as a string, for a line's state. */
 function headKey(h: Head): string {
   if (!/^[FPT]/.test(h.stage)) return h.stage;
-  return `${h.stage}:${h.depth}.${h.parens}${h.afterBegin ? "a" : ""}`;
+  return `${h.stage}:${h.depth}.${h.parens}${h.afterBegin ? "a" : ""}${h.afterEnd ? "e" : ""}`;
 }
 
 function parseHead(key: string): Head {
-  const m = /^([FPT]0?):(\d+)\.(-?\d+)(a?)$/.exec(key);
+  const m = /^([FPT]0?):(\d+)\.(-?\d+)(a?)(e?)$/.exec(key);
   if (!m) return { ...freshHead(), stage: key };
-  return { stage: m[1], depth: Number(m[2]), parens: Number(m[3]), afterBegin: m[4] === "a" };
+  return { stage: m[1], depth: Number(m[2]), parens: Number(m[3]), afterBegin: m[4] === "a", afterEnd: m[5] === "e" };
 }
 
 /**
@@ -240,7 +300,7 @@ function parseHead(key: string): Head {
  * state. A state is the lexer's (`LineState`), then a space and the
  * statement's `headKey` unless that is empty.
  */
-function statementLine(line: string, base: number, entry: string, semis: number[]): string {
+function statementLine(line: string, base: number, entry: string, semis: number[], dialect: SqlDialect): string {
   const space = entry.indexOf(" ");
   const lex = space < 0 ? entry : entry.slice(0, space);
   const head = space < 0 ? freshHead() : parseHead(entry.slice(space + 1));
@@ -259,7 +319,7 @@ function statementLine(line: string, base: number, entry: string, semis: number[
       const close = line.indexOf(lex);
       j = close < 0 ? -1 : close + lex.length;
     } else {
-      j = quoteCloseIn(line, 0, lex);
+      j = quoteCloseIn(line, 0, lex, dialect);
     }
     if (j < 0) return entry;
     i = j;
@@ -267,16 +327,16 @@ function statementLine(line: string, base: number, entry: string, semis: number[
   while (i < n) {
     const c = line[i];
     if (c === "'" || c === '"' || c === "`") {
-      const end = quoteCloseIn(line, i + 1, c);
+      const end = quoteCloseIn(line, i + 1, c, dialect);
       if (end < 0) return out(c);
       i = end;
-    } else if (c === "-" && line[i + 1] === "-") {
+    } else if (lineCommentAt(line, i, dialect)) {
       return out("");
     } else if (c === "/" && line[i + 1] === "*") {
       const close = line.indexOf("*/", i + 2);
       if (close < 0) return out("*");
       i = close + 2;
-    } else if (c === "$") {
+    } else if (c === "$" && dialect !== "mysql") {
       const m = /^\$[A-Za-z_]*\$/.exec(line.slice(i, i + 64));
       if (m && !/\w/.test(line[i - 1] ?? "")) {
         const close = line.indexOf(m[0], i + m[0].length);
@@ -286,6 +346,8 @@ function statementLine(line: string, base: number, entry: string, semis: number[
         i++;
       }
     } else if (c === ";") {
+      // `END;` closed a block: the next statement's IF (…) opens its own.
+      head.afterEnd = false;
       if (head.depth === 0) {
         semis.push(base + i + 1);
         Object.assign(head, freshHead());
@@ -293,7 +355,7 @@ function statementLine(line: string, base: number, entry: string, semis: number[
       i++;
     } else if (head.stage !== "x" && startsWord(line.charCodeAt(i))) {
       const end = wordEnd(line, i);
-      if (!namePart(line[i - 1])) headWord(head, line.slice(i, end).toUpperCase());
+      if (!namePart(line[i - 1])) headWord(head, line.slice(i, end).toUpperCase(), dialect);
       i = end;
     } else {
       if (c === "(" || c === ")") headParen(head, c);
@@ -322,7 +384,7 @@ export interface StatementScanner {
 }
 
 /** A per-editor statement splitter: caches each line's start state and the `;` offsets. */
-export function createStatementScanner(): StatementScanner {
+export function createStatementScanner(dialect?: SqlDialect): StatementScanner {
   let text: string | null = null;
   let src: string[] = [];
   /** `states[k]`: where line k starts (see `statementLine`); one more entry than lines. */
@@ -352,7 +414,7 @@ export function createStatementScanner(): StatementScanner {
       for (; k < lines.length; k++) {
         // An unchanged line starting in its old state: the rest is as before.
         if (k >= lines.length - q && state === states[k - delta]) break;
-        state = statementLine(lines[k], base, state, outSemis);
+        state = statementLine(lines[k], base, state, outSemis, dialect);
         base += lines[k].length + 1;
         outStates.push(state);
         outCounts.push(outSemis.length);
@@ -427,6 +489,7 @@ export function sqlToRun(
   text: string,
   selectionStart: number,
   selectionEnd: number,
+  ranges?: CharRange[],
 ): string {
   if (selectionStart !== selectionEnd) {
     return text.slice(
@@ -434,6 +497,6 @@ export function sqlToRun(
       Math.max(selectionStart, selectionEnd),
     );
   }
-  const range = statementRangeAtOffset(text, selectionStart);
+  const range = statementRangeAtOffset(text, selectionStart, ranges);
   return range ? text.slice(range.start, range.end) : "";
 }

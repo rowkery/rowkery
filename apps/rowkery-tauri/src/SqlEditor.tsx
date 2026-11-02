@@ -16,7 +16,7 @@ import type { CompletionResult } from "./sqlComplete";
 import { createSqlScan, lineAtOffset, lineStartOffsets, type SqlScan } from "./sqlHighlight";
 import { BLOCK, CATCH_UP_BLOCKS, linesNeeded, pickShownLines, type ShownLines } from "./sqlLineBlocks";
 import { formatSql, formatTarget, type FormatDialect } from "./sqlFormat";
-import { sqlToRun, statementRangeAtOffset, type CharRange } from "./sqlStatements";
+import { sqlToRun, statementRangeAtOffset, type CharRange, type SqlDialect } from "./sqlStatements";
 
 export interface SqlEditorHandle {
   getSqlToRun: () => string;
@@ -73,6 +73,8 @@ interface Props {
   compact?: boolean;
   onEscape?: () => boolean;
   placeholder?: string;
+  /** How the connection reads comments and quotes, for colours and the statement ⌘↵ runs. */
+  dialect?: SqlDialect;
 }
 
 /** Typing one of these opens (or keeps refreshing) the completion list. */
@@ -166,7 +168,7 @@ function blockDecor(d: LineDecor, from: number, to: number): string {
 }
 
 export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
-  { value, onChange, onRun, readOnly, completion, compact, onEscape, placeholder, mark, onMarkEnter },
+  { value, onChange, onRun, readOnly, completion, compact, onEscape, placeholder, mark, onMarkEnter, dialect },
   ref,
 ) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -207,14 +209,14 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
 
   // Scan once per edit, and only from the first changed line (the scanners
   // cache each line's lexer state); caret moves only walk the cached ranges.
-  const scan = useRef<SqlScan | null>(null);
-  scan.current ??= createSqlScan();
+  const scan = useRef<{ dialect: SqlDialect; scan: SqlScan } | null>(null);
+  if (!scan.current || scan.current.dialect !== dialect) scan.current = { dialect, scan: createSqlScan(dialect) };
   const {
     ranges,
     lines: freshLines,
     text: textLines,
     valid,
-  } = scan.current.update(value, linesNeeded(caretBlock, caught.current.blocks, shown.current !== null));
+  } = scan.current.scan.update(value, linesNeeded(caretBlock, caught.current.blocks, shown.current !== null));
   const picked = pickShownLines(freshLines, valid, textLines, shown.current, caretBlock, (b) =>
     caught.current.blocks.has(b),
   );
@@ -277,7 +279,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
     const { value } = live.current;
     const ta = textareaRef.current;
     if (!ta) return value;
-    return sqlToRun(value, ta.selectionStart, ta.selectionEnd);
+    return sqlToRun(value, ta.selectionStart, ta.selectionEnd, live.current.ranges);
   }, []);
 
   const focus = useCallback(() => textareaRef.current?.focus(), []);
