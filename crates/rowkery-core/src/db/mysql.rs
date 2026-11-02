@@ -577,6 +577,9 @@ where
         if guard && !crate::safety::plain_read(piece, Dialect::Mysql) {
             session.charset_due = true;
         }
+        if session.config.safe_mode == SafeMode::ReadOnly {
+            refuse_stored_functions(session, piece).await?;
+        }
         last = stream_statements(session, piece, &mut on_batch).await?;
         if send == crate::safety::MysqlSend::OneByOne {
             settle_charset(session).await?;
@@ -586,6 +589,61 @@ where
         settle_charset(session).await?;
     }
     Ok(last)
+}
+
+/// Read-only: refuses `sql` when it calls a stored or loadable function. A
+/// read-only transaction stops a function's row writes but not the rest of
+/// what it may do (`SET GLOBAL`, `SELECT … INTO OUTFILE`). Asked of the
+/// server just before `sql` runs, so an earlier `USE` counts.
+async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Result<(), DriverError> {
+    use crate::db::{EngineKind, Value};
+    let lit = |s: &str| {
+        crate::query_util::sql_literal(EngineKind::Mysql, &Value::Text(s.to_string()))
+            .unwrap_or_else(|| "NULL".into())
+    };
+    for (schema, name) in crate::safety::mysql_called_functions(sql) {
+        let db = schema
+            .as_deref()
+            .map_or_else(|| "DATABASE()".to_string(), lit);
+        let found = text_rows(
+            session,
+            &format!(
+                "SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_TYPE = 'FUNCTION' \
+                 AND ROUTINE_SCHEMA = {db} AND ROUTINE_NAME = {}",
+                lit(&name)
+            ),
+        )
+        .await?;
+        let stored = found
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .is_some_and(|n| n != "0");
+        // Loadable functions sit in mysql.func, which most logins can't
+        // read: then this can't tell, and the call runs (installing one
+        // takes an admin).
+        let loadable = schema.is_none()
+            && !stored
+            && text_rows(
+                session,
+                &format!(
+                    "SELECT COUNT(*) FROM mysql.func WHERE name = {}",
+                    lit(&name)
+                ),
+            )
+            .await
+            .is_ok_and(|r| {
+                r.first()
+                    .and_then(|r| r.first().cloned().flatten())
+                    .is_some_and(|n| n != "0")
+            });
+        if stored || loadable {
+            let shown = schema.map_or_else(|| name.clone(), |s| format!("{s}.{name}"));
+            return Err(DriverError::Message(format!(
+                "Read-only refused this: it calls the function {shown}, and a function can change what a read-only transaction doesn't guard (server settings, files). Run it with safe mode set to Confirm writes or off."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// With safe mode on, after anything that may have changed the session:

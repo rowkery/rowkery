@@ -380,8 +380,13 @@ const COMPUTING_FUNCTIONS: &[&str] = &[
 /// not a column list after `AS` (`AS t(a, b)`). A quoted or qualified name
 /// always may.
 fn calls_function(toks: &[Tok]) -> bool {
-    toks.windows(2).enumerate().any(|(k, w)| {
-        w[1] == Tok::Open
+    call_sites(toks).next().is_some()
+}
+
+/// Where [`calls_function`] sees a call: the index of each name before `(`.
+fn call_sites(toks: &[Tok]) -> impl Iterator<Item = usize> + '_ {
+    toks.windows(2).enumerate().filter_map(|(k, w)| {
+        let call = w[1] == Tok::Open
             && match &w[0] {
                 Tok::Word(word, _) => {
                     let before = k.checked_sub(1).map(|b| &toks[b]);
@@ -393,8 +398,58 @@ fn calls_function(toks: &[Tok]) -> bool {
                 }
                 Tok::Quoted(_) => true,
                 _ => false,
-            }
+            };
+        call.then_some(k)
     })
+}
+
+/// A name as MySQL reads it: a bare word as written, a backticked one
+/// without its quotes. `None` for anything else.
+fn mysql_name(tok: &Tok) -> Option<String> {
+    match tok {
+        Tok::Word(_, text) => Some(text.clone()),
+        Tok::Quoted(text) if text.len() >= 2 => {
+            let q = &text[..1];
+            let inner = text[1..].strip_suffix(q).unwrap_or(&text[1..]);
+            Some(inner.replace(&format!("{q}{q}"), q))
+        }
+        _ => None,
+    }
+}
+
+/// The functions MySQL text may call that aren't plain built-ins, as
+/// `(database, name)` (`None` when unqualified: the current database). A
+/// stored function can't be called bare by a built-in's name, so each is a
+/// stored function, a loadable one, or a built-in Rowkery doesn't list.
+pub fn mysql_called_functions(sql: &str) -> Vec<(Option<String>, String)> {
+    let mut out = Vec::new();
+    for toks in tokenize(sql, Dialect::Mysql) {
+        // A doubled backtick (`` `a``b` ``) lexes as two quoted names in a row.
+        let joined = |mut k: usize| -> (usize, Option<String>) {
+            let mut name = mysql_name(&toks[k]);
+            while k > 0 && matches!((&toks[k - 1], &toks[k]), (Tok::Quoted(_), Tok::Quoted(_))) {
+                k -= 1;
+                name = mysql_name(&toks[k])
+                    .zip(name)
+                    .map(|(a, b)| format!("{a}`{b}"));
+            }
+            (k, name)
+        };
+        for k in call_sites(&toks) {
+            let (k, name) = joined(k);
+            let Some(name) = name else {
+                continue;
+            };
+            let schema = (k >= 2 && toks[k - 1] == Tok::Dot)
+                .then(|| joined(k - 2).1)
+                .flatten();
+            let call = (schema, name);
+            if !out.contains(&call) {
+                out.push(call);
+            }
+        }
+    }
+    out
 }
 
 /// Settings that keep a read-only session read-only.
@@ -1619,14 +1674,14 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
         unlocks_writes: false,
     };
     match first {
-        "SELECT" => {
-            // `SELECT … INTO new_table` creates a table (Postgres).
-            if top_level(toks).any(|t| t.is("INTO")) {
-                data_check(toks, "SELECT INTO", 0)
-            } else {
-                read()
-            }
+        // `SELECT … INTO new_table` creates a table (Postgres); MySQL's
+        // `INTO OUTFILE` writes a file, also after `TABLE t`, `VALUES …` and
+        // `(SELECT …)`, and inside the parentheses of a union's last part.
+        // A subquery can't hold one, so INTO at any depth is a write.
+        "SELECT" | "VALUES" | "TABLE" if toks.iter().any(|t| t.is("INTO")) => {
+            data_check(toks, "SELECT INTO", 0)
         }
+        "SELECT" => read(),
         "WITH" => {
             // A data-modifying CTE or main statement makes the whole run a
             // write, and so do `… SELECT … INTO new_table` (Postgres) and
@@ -2925,6 +2980,33 @@ mod tests {
         assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
         assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
         assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // INTO OUTFILE writes a file whatever leads the statement.
+        for sql in [
+            "TABLE t INTO OUTFILE '/tmp/x'",
+            "VALUES ROW(1) INTO OUTFILE '/tmp/x'",
+            "VALUES (1) INTO OUTFILE '/tmp/x'",
+            "(SELECT 1) INTO OUTFILE '/tmp/x'",
+            "((SELECT 1)) INTO DUMPFILE '/tmp/x'",
+            "(SELECT 1) UNION (SELECT 2) INTO OUTFILE '/tmp/x'",
+            "SELECT 1 UNION (SELECT 2 INTO OUTFILE '/tmp/x')",
+        ] {
+            assert_eq!(kinds(sql), [Write], "{sql}");
+        }
+        assert_eq!(
+            kinds("TABLE t; VALUES ROW(1); (SELECT 1) UNION SELECT 2"),
+            [Read, Read, Read]
+        );
+        assert_eq!(
+            mysql_called_functions(
+                "SELECT f(1), db.g(), `h``x`(), NOW(), COUNT(*) FROM t; SET @a = `d`.`k`()"
+            ),
+            [
+                (None, "f".to_string()),
+                (Some("db".to_string()), "g".to_string()),
+                (None, "h`x".to_string()),
+                (Some("d".to_string()), "k".to_string()),
+            ]
+        );
         // MariaDB's MSSQL mode reads `[']` as a name: the DELETE runs.
         assert_eq!(
             verbs("SELECT 1 AS [']; DELETE FROM t; SELECT [']"),

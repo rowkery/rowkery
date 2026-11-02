@@ -876,3 +876,70 @@ fn mysql_brackets_never_hide_a_write() {
     }
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// Read-only on MySQL: `INTO OUTFILE` after `TABLE`, `VALUES` or `(SELECT …)`
+/// is refused like any other, and a read calling a stored function is
+/// refused (a read-only transaction doesn't stop `SET GLOBAL` or a file
+/// write inside one); built-ins still run.
+#[test]
+fn mysql_read_only_refuses_files_and_stored_functions() {
+    let (_guard, _file, _path) = test_guard();
+    trust_function_creators();
+    let bridge = super::super::CoreBridge::spawn();
+    save_mysql(&bridge, "my-ro-setup", SafeMode::Off);
+    bridge.open_window("w", "my-ro-setup", None).expect("open");
+    rows_of(&bridge, "w", 1, "DROP FUNCTION IF EXISTS bw_ro_fn");
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "CREATE FUNCTION bw_ro_fn() RETURNS INT DETERMINISTIC RETURN 1",
+    );
+    rows_of(
+        &bridge,
+        "w",
+        1,
+        "DROP TABLE IF EXISTS bw_ro; CREATE TABLE bw_ro (id INT)",
+    );
+    bridge.close_window("w");
+
+    save_mysql(&bridge, "my-ro", SafeMode::ReadOnly);
+    bridge.open_window("c", "my-ro", None).expect("open");
+    let outcome = |sql: &str| {
+        ended(
+            &bridge
+                .run_window_query("c", 1, sql.into(), None, true)
+                .expect("run"),
+        )
+    };
+    for sql in [
+        "TABLE bw_ro INTO OUTFILE '/tmp/bw_ro_x'",
+        "(SELECT 1) INTO OUTFILE '/tmp/bw_ro_x'",
+        "VALUES (1) INTO OUTFILE '/tmp/bw_ro_x'",
+    ] {
+        assert_eq!(outcome(sql).as_deref(), Some("held: Refuse"), "{sql}");
+    }
+    for sql in [
+        "SELECT bw_ro_fn()",
+        "SELECT `bw_ro_fn`() FROM bw_ro",
+        "SELECT rowkery.bw_ro_fn()",
+        "SET @x = bw_ro_fn()",
+    ] {
+        let error = outcome(sql);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("calls the function")),
+            "{sql}: {error:?}"
+        );
+    }
+    let (rows, _, _) = rows_of(
+        &bridge,
+        "c",
+        1,
+        "SELECT CONCAT('a', 'b'), DATE_FORMAT(NOW(), '%Y') > '2000', JSON_EXTRACT('[1]', '$[0]')",
+    );
+    assert_eq!(rows[0][0], Value::Text("ab".into()));
+    bridge.close_window("c");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
