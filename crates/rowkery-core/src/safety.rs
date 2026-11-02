@@ -404,7 +404,8 @@ fn call_sites(toks: &[Tok]) -> impl Iterator<Item = usize> + '_ {
 }
 
 /// What MySQL text may call, for Read-only's check of stored and loadable
-/// functions ([`mysql_calls`]). Every name lower-cased.
+/// functions ([`mysql_calls`]). Names as written: the server folds case
+/// (Rust's `to_lowercase` folds `İ` and `ẞ` otherwise than MySQL does).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MysqlCalls {
     /// Names followed by `(` (spaces and comments between allowed).
@@ -415,7 +416,7 @@ pub struct MysqlCalls {
     pub quoted: Vec<String>,
     /// Names followed by `.`: a database or a MariaDB package.
     pub qualifiers: Vec<String>,
-    /// Every name: the views the text may read.
+    /// Every name but bare numbers: the views the text may read.
     pub words: Vec<String>,
 }
 
@@ -429,19 +430,36 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
     let b = sql.as_bytes();
     let n = b.len();
     let mut out = MysqlCalls::default();
-    let add = |list: &mut Vec<String>, name: &str| {
-        let name = name.to_lowercase();
-        if !name.is_empty() && !list.contains(&name) {
-            list.push(name);
+    // Which list (0 names, 1 quoted, 2 qualifiers, 3 words) has which name:
+    // a set, so a text of many thousand names stays linear.
+    let mut seen = std::collections::HashSet::new();
+    let mut add = |kind: u8, list: &mut Vec<String>, name: &str| {
+        if !name.is_empty() && seen.insert((kind, name.to_string())) {
+            list.push(name.to_string());
         }
     };
-    // Past spaces and comments from `i`.
+    // Past spaces and comments from `i`. A `/*!…*/` (or MariaDB `/*M!…*/`)
+    // is run by the server, so only its marks are passed, not its text.
     let skip = |mut i: usize| -> usize {
         loop {
             while i < n && (b[i].is_ascii_whitespace() || b[i] == 0x0b) {
                 i += 1;
             }
-            if b[i..].starts_with(b"/*") {
+            let versioned = if b[i..].starts_with(b"/*!") {
+                Some(i + 3)
+            } else if b[i..].starts_with(b"/*M!") || b[i..].starts_with(b"/*m!") {
+                Some(i + 4)
+            } else {
+                None
+            };
+            if let Some(mut j) = versioned {
+                while j < n && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                i = j;
+            } else if b[i..].starts_with(b"*/") {
+                i += 2;
+            } else if b[i..].starts_with(b"/*") {
                 i = sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2);
             } else if b[i..].starts_with(b"#") || b[i..].starts_with(b"--") {
                 i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
@@ -450,17 +468,52 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
             }
         }
     };
-    let note = |name: &str, end: usize, quoted: bool, out: &mut MysqlCalls| {
-        add(&mut out.words, name);
+    // What came before `start`, past spaces: a `)` or the word AS.
+    let after_close_or_as = |start: usize| {
+        let before = sql[..start].trim_end();
+        before.ends_with(')')
+            || before.len() >= 2
+                && before[before.len() - 2..].eq_ignore_ascii_case("as")
+                && !before[..before.len() - 2]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
+    // A column list (`` `c` (`a`) AS ( `` in a stored WITH, `` ) `d` (`a`) ``
+    // after a derived table), not a call: the `)` closing it is followed
+    // by AS (.
+    let column_list = |open: usize| {
+        let mut depth = 0usize;
+        for (k, c) in sql[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let rest = sql[open + k + 1..].trim_start();
+                        return rest.len() >= 2
+                            && rest[..2].eq_ignore_ascii_case("as")
+                            && rest[2..].trim_start().starts_with('(');
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    };
+    let mut note = |name: &str, start: usize, end: usize, quoted: bool, out: &mut MysqlCalls| {
+        if quoted || !name.bytes().all(|c| c.is_ascii_digit()) {
+            add(3, &mut out.words, name);
+        }
         let next = skip(end);
         match b.get(next) {
             Some(b'(') => {
-                add(&mut out.names, name);
-                if quoted {
-                    add(&mut out.quoted, name);
+                add(0, &mut out.names, name);
+                if quoted && !after_close_or_as(start) && !column_list(next) {
+                    add(1, &mut out.quoted, name);
                 }
             }
-            Some(b'.') => add(&mut out.qualifiers, name),
+            Some(b'.') => add(2, &mut out.qualifiers, name),
             _ => {}
         }
     };
@@ -473,7 +526,7 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
                 .char_indices()
                 .find(|&(_, c)| !word(c))
                 .map_or(n, |(k, _)| i + k);
-            note(&sql[i..end], end, false, &mut out);
+            note(&sql[i..end], i, end, false, &mut out);
             i = end;
             continue;
         }
@@ -496,7 +549,13 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
                 j += 1;
             }
             if j < n {
-                note(&String::from_utf8_lossy(&name), j + 1, c == '`', &mut out);
+                note(
+                    &String::from_utf8_lossy(&name),
+                    i,
+                    j + 1,
+                    c == '`',
+                    &mut out,
+                );
             }
         }
         i += c.len_utf8();
@@ -3050,9 +3109,11 @@ mod tests {
         );
         let calls = mysql_calls(
             "SELECT f(1), db.g (), `h``x`(), NOW(), 9f(), $z(), age /* c */ (), x # (\n() FROM t; \
-             SET @a = `d`.`k`(); SELECT 'a\"', `my f`(), '\"'",
+             SET @a = `d`.`k`(); SELECT 'a\"', `my f`(), '\"', `fİ`(), 12345",
         );
-        for name in ["f", "g", "h`x", "now", "9f", "$z", "age", "x", "k", "my f"] {
+        for name in [
+            "f", "g", "h`x", "NOW", "9f", "$z", "age", "x", "k", "my f", "fİ",
+        ] {
             assert!(calls.names.contains(&name.to_string()), "{name}: {calls:?}");
         }
         // Every backtick is tried as a start, so `x` (inside `h``x`) counts too.
@@ -3068,10 +3129,33 @@ mod tests {
                 && calls.qualifiers.contains(&"d".to_string())
         );
         assert!(calls.words.contains(&"t".to_string()));
-        // A name split from its ( only by a comment still counts.
-        assert!(mysql_calls("SELECT f/**/()")
-            .names
-            .contains(&"f".to_string()));
+        assert!(!calls.words.contains(&"12345".to_string()));
+        // A name split from its ( only by a comment still counts, but a
+        // versioned comment's text is run, so its ( and . count.
+        for sql in [
+            "SELECT f/**/()",
+            "SELECT f/*!()*/",
+            "SELECT f/*!50000 ()*/",
+            "SELECT f/*M!100000 ()*/",
+        ] {
+            assert!(mysql_calls(sql).names.contains(&"f".to_string()), "{sql}");
+        }
+        assert!(mysql_calls("SELECT pkg/*M!.*/pf()")
+            .qualifiers
+            .contains(&"pkg".to_string()));
+        // How MySQL stores a view with a CTE or a derived table's columns:
+        // column lists, not calls.
+        for sql in [
+            "with `c` (`a`) as (select 1 AS `1`) select `c`.`a` AS `a` from `c`",
+            "select `d`.`a` AS `a` from (select 1 AS `1`) `d` (`a`)",
+            "select 1 AS `x` from (select 1) as `d` (`a`)",
+        ] {
+            assert_eq!(mysql_calls(sql).quoted, Vec::<String>::new(), "{sql}");
+        }
+        assert_eq!(
+            mysql_calls("select `f`(1) AS `a`, `g`() AS `b`").quoted,
+            ["f", "g"]
+        );
         assert!(mysql_calls("SELECT rowkery.rk_pkg.pf()")
             .qualifiers
             .contains(&"rk_pkg".to_string()));

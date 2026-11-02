@@ -95,6 +95,9 @@ pub struct MysqlSession {
     /// A run that may have changed the client character set hasn't been
     /// checked yet (see `settle_charset`).
     charset_due: bool,
+    /// Read-only's lookups of loadable functions (`mysql.func`,
+    /// `performance_schema`) this login was refused: not asked again.
+    udf_denied: [bool; 2],
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -341,6 +344,7 @@ pub async fn open_session_via(
         version,
         tag,
         charset_due: false,
+        udf_denied: [false; 2],
         guard: None,
         stateful: false,
         abandoned: false,
@@ -603,8 +607,8 @@ where
 /// see, a loadable function's, or a MariaDB package's (`pkg.f()`) refuses
 /// it, whatever the text around it. A view's stored definition writes a
 /// stored function's call in backticks, so one is refused even when the
-/// login can't see that function. Not seen: a view whose definition the
-/// login can't read (no SHOW VIEW).
+/// login can't see that function; a view whose definition the login can't
+/// read (no SHOW VIEW) is refused, as is a nesting deeper than 32.
 async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Result<(), DriverError> {
     use crate::db::{EngineKind, Value};
     use crate::safety::{mysql_calls, MysqlCalls};
@@ -614,6 +618,8 @@ async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Resul
             .filter_map(|n| {
                 crate::query_util::sql_literal(EngineKind::Mysql, &Value::Text(n.clone()))
             })
+            // The server folds case on both sides, as it reads names.
+            .map(|lit| format!("LOWER({lit})"))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -623,17 +629,23 @@ async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Resul
         ))
     };
     let mut calls = mysql_calls(sql);
-    // Views it may read, and the views those read.
-    let mut asked: Vec<String> = Vec::new();
-    for _ in 0..8 {
+    // Views it may read, and the views those read, to a depth no real
+    // schema needs; deeper, it refuses rather than guess.
+    let mut asked = std::collections::HashSet::new();
+    for round in 0.. {
         let new: Vec<String> = calls
             .words
             .iter()
-            .filter(|w| !asked.contains(w))
+            .filter(|w| !asked.contains(*w))
             .cloned()
             .collect();
         if new.is_empty() {
             break;
+        }
+        if round == 32 {
+            return Err(DriverError::Message(
+                "Read-only refused this: it reads views nested too deep to check for function calls. Run it with safe mode set to Confirm writes or off.".into(),
+            ));
         }
         asked.extend(new.iter().cloned());
         let views = text_rows(
@@ -652,6 +664,13 @@ async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Resul
                 row.get(1).cloned().flatten().unwrap_or_default()
             );
             let body = row.get(2).cloned().flatten().unwrap_or_default();
+            // Shown empty without SHOW VIEW: what it runs (as its definer,
+            // maybe) can't be checked.
+            if body.trim().is_empty() {
+                return Err(DriverError::Message(format!(
+                    "Read-only refused this: it may read the view {name}, and this login can't see what that view runs (it needs SHOW VIEW), so Rowkery can't tell whether it calls a function. Run it with safe mode set to Confirm writes or off."
+                )));
+            }
             let MysqlCalls {
                 names,
                 quoted,
@@ -666,11 +685,8 @@ async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Resul
                 (&mut calls.qualifiers, qualifiers),
                 (&mut calls.words, words),
             ] {
-                for w in from {
-                    if !to.contains(&w) {
-                        to.push(w);
-                    }
-                }
+                let have: std::collections::HashSet<String> = to.iter().cloned().collect();
+                to.extend(from.into_iter().filter(|w| !have.contains(w)));
             }
         }
     }
@@ -700,27 +716,31 @@ async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Resul
     // Loadable functions: in mysql.func, or (MySQL 8 components)
     // performance_schema. Most logins can read neither: then this can't
     // tell, and the call runs (installing one takes an admin).
-    for table in [
-        "SELECT name FROM mysql.func",
-        "SELECT UDF_NAME FROM performance_schema.user_defined_functions",
-    ] {
-        let column = if table.contains("UDF_NAME") {
-            "UDF_NAME"
-        } else {
-            "name"
-        };
-        if let Ok(rows) = text_rows(
+    for (k, (table, column)) in [
+        ("mysql.func", "name"),
+        ("performance_schema.user_defined_functions", "UDF_NAME"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if session.udf_denied[k] {
+            continue;
+        }
+        match text_rows(
             session,
             &format!(
-                "{table} WHERE LOWER({column}) IN ({}) LIMIT 1",
+                "SELECT {column} FROM {table} WHERE LOWER({column}) IN ({}) LIMIT 1",
                 list(&calls.names)
             ),
         )
         .await
         {
-            if let Some(name) = rows.first().and_then(|r| r.first().cloned().flatten()) {
-                return Err(refuse(format!("the loadable function {name}")));
+            Ok(rows) => {
+                if let Some(name) = rows.first().and_then(|r| r.first().cloned().flatten()) {
+                    return Err(refuse(format!("the loadable function {name}")));
+                }
             }
+            Err(_) => session.udf_denied[k] = true,
         }
     }
     Ok(())

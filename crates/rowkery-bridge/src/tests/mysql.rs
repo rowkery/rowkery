@@ -13,6 +13,11 @@ fn env(name: &str, default: &str) -> String {
 /// Lets the test login make stored functions (MySQL 8.0 with binary
 /// logging asks for SUPER otherwise), as root.
 fn trust_function_creators() {
+    as_root(&["SET GLOBAL log_bin_trust_function_creators = 1"]);
+}
+
+/// Runs each statement as root, for setup the test login can't do.
+fn as_root(statements: &[&str]) {
     let mut root = record("root", SafeMode::Off);
     root.username = "root".into();
     let secrets = ConnectionSecrets {
@@ -24,12 +29,11 @@ fn trust_function_creators() {
             rowkery_core::db::mysql::open_session_via(root.id.clone(), root, Some(&secrets), None)
                 .await
                 .expect("root");
-        rowkery_core::db::mysql::session_execute(
-            &mut s,
-            "SET GLOBAL log_bin_trust_function_creators = 1",
-        )
-        .await
-        .expect("trust");
+        for sql in statements {
+            rowkery_core::db::mysql::session_execute(&mut s, sql)
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        }
     });
 }
 
@@ -921,6 +925,35 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
          CREATE OR REPLACE VIEW bw_ro_v2 AS SELECT a FROM bw_ro_v",
     );
     assert_eq!(error, None);
+    // A name that changes under Unicode case folding, a CTE whose column
+    // list mustn't read as a call, and chains of views 10 and 40 deep.
+    rows_of(&bridge, "w", 1, "DROP FUNCTION IF EXISTS `fİ`");
+    let (_, error, _) = rows_of(
+        &bridge,
+        "w",
+        1,
+        "CREATE FUNCTION `fİ`() RETURNS INT DETERMINISTIC RETURN 1;
+         CREATE OR REPLACE VIEW bw_ro_cte AS WITH c (`bw_ro_fn`) AS (SELECT 1) SELECT `bw_ro_fn` FROM c",
+    );
+    assert_eq!(error, None);
+    let mut chain = String::from("CREATE OR REPLACE VIEW bw_ro_d0 AS SELECT bw_ro_fn() AS a");
+    for i in 1..40 {
+        chain += &format!(
+            ";\nCREATE OR REPLACE VIEW bw_ro_d{i} AS SELECT a FROM bw_ro_d{}",
+            i - 1
+        );
+    }
+    let (_, error, _) = rows_of(&bridge, "w", 1, &chain);
+    assert_eq!(error, None);
+    // A definer view in a schema this login can only SELECT the view from:
+    // without SHOW VIEW its definition reads back empty.
+    as_root(&[
+        "DROP DATABASE IF EXISTS bw_hidden",
+        "CREATE DATABASE bw_hidden",
+        "CREATE FUNCTION bw_hidden.f() RETURNS INT DETERMINISTIC RETURN 1",
+        "CREATE SQL SECURITY DEFINER VIEW bw_hidden.v AS SELECT bw_hidden.f() AS a",
+        "GRANT SELECT ON bw_hidden.v TO 'rowkery'@'%'",
+    ]);
     // Packages outside Oracle mode came with MariaDB 11.4: on 10.11 the
     // CREATE fails, and those calls aren't tried.
     let mut packages = env("ROWKERY_MYSQL_FLAVOR", "") == "mariadb";
@@ -962,6 +995,9 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
         "SELECT 9bw()",
         "SELECT $bwz()",
         "SELECT bw_ro_fn/* c */()",
+        "SELECT bw_ro_fn/*!()*/",
+        "SELECT `fİ`()",
+        "SELECT * FROM bw_ro_d9",
         "SELECT * FROM bw_ro_v",
         "SELECT * FROM rowkery.bw_ro_v2",
     ] {
@@ -973,6 +1009,30 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
             "{sql}: {error:?}"
         );
     }
+    if env("ROWKERY_MYSQL_FLAVOR", "") == "mariadb" {
+        let error = outcome("SELECT bw_ro_fn/*M!()*/");
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("calls the function")),
+            "/*M!: {error:?}"
+        );
+    }
+    let error = outcome("SELECT * FROM bw_ro_d39");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("nested too deep")),
+        "{error:?}"
+    );
+    let error = outcome("SELECT * FROM bw_hidden.v");
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("SHOW VIEW")),
+        "{error:?}"
+    );
+    let (rows, error, _) = rows_of(&bridge, "c", 1, "SELECT * FROM bw_ro_cte");
+    assert_eq!(error, None);
+    assert_eq!(rows[0][0], Value::Int(1));
     if packages {
         for sql in ["SELECT bw_pkg.pf()", "SELECT rowkery.bw_pkg.pf()"] {
             let error = outcome(sql);
@@ -1014,8 +1074,16 @@ fn mysql_read_only_refuses_files_and_stored_functions() {
         "w",
         1,
         "DROP VIEW IF EXISTS bw_ro_v2; DROP VIEW IF EXISTS bw_ro_v; DROP FUNCTION IF EXISTS age;
-         DROP FUNCTION IF EXISTS ilike; DROP FUNCTION IF EXISTS `9bw`; DROP FUNCTION IF EXISTS `$bwz`",
+         DROP FUNCTION IF EXISTS ilike; DROP FUNCTION IF EXISTS `9bw`; DROP FUNCTION IF EXISTS `$bwz`;
+         DROP FUNCTION IF EXISTS `fİ`; DROP VIEW IF EXISTS bw_ro_cte",
     );
+    let drops = (0..40)
+        .rev()
+        .map(|i| format!("DROP VIEW IF EXISTS bw_ro_d{i}"))
+        .collect::<Vec<_>>()
+        .join(";\n");
+    rows_of(&bridge, "w", 1, &drops);
+    as_root(&["DROP DATABASE IF EXISTS bw_hidden"]);
     if packages {
         rows_of(&bridge, "w", 1, "DROP PACKAGE IF EXISTS bw_pkg");
     }
