@@ -95,6 +95,9 @@ pub struct MysqlSession {
     /// A run that may have changed the client character set hasn't been
     /// checked yet (see `settle_charset`).
     charset_due: bool,
+    /// Read-only's lookups of loadable functions (`mysql.func`,
+    /// `performance_schema`) this login was refused: not asked again.
+    udf_denied: [bool; 2],
 }
 
 /// How to stop what a session is running: `KILL QUERY` from a second
@@ -341,6 +344,7 @@ pub async fn open_session_via(
         version,
         tag,
         charset_due: false,
+        udf_denied: [false; 2],
         guard: None,
         stateful: false,
         abandoned: false,
@@ -570,6 +574,11 @@ where
     } else {
         vec![sql]
     };
+    // Once for the whole run, before anything is sent: a lookup between
+    // statements would reset what the last one left (FOUND_ROWS()).
+    if session.config.safe_mode == SafeMode::ReadOnly {
+        refuse_stored_functions(session, sql).await?;
+    }
     let mut last = 0u64;
     for piece in pieces {
         // Checked once this piece has run (or, cut short, before the next
@@ -587,6 +596,168 @@ where
     }
     Ok(last)
 }
+
+/// Read-only: refuses `sql` when it may call a stored or loadable function,
+/// itself or through a view it reads. A read-only transaction stops a
+/// function's row writes but not the rest of what it may do (`SET GLOBAL`,
+/// `SELECT … INTO OUTFILE`).
+///
+/// Over-inclusive by design ([`crate::safety::mysql_calls`]): any name
+/// followed by `(` that is a function's name in any database the login can
+/// see, a loadable function's, or a MariaDB package's (`pkg.f()`) refuses
+/// it, whatever the text around it. A view's stored definition writes a
+/// stored function's call in backticks, so one is refused even when the
+/// login can't see that function; a view whose definition the login can't
+/// read (no SHOW VIEW) is refused, as is a nesting deeper than 32.
+async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Result<(), DriverError> {
+    use crate::db::{EngineKind, Value};
+    use crate::safety::{mysql_calls, MysqlCalls};
+    let list = |names: &[String]| {
+        names
+            .iter()
+            .filter_map(|n| {
+                crate::query_util::sql_literal(EngineKind::Mysql, &Value::Text(n.clone()))
+            })
+            // The server folds case on both sides, as it reads names.
+            .map(|lit| format!("LOWER({lit})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let refuse = |what: String| {
+        DriverError::Message(format!(
+            "Read-only refused this: it calls {what}, and a function can change what a read-only transaction doesn't guard (server settings, files). Run it with safe mode set to Confirm writes or off."
+        ))
+    };
+    let mut calls = mysql_calls(sql);
+    // Views it may read, and the views those read, to a depth no real
+    // schema needs; deeper, it refuses rather than guess.
+    let mut asked = std::collections::HashSet::new();
+    for round in 0.. {
+        let new: Vec<String> = calls
+            .words
+            .iter()
+            .filter(|w| !asked.contains(*w))
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        if round == 32 {
+            return Err(DriverError::Message(
+                "Read-only refused this: it reads views nested too deep to check for function calls. Run it with safe mode set to Confirm writes or off.".into(),
+            ));
+        }
+        asked.extend(new.iter().cloned());
+        let views = text_rows(
+            session,
+            &format!(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+                 WHERE LOWER(TABLE_NAME) IN ({})",
+                list(&new)
+            ),
+        )
+        .await?;
+        for row in views {
+            let name = format!(
+                "{}.{}",
+                row.first().cloned().flatten().unwrap_or_default(),
+                row.get(1).cloned().flatten().unwrap_or_default()
+            );
+            let body = row.get(2).cloned().flatten().unwrap_or_default();
+            // Shown empty without SHOW VIEW: what it runs (as its definer,
+            // maybe) can't be checked.
+            if body.trim().is_empty() {
+                return Err(DriverError::Message(format!(
+                    "Read-only refused this: it may read the view {name}, and this login can't see what that view runs (it needs SHOW VIEW), so Rowkery can't tell whether it calls a function. Run it with safe mode set to Confirm writes or off."
+                )));
+            }
+            let MysqlCalls {
+                names,
+                quoted,
+                qualifiers,
+                words,
+            } = mysql_calls(&body);
+            if let Some(f) = quoted.first() {
+                return Err(refuse(format!("the function {f} through the view {name}")));
+            }
+            for (to, from) in [
+                (&mut calls.names, names),
+                (&mut calls.qualifiers, qualifiers),
+                (&mut calls.words, words),
+            ] {
+                let have: std::collections::HashSet<String> = to.iter().cloned().collect();
+                to.extend(from.into_iter().filter(|w| !have.contains(w)));
+            }
+        }
+    }
+    if calls.names.is_empty() {
+        return Ok(());
+    }
+    let qualifiers = if calls.qualifiers.is_empty() {
+        "NULL".to_string()
+    } else {
+        list(&calls.qualifiers)
+    };
+    let found = text_rows(
+        session,
+        &format!(
+            "SELECT ROUTINE_SCHEMA, ROUTINE_NAME FROM information_schema.ROUTINES \
+             WHERE (ROUTINE_TYPE = 'FUNCTION' AND LOWER(ROUTINE_NAME) IN ({})) \
+             OR (ROUTINE_TYPE LIKE 'PACKAGE%' AND LOWER(ROUTINE_NAME) IN ({qualifiers})) LIMIT 1",
+            list(&calls.names)
+        ),
+    )
+    .await?;
+    if let Some(row) = found.first() {
+        let schema = row.first().cloned().flatten().unwrap_or_default();
+        let name = row.get(1).cloned().flatten().unwrap_or_default();
+        return Err(refuse(format!("the function {schema}.{name}")));
+    }
+    // Loadable functions: in mysql.func, or (MySQL 8 components)
+    // performance_schema. Most logins can read neither: then this can't
+    // tell, and the call runs (installing one takes an admin).
+    for (k, (table, column)) in [
+        ("mysql.func", "name"),
+        ("performance_schema.user_defined_functions", "UDF_NAME"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if session.udf_denied[k] {
+            continue;
+        }
+        // Matched ignoring accents too, as the server finds one by name
+        // (`sérvice_release_locks` calls `service_release_locks`).
+        let sql = format!(
+            "SELECT {column} FROM {table} WHERE CONVERT({column} USING utf8mb4) \
+             COLLATE utf8mb4_general_ci IN ({}) LIMIT 1",
+            list(&calls.names)
+        );
+        match session.conn.query::<Row, _>(sql).await {
+            Ok(rows) => {
+                if let Some(row) = rows.into_iter().next() {
+                    let name: Option<String> = row.get(0);
+                    return Err(refuse(format!(
+                        "the loadable function {}",
+                        name.unwrap_or_default()
+                    )));
+                }
+            }
+            // Denied or absent (MariaDB has no performance_schema table):
+            // it stays so for the session. Any other failure (a timeout,
+            // a cancel, a lost connection) refuses this run.
+            Err(mysql_async::Error::Server(e)) if UDF_UNREADABLE.contains(&e.code) => {
+                session.udf_denied[k] = true
+            }
+            Err(e) => return Err(map_error(e, &session.config)),
+        }
+    }
+    Ok(())
+}
+
+/// Lookup errors meaning this login can't read a loadable-function table:
+/// table or column access denied, needs a privilege, no such table.
+const UDF_UNREADABLE: [u16; 4] = [1142, 1143, 1227, 1146];
 
 /// With safe mode on, after anything that may have changed the session:
 /// puts a client character set other than UTF-8 (gbk, macroman, …; see

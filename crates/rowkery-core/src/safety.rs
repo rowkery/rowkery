@@ -380,8 +380,13 @@ const COMPUTING_FUNCTIONS: &[&str] = &[
 /// not a column list after `AS` (`AS t(a, b)`). A quoted or qualified name
 /// always may.
 fn calls_function(toks: &[Tok]) -> bool {
-    toks.windows(2).enumerate().any(|(k, w)| {
-        w[1] == Tok::Open
+    call_sites(toks).next().is_some()
+}
+
+/// Where [`calls_function`] sees a call: the index of each name before `(`.
+fn call_sites(toks: &[Tok]) -> impl Iterator<Item = usize> + '_ {
+    toks.windows(2).enumerate().filter_map(|(k, w)| {
+        let call = w[1] == Tok::Open
             && match &w[0] {
                 Tok::Word(word, _) => {
                     let before = k.checked_sub(1).map(|b| &toks[b]);
@@ -393,8 +398,230 @@ fn calls_function(toks: &[Tok]) -> bool {
                 }
                 Tok::Quoted(_) => true,
                 _ => false,
-            }
+            };
+        call.then_some(k)
     })
+}
+
+/// What MySQL text may call, for Read-only's check of stored and loadable
+/// functions ([`mysql_calls`]). Names as written: the server folds case
+/// (Rust's `to_lowercase` folds `İ` and `ẞ` otherwise than MySQL does).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MysqlCalls {
+    /// Names followed by `(` (spaces and comments between allowed).
+    pub names: Vec<String>,
+    /// Of those, the ones written in backticks: in a view's stored
+    /// definition only a stored function's call is (`` `f`() ``, never
+    /// `count(0)`).
+    pub quoted: Vec<String>,
+    /// Names followed by `.`: a database or a MariaDB package.
+    pub qualifiers: Vec<String>,
+    /// Every name but bare numbers: the views the text may read.
+    pub words: Vec<String>,
+}
+
+/// Every name in MySQL text that may be a function call, over-inclusive on
+/// purpose: the text isn't lexed, so no string, comment, `/*! … */` or
+/// quoting trick can hide one (a name in a string or comment counts too,
+/// which costs at most a refusal naming it). Unquoted names are runs of
+/// letters, digits, `_`, `$` and non-ASCII (`9f`, `$x`); each backtick or
+/// double quote is also tried as the start of a quoted name.
+pub fn mysql_calls(sql: &str) -> MysqlCalls {
+    let b = sql.as_bytes();
+    let n = b.len();
+    let mut out = MysqlCalls::default();
+    // Which list (0 names, 1 quoted, 2 qualifiers, 3 words) has which name:
+    // a set, so a text of many thousand names stays linear.
+    let mut seen = std::collections::HashSet::new();
+    let mut add = |kind: u8, list: &mut Vec<String>, name: &str| {
+        if !name.is_empty() && seen.insert((kind, name.to_string())) {
+            list.push(name.to_string());
+        }
+    };
+    // Where the comment opening at `i` may end: the first `*/`, and each one
+    // after it up to where nested `/* … */` pairs close it (the server
+    // nests them inside a `/*!…*/`). Never empty.
+    let comment_ends = |i: usize| -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut depth = 0usize;
+        let mut k = i;
+        while k + 1 < n {
+            if b[k] == b'/' && b[k + 1] == b'*' {
+                depth += 1;
+                k += 2;
+            } else if b[k] == b'*' && b[k + 1] == b'/' {
+                k += 2;
+                ends.push(k);
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            } else {
+                k += 1;
+            }
+        }
+        if ends.is_empty() {
+            ends.push(n);
+        }
+        ends
+    };
+    // Where the next code may start past spaces and comments from `i`.
+    // The server runs a `/*!…*/` (MariaDB `/*M!…*/`) or skips it whole by
+    // its version number, so both readings are kept.
+    let nexts = |from: usize| -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut todo = vec![from];
+        let mut tried = std::collections::HashSet::new();
+        while let Some(mut i) = todo.pop() {
+            if !tried.insert(i) {
+                continue;
+            }
+            loop {
+                while i < n && (b[i].is_ascii_whitespace() || b[i] == 0x0b) {
+                    i += 1;
+                }
+                let versioned = if b[i..].starts_with(b"/*!") {
+                    Some(i + 3)
+                } else if b[i..].starts_with(b"/*M!") || b[i..].starts_with(b"/*m!") {
+                    Some(i + 4)
+                } else {
+                    None
+                };
+                if let Some(mut j) = versioned {
+                    todo.extend(comment_ends(i));
+                    while j < n && b[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    i = j;
+                } else if b[i..].starts_with(b"*/") {
+                    i += 2;
+                } else if b[i..].starts_with(b"/*") {
+                    let ends = comment_ends(i);
+                    i = ends[0];
+                    todo.extend(&ends[1..]);
+                } else if b[i..].starts_with(b"#") || b[i..].starts_with(b"--") {
+                    i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
+                } else {
+                    found.push(i);
+                    break;
+                }
+            }
+        }
+        found
+    };
+    // What came before `start`, past spaces: a `)` or the word AS.
+    // Before `start`, past spaces: a `)` or the word AS (a derived table).
+    let after_close_or_as = |start: usize| {
+        let before = sql[..start].trim_end().as_bytes();
+        let k = before.len();
+        before.ends_with(b")")
+            || k >= 2
+                && before[k - 2..].eq_ignore_ascii_case(b"as")
+                && !before[..k - 2].last().is_some_and(|&c| {
+                    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
+                })
+    };
+    // A column list (`` `c` (`a`,`b`) AS ( `` in a stored WITH, or
+    // `` ) `d` (`a`) `` after a derived table), not a call: only backticked
+    // names and commas inside, so a string's `)` can't fake one; a WITH's
+    // is followed by AS (.
+    let column_list = |open: usize, derived: bool| {
+        let mut k = open + 1;
+        loop {
+            while k < n && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if b.get(k) != Some(&b'`') {
+                return false;
+            }
+            k += 1;
+            loop {
+                match b.get(k) {
+                    None => return false,
+                    Some(b'`') if b.get(k + 1) == Some(&b'`') => k += 2,
+                    Some(b'`') => break,
+                    _ => k += 1,
+                }
+            }
+            k += 1;
+            while k < n && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            match b.get(k) {
+                Some(b',') => k += 1,
+                Some(b')') => break,
+                _ => return false,
+            }
+        }
+        if derived {
+            return true;
+        }
+        let rest = sql[k + 1..].trim_start().as_bytes();
+        rest.len() >= 2
+            && rest[..2].eq_ignore_ascii_case(b"as")
+            && sql[k + 1..].trim_start()[2..].trim_start().starts_with('(')
+    };
+    let mut note = |name: &str, start: usize, end: usize, quoted: bool, out: &mut MysqlCalls| {
+        if quoted || !name.bytes().all(|c| c.is_ascii_digit()) {
+            add(3, &mut out.words, name);
+        }
+        for next in nexts(end) {
+            match b.get(next) {
+                Some(b'(') => {
+                    add(0, &mut out.names, name);
+                    if quoted && !column_list(next, after_close_or_as(start)) {
+                        add(1, &mut out.quoted, name);
+                    }
+                }
+                Some(b'.') => add(2, &mut out.qualifiers, name),
+                _ => {}
+            }
+        }
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii();
+    let mut i = 0;
+    while i < n {
+        let c = sql[i..].chars().next().unwrap_or(' ');
+        if word(c) {
+            let end = sql[i..]
+                .char_indices()
+                .find(|&(_, c)| !word(c))
+                .map_or(n, |(k, _)| i + k);
+            note(&sql[i..end], i, end, false, &mut out);
+            i = end;
+            continue;
+        }
+        if c == '`' || c == '"' {
+            // To the matching quote (a doubled one stays inside); every
+            // quote is tried, so a pairing a string throws off can't hide one.
+            let q = c as u8;
+            let mut j = i + 1;
+            let mut name = Vec::new();
+            while j < n {
+                if b[j] == q {
+                    if b.get(j + 1) == Some(&q) {
+                        name.push(q);
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                name.push(b[j]);
+                j += 1;
+            }
+            if j < n {
+                note(
+                    &String::from_utf8_lossy(&name),
+                    i,
+                    j + 1,
+                    c == '`',
+                    &mut out,
+                );
+            }
+        }
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// Settings that keep a read-only session read-only.
@@ -1619,14 +1846,14 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
         unlocks_writes: false,
     };
     match first {
-        "SELECT" => {
-            // `SELECT … INTO new_table` creates a table (Postgres).
-            if top_level(toks).any(|t| t.is("INTO")) {
-                data_check(toks, "SELECT INTO", 0)
-            } else {
-                read()
-            }
+        // `SELECT … INTO new_table` creates a table (Postgres); MySQL's
+        // `INTO OUTFILE` writes a file, also after `TABLE t`, `VALUES …` and
+        // `(SELECT …)`, and inside the parentheses of a union's last part.
+        // A subquery can't hold one, so INTO at any depth is a write.
+        "SELECT" | "VALUES" | "TABLE" if toks.iter().any(|t| t.is("INTO")) => {
+            data_check(toks, "SELECT INTO", 0)
         }
+        "SELECT" => read(),
         "WITH" => {
             // A data-modifying CTE or main statement makes the whole run a
             // write, and so do `… SELECT … INTO new_table` (Postgres) and
@@ -2925,6 +3152,93 @@ mod tests {
         assert_eq!(kinds("SELECT 1--1; DROP TABLE t"), [Read, Schema]);
         assert_eq!(kinds("SELECT 1 -- note; DROP TABLE t"), [Read]);
         assert_eq!(kinds("SELECT 1 --\tnote; DROP TABLE t"), [Read]);
+        // INTO OUTFILE writes a file whatever leads the statement.
+        for sql in [
+            "TABLE t INTO OUTFILE '/tmp/x'",
+            "VALUES ROW(1) INTO OUTFILE '/tmp/x'",
+            "VALUES (1) INTO OUTFILE '/tmp/x'",
+            "(SELECT 1) INTO OUTFILE '/tmp/x'",
+            "((SELECT 1)) INTO DUMPFILE '/tmp/x'",
+            "(SELECT 1) UNION (SELECT 2) INTO OUTFILE '/tmp/x'",
+            "SELECT 1 UNION (SELECT 2 INTO OUTFILE '/tmp/x')",
+        ] {
+            assert_eq!(kinds(sql), [Write], "{sql}");
+        }
+        assert_eq!(
+            kinds("TABLE t; VALUES ROW(1); (SELECT 1) UNION SELECT 2"),
+            [Read, Read, Read]
+        );
+        let calls = mysql_calls(
+            "SELECT f(1), db.g (), `h``x`(), NOW(), 9f(), $z(), age /* c */ (), x # (\n() FROM t; \
+             SET @a = `d`.`k`(); SELECT 'a\"', `my f`(), '\"', `fİ`(), 12345",
+        );
+        for name in [
+            "f", "g", "h`x", "NOW", "9f", "$z", "age", "x", "k", "my f", "fİ",
+        ] {
+            assert!(calls.names.contains(&name.to_string()), "{name}: {calls:?}");
+        }
+        // Every backtick is tried as a start, so `x` (inside `h``x`) counts too.
+        for name in ["h`x", "k", "my f"] {
+            assert!(
+                calls.quoted.contains(&name.to_string()),
+                "{name}: {calls:?}"
+            );
+        }
+        assert!(!calls.quoted.contains(&"f".to_string()));
+        assert!(
+            calls.qualifiers.contains(&"db".to_string())
+                && calls.qualifiers.contains(&"d".to_string())
+        );
+        assert!(calls.words.contains(&"t".to_string()));
+        assert!(!calls.words.contains(&"12345".to_string()));
+        // A name split from its ( only by a comment still counts, but a
+        // versioned comment's text is run, so its ( and . count.
+        for sql in [
+            "SELECT f/**/()",
+            "SELECT f/*!()*/",
+            "SELECT f/*!50000 ()*/",
+            "SELECT f/*M!100000 ()*/",
+        ] {
+            assert!(mysql_calls(sql).names.contains(&"f".to_string()), "{sql}");
+        }
+        assert!(mysql_calls("SELECT pkg/*M!.*/pf()")
+            .qualifiers
+            .contains(&"pkg".to_string()));
+        // How MySQL stores a view with a CTE or a derived table's columns:
+        // column lists, not calls.
+        for sql in [
+            "with `c` (`a`) as (select 1 AS `1`) select `c`.`a` AS `a` from `c`",
+            "select `d`.`a` AS `a` from (select 1 AS `1`) `d` (`a`)",
+            "select 1 AS `x` from (select 1) as `d` (`a`)",
+        ] {
+            assert_eq!(mysql_calls(sql).quoted, Vec::<String>::new(), "{sql}");
+        }
+        assert_eq!(
+            mysql_calls("select `f`(1) AS `a`, `g`() AS `b`").quoted,
+            ["f", "g"]
+        );
+        // A versioned comment the server's version skips whole: the ( after
+        // it is the call's.
+        for sql in [
+            "SELECT f/*!99999 junk*/()",
+            "SELECT f/*M!999999 junk*/()",
+            "SELECT f/*!99999 /* a */ b*/()",
+            "SELECT f/*!99999 /*!80000 a*/ b*/()",
+            "SELECT f/* /* a */ b*/()",
+        ] {
+            assert!(mysql_calls(sql).names.contains(&"f".to_string()), "{sql}");
+        }
+        // A string's parentheses don't make a call's arguments a column list.
+        assert_eq!(mysql_calls("select `db`.`g`(')as(') AS `x`").quoted, ["g"]);
+        // Multi-byte text next to a name.
+        assert_eq!(mysql_calls("SELECT €`f`()").quoted, ["f"]);
+        assert_eq!(
+            mysql_calls("SELECT `count`(1)数量 FROM t").quoted,
+            ["count"]
+        );
+        assert!(mysql_calls("SELECT rowkery.rk_pkg.pf()")
+            .qualifiers
+            .contains(&"rk_pkg".to_string()));
         // MariaDB's MSSQL mode reads `[']` as a name: the DELETE runs.
         assert_eq!(
             verbs("SELECT 1 AS [']; DELETE FROM t; SELECT [']"),
