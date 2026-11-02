@@ -726,25 +726,38 @@ async fn refuse_stored_functions(session: &mut MysqlSession, sql: &str) -> Resul
         if session.udf_denied[k] {
             continue;
         }
-        match text_rows(
-            session,
-            &format!(
-                "SELECT {column} FROM {table} WHERE LOWER({column}) IN ({}) LIMIT 1",
-                list(&calls.names)
-            ),
-        )
-        .await
-        {
+        // Matched ignoring accents too, as the server finds one by name
+        // (`sérvice_release_locks` calls `service_release_locks`).
+        let sql = format!(
+            "SELECT {column} FROM {table} WHERE CONVERT({column} USING utf8mb4) \
+             COLLATE utf8mb4_general_ci IN ({}) LIMIT 1",
+            list(&calls.names)
+        );
+        match session.conn.query::<Row, _>(sql).await {
             Ok(rows) => {
-                if let Some(name) = rows.first().and_then(|r| r.first().cloned().flatten()) {
-                    return Err(refuse(format!("the loadable function {name}")));
+                if let Some(row) = rows.into_iter().next() {
+                    let name: Option<String> = row.get(0);
+                    return Err(refuse(format!(
+                        "the loadable function {}",
+                        name.unwrap_or_default()
+                    )));
                 }
             }
-            Err(_) => session.udf_denied[k] = true,
+            // Denied or absent (MariaDB has no performance_schema table):
+            // it stays so for the session. Any other failure (a timeout,
+            // a cancel, a lost connection) refuses this run.
+            Err(mysql_async::Error::Server(e)) if UDF_UNREADABLE.contains(&e.code) => {
+                session.udf_denied[k] = true
+            }
+            Err(e) => return Err(map_error(e, &session.config)),
         }
     }
     Ok(())
 }
+
+/// Lookup errors meaning this login can't read a loadable-function table:
+/// table or column access denied, needs a privilege, no such table.
+const UDF_UNREADABLE: [u16; 4] = [1142, 1143, 1227, 1146];
 
 /// With safe mode on, after anything that may have changed the session:
 /// puts a client character set other than UTF-8 (gbk, macroman, …; see

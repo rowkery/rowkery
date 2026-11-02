@@ -228,14 +228,62 @@ pub(crate) fn run_query(
             // A warm session whose socket died while parked fails before
             // anything ran: once more on a fresh one, for a plain read only,
             // and never when it may have held the user's transaction.
-            if result.is_err()
+            let died_parked = result.is_err()
                 && reused
                 && attempt == 1
                 && !sent_rows
                 && session.is_closed()
                 && session.txn_known() == Some(false)
-                && plain_read(&sql, Dialect::Mysql)
+                && plain_read(&sql, Dialect::Mysql);
+            // Nor when it held the tab's `USE` / `SET`: a fresh session
+            // would read without them. The read says so, once.
+            if died_parked && session.keeps_state() {
+                disarm_cancel(&interrupt_slot);
+                // Forgotten before the tab hears, so its next run can't
+                // be told twice.
+                pool::give_back_told(
+                    &pooled.pool,
+                    &pooled.window_id,
+                    Slot::Tab(tab_id),
+                    pooled.generation,
+                    session,
+                );
+                drop(out);
+                finish_query_worker(
+                    Err(DriverError::Message(pool::LOST_STATE.into()).into()),
+                    query_id,
+                    tab_id,
+                    start,
+                    &events,
+                );
+                return;
+            }
+            // Anything else whose session died with the tab's USE / SET in
+            // it: its own error says whether it ran, and the loss is said
+            // with it, once, instead of on the next run.
+            if result.is_err()
+                && session.is_closed()
+                && session.txn_known() == Some(false)
+                && session.keeps_state()
+                && !cancel_requested(&interrupt_slot)
             {
+                disarm_cancel(&interrupt_slot);
+                pool::give_back_told(
+                    &pooled.pool,
+                    &pooled.window_id,
+                    Slot::Tab(tab_id),
+                    pooled.generation,
+                    session,
+                );
+                drop(out);
+                let result = result.map_err(|mut f| {
+                    f.message = format!("{} {}", f.message.trim_end(), pool::LOST_STATE_TOO);
+                    f
+                });
+                finish_query_worker(result, query_id, tab_id, start, &events);
+                return;
+            }
+            if died_parked {
                 disarm_cancel(&interrupt_slot);
                 if cancel_requested(&interrupt_slot) {
                     finish_query_worker(

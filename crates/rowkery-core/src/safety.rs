@@ -438,83 +438,115 @@ pub fn mysql_calls(sql: &str) -> MysqlCalls {
             list.push(name.to_string());
         }
     };
-    // Past spaces and comments from `i`. A `/*!…*/` (or MariaDB `/*M!…*/`)
-    // is run by the server, so only its marks are passed, not its text.
-    let skip = |mut i: usize| -> usize {
-        loop {
-            while i < n && (b[i].is_ascii_whitespace() || b[i] == 0x0b) {
-                i += 1;
+    // Where the next code may start past spaces and comments from `i`.
+    // The server runs a `/*!…*/` (MariaDB `/*M!…*/`) or skips it whole by
+    // its version number, so both readings are kept.
+    let nexts = |from: usize| -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut todo = vec![from];
+        let mut tried = std::collections::HashSet::new();
+        while let Some(mut i) = todo.pop() {
+            if !tried.insert(i) {
+                continue;
             }
-            let versioned = if b[i..].starts_with(b"/*!") {
-                Some(i + 3)
-            } else if b[i..].starts_with(b"/*M!") || b[i..].starts_with(b"/*m!") {
-                Some(i + 4)
-            } else {
-                None
-            };
-            if let Some(mut j) = versioned {
-                while j < n && b[j].is_ascii_digit() {
-                    j += 1;
+            loop {
+                while i < n && (b[i].is_ascii_whitespace() || b[i] == 0x0b) {
+                    i += 1;
                 }
-                i = j;
-            } else if b[i..].starts_with(b"*/") {
-                i += 2;
-            } else if b[i..].starts_with(b"/*") {
-                i = sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2);
-            } else if b[i..].starts_with(b"#") || b[i..].starts_with(b"--") {
-                i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
-            } else {
-                return i;
+                let versioned = if b[i..].starts_with(b"/*!") {
+                    Some(i + 3)
+                } else if b[i..].starts_with(b"/*M!") || b[i..].starts_with(b"/*m!") {
+                    Some(i + 4)
+                } else {
+                    None
+                };
+                if let Some(mut j) = versioned {
+                    todo.push(sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2));
+                    while j < n && b[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    i = j;
+                } else if b[i..].starts_with(b"*/") {
+                    i += 2;
+                } else if b[i..].starts_with(b"/*") {
+                    i = sql[i + 2..].find("*/").map_or(n, |e| i + 2 + e + 2);
+                } else if b[i..].starts_with(b"#") || b[i..].starts_with(b"--") {
+                    i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
+                } else {
+                    found.push(i);
+                    break;
+                }
             }
         }
+        found
     };
     // What came before `start`, past spaces: a `)` or the word AS.
+    // Before `start`, past spaces: a `)` or the word AS (a derived table).
     let after_close_or_as = |start: usize| {
-        let before = sql[..start].trim_end();
-        before.ends_with(')')
-            || before.len() >= 2
-                && before[before.len() - 2..].eq_ignore_ascii_case("as")
-                && !before[..before.len() - 2]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        let before = sql[..start].trim_end().as_bytes();
+        let k = before.len();
+        before.ends_with(b")")
+            || k >= 2
+                && before[k - 2..].eq_ignore_ascii_case(b"as")
+                && !before[..k - 2].last().is_some_and(|&c| {
+                    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
+                })
     };
-    // A column list (`` `c` (`a`) AS ( `` in a stored WITH, `` ) `d` (`a`) ``
-    // after a derived table), not a call: the `)` closing it is followed
-    // by AS (.
-    let column_list = |open: usize| {
-        let mut depth = 0usize;
-        for (k, c) in sql[open..].char_indices() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let rest = sql[open + k + 1..].trim_start();
-                        return rest.len() >= 2
-                            && rest[..2].eq_ignore_ascii_case("as")
-                            && rest[2..].trim_start().starts_with('(');
-                    }
+    // A column list (`` `c` (`a`,`b`) AS ( `` in a stored WITH, or
+    // `` ) `d` (`a`) `` after a derived table), not a call: only backticked
+    // names and commas inside, so a string's `)` can't fake one; a WITH's
+    // is followed by AS (.
+    let column_list = |open: usize, derived: bool| {
+        let mut k = open + 1;
+        loop {
+            while k < n && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if b.get(k) != Some(&b'`') {
+                return false;
+            }
+            k += 1;
+            loop {
+                match b.get(k) {
+                    None => return false,
+                    Some(b'`') if b.get(k + 1) == Some(&b'`') => k += 2,
+                    Some(b'`') => break,
+                    _ => k += 1,
                 }
-                _ => {}
+            }
+            k += 1;
+            while k < n && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            match b.get(k) {
+                Some(b',') => k += 1,
+                Some(b')') => break,
+                _ => return false,
             }
         }
-        false
+        if derived {
+            return true;
+        }
+        let rest = sql[k + 1..].trim_start().as_bytes();
+        rest.len() >= 2
+            && rest[..2].eq_ignore_ascii_case(b"as")
+            && sql[k + 1..].trim_start()[2..].trim_start().starts_with('(')
     };
     let mut note = |name: &str, start: usize, end: usize, quoted: bool, out: &mut MysqlCalls| {
         if quoted || !name.bytes().all(|c| c.is_ascii_digit()) {
             add(3, &mut out.words, name);
         }
-        let next = skip(end);
-        match b.get(next) {
-            Some(b'(') => {
-                add(0, &mut out.names, name);
-                if quoted && !after_close_or_as(start) && !column_list(next) {
-                    add(1, &mut out.quoted, name);
+        for next in nexts(end) {
+            match b.get(next) {
+                Some(b'(') => {
+                    add(0, &mut out.names, name);
+                    if quoted && !column_list(next, after_close_or_as(start)) {
+                        add(1, &mut out.quoted, name);
+                    }
                 }
+                Some(b'.') => add(2, &mut out.qualifiers, name),
+                _ => {}
             }
-            Some(b'.') => add(2, &mut out.qualifiers, name),
-            _ => {}
         }
     };
     let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii();
@@ -3155,6 +3187,19 @@ mod tests {
         assert_eq!(
             mysql_calls("select `f`(1) AS `a`, `g`() AS `b`").quoted,
             ["f", "g"]
+        );
+        // A versioned comment the server's version skips whole: the ( after
+        // it is the call's.
+        for sql in ["SELECT f/*!99999 junk*/()", "SELECT f/*M!999999 junk*/()"] {
+            assert!(mysql_calls(sql).names.contains(&"f".to_string()), "{sql}");
+        }
+        // A string's parentheses don't make a call's arguments a column list.
+        assert_eq!(mysql_calls("select `db`.`g`(')as(') AS `x`").quoted, ["g"]);
+        // Multi-byte text next to a name.
+        assert_eq!(mysql_calls("SELECT €`f`()").quoted, ["f"]);
+        assert_eq!(
+            mysql_calls("SELECT `count`(1)数量 FROM t").quoted,
+            ["count"]
         );
         assert!(mysql_calls("SELECT rowkery.rk_pkg.pf()")
             .qualifiers
