@@ -4,7 +4,7 @@
 // newlines onto SQL fixtures; each step compares both against a full re-scan.
 import { describe, expect, test } from "vitest";
 import { createSqlHighlighter, highlightSqlLines } from "../src/sqlHighlight";
-import { createStatementScanner, sqlStatementRanges } from "../src/sqlStatements";
+import { createStatementScanner, sqlStatementRanges, type SqlDialect } from "../src/sqlStatements";
 
 /** Small deterministic PRNG (mulberry32), so a failure replays. */
 function rng(seed: number) {
@@ -68,28 +68,47 @@ const FIXTURES: Record<string, string> = {
     "begin atomic select 1; select (2); end; begin; select 1; commit;",
     "CREATE TEMP TRIGGER g BEFORE INSERT ON t WHEN (1) BEGIN SELECT 1; END; select 3;",
   ].join("\n"),
+  mysql: [
+    "select 'it\\'s; fine', \"a\\\"b;\" # a; comment",
+    "from t where x = 1--1;",
+    "select 2 -- real; comment",
+    "--",
+    "CREATE DEFINER=`root`@`%` PROCEDURE p(n INT) BEGIN",
+    "  IF n > 0 THEN SELECT 'x\\",
+    "y;'; END IF;",
+    "  WHILE n > 0 DO SET n = n - 1; END WHILE;",
+    "  CASE n WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE;",
+    "END; select $$ ; $$;",
+  ].join("\n"),
 };
 
 const TOKENS = [
   "'", "''", '"', "`", "--", "/*", "*/", "$$", "$a$", "$tag$", ";", ";", "\n", "\n", "\n\n",
   " ", "  ", "\t", "\r", "x", "select", "SELECT", "date", ".", "1", "1e", "e", "5", "(", "é", "_",
   "BEGIN", "begin ", " END", "END;", "CASE", "ATOMIC", "CREATE ", "TRIGGER ", " t ", ")", "FUNCTION", "[", "x.",
+  "#", "\\", "\\'", "--x", "-- ", " IF", " LOOP", "END IF", "PROCEDURE ", "DEFINER", "EVENT ",
 ];
 
-function check(text: string, hl: ReturnType<typeof createSqlHighlighter>, st: ReturnType<typeof createStatementScanner>) {
-  expect(hl.update(text)).toEqual(highlightSqlLines(text));
-  expect(st.update(text)).toEqual(sqlStatementRanges(text));
+function check(
+  text: string,
+  hl: ReturnType<typeof createSqlHighlighter>,
+  st: ReturnType<typeof createStatementScanner>,
+  dialect?: SqlDialect,
+) {
+  expect(hl.update(text)).toEqual(highlightSqlLines(text, dialect));
+  expect(st.update(text)).toEqual(sqlStatementRanges(text, dialect));
 }
 
 describe("incremental tokenizing matches a full re-scan", () => {
   for (const [name, fixture] of Object.entries(FIXTURES)) {
+    for (const dialect of [undefined, "mysql"] as SqlDialect[])
     for (const seed of [1, 2, 3, 4, 5]) {
-      test(`${name}, seed ${seed}`, () => {
+      test(`${name}, ${dialect ?? "default"}, seed ${seed}`, () => {
         const rand = rng(seed * 7919 + name.length);
-        const hl = createSqlHighlighter();
-        const st = createStatementScanner();
+        const hl = createSqlHighlighter(dialect);
+        const st = createStatementScanner(dialect);
         let text = fixture;
-        check(text, hl, st);
+        check(text, hl, st, dialect);
         for (let step = 0; step < 300; step++) {
           const at = Math.floor(rand() * (text.length + 1));
           const roll = rand();
@@ -106,7 +125,7 @@ describe("incremental tokenizing matches a full re-scan", () => {
             const chunk = other.slice(a, a + Math.floor(rand() * 60));
             text = roll < 0.98 ? text.slice(0, at) + chunk + text.slice(at) : chunk;
           }
-          check(text, hl, st);
+          check(text, hl, st, dialect);
         }
       });
     }

@@ -611,6 +611,9 @@ function AccessCard({
           className="nc-switch"
           data-mcp-allow={c.id}
           aria-label={`Share ${c.name} with agents`}
+          // The MCP server can't share MySQL yet: such a share could only be turned off.
+          disabled={c.kind === "mysql" && !c.allow_mcp}
+          title={c.kind === "mysql" ? "Agents can't use MySQL or MariaDB connections yet" : undefined}
           checked={shared}
           onChange={(e) => {
             if (!e.target.checked && editing) onEdit(null);

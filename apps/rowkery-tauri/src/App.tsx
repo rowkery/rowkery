@@ -741,7 +741,8 @@ function App() {
   /** Allow MCP on or off; `until` (Unix ms) ends a share on its own. */
   const setAllowMcp = async (allow: boolean, id = activeConnection?.id, until: number | null = null) => {
     const conn = connections.find((c) => c.id === id);
-    if (!conn) return;
+    // The MCP server can't share MySQL yet (it refuses every call): never turn it on.
+    if (!conn || (allow && conn.kind === "mysql")) return;
     // First share: the own database with no tables ticked, and Edit access
     // opens so they can be ticked at once.
     const first = allow && !conn.mcp_access;

@@ -875,10 +875,11 @@ const NO_HABITS: ReadonlyMap<string, number> = new Map();
  * a 5,000-line editor was a few ms of each one.
  */
 const statements = createStatementScanner();
+const mysqlStatements = createStatementScanner("mysql");
 
-function statementAround(text: string, caret: number): { start: number; end: number } {
+function statementAround(text: string, caret: number, engine: string): { start: number; end: number } {
   let prev: { start: number; end: number } | null = null;
-  for (const r of statements.update(text)) {
+  for (const r of (engine === "mysql" ? mysqlStatements : statements).update(text)) {
     if (caret >= r.start && caret <= r.end) {
       if (caret === r.end && text[r.end - 1] === ";") return { start: caret, end: caret };
       return r;
@@ -897,7 +898,7 @@ export function complete(
   usage: Map<string, number>,
   opts: CompleteOptions = {},
 ): CompletionResult | null {
-  const st = statementAround(text, caret);
+  const st = statementAround(text, caret, index.engine);
   const { toks, parent, inComment } = scan(text, st.start, st.end, caret);
   if (inComment) return null;
 
@@ -1150,7 +1151,7 @@ export function expandStar(
   index: CompletionIndex,
 ): { from: number; to: number; insert: string } | null {
   if (text[caret - 1] !== "*") return null;
-  const st = statementAround(text, caret);
+  const st = statementAround(text, caret, index.engine);
   const { toks, parent } = scan(text, st.start, st.end, caret);
   const at = toks.findIndex((t) => t.v === "*" && t.e === caret);
   if (at < 0) return null;

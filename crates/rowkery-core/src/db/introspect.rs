@@ -734,8 +734,12 @@ pub fn table_browse_query(
     let filter = opts.filter.as_deref().unwrap_or("").trim();
     let filter = filter.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
     if !filter.is_empty() {
-        // A `--` comment would swallow the closing parenthesis.
-        let close = if filter.contains("--") { "\n)" } else { ")" };
+        // A `--` (or MySQL `#`) comment would swallow the closing parenthesis.
+        let close = if filter.contains("--") || filter.contains('#') {
+            "\n)"
+        } else {
+            ")"
+        };
         sql.push_str(&format!("\nWHERE ({filter}{close}"));
         if let Some(k) = &keyset {
             sql.push_str(&format!("\n  AND ({k})"));
@@ -788,7 +792,11 @@ pub fn table_count_query(
     if filter.is_empty() {
         format!("SELECT count(*) FROM {from};")
     } else {
-        let close = if filter.contains("--") { "\n)" } else { ")" };
+        let close = if filter.contains("--") || filter.contains('#') {
+            "\n)"
+        } else {
+            ")"
+        };
         format!("SELECT count(*) FROM {from}\nWHERE ({filter}{close};")
     }
 }
@@ -883,6 +891,10 @@ mod tests {
         assert_eq!(
             table_count_query(EngineKind::Sqlite, "main", "t", Some("a = 1 -- note")),
             "SELECT count(*) FROM t\nWHERE (a = 1 -- note\n);"
+        );
+        assert_eq!(
+            table_count_query(EngineKind::Mysql, "rowkery", "t", Some("a = 1 # note")),
+            "SELECT count(*) FROM rowkery.t\nWHERE (a = 1 # note\n);"
         );
     }
 
