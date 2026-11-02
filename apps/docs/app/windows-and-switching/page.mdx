@@ -62,7 +62,7 @@ Right-click a pill to show that window and open its menu:
 
 | Item | When it's there |
 | --- | --- |
-| **Switch database…** | The window is connected to Postgres |
+| **Switch database…** | The window is connected to Postgres, MySQL or MariaDB |
 | **Switch connection…** | The window has a connection |
 | **Edit connection…** | The window has a connection |
 | **Reconnect** | The window has a connection |
@@ -101,7 +101,7 @@ Switching keeps the window's tabs. Query tabs stay as they are. A table tab whos
 
 ## Switch database
 
-On a Postgres connection, press <kbd>⇧⌘D</kbd> (**Connection › Switch Database…**), or click the database name at the top of the schema column.
+On a Postgres, MySQL or MariaDB connection, press <kbd>⇧⌘D</kbd> (**Connection › Switch Database…**), or click the database name at the top of the schema column.
 
 <Shot side src="/img/windows-and-switching-database-switcher.webp" width={388} height={290} alt="The Switch database picker listing analytics, postgres, shop (ticked), shop_archive and shop_staging_copy with their sizes, and ↵ Switch this window, ⌘↵ Open in new window at the foot." />
 
@@ -110,7 +110,9 @@ On a Postgres connection, press <kbd>⇧⌘D</kbd> (**Connection › Switch Data
 - Type to filter. An exact name comes first, then names that start with what you typed, then names that contain it, so <kbd>↵</kbd> takes what you typed.
 - <kbd>↵</kbd> switches this window to the database. <kbd>⌘↵</kbd>, or <kbd>⌘</kbd>-click, opens it in a new window.
 
-Switch database needs a connected Postgres window. A SQLite file has one database, so the head of the schema column shows the file's name instead.
+On MySQL and MariaDB the list is every database your login can see, without the server's own (`mysql`, `sys`, `information_schema`, `performance_schema`). Picking one makes it the default database for the window's queries, and the schema column lists it first, even while it has no tables (a server with no tables at all says **No tables**). The other databases stay in the schema column below it.
+
+Switch database needs a connected window. A SQLite file has one database, so the head of the schema column shows the file's name instead.
 
 <div className="clear" />
 

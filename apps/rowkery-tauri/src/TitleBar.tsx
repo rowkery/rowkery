@@ -1,5 +1,5 @@
 import { useRef, type CSSProperties, type PointerEvent as ReactPointerEvent, type Ref } from "react";
-import { connectionLook } from "./engines";
+import { EngineLogo, connectionLook } from "./engines";
 import { PenguinMark } from "./PenguinMark";
 import { GridMenu, useContextMenu } from "./GridMenu";
 import { railTileMenu } from "./contextMenus";
@@ -137,9 +137,7 @@ export function TitleBar({
             >
               <span data-testid="win-icon" className="win-icon">
                 {engine ? (
-                  <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
-                    <path d={engine.logo} fill="currentColor" />
-                  </svg>
+                  <EngineLogo engine={engine} size={14} />
                 ) : (
                   <PenguinMark size={14} className="win-penguin" />
                 )}
@@ -225,7 +223,7 @@ export function TitleBar({
         items={railTileMenu({
           hasConnection: !!menuConn,
           connected: menuWindow?.state === "connected",
-          postgres: menuConn?.kind === "postgres",
+          switchesDatabase: menuConn?.kind === "postgres" || menuConn?.kind === "mysql",
         })}
         onPick={(id) => menuWindow && onTilePick(menuWindow.id, id)}
         onClose={tileMenu.close}

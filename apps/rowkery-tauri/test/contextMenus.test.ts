@@ -64,10 +64,10 @@ function allMenus(): [string, MenuRow[]][] {
   for (const table of [false, true]) {
     out.push(["tab", tabMenu({ table, preview: table, tabCount: 3, closedTabs: 2 })]);
   }
-  for (const postgres of [false, true]) {
-    out.push(["rail-tile", railTileMenu({ hasConnection: true, connected: true, postgres })]);
+  for (const switchesDatabase of [false, true]) {
+    out.push(["rail-tile", railTileMenu({ hasConnection: true, connected: true, switchesDatabase })]);
   }
-  out.push(["rail-tile", railTileMenu({ hasConnection: false, connected: false, postgres: false })]);
+  out.push(["rail-tile", railTileMenu({ hasConnection: false, connected: false, switchesDatabase: false })]);
   out.push(["chip", chipMenu({ chipCount: 3 })], ["help", helpMenu()]);
   return out;
 }
@@ -95,7 +95,7 @@ describe("context menus", () => {
   test("a keymap's swapped chord is what the menus print", () => {
     const rail = (keymap: "rowkery" | "tableplus") =>
       Object.fromEntries(
-        railTileMenu({ hasConnection: true, connected: true, postgres: true }).map((r) => [r.id, rowKeys(r, true, keymap)]),
+        railTileMenu({ hasConnection: true, connected: true, switchesDatabase: true }).map((r) => [r.id, rowKeys(r, true, keymap)]),
       );
     expect(rail("rowkery")["new-window"]).toBe("⌘T");
     expect(rail("tableplus")["new-window"]).toBe("⌥⌘T");
@@ -157,7 +157,7 @@ describe("context menus", () => {
       close: "⌘W",
       reopen: "⇧⌘T",
     });
-    expect(keys(railTileMenu({ hasConnection: true, connected: true, postgres: true }))).toMatchObject({
+    expect(keys(railTileMenu({ hasConnection: true, connected: true, switchesDatabase: true }))).toMatchObject({
       "switch-database": "⇧⌘D",
       "switch-connection": "⇧⌘O",
       "new-window": "⌘T",

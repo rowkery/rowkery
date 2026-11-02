@@ -386,7 +386,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
           {pinned.length > 0 &&
             section("pinned", "Pinned", pinned.length, pinned, true)}
           {visible.flatMap((s) => [
-            s.tables.length > 0 &&
+            (s.tables.length > 0 || (s.current && s.views.length === 0 && !filtering)) &&
               section(
                 s.key,
                 single ? "Tables" : s.schema,
@@ -471,7 +471,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
             className="sb-scroll"
             key={`${connectionId}:${schemas[0]?.database ?? ""}:${schemas.length > 0}`}
           >
-            {schemas.length === 0 ? (
+            {schemas.every((s) => s.tables.length === 0 && s.views.length === 0) ? (
               // Couldn't connect folds the column to its head (styles/connect-to-start.css).
               failed ? null : (
                 <div className="sb-empty">

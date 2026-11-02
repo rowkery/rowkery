@@ -22,6 +22,8 @@ export interface SidebarSchema {
   count: number;
   /** Views and materialized views, listed in their own section. */
   views: SidebarTable[];
+  /** A MySQL window's default database: listed first, and shown even with no tables. */
+  current?: boolean;
 }
 
 export function isView(t: SidebarTable) {
@@ -42,9 +44,14 @@ export function tableKey(database: string, schema: string, name: string) {
   return `${database}.${schema}.${name}`;
 }
 
-/** Group partitions under their parent so `events_p0…p99` fold into one row. */
+/**
+ * Group partitions under their parent so `events_p0…p99` fold into one row.
+ * `current`: a MySQL window's default database (a schema of its catalog),
+ * which goes first.
+ */
 export function buildSchemaTree(
   catalog: SchemaCatalog | null,
+  current: string | null = null,
 ): SidebarSchema[] {
   if (!catalog) return [];
   const out: SidebarSchema[] = [];
@@ -94,9 +101,12 @@ export function buildSchemaTree(
         tables,
         count: tables.length,
         views: top.filter(isView),
+        ...(current !== null && schema.name === current ? { current: true } : {}),
       });
     }
   }
+  const at = out.findIndex((s) => s.current);
+  if (at > 0) out.unshift(...out.splice(at, 1));
   return out;
 }
 
