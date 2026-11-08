@@ -100,7 +100,8 @@ import { TableStructure } from "./TableStructure";
 import { SchemaMap } from "./SchemaMap";
 import { depthKey, lastTableView, mapDepthFor, setLastTableView, setMapDepth } from "./viewMemory";
 import { mapGuessOn, setMapGuess } from "./mapGuess";
-import { Sidebar, SidebarFoot } from "./Sidebar";
+import { Sidebar, SidebarFoot, StarCard } from "./Sidebar";
+import { endStarAsk, noteUseDay, openRepoPage } from "./starAsk";
 import { createPortal } from "react-dom";
 import { connectionLook } from "./engines";
 import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEditor";
@@ -345,6 +346,7 @@ const OVER_PAGE = new Set([
   "third-party-notices",
   "report-issue",
   "check-updates",
+  "star-on-github",
   "show-key-hints",
   "hide-tips",
   "timings",
@@ -3967,6 +3969,8 @@ export function Workspace({
   // No tip while the shown tab runs; one earned meanwhile waits for the rows.
   useEffect(() => {
     if (active) setQueryRunning(running);
+    // A day Rowkery was used, for the GitHub star card.
+    if (running) noteUseDay();
   }, [active, running]);
   const filterKeys = commandKeys("filter-rows", macOverlay);
   const hasRows = !!result && result.columns.length > 0;
@@ -4262,6 +4266,10 @@ export function Workspace({
     if (id === "keyboard-shortcuts") return actions.openShortcuts();
     if (id === "third-party-notices") return actions.openNotices();
     if (id === "check-updates") return actions.checkForUpdates();
+    if (id === "star-on-github") {
+      endStarAsk();
+      return void openRepoPage().catch((e) => showToast("Couldn't open GitHub", String(e), "error"));
+    }
     if (id === "settings") return actions.openSettings();
     if (id === "show-key-hints") return showKeyHints();
     if (id === "find-results") return openFind();
@@ -4575,14 +4583,17 @@ export function Workspace({
           }
           envTag={activeConnection?.environment ? <EnvTag env={activeConnection.environment} /> : null}
           foot={
-            <SidebarFoot
+            <>
+              <StarCard />
+              <SidebarFoot
               mcpOn={mcpOn}
               agentsOpen={agentsOpen}
               proposals={proposalCount}
               onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
               settingsOpen={settingsOpen}
               onSettings={(section) => actions.openSettings(section)}
-            />
+              />
+            </>
           }
           menu={active && <ZoneMenu zone="panel" state={commandState} onRun={runCommand} />}
           keyStrip={active && <KeyStrip zone="panel" state={commandState} />}
