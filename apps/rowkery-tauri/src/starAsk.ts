@@ -1,10 +1,13 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { readKey, writeKey } from "./persist";
+import { showToast } from "./notify";
 
 /**
  * The GitHub star card (2026-11-08): once Rowkery has been used on five
- * different days (a day counts when a query or a table read starts), a card
+ * different days (a day counts when the shown tab starts a query, a table
+ * read or an export, including the read a restored table tab runs at
+ * launch, so opening Rowkery on a table counts), a card
  * above the schema column's foot asks for a star. Star on GitHub or × ends
  * it for good. The app is offline, so it can't know whether a star was
  * given: the click is the answer. Help > Star Rowkery on GitHub stays.
@@ -17,7 +20,7 @@ const KEY = "rowkery.starAsk";
 export const STAR_AFTER_DAYS = 5;
 
 interface Saved {
-  /** Different local days a query ran on (counted up to STAR_AFTER_DAYS). */
+  /** Different local days counted (up to STAR_AFTER_DAYS). */
   days: number;
   /** The local day (YYYY-MM-DD) last counted. */
   lastDay?: string;
@@ -75,7 +78,11 @@ export function endStarAsk() {
   if (!s.done) save({ ...s, done: true });
 }
 
-/** Opens the repository in the browser (core holds the URL). */
-export function openRepoPage(): Promise<void> {
-  return invoke("open_repo_page");
+/**
+ * Star on GitHub (the card, Help, ⌘K): opens the repository in the browser
+ * (core holds the URL) and ends the card once it opened; if it couldn't,
+ * the card stays and a toast says so.
+ */
+export function starOnGitHub() {
+  invoke("open_repo_page").then(endStarAsk, (e) => showToast("Couldn't open GitHub", String(e), "error"));
 }

@@ -101,7 +101,7 @@ import { SchemaMap } from "./SchemaMap";
 import { depthKey, lastTableView, mapDepthFor, setLastTableView, setMapDepth } from "./viewMemory";
 import { mapGuessOn, setMapGuess } from "./mapGuess";
 import { Sidebar, SidebarFoot, StarCard } from "./Sidebar";
-import { endStarAsk, noteUseDay, openRepoPage } from "./starAsk";
+import { noteUseDay, starOnGitHub } from "./starAsk";
 import { createPortal } from "react-dom";
 import { connectionLook } from "./engines";
 import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEditor";
@@ -4266,10 +4266,7 @@ export function Workspace({
     if (id === "keyboard-shortcuts") return actions.openShortcuts();
     if (id === "third-party-notices") return actions.openNotices();
     if (id === "check-updates") return actions.checkForUpdates();
-    if (id === "star-on-github") {
-      endStarAsk();
-      return void openRepoPage().catch((e) => showToast("Couldn't open GitHub", String(e), "error"));
-    }
+    if (id === "star-on-github") return starOnGitHub();
     if (id === "settings") return actions.openSettings();
     if (id === "show-key-hints") return showKeyHints();
     if (id === "find-results") return openFind();
@@ -4586,12 +4583,12 @@ export function Workspace({
             <>
               <StarCard />
               <SidebarFoot
-              mcpOn={mcpOn}
-              agentsOpen={agentsOpen}
-              proposals={proposalCount}
-              onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
-              settingsOpen={settingsOpen}
-              onSettings={(section) => actions.openSettings(section)}
+                mcpOn={mcpOn}
+                agentsOpen={agentsOpen}
+                proposals={proposalCount}
+                onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
+                settingsOpen={settingsOpen}
+                onSettings={(section) => actions.openSettings(section)}
               />
             </>
           }

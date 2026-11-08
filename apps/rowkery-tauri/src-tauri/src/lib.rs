@@ -1931,26 +1931,21 @@ const REPO_URL: &str = "https://github.com/rowkery/rowkery";
 /// Opens the repository in the default browser (the star card, Help > Star
 /// Rowkery on GitHub).
 #[tauri::command]
-async fn open_repo_page() -> Result<(), String> {
+fn open_repo_page() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let opener = "/usr/bin/open";
     #[cfg(target_os = "windows")]
     let opener = "explorer";
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let opener = "xdg-open";
-    // Waited for (it hands the URL over and exits) so no zombie is left behind.
-    let status = tauri::async_runtime::spawn_blocking(move || {
-        std::process::Command::new(opener).arg(REPO_URL).status()
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    // explorer exits 1 even when it opened the page.
-    if status.success() || cfg!(target_os = "windows") {
-        Ok(())
-    } else {
-        Err(format!("{opener} exited with {status}"))
-    }
+    let mut child = std::process::Command::new(opener)
+        .arg(REPO_URL)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Reaped off the main thread: xdg-open without a desktop can run the
+    // browser in the foreground and only exit when it quits.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

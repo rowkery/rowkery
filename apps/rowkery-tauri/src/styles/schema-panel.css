@@ -553,8 +553,8 @@
   color: var(--acc);
 }
 
-/* The GitHub star card (StarCard): a soft fill above the foot's rule, ink
-   button (it does something), × to stop asking. */
+/* The GitHub star card (StarCard): a soft fill above the foot's rule, its
+   one button in ink (the mock Lucas picked, 2026-11-08), × to stop asking. */
 .sb-star {
   position: relative;
   flex-shrink: 0;
@@ -569,13 +569,13 @@
   animation: rise 0.2s var(--ease-out);
 }
 
-.sb-star p {
+.sb-star-text {
   margin: 0;
 }
 
 .sb-star-title {
   padding-right: 20px;
-  margin-bottom: 2px !important;
+  margin: 0 0 2px;
   color: var(--text);
   font-weight: 600;
   font-size: 12.5px;

@@ -43,7 +43,7 @@ import { GridMenu, useContextMenu } from "./GridMenu";
 import { panelRowMenu } from "./contextMenus";
 import { showToast } from "./notify";
 import { setPresenting, usePresenting } from "./presenting";
-import { endStarAsk, openRepoPage, useStarAskDue } from "./starAsk";
+import { endStarAsk, starOnGitHub, useStarAskDue } from "./starAsk";
 import { updateWaiting, useUpdatePref, useUpdateState, type UpdateState } from "./updates";
 import type { SettingsSection } from "./SettingsPage";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -530,10 +530,7 @@ export function StarCard() {
         type="button"
         className="sb-star-go"
         data-testid="star-go"
-        onClick={() => {
-          endStarAsk();
-          openRepoPage().catch((e) => showToast("Couldn't open GitHub", String(e), "error"));
-        }}
+        onClick={starOnGitHub}
       >
         <GitHubIcon size={13} />
         Star on GitHub
