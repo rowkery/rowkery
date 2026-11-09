@@ -1,7 +1,7 @@
 [
   {
     "version": "v1.1.0",
-    "markdown": "Rowkery 1.1.0 adds MySQL and MariaDB.\n\n## New\n\n- **MySQL and MariaDB connections.** Pick **MySQL · MariaDB** in the New connection form, or paste a `mysql://`, `mariadb://` or `jdbc:mysql://` URL. SSL and SSH tunnels work as on Postgres.\n- Browse, filter and edit rows, Quick Look, Import CSV, Run SQL file (mysqldump and mariadb-dump files too), ⌘E plans, the Sessions view and the database picker (⇧⌘D) all work on MySQL and MariaDB.\n- Safe mode covers MySQL: Read-only refuses stored functions and `INTO OUTFILE`, and switching the character set can't hide a write.\n- Agents can't use MySQL or MariaDB connections yet, and the Health tab is Postgres and SQLite only for now.\n- **Star Rowkery on GitHub** in the Help menu and ⌘K. After five days of use, a card in the schema column asks once.\n"
+    "markdown": "Rowkery 1.1.0 adds MySQL and MariaDB.\n\n## New\n\n- **MySQL and MariaDB connections.** Pick **MySQL · MariaDB** in the New connection form, or paste a `mysql://`, `mariadb://` or `jdbc:mysql://` URL. SSL and SSH tunnels work as on Postgres.\n- Browse, filter and edit rows, Quick Look, Import CSV, Run SQL file (mysqldump and mariadb-dump files too), ⌘E plans, the Sessions view and the database picker (⇧⌘D) all work on MySQL and MariaDB.\n- Safe mode covers MySQL: Read-only refuses stored functions and `INTO OUTFILE`, and switching the character set can't hide a write.\n- **Star Rowkery on GitHub** in the Help menu and ⌘K. On the fifth day you use Rowkery, a card in the schema column asks, until you star or close it.\n\n## Not yet\n\n- Agents can't use MySQL or MariaDB connections, and Health is Postgres and SQLite only.\n"
   },
   {
     "version": "v1.0.0",

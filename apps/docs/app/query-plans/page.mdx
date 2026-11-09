@@ -88,7 +88,7 @@ It hints at two things: a full scan of a table with 10,000 rows or more ("If you
 
 ## MySQL and MariaDB
 
-On MySQL and MariaDB, **Run with timings** works on reads only, every plan runs in a transaction that is rolled back, and <kbd>⌘E</kbd> waits until the tab's own transaction ends. [MySQL and MariaDB](/mysql-and-mariadb/#query-plans) has the details.
+On MySQL and MariaDB, **Run with timings** works on reads only, every plan runs in a transaction that is rolled back, and <kbd>⌘E</kbd> is refused while the tab has a transaction open. [MySQL and MariaDB](/mysql-and-mariadb/#query-plans) has the details.
 
 ## Copy a plan
 

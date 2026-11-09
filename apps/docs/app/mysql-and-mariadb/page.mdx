@@ -20,11 +20,11 @@ jdbc:mysql://db.arcade.internal:3306/arcade?user=maya
 DATABASE_URL=mysql://maya@db.arcade.internal/arcade
 ```
 
-`ssl-mode`, `sslMode`, `require_ssl`, `ssl` and `useSSL` in the URL set the SSL setting. A socket path in the URL isn't read.
+`ssl-mode`, `sslMode`, `require_ssl`, `ssl` and `useSSL` in the URL set the SSL setting. A URL needs a host: one with only a socket path can't be read.
 
-**Database** is optional. Leave it blank and every database your login can see is listed in the schema column; name one and it's listed first and used as the default database for your queries. Switch it later with <kbd>⇧⌘D</kbd> ([Switch database](/windows-and-switching/#switch-database)).
+**Database** is optional, so the form tries the connection once **Host** and **User** are set. Leave Database blank and every database your login can see is listed in the schema column; name one and it's listed first and used as the default database for your queries. Switch it later with <kbd>⇧⌘D</kbd> ([Switch database](/windows-and-switching/#switch-database)).
 
-Rowkery asks the server what it is when it connects. A MariaDB server gets the MariaDB seal and name in the connection lists, the window's tab and the status line, even though you picked **MySQL · MariaDB**.
+Rowkery asks the server what it is when it connects. A MariaDB server gets the MariaDB seal and name in the connection lists, the window's pill and the status line, even though you picked **MySQL · MariaDB**.
 
 SSL (Disable, Prefer, Require, Verify) and SSH tunnels work as on Postgres ([SSL](/setting-up-a-connection/#ssl), [SSH tunnel](/setting-up-a-connection/#ssh-tunnel)). Verify checks the certificate and the host name, like the `mysql` client's `VERIFY_IDENTITY`.
 
@@ -35,7 +35,7 @@ Rowkery is tested against MySQL 8.0 and 8.4 and MariaDB 10.11 and 11.4.
 | Feature | On MySQL and MariaDB |
 | --- | --- |
 | Sharing with agents | Not yet. The form has no **Share with agents** switch, and the Agents page can't turn one on |
-| Health | The tab is hidden |
+| Health | Not available |
 | Google Cloud SQL | Postgres instances only |
 | Prefetch on hover | Postgres only |
 | Found on this Mac | Lists local Postgres servers only |
@@ -44,7 +44,7 @@ Rowkery is tested against MySQL 8.0 and 8.4 and MariaDB 10.11 and 11.4.
 
 Each query tab runs on its own session and keeps it between runs, as on Postgres, so `USE`, `SET @x = …` and an open `START TRANSACTION` stay with the tab ([Each tab has its own session](/query-tabs/#each-tab-has-its-own-session)).
 
-If that session is closed while the tab is idle (the server restarted, the network dropped, or another session killed it), the tab's next run stops and says so, because the `USE` or `SET` you ran there is gone with it. Nothing runs that time. Run them again, then your statements.
+If that session is closed while the tab is idle (the server restarted, the network dropped, another session killed it, or Rowkery closed it to free a connection for another tab), the tab's next run stops and says so, because the `USE` or `SET` you ran there is gone with it. Nothing runs that time. Run them again, then your statements.
 
 Backticks quote names, `#` starts a comment, and the editor splits statements, colours them and formats them (<kbd>⌘I</kbd>) the MySQL way. Completion offers MySQL's functions and statements such as `SHOW`, `DESCRIBE` and `USE`. Tables in the tab's database go in bare, and tables in other databases get the database's name in front (`audit.events`).
 
@@ -55,7 +55,7 @@ Read-only and Confirm writes work as on Postgres ([Environments and safe mode](/
 - **Read-only** sets `SET SESSION TRANSACTION READ ONLY` when a session opens and again before every run.
 - **Functions in Read-only.** A read-only transaction stops a function's row writes but not a `SET GLOBAL` or a file write inside it. So on a Read-only connection, a statement that calls a stored function, a MariaDB package function or a loadable function is refused, even through a view. Built-in functions such as `CONCAT` or `JSON_EXTRACT` still run.
 - **Writes to files.** `INTO OUTFILE` and `INTO DUMPFILE` count as writes, however the statement starts (`SELECT`, `TABLE`, `VALUES`).
-- **Character sets.** With safe mode on, each session uses utf8mb4. If a statement switches the session to another character set, Rowkery sets it back and runs nothing after that statement. Under some character sets the server would read Rowkery's text differently from how safe mode read it.
+- **Character sets.** Under a character set other than UTF-8, the server can read Rowkery's text differently from how safe mode read it. With safe mode on, a session that opens in such a character set is switched to utf8mb4. If a statement switches to one, Rowkery sets it back to utf8mb4 after that statement. When the text holds non-ASCII characters, its statements are sent one at a time, so nothing runs after the switch.
 
 ## Editing rows
 
@@ -70,17 +70,17 @@ Grid edits use the same tray, Review SQL and <kbd>⌘S</kbd> commit as on Postgr
 
 **Import CSV…** works as on Postgres ([Importing a CSV](/importing-csv/)), with these differences:
 
-- The import runs in strict SQL mode, whatever the tab set, so an impossible date or a value too long for its column fails the import and names the file's line. The tab's own mode comes back afterwards.
+- The import runs on its own connection in strict SQL mode, whatever your tabs use, so an impossible date or a value too long for its column fails the import and names the file's line.
 - **Skip** skips a row that matches an existing row on any unique key, not only the key you matched on. MySQL can't aim at one key.
 - The table must be able to roll back (InnoDB). A MyISAM table is refused.
 - Your login needs the `CREATE TEMPORARY TABLES` privilege on the database, because the rows go into a temporary table first.
 
 ## Running a SQL file
 
-**Run SQL file…** reads `.sql` files, mysqldump and mariadb-dump output included ([Query tabs](/query-tabs/)). It splits the file as the `mysql` client does, `DELIMITER` lines included.
+**Run SQL file…** reads `.sql` files, mysqldump and mariadb-dump output included. It splits the file as the `mysql` client does, `DELIMITER` lines included.
 
 - MySQL commits by itself before `CREATE`, `DROP`, `ALTER`, `LOCK TABLES` and similar statements. A file holding any of them runs one statement at a time, and the summary says why. A file of plain reads and writes can still run as one transaction.
-- Before anything runs, Rowkery refuses a file that sets `sql_mode` to ANSI quotes or `NO_BACKSLASH_ESCAPES`, a file that sets the character set to gbk, big5, sjis, cp932 or gb18030, and a routine body that has no `DELIMITER` line around it. The message says what to change.
+- Before anything runs, Rowkery refuses a file that sets `sql_mode` with `ANSI`, `NO_BACKSLASH_ESCAPES`, `ORACLE`, `DB2`, `MSSQL`, `POSTGRESQL` or `MAXDB`, a file that sets a character set other than UTF-8 (older dumps often hold `SET NAMES latin1`: save the file as UTF-8 first), and a routine body that has no `DELIMITER` line around it. The message says what to change.
 - `mysql` client commands such as `\G` are refused, since only that client can run them.
 
 ## Query plans
