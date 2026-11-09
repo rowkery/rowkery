@@ -1,7 +1,7 @@
 /** The common questions, all closed to start. */
 const QUESTIONS = [
   ["Do I need an AI agent?", "No. Everything works on your own, from the keyboard."],
-  ["Which databases does it support?", "Postgres, including Google Cloud SQL, and SQLite. More are on the way."],
+  ["Which databases does it support?", "Postgres (including Google Cloud SQL), MySQL, MariaDB and SQLite. Agents can use Postgres and SQLite for now; MySQL and MariaDB come next. More databases are on the way."],
   ["Does my data go through your servers?", "No. Rowkery connects straight from your Mac to your database."],
   ["Which agents work with it?", "Claude Code and Claude Desktop in one click. Cursor and other MCP clients with a short config entry."],
   ["Is the app signed?", "Yes. Rowkery is signed and notarized by Apple, so it opens like any other app, and every update is signed too."],

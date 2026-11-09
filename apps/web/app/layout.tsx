@@ -23,9 +23,9 @@ const mono = localFont({
   display: "swap",
 });
 // Search results show the title and description; Google cuts the description near 155 characters.
-const TITLE = "Rowkery · Free Postgres and SQLite client for the Mac";
+const TITLE = "Rowkery · Free Postgres, MySQL and SQLite client for the Mac";
 const DESCRIPTION =
-  "Rowkery is a free, open-source Postgres and SQLite client for the Mac. Use it from the keyboard, or let Claude, Cursor or another AI agent read your database.";
+  "Rowkery is a free, open-source Postgres, MySQL and SQLite client for the Mac. Use it from the keyboard, or let Claude, Cursor or another AI agent read your database.";
 
 // The link preview (X, Slack, iMessage, Discord, Bluesky) comes from these tags and from
 // public/og.png (1200 × 630: the mark, the name and one line). Without them a shared

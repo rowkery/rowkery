@@ -86,6 +86,10 @@ On SQLite, <kbd>⌘E</kbd> shows the steps of `EXPLAIN QUERY PLAN`: which tables
 
 It hints at two things: a full scan of a table with 10,000 rows or more ("If you filter or join on one of its columns, an index on it lets SQLite go straight to the rows."), and a sort SQLite does itself for `ORDER BY` ("An index on the ORDER BY columns returns them already in order."). These hints have no SQL to copy.
 
+## MySQL and MariaDB
+
+On MySQL and MariaDB, **Run with timings** works on reads only, every plan runs in a transaction that is rolled back, and <kbd>⌘E</kbd> waits until the tab's own transaction ends. [MySQL and MariaDB](/mysql-and-mariadb/#query-plans) has the details.
+
 ## Copy a plan
 
 **Copy as text** in the plan header copies the plan as indented text, one line per step, to paste into a ticket or a chat.

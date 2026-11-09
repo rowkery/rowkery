@@ -4,7 +4,7 @@ export const metadata = { title: "Setting up a connection" };
 
 # Setting up a connection
 
-<p className="lead">A connection is a saved way to reach one Postgres server or SQLite file. Rowkery keeps the details in its config and the password in your Mac's keychain.</p>
+<p className="lead">A connection is a saved way to reach one Postgres, MySQL or MariaDB server, or one SQLite file. Rowkery keeps the details in its config and the password in your Mac's keychain.</p>
 
 ## Ways to start one
 
@@ -26,6 +26,8 @@ host=db.arcade.internal port=5432 dbname=arcade user=maya
 psql -h db.arcade.internal -U maya arcade
 # a line from a .env file
 DATABASE_URL=postgres://maya@db.arcade.internal/arcade
+# MySQL and MariaDB
+mysql://maya@db.arcade.internal:3306/arcade
 ```
 
 A password in the URL fills the Password field, and the URL box shows it as `•••`. As with `psql`, a password may hold `#`, `?` or `@` as typed, but a `/` must be written as `%2F`.
@@ -34,7 +36,7 @@ A password in the URL fills the Password field, and the URL box shows it as `•
 
 <Shot side src="/img/new-connection.webp" width={620} height={845} alt="The New connection form: a box to paste a URL, then name, host, port, database, user and password, which is kept in the keychain." />
 
-Fill in **Host**, **Database** and **User**. Blank fields use Postgres's usual defaults, shown dimmed.
+Pick the engine from the menu at the top: **PostgreSQL**, **MySQL · MariaDB** or **SQLite**. Fill in **Host**, **Database** and **User**. Blank fields use the engine's usual defaults, shown dimmed. On MySQL and MariaDB, Database is optional ([MySQL and MariaDB](/mysql-and-mariadb/)).
 
 Once those three are set, Rowkery tries the connection on its own. If the server says no, its reason appears under the field it's about, such as a wrong password under Password.
 

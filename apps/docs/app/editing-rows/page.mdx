@@ -6,6 +6,8 @@ export const metadata = { title: "Editing rows" };
 
 <p className="lead">You can change values, add rows and delete rows right in a table tab's grid. Nothing is written as you go: your changes are staged, you can read the exact SQL, and Commit saves them all in one transaction.</p>
 
+MySQL and MariaDB have a few rules of their own, such as MyISAM tables and how cascades are counted: see [MySQL and MariaDB](/mysql-and-mariadb/#editing-rows).
+
 <Clip src="/clips/editing-rows-commit.mp4" poster="/clips/editing-rows-commit.webp" width={1100} height={640} alt="Editing an order: the status cell opens a list of the enum's values and refunded is picked, the total is changed to 0.00, Review SQL shows the one UPDATE, and Commit saves it: the foot reads Updated 1 · 24 ms." />
 
 ## When a table can be edited
