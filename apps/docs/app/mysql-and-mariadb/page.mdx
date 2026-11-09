@@ -1,0 +1,98 @@
+export const metadata = { title: "MySQL and MariaDB" };
+
+<p className="crumb">Connections</p>
+
+# MySQL and MariaDB
+
+<p className="lead">Rowkery connects to MySQL and MariaDB servers the same way it connects to Postgres: browse, filter, edit, import, run files and read plans from the keyboard. This page lists what works differently. Agents can't use MySQL or MariaDB connections yet.</p>
+
+## Connecting
+
+In the New connection form <kbd>⌘N</kbd>, open the engine menu at the top and pick **MySQL · MariaDB**. The port becomes `3306` until you type your own.
+
+You can also paste a connection string outside a text field, and the form opens on the right engine:
+
+```bash
+mysql://maya@db.arcade.internal:3306/arcade?ssl-mode=REQUIRED
+mariadb://maya@db.arcade.internal/arcade
+mysql2://maya@db.arcade.internal/arcade
+jdbc:mysql://db.arcade.internal:3306/arcade?user=maya
+DATABASE_URL=mysql://maya@db.arcade.internal/arcade
+```
+
+`ssl-mode`, `sslMode`, `require_ssl`, `ssl` and `useSSL` in the URL set the SSL setting. A URL needs a host: one with only a socket path can't be read.
+
+**Database** is optional, so the form tries the connection once **Host** and **User** are set. Leave Database blank and every database your login can see is listed in the schema column; name one and it's listed first and used as the default database for your queries. Switch it later with <kbd>⇧⌘D</kbd> ([Switch database](/windows-and-switching/#switch-database)).
+
+Rowkery asks the server what it is when it connects. A MariaDB server gets the MariaDB seal and name in the connection lists, the window's pill and the status line, even though you picked **MySQL · MariaDB**.
+
+SSL (Disable, Prefer, Require, Verify) and SSH tunnels work as on Postgres ([SSL](/setting-up-a-connection/#ssl), [SSH tunnel](/setting-up-a-connection/#ssh-tunnel)). Verify checks the certificate and the host name, like the `mysql` client's `VERIFY_IDENTITY`.
+
+Rowkery is tested against MySQL 8.0 and 8.4 and MariaDB 10.11 and 11.4.
+
+## What isn't there yet
+
+| Feature | On MySQL and MariaDB |
+| --- | --- |
+| Sharing with agents | Not yet. The form has no **Share with agents** switch, and the Agents page can't turn one on |
+| Health | Not available |
+| Google Cloud SQL | Postgres instances only |
+| Prefetch on hover | Postgres only |
+| Found on this Mac | Lists local Postgres servers only |
+
+## Query tabs
+
+Each query tab runs on its own session and keeps it between runs, as on Postgres, so `USE`, `SET @x = …` and an open `START TRANSACTION` stay with the tab ([Each tab has its own session](/query-tabs/#each-tab-has-its-own-session)).
+
+If that session is closed while the tab is idle (the server restarted, the network dropped, another session killed it, or Rowkery closed it to free a connection for another tab), the tab's next run stops and says so, because the `USE` or `SET` you ran there is gone with it. Nothing runs that time. Run them again, then your statements.
+
+Backticks quote names, `#` starts a comment, and the editor splits statements, colours them and formats them (<kbd>⌘I</kbd>) the MySQL way. Completion offers MySQL's functions and statements such as `SHOW`, `DESCRIBE` and `USE`. Tables in the tab's database go in bare, and tables in other databases get the database's name in front (`audit.events`).
+
+## Safe mode
+
+Read-only and Confirm writes work as on Postgres ([Environments and safe mode](/environments-and-safe-mode/)), with a few MySQL rules:
+
+- **Read-only** sets `SET SESSION TRANSACTION READ ONLY` when a session opens and again before every run.
+- **Functions in Read-only.** A read-only transaction stops a function's row writes but not a `SET GLOBAL` or a file write inside it. So on a Read-only connection, a statement that calls a stored function, a MariaDB package function or a loadable function is refused, even through a view. Built-in functions such as `CONCAT` or `JSON_EXTRACT` still run.
+- **Writes to files.** `INTO OUTFILE` and `INTO DUMPFILE` count as writes, however the statement starts (`SELECT`, `TABLE`, `VALUES`).
+- **Character sets.** Under a character set other than UTF-8, the server can read Rowkery's text differently from how safe mode read it. With safe mode on, a session that opens in such a character set is switched to utf8mb4. If a statement switches to one, Rowkery sets it back to utf8mb4 after that statement. When the text holds non-ASCII characters, its statements are sent one at a time, so nothing runs after the switch.
+
+## Editing rows
+
+Grid edits use the same tray, Review SQL and <kbd>⌘S</kbd> commit as on Postgres ([Editing rows](/editing-rows/)). Every statement must change exactly one row, or the whole commit rolls back.
+
+- **An open transaction in the tab.** Commit is refused while the tab has a transaction open, because MySQL's `START TRANSACTION` would commit yours.
+- **MyISAM tables** can't roll back, so a commit with more than one change to one is refused. Commit those changes one row at a time.
+- **Cascade counts.** MySQL keeps no count of rows a statement changed in other tables. Rowkery works out what a delete or key update reaches through foreign keys before it runs, locks those rows and counts them. When it can't count something, it names it instead of giving a number: a trigger on the table, triggers your login can't see, a key that loops back to its own table, a table reached two ways, or more than 15 levels of cascade.
+- A `tinyint(1)` column edits as a boolean, an `enum` as a list of its values. Typing `now()` in a date or time column writes `CURRENT_TIMESTAMP`, `CURRENT_DATE` or `CURRENT_TIME`.
+
+## Importing a CSV
+
+**Import CSV…** works as on Postgres ([Importing a CSV](/importing-csv/)), with these differences:
+
+- The import runs on its own connection in strict SQL mode, whatever your tabs use, so an impossible date or a value too long for its column fails the import and names the file's line.
+- **Skip** skips a row that matches an existing row on any unique key, not only the key you matched on. MySQL can't aim at one key.
+- The table must be able to roll back (InnoDB). A MyISAM table is refused.
+- Your login needs the `CREATE TEMPORARY TABLES` privilege on the database, because the rows go into a temporary table first.
+
+## Running a SQL file
+
+**Run SQL file…** reads `.sql` files, mysqldump and mariadb-dump output included. It splits the file as the `mysql` client does, `DELIMITER` lines included.
+
+- MySQL commits by itself before `CREATE`, `DROP`, `ALTER`, `LOCK TABLES` and similar statements. A file holding any of them runs one statement at a time, and the summary says why. A file of plain reads and writes can still run as one transaction.
+- Before anything runs, Rowkery refuses a file that sets `sql_mode` with `ANSI`, `NO_BACKSLASH_ESCAPES`, `ORACLE`, `DB2`, `MSSQL`, `POSTGRESQL` or `MAXDB`, a file that sets a character set other than UTF-8 (older dumps often hold `SET NAMES latin1`: save the file as UTF-8 first), and a routine body that has no `DELIMITER` line around it. The message says what to change.
+- `mysql` client commands such as `\G` are refused, since only that client can run them.
+
+## Query plans
+
+<kbd>⌘E</kbd> shows the plan as steps, as on Postgres ([Query plans](/query-plans/)).
+
+- **Run with timings** works on reads only, because MySQL can't roll back what it runs.
+- MySQL runs parts of a statement while it works out the plan, so every plan runs in its own transaction that is rolled back. If working out the plan would change data (a function in it writes), Rowkery stops and changes nothing.
+- <kbd>⌘E</kbd> is refused while the tab has a transaction open. Commit or roll back first, or use another tab.
+
+## Sessions
+
+**View › Sessions** lists the server's connections from `information_schema.PROCESSLIST` ([Sessions](/sessions/)). **Cancel query** runs `KILL QUERY` and **End session** runs `KILL`, through safe mode as on Postgres.
+
+Without the `PROCESS` privilege, the server shows only your own login's sessions and hides open transactions and lock waits, so those columns stay empty. MySQL lets you stop your own login's sessions, or anyone's with `CONNECTION_ADMIN` or `SUPER`.

@@ -15,7 +15,7 @@ export function Hero() {
         <span className="ln">A database app for</span> <span className="ln">you and your agent</span>
       </h1>
       <p className="lead">
-        Postgres and SQLite on your Mac. Quick from the keyboard, and safe to hand to <b>Claude</b> or any other agent.
+        Postgres, MySQL and SQLite on your Mac. Quick from the keyboard, and safe to hand to <b>Claude</b> or any other agent.
       </p>
       <div className="ctas">
         <DownloadButton />

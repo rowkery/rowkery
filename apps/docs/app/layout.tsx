@@ -28,7 +28,7 @@ const mono = localFont({
 
 export const metadata: Metadata = {
   title: { default: "Rowkery Docs", template: "%s · Rowkery Docs" },
-  description: "How to install Rowkery, connect to Postgres and SQLite, and let your AI agent read your database through it.",
+  description: "How to install Rowkery, connect to Postgres, MySQL, MariaDB and SQLite, and let your AI agent read your database through it.",
   metadataBase: new URL("https://docs.rowkery.com"),
   // Each page names its own address as the one to index.
   alternates: { canonical: "./" },

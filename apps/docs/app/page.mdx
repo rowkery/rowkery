@@ -4,7 +4,7 @@ export const metadata = { title: { absolute: "Rowkery Docs" } };
 
 # Rowkery
 
-<p className="lead">Rowkery is a Mac app for Postgres and SQLite. You can browse and edit your data yourself, or let an AI agent read it through the server built into the app. Only you can change it.</p>
+<p className="lead">Rowkery is a Mac app for Postgres, MySQL, MariaDB and SQLite. You can browse and edit your data yourself, or let an AI agent read it through the server built into the app. Only you can change it.</p>
 
 <Shot src="/img/window.webp" width={1600} height={1000} alt="A Rowkery window: the arcade database's tables on the left, a query in the editor and its 24 rows below." caption="A window on the arcade database, with safe mode set to Confirm writes" />
 
@@ -28,7 +28,7 @@ Each window is one connection and one database. Open as many as you like; they s
 ## What it needs
 
 - macOS on Apple Silicon or Intel. Linux and Windows build from source, but they aren't tested the way the Mac app is.
-- Nothing else. The Postgres and SQLite drivers are part of the app, and there's no account to make.
+- Nothing else. The database drivers are part of the app, and there's no account to make.
 
 <Note>
 
@@ -40,7 +40,7 @@ Each window is one connection and one database. Open as many as you like; they s
 
 <Cards>
   <Card href="/quick-setup/" title="Quick setup">Install, open the sample, connect your own database</Card>
-  <Card href="/setting-up-a-connection/" title="Setting up a connection">Postgres, SQLite, SSL and SSH tunnels</Card>
+  <Card href="/setting-up-a-connection/" title="Setting up a connection">Postgres, MySQL, SQLite, SSL and SSH tunnels</Card>
   <Card href="/table-tabs-and-filters/" title="Table tabs and filters">Browse a table and narrow it without writing SQL</Card>
   <Card href="/editing-rows/" title="Editing rows">Change cells, review the exact SQL, then commit</Card>
   <Card href="/connecting-to-agents/" title="Connecting to agents">Claude Desktop, Claude Code or any MCP client</Card>

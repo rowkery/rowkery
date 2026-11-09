@@ -4707,7 +4707,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-bridge"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "futures",
  "rowkery-core",
@@ -4721,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4759,7 +4759,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-mcp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "hmac 0.12.1",
  "rmcp",
@@ -4773,7 +4773,7 @@ dependencies = [
 
 [[package]]
 name = "rowkery-tauri"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "indexmap 2.14.2",
  "libc",
