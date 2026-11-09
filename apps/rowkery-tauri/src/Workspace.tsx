@@ -3949,7 +3949,7 @@ export function Workspace({
   const connected = connState === "connected";
   const sessions = useSessions(
     windowId,
-    active && isSessionsTab && connected && activeConnection?.kind === "postgres",
+    active && isSessionsTab && connected && (activeConnection?.kind === "postgres" || activeConnection?.kind === "mysql"),
   );
   const health = useHealth(
     windowId,
