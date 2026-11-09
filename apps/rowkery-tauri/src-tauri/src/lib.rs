@@ -1924,6 +1924,30 @@ async fn write_timings(
     timings.write(&lines).map_err(|e| e.to_string())
 }
 
+/// Rowkery's repository, where "Star on GitHub" goes. Fixed here: the page
+/// names no URL, so nothing in the webview can open another one.
+const REPO_URL: &str = "https://github.com/rowkery/rowkery";
+
+/// Opens the repository in the default browser (the star card, Help > Star
+/// Rowkery on GitHub).
+#[tauri::command]
+fn open_repo_page() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let opener = "/usr/bin/open";
+    #[cfg(target_os = "windows")]
+    let opener = "explorer";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let opener = "xdg-open";
+    let mut child = std::process::Command::new(opener)
+        .arg(REPO_URL)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Reaped off the main thread: xdg-open without a desktop can run the
+    // browser in the foreground and only exit when it quits.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn os_version() -> Option<String> {
     let out = std::process::Command::new("sw_vers")
@@ -2398,6 +2422,7 @@ pub fn run(mut timings: Timings) {
             save_ui_state,
             take_config_notice,
             app_info,
+            open_repo_page,
             timings_origin,
             rust_marks,
             write_timings,
