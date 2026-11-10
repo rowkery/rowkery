@@ -76,6 +76,8 @@ A [proposed change](/proposed-changes/) can't mention a masked column at all: no
 
 If you mark a column that is later dropped from its table, queries on that table are refused until you check its marks again.
 
+A materialized view holds a stored copy of its tables' values under names of its own, which can't be masked. So agents can't read a materialized view built from a table that has a sensitive column, whichever of its columns the view uses. They can query the table itself, where the column is masked.
+
 ### How it's enforced
 
 Rowkery doesn't trust the SQL as written. On Postgres it asks the server for the query's plan (`EXPLAIN VERBOSE`, which runs nothing), where views are already expanded and every use of every column is spelled out, and walks it to find each place a masked column is used. On SQLite it prepares the query with an authorizer that reports every column read and where each result column comes from. When the check can't follow a use, it refuses the query instead of guessing. The values are replaced on their way out, before the answer leaves Rowkery.

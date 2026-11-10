@@ -97,6 +97,12 @@ pub fn index_refusal(index: &str) -> String {
     )
 }
 
+pub fn copy_refusal(view: &str, table: &str) -> String {
+    format!(
+        "Refused: {view} is a materialized view built from {table}, which has masked columns. Its rows are a stored copy that can't be masked, so agents can't read it. Query {table} instead."
+    )
+}
+
 pub fn missing_refusal(table: &str, column: &str) -> String {
     format!(
         "Refused: {table} has a masked column ({column}) that is no longer in the table. Ask the user to check the table's masked columns in Rowkery."

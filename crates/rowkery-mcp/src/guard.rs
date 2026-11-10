@@ -565,8 +565,23 @@ pub const CREDENTIALS_REFUSAL: &str =
 pub const CREDENTIALS_RENAMED: &str =
     "Refused: this renames the columns of a catalog that holds passwords or connection strings (pg_authid, pg_user_mapping or pg_subscription), so Rowkery can't tell which one it reads. Use the columns' own names.";
 
+pub fn copied_credentials_refusal(view: &str) -> String {
+    format!(
+        "Refused: {view} is a materialized view built from a catalog that holds passwords or connection strings (pg_authid, pg_user_mapping or pg_subscription), and Rowkery can't tell which of its columns it copied. Agents never read these."
+    )
+}
+
+pub fn copied_through_code_refusal(view: &str, function: &str) -> String {
+    format!(
+        "Refused: {view} is a materialized view built with {function}(), a function defined in the database. What that function read isn't recorded, so Rowkery can't tell whether the copy holds tables the user hasn't shared or masked columns. Query the tables it was built from instead."
+    )
+}
+
+pub const COPY_UNREADABLE: &str =
+    "Refused: this reads a materialized view, and Rowkery couldn't read from the server what it was built from, so it can't tell whether the copy holds tables the user hasn't shared. Query the tables it was built from instead.";
+
 pub const HIDDEN_REFUSAL: &str =
-    "Refused: this reads a table the user hasn't shared with agents in Rowkery. A view or join needs every table it reads shared. Leave it out of the query, or ask the user to share it.";
+    "Refused: this reads a table the user hasn't shared with agents in Rowkery. A view, materialized view or join needs every table it reads shared. Leave it out of the query, or ask the user to share it.";
 
 /// Tables SQLite's `EXPLAIN QUERY PLAN` reads in full (`SCAN t`, as opposed to
 /// `SEARCH t USING INDEX`).

@@ -1087,6 +1087,7 @@ async fn run_read(
 
     // The plan, and the big tables it would read end to end.
     let mut sqlite_eqp: Vec<(i64, i64, String)> = Vec::new();
+    let mut copied_mask = None;
     let (plan_lines, scanned, touched, pg_plan_json) = match engine {
         EngineKind::Postgres => {
             // The SQL as sent, before the planner evaluates any of it.
@@ -1106,11 +1107,19 @@ async fn run_read(
             let (lines, scans) = guard::pg_plan(&plan);
             let scans: Vec<(Option<String>, String)> =
                 scans.into_iter().map(|s| (s.schema, s.table)).collect();
-            let touched = if rule.restricts() || !marks.is_empty() {
+            let mut touched = if rule.restricts() || !marks.is_empty() {
                 lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
             } else {
                 guard::pg_relations(&plan)
             };
+            copied_mask = lineage::pg_copied(
+                store,
+                target,
+                &mut touched,
+                &marks,
+                rule.restricts() || !marks.is_empty(),
+            )
+            .await?;
             refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }
@@ -1172,6 +1181,10 @@ async fn run_read(
         if lineage::keeps_back(&rule, &above, &touched, default_schema(&target.record)) {
             return Err(guard::HIDDEN_REFUSAL.into());
         }
+    }
+    // After the check above: this refusal names the table the copy was made of.
+    if let Some(why) = copied_mask {
+        return Err(why);
     }
     // Sensitive columns: refused unless only returned or counted, and the
     // places in the result that hold one.
