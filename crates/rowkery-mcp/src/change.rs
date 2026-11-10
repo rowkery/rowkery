@@ -113,6 +113,10 @@ pub async fn check(
                     if facts.columns.contains(&key) {
                         return Err(masked_refusal(m));
                     }
+                    let read = |(_, t): &(String, String)| t.eq_ignore_ascii_case(&m.table);
+                    if facts.unseen_joins && facts.tables.iter().any(read) {
+                        return Err(crate::target::SQLITE_USING_REFUSAL.into());
+                    }
                 }
                 masked_mention(store, target, &marks, &above, &touched, change, None).await?;
             }
@@ -362,6 +366,9 @@ fn words(text: &str) -> HashSet<String> {
 pub struct SqliteFacts {
     pub tables: Vec<(String, String)>,
     pub columns: HashSet<(String, String)>,
+    /// It joins with `USING` or `NATURAL`, itself or in a view it reaches:
+    /// the columns such a join compares aren't in `columns`.
+    pub unseen_joins: bool,
 }
 
 pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
@@ -390,6 +397,7 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
     let facts = Arc::new(Mutex::new(SqliteFacts {
         tables: Vec::new(),
         columns: HashSet::new(),
+        unseen_joins: false,
     }));
     let sink = Arc::clone(&facts);
     conn.authorizer(Some(move |ctx: AuthContext<'_>| {
@@ -427,10 +435,48 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
     }));
     conn.prepare(sql).map_err(|e| e.to_string())?;
     drop(conn);
-    let facts = Arc::try_unwrap(facts)
+    let mut facts = Arc::try_unwrap(facts)
         .map_err(|_| "authorizer still held".to_string())?
         .into_inner()
         .map_err(|e| e.to_string())?;
+    // The authorizer isn't asked about the columns of a USING or NATURAL
+    // join, so a table read only through one is missing above: the
+    // bytecode names every table opened. Compiled with triggers and
+    // foreign keys off, it holds the statement's own reads and no more. A
+    // view written through its INSTEAD OF trigger compiles only with them
+    // on, and then counts what the trigger opens too.
+    let look = |triggers: bool| -> Result<_, String> {
+        let conn = rusqlite::Connection::open_with_flags(
+            rowkery_core::connections::expand_home(path),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA foreign_keys = OFF")
+            .and_then(|()| {
+                conn.set_db_config(
+                    rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+                    triggers,
+                )
+            })
+            .map_err(|e| e.to_string())?;
+        let opened = crate::target::sqlite_opened(&conn, sql)?;
+        Ok((opened, crate::target::sqlite_joins_unseen(&conn, sql)?))
+    };
+    let (opened, unseen_joins) = look(false).or_else(|_| look(true))?;
+    if opened.virtual_table && unseen_joins {
+        return Err(crate::target::SQLITE_VIRTUAL_REFUSAL.into());
+    }
+    facts.unseen_joins = unseen_joins;
+    for table in opened.tables {
+        // An INSERT into an AUTOINCREMENT table opens `sqlite_sequence`
+        // itself: the statement's own only when it could have joined it.
+        if table == "sqlite_sequence" && !unseen_joins {
+            continue;
+        }
+        if !facts.tables.iter().any(|(s, t)| s == "main" && *t == table) {
+            facts.tables.push(("main".to_string(), table));
+        }
+    }
     Ok(facts)
 }
 
@@ -447,7 +493,12 @@ mod tests {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE c (id INTEGER PRIMARY KEY, email TEXT, plan TEXT);
-             CREATE TABLE o (id INTEGER PRIMARY KEY, c_id INT, note TEXT);",
+             CREATE TABLE o (id INTEGER PRIMARY KEY, c_id INT, note TEXT);
+             CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT);
+             INSERT INTO seq (note) VALUES ('a');
+             CREATE VIEW ov AS SELECT id, note FROM o;
+             CREATE TRIGGER ov_note INSTEAD OF UPDATE ON ov
+               BEGIN UPDATE o SET note = new.note WHERE id = old.id; END;",
         )
         .unwrap();
         drop(conn);
@@ -465,6 +516,32 @@ mod tests {
         assert_eq!(f.tables.len(), 2);
         let f = sqlite_facts(&p, "DELETE FROM o WHERE id = 3").unwrap();
         assert!(f.tables.contains(&("main".to_string(), "o".to_string())));
+        assert!(!f.unseen_joins);
+        // rowkery/reports#78: the authorizer hears nothing of a table read
+        // only through the columns of a USING or NATURAL join.
+        for sql in [
+            "DELETE FROM o WHERE note IN (SELECT email FROM (SELECT 'x' AS email) NATURAL JOIN c)",
+            "UPDATE o SET note = (SELECT max(email) FROM (SELECT 'x' AS email) FULL JOIN c USING (email))",
+        ] {
+            let f = sqlite_facts(&p, sql).unwrap();
+            assert!(f.tables.contains(&("main".to_string(), "c".to_string())), "{sql}");
+            assert!(f.unseen_joins, "{sql}");
+        }
+        // The table SQLite keeps AUTOINCREMENT counts in is its own doing,
+        // unless the statement could have joined it.
+        let f = sqlite_facts(&p, "INSERT INTO seq (note) VALUES ('b')").unwrap();
+        assert_eq!(f.tables, vec![("main".to_string(), "seq".to_string())]);
+        let f = sqlite_facts(
+            &p,
+            "UPDATE o SET note = (SELECT max(seq) FROM (SELECT 'seq' AS name) NATURAL JOIN sqlite_sequence)",
+        )
+        .unwrap();
+        assert!(f
+            .tables
+            .contains(&("main".to_string(), "sqlite_sequence".to_string())));
+        // A view written through its INSTEAD OF trigger still compiles.
+        let f = sqlite_facts(&p, "UPDATE ov SET note = 'n' WHERE id = 1").unwrap();
+        assert!(f.tables.iter().any(|(_, t)| t == "ov"), "{:?}", f.tables);
     }
 
     /// A cascade or a trigger is the database's doing, not the statement's;
