@@ -173,7 +173,7 @@ impl SqliteDriver {
         let conn = self
             .connection()
             .map_err(|e| ApplyFailure::other(e.into_message()))?;
-        let conn = conn
+        let mut conn = conn
             .lock()
             .map_err(|_| ApplyFailure::other("lock poisoned"))?;
         if !conn.is_autocommit() {
@@ -185,25 +185,31 @@ impl SqliteDriver {
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ApplyFailure::other(e.to_string()))?;
         // The hook goes with the batch: nothing else on the tab counts.
-        let mut counter = SqliteCounter::install(&conn);
-        let rollback = || {
+        fn rollback(conn: &mut rusqlite::Connection) {
             let _ = conn.execute_batch("ROLLBACK");
-            conn.update_hook(None::<fn(Action, &str, &str, i64)>);
+            let _ = conn.update_hook(None::<fn(Action, &str, &str, i64)>);
+        }
+        let mut counter = match SqliteCounter::install(&mut conn) {
+            Ok(counter) => counter,
+            Err(err) => {
+                rollback(&mut conn);
+                return Err(ApplyFailure::other(err.to_string()));
+            }
         };
         let mut counts = ApplyCounts::default();
         if let Err(err) = counter.mark(&conn) {
-            rollback();
+            rollback(&mut conn);
             return Err(ApplyFailure::other(err.to_string()));
         }
         for (index, statement) in statements.iter().enumerate() {
             match conn.execute(&statement.sql, []) {
                 Ok(1) => counts.add(statement.verb, 1),
                 Ok(rows) => {
-                    rollback();
+                    rollback(&mut conn);
                     return Err(ApplyFailure::count(index, statement, rows as u64));
                 }
                 Err(err) => {
-                    rollback();
+                    rollback(&mut conn);
                     return Err(ApplyFailure::error(index, statement, err.to_string()));
                 }
             }
@@ -230,17 +236,17 @@ impl SqliteDriver {
                 beyond(all, &schema, &table, counts.rows())
             }
             Err(err) => {
-                rollback();
+                rollback(&mut conn);
                 return Err(ApplyFailure::other(err.to_string()));
             }
         };
         if !reach.is_empty() && approved != Some(&reach) {
-            rollback();
+            rollback(&mut conn);
             return Err(ApplyFailure::reaches(reach));
         }
-        conn.update_hook(None::<fn(Action, &str, &str, i64)>);
+        let _ = conn.update_hook(None::<fn(Action, &str, &str, i64)>);
         if let Err(err) = conn.execute_batch("COMMIT") {
-            rollback();
+            rollback(&mut conn);
             return Err(ApplyFailure::other(err.to_string()));
         }
         Ok(counts)
@@ -931,7 +937,6 @@ fn result_columns(stmt: &rusqlite::Statement<'_>) -> Vec<Column> {
     // rusqlite panics on a declared type that isn't UTF-8; read it as none.
     let declared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         stmt.columns()
-            .into_iter()
             .map(|c| c.decl_type().map(str::to_string))
             .collect::<Vec<_>>()
     }))
@@ -1046,6 +1051,26 @@ mod tests {
         run("CREATE TRIGGER items_gone AFTER DELETE ON items BEGIN INSERT INTO audit VALUES ('deleted ' || old.id); END;");
         run("DELETE FROM items WHERE id = 1");
         assert_eq!(run("SELECT note FROM audit"), 1);
+    }
+
+    #[test]
+    fn text_holding_two_statements_runs_neither() {
+        // rusqlite 0.41 turns down text with a second statement in it; before
+        // that the first ran and the rest was dropped without a word.
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut run = |sql: &str| driver.query_stream(sql, |_, _| Ok(()));
+        let err =
+            run("INSERT INTO items (name) VALUES ('c'); INSERT INTO items (name) VALUES ('d')")
+                .expect_err("two statements");
+        assert!(err.to_string().contains("Multiple statements"), "{err}");
+        // A comment or a stray `;` after the statement is not a second one.
+        assert_eq!(
+            run("SELECT id FROM items; -- all of them").expect("comment"),
+            2
+        );
+        assert_eq!(run("SELECT id FROM items; ;\n").expect("stray"), 2);
     }
 
     #[test]
