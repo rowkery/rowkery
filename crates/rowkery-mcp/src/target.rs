@@ -726,7 +726,7 @@ pub fn sqlite_tables_read(path: &str, sql: &str) -> Result<Vec<(String, String)>
     use rusqlite::OpenFlags;
     use std::sync::{Arc, Mutex};
 
-    let conn = rusqlite::Connection::open_with_flags(
+    let mut conn = rusqlite::Connection::open_with_flags(
         rowkery_core::connections::expand_home(path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -743,10 +743,116 @@ pub fn sqlite_tables_read(path: &str, sql: &str) -> Result<Vec<(String, String)>
             }
         }
         Authorization::Allow
-    }));
+    }))
+    .map_err(|e| e.to_string())?;
     conn.prepare(sql).map_err(|e| e.to_string())?;
-    let list = seen.lock().map(|l| l.clone()).unwrap_or_default();
+    let mut list = seen.lock().map(|l| l.clone()).unwrap_or_default();
+    let opened = sqlite_opened(&conn, sql)?;
+    if opened.virtual_table && sqlite_joins_unseen(&conn, sql)? {
+        return Err(SQLITE_VIRTUAL_REFUSAL.into());
+    }
+    for table in opened.tables {
+        if !list.iter().any(|(s, t)| s == "main" && *t == table) {
+            list.push(("main".to_string(), table));
+        }
+    }
     Ok(list)
+}
+
+/// What a query that reads a table with a masked column is told when it,
+/// or a view it reaches, joins with `USING` or `NATURAL`.
+pub(crate) const SQLITE_USING_REFUSAL: &str = "Refused: on SQLite a query that reads a table with a masked column can't join with USING or NATURAL JOIN, in its own text or in a view it reads. Write the join with ON.";
+
+/// A virtual table has no root page for the bytecode to name, so one joined
+/// with `USING` or `NATURAL` can't be told from any other.
+pub(crate) const SQLITE_VIRTUAL_REFUSAL: &str = "Refused: on SQLite a query that reads a virtual table (full-text search, json_each, a pragma function) can't join with USING or NATURAL JOIN while tables are hidden or columns masked. Write the join with ON.";
+
+/// Text `rowkery_core::safety::sqlite_names` won't read.
+const SQLITE_UNCLEAR_REFUSAL: &str = "Refused: Rowkery can't be sure how SQLite reads this query, or a view it reads: it holds a parameter (?, :name, @name, $name), a byte-order mark, or a string or comment that never ends. Write the values in and send it again.";
+
+/// What a SQLite statement opens (`sqlite_opened`).
+pub(crate) struct Opened {
+    /// The tables behind the root pages it opens.
+    pub tables: Vec<String>,
+    /// It opens a virtual table, which no root page names.
+    pub virtual_table: bool,
+}
+
+/// The tables whose b-trees a SQLite statement opens, read from its
+/// bytecode (`EXPLAIN`; nothing runs): the table behind every root page an
+/// `Open…` opcode names, an index counted as its table. The authorizer
+/// alone misses a table reached only through the columns of a `USING` or
+/// `NATURAL` join, which SQLite compares without asking it
+/// (rowkery/reports#78). A root page with no table to its name is refused.
+pub(crate) fn sqlite_opened(conn: &rusqlite::Connection, sql: &str) -> Result<Opened, String> {
+    const UNKNOWN: &str = "Refused: Rowkery couldn't tell which tables this reads.";
+    // Cursors over rows the statement makes itself, with no root page.
+    const OWN: &[&str] = &["OpenEphemeral", "OpenAutoindex", "OpenPseudo", "OpenDup"];
+    let roots: HashMap<i64, String> = conn
+        .prepare("SELECT rootpage, tbl_name FROM sqlite_master WHERE rootpage > 0")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+        .map_err(|e| e.to_string())?;
+    let opens: Vec<(String, i64, i64)> = conn
+        .prepare(&format!("EXPLAIN {sql}"))
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get(1)?, r.get(3)?, r.get(4)?)))?
+                .collect()
+        })
+        .map_err(|e| e.to_string())?;
+    let mut tables: Vec<String> = Vec::new();
+    let mut virtual_table = false;
+    for (opcode, root, database) in opens {
+        virtual_table |= opcode == "VOpen";
+        if !(opcode.starts_with("Open") || opcode == "ReopenIdx") || OWN.contains(&opcode.as_str())
+        {
+            continue;
+        }
+        let table = match (database, root) {
+            (0, 1) => "sqlite_master".to_string(),
+            (0, root) => roots.get(&root).cloned().ok_or(UNKNOWN)?,
+            // Only `main` holds anything on a connection opened to look.
+            _ => return Err(UNKNOWN.into()),
+        };
+        if !tables.contains(&table) {
+            tables.push(table);
+        }
+    }
+    Ok(Opened {
+        tables,
+        virtual_table,
+    })
+}
+
+/// Whether a SQLite statement, or a view its text can reach, joins with
+/// `USING` or `NATURAL`: the two joins whose column comparisons the
+/// authorizer isn't asked about. A view is reached by its name in the text
+/// (or in the text of a view reached before it), bare or quoted. Text that
+/// may be read another way, or holds a parameter, is refused.
+pub(crate) fn sqlite_joins_unseen(conn: &rusqlite::Connection, sql: &str) -> Result<bool, String> {
+    let mut views: Vec<(String, String)> = conn
+        .prepare("SELECT upper(name), coalesce(sql, '') FROM sqlite_master WHERE type = 'view'")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+        .map_err(|e| e.to_string())?;
+    let mut texts = vec![sql.to_string()];
+    while let Some(text) = texts.pop() {
+        let Some((bare, quoted)) = rowkery_core::safety::sqlite_names(&text) else {
+            return Err(SQLITE_UNCLEAR_REFUSAL.into());
+        };
+        if bare.iter().any(|w| w == "USING" || w == "NATURAL") {
+            return Ok(true);
+        }
+        // A name the lexer can't hand back whole is taken as reached.
+        let named = |name: &String| {
+            name.contains(['"', '`', '[', ']', '\'', '\\'])
+                || !name.is_ascii()
+                || bare.contains(name)
+                || quoted.contains(name)
+        };
+        let (reached, rest): (Vec<_>, Vec<_>) = views.into_iter().partition(|(n, _)| named(n));
+        texts.extend(reached.into_iter().map(|(_, text)| text));
+        views = rest;
+    }
+    Ok(false)
 }
 
 /// SQLite's version of the masked-column check (`mask`). It has no verbose
@@ -768,7 +874,7 @@ pub fn sqlite_mask_check(
     const REFUSAL: &str = "Refused: on SQLite a masked column can only be returned as it is, from the main SELECT, with no sorting, grouping, subqueries or combined results in the same query.";
     let key = |t: &str, c: &str| (t.to_lowercase(), c.to_lowercase());
     let marked: Vec<(String, String)> = marked.iter().map(|(t, c)| key(t, c)).collect();
-    let conn = rusqlite::Connection::open_with_flags(
+    let mut conn = rusqlite::Connection::open_with_flags(
         rowkery_core::connections::expand_home(path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -802,7 +908,8 @@ pub fn sqlite_mask_check(
             }
         }
         Authorization::Allow
-    }));
+    }))
+    .map_err(|e| e.to_string())?;
     // The origin of each result column needs the raw statement.
     let c_sql = CString::new(sql).map_err(|e| e.to_string())?;
     let mut origins: Vec<Option<(String, String)>> = Vec::new();
@@ -833,8 +940,26 @@ pub fn sqlite_mask_check(
         }
         ffi::sqlite3_finalize(stmt);
     }
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .map_err(|e| e.to_string())?;
     let reads = reads.lock().map(|m| m.clone()).unwrap_or_default();
+    // A `USING` or `NATURAL` join compares its columns without the
+    // authorizer hearing of it, so the counts above miss a join on a marked
+    // column (rowkery/reports#78). Refused wherever a table with one is read.
+    let opened = sqlite_opened(&conn, sql)?;
+    let reads_marked = |table: &str| marked.iter().any(|(m, _)| m == &table.to_lowercase());
+    if (opened.virtual_table
+        || reads.keys().any(|(t, _)| reads_marked(t))
+        || opened.tables.iter().any(|t| reads_marked(t)))
+        && sqlite_joins_unseen(&conn, sql)?
+    {
+        return Err(if opened.virtual_table {
+            SQLITE_VIRTUAL_REFUSAL
+        } else {
+            SQLITE_USING_REFUSAL
+        }
+        .into());
+    }
     let mut positions = Vec::new();
     let mut any = false;
     for m in &marked {
@@ -942,6 +1067,75 @@ mod tests {
             reads("with x as (select v from secret) select * from x").contains(&"secret".into())
         );
         assert_eq!(reads("select s from t"), vec!["t".to_string()]);
+        // rowkery/reports#78: SQLite compares the columns of a USING or
+        // NATURAL join without asking the authorizer; the bytecode still
+        // names every table opened.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "create table pub(v text, w text);
+             create index secret_v on secret(v);
+             create table keyed(v text primary key, n int) without rowid;
+             create view counted as select count(*) n from pub natural full join secret;",
+        )
+        .unwrap();
+        drop(conn);
+        for sql in [
+            "select v from pub full join secret using (v)",
+            "select v from secret full join pub using (v)",
+            "select v from pub natural full join secret",
+            "select v from pub join secret using (v)",
+            "select w from pub natural join secret",
+            "select count(*) from pub natural full join secret",
+            "select * from (select null as id, null as v) natural full join secret",
+            "select v from (select 'x' as v) full join secret using (v)",
+            "select n from counted",
+            "select count(*) from pub left join secret indexed by secret_v using (v)",
+        ] {
+            assert!(reads(sql).contains(&"secret".into()), "{sql}");
+        }
+        assert_eq!(reads("select w from pub"), vec!["pub".to_string()]);
+        assert_eq!(
+            reads("select n from keyed where v = 'a'"),
+            vec!["keyed".to_string()]
+        );
+        assert_eq!(
+            reads("select v from pub join keyed using (v)"),
+            ["pub", "keyed"]
+        );
+        assert_eq!(reads("select 1"), Vec::<String>::new());
+        assert_eq!(
+            reads("select count(*) from sqlite_master"),
+            ["sqlite_master"]
+        );
+        // A virtual table has no root page: joined this way it is refused,
+        // and named by the authorizer as before when it isn't.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("create virtual table docs using fts5(title, body);")
+            .unwrap();
+        drop(conn);
+        for sql in [
+            "select * from (select null as title, null as body) natural full join docs",
+            "select name from (select 'v' as name) join pragma_table_info('secret') using (name)",
+            "select * from (select 1 as key) natural join json_each('[1]')",
+        ] {
+            let err = sqlite_tables_read(p, sql).expect_err(sql);
+            assert!(err.contains("virtual table"), "{sql}: {err}");
+        }
+        assert!(reads("select title from docs where docs match 'a'").contains(&"docs".into()));
+        assert!(reads("select count(*) from docs").contains(&"docs".into()));
+        assert!(reads("select j.value from pub, json_each('[1]') j").contains(&"pub".into()));
+        // What SQLite reads another way than the lexer is refused, not
+        // guessed; a parameter nobody binds stops at the bytecode already.
+        for sql in [
+            "select * from (select null as title) \u{FEFF}natural full join docs",
+            "select $a(--), title from (select null as title) natural full join docs",
+        ] {
+            let err = sqlite_tables_read(p, sql).expect_err(sql);
+            assert!(
+                err.contains("can't be sure") || err.contains("parameters"),
+                "{sql}: {err}"
+            );
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1009,6 +1203,10 @@ mod tests {
                  create table phones(id integer primary key, num text);
                  create index phones_num on phones(num);
                  create view cv as select id, email from customers;
+                 create table leads(id integer primary key, email text);
+                 create view matched as select leads.email from leads join customers using (email);
+                 create view lead_names as select id, email from leads;
+                 create view \"through it\" as select * from matched;
                  insert into customers values (1, 'a@x', 'pro'), (2, 'b@x', 'free');",
             )
             .unwrap();
@@ -1045,6 +1243,61 @@ mod tests {
         ] {
             assert!(check(sql).is_err(), "{sql}");
         }
+        // rowkery/reports#78: a USING or NATURAL join compares a marked
+        // column without the authorizer hearing of it.
+        for sql in [
+            "select email from customers full join leads using (email)",
+            "select email from customers full join (select 'zzz' as email) using (email)",
+            "select email from customers natural full join (select 'zzz' as email)",
+            "select email from (select 'zzz' as email) natural full join customers",
+            "select id from customers join (select 'a@x' as email) using (email)",
+            "select customers.id from customers join leads using (email)",
+            "select id from customers natural join (select 'a@x' as email)",
+            "select c.id from customers c left join leads l USING(email) where l.id is not null",
+            "select email from customers/**/natural/**/full join leads",
+            "select email from customers full join leads [l]using(email)",
+            "select 1 as \"a\"\"b\", email from customers full join leads using (email)",
+            "select '--', email from customers full join leads using (email)",
+            "select * from matched",
+            "select m.email from matched m join lead_names n on n.id = 1",
+            // A view reached through another, by a quoted name.
+            "select * from [through it]",
+            "select * from \"Through It\"",
+            "select * from 'through it'",
+            // Stricter than it must be: the join isn't on the marked column.
+            "select c.plan from customers c join leads using (id)",
+        ] {
+            let err = check(sql).expect_err(sql);
+            assert!(err.contains("USING or NATURAL"), "{sql}: {err}");
+        }
+        for sql in [
+            "select email from customers full join leads \u{FEFF}using (email)",
+            "select email from customers \u{FEFF}natural full join leads",
+            "select * from \u{FEFF}matched",
+            "select $a(--), email from customers natural full join leads",
+            "select :a('), email from customers natural full join leads --'",
+        ] {
+            let err = check(sql).expect_err(sql);
+            assert!(
+                err.contains("can't be sure") || err.contains("parameters"),
+                "{sql}: {err}"
+            );
+        }
+        // The same joins written with ON are judged as before, and a join
+        // that reads no marked table may use either word.
+        assert_eq!(
+            check("select c.id, c.email from customers c join leads l on l.id = c.id"),
+            Ok(vec![1])
+        );
+        assert!(check("select c.id from customers c join leads l on l.email = c.email").is_err());
+        assert_eq!(
+            check("select l.email from leads l join lead_names using (id)"),
+            Ok(vec![])
+        );
+        assert_eq!(
+            check("select plan as \"using\", 'natural' from customers -- using"),
+            Ok(vec![])
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
