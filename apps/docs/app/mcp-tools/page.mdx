@@ -34,7 +34,7 @@ Every query an agent runs is held to these limits. They are fixed in the server 
 - **Rows.** The agent can ask for any number of rows from 1 to the maximum with `max_rows`. Rowkery caps the query by wrapping it in an outer `SELECT … LIMIT`, so the query's own `ORDER BY` and `LIMIT` stay as written. When the cap cuts the result, `more` is `true`.
 - **Time.** On Postgres the limit is the session's `statement_timeout`; on SQLite the query is interrupted. Separately, Rowkery gives up on connecting after 20 seconds, and on any other step that waits on the database (reading the schema, running the query) 10 seconds past the time limit.
 - **Big tables.** Before running a query, Rowkery reads its plan. On Postgres, a plan that reads a table of more than 100,000 rows (by the planner's estimate) from start to end is refused, and the refusal names the table and its indexes so the agent can filter on one. A plain browse that stops early under the row cap is fine. On SQLite, a local file nobody else is waiting on, the query runs anyway with a note. A Postgres plan bigger than 8 MB, which a query over a table with thousands of partitions or many joins can produce, is refused rather than checked. The `explain` tool lists plan lines up to 64 KB and says how many more there are.
-- **Text and size.** Text longer than 200 characters is cut and ends with `…`; binary values come back as `<N bytes>`. Rows stop once the JSON would pass 64 KB. Either way the answer carries a note saying so.
+- **Text and size.** Text longer than 200 characters is cut and ends with `…`; binary values come back as `<N bytes>`. Rows stop once the JSON would pass 64 KB. Either way the answer carries a note saying so. On SQLite a single value over 64 MB stops the query, whether a function builds it or a row holds it, and so does a row whose values pass 64 MB together: the row's other columns still read, and `length()` gives a value's size.
 - **Read-only.** Every Postgres query runs on a read-only session (`default_transaction_read_only`), set again before every statement, so nothing a query does can loosen it. SQLite files are opened with writes refused.
 
 ## Instructions agents get
@@ -232,6 +232,7 @@ The reasons a function is refused by name:
 | `Stopped after 10 s (statement timeout). Filter on an indexed column or aggregate less.` | The query ran past the time limit and was stopped |
 | `Timed out connecting.` | The database didn't accept a connection within 20 seconds |
 | `Timed out reading the schema.`, `Timed out reading indexes.`, `Timed out.` | The database didn't answer a schema read, an index read or a `list_databases` / `sessions` / `health` call within 20 seconds |
+| `Stopped: a value this reads or builds, or one row of them together, is over 64 MB, more than an agent's query takes. Leave that column out, or read its size with length().` | SQLite: one text or binary value in the query, or the values of one row together, are larger than 64 MB. Rowkery keeps 200 characters of a cell, so it stops before holding the whole value in memory |
 | `Timed out waiting for the server.` | The server stopped answering mid-query; Rowkery cancelled it and drops that session |
 
 Any other error from the database, such as a syntax error or a missing column, comes back as the database's own message.
