@@ -110,7 +110,7 @@ A connection shared before Rowkery had Edit access shares every database except 
 
 A view is only as open as the tables it reads. Tick every table under a view, or any query on the view is refused. The same goes for a join: each table in it must be shared.
 
-A materialized view keeps a copy of the rows it was built from, so it follows the same rule: every table its query reads must be shared, or a query on it is refused. Rowkery reads what it was built from off the server each time, through any views and materialized views in between.
+A materialized view keeps a copy of the rows it was built from, so it follows the same rule: every table its query reads must be shared, or a query on it is refused. Rowkery reads what it was built from off the server each time, through any views and materialized views in between. The server doesn't record what a function of your own read, so while anything is hidden, unticked or sensitive, a materialized view whose query calls one is refused.
 
 ## What the agent sees of hidden tables
 

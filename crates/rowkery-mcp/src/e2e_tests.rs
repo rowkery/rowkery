@@ -2330,6 +2330,7 @@ async fn a_materialized_view_answers_for_what_it_was_built_from() {
         &setup,
         "DROP TABLE IF EXISTS mcp_mv_t_people, mcp_mv_t_secrets, mcp_mv_t_open, mcp_mv_t_led CASCADE;
          DROP MATERIALIZED VIEW IF EXISTS mcp_mv_auth, mcp_mv_stats;
+         DROP FUNCTION IF EXISTS mcp_mv_peek(int) CASCADE;
          CREATE TABLE mcp_mv_t_people (id int PRIMARY KEY, name text, ssn text);
          INSERT INTO mcp_mv_t_people VALUES (1, 'Ada', '111-22-3333');
          CREATE TABLE mcp_mv_t_secrets (id int PRIMARY KEY, api_key text);
@@ -2353,7 +2354,12 @@ async fn a_materialized_view_answers_for_what_it_was_built_from() {
          CREATE VIEW mcp_mv_v_over AS SELECT k FROM mcp_mv_chain;
          CREATE MATERIALIZED VIEW mcp_mv_open AS SELECT id, label FROM mcp_mv_t_open;
          CREATE MATERIALIZED VIEW mcp_mv_led AS SELECT amount FROM mcp_mv_t_led;
-         CREATE MATERIALIZED VIEW mcp_mv_led_1 AS SELECT amount FROM mcp_mv_t_led_1;",
+         CREATE MATERIALIZED VIEW mcp_mv_led_1 AS SELECT amount FROM mcp_mv_t_led_1;
+         -- Schema-qualified: since Postgres 17 a materialized view is built
+         -- with only pg_catalog on the search path.
+         CREATE FUNCTION mcp_mv_peek(int) RETURNS text LANGUAGE sql
+           AS 'SELECT api_key FROM public.mcp_mv_t_secrets WHERE id = $1';
+         CREATE MATERIALIZED VIEW mcp_mv_fn AS SELECT o.id, mcp_mv_peek(o.id) AS k FROM mcp_mv_t_open o;",
     )
     .await
     .expect("fixtures");
@@ -2489,6 +2495,31 @@ async fn a_materialized_view_answers_for_what_it_was_built_from() {
         .await
         .expect_err("its table isn't ticked");
     assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
+    // Unticked and with a sensitive column: the refusal doesn't name it.
+    let mcp = share(&[], Some(&["mcp_mv_people"]), &["mcp_mv_t_people.ssn"]);
+    let err = query(&mcp, "SELECT tax FROM mcp_mv_people")
+        .await
+        .expect_err("its table isn't ticked");
+    assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
+
+    // Built through a function of the database's own: no rule records what
+    // that read, so the copy answers only when nothing is kept back.
+    let through =
+        crate::guard::copied_through_code_refusal("public.mcp_mv_fn", "public.mcp_mv_peek");
+    for mcp in [
+        share(&["mcp_mv_t_secrets"], None, &[]),
+        share(&[], Some(&["mcp_mv_fn", "mcp_mv_t_open"]), &[]),
+        share(&[], None, &["mcp_mv_t_people.ssn"]),
+    ] {
+        let err = query(&mcp, "SELECT k FROM mcp_mv_fn")
+            .await
+            .expect_err("built through a function");
+        assert_eq!(err, through);
+    }
+    let mcp = share(&[], None, &[]);
+    query(&mcp, "SELECT k FROM mcp_mv_fn")
+        .await
+        .expect("nothing kept back");
 
     // A sensitive column: its values sit in the copy under another name
     // (or inside a whole row), so no copy of that table is read at all.
@@ -2581,7 +2612,8 @@ async fn a_materialized_view_answers_for_what_it_was_built_from() {
     session_execute(
         &setup,
         "DROP MATERIALIZED VIEW IF EXISTS mcp_mv_auth, mcp_mv_stats;
-         DROP TABLE mcp_mv_t_people, mcp_mv_t_secrets, mcp_mv_t_open, mcp_mv_t_led CASCADE;",
+         DROP TABLE mcp_mv_t_people, mcp_mv_t_secrets, mcp_mv_t_open, mcp_mv_t_led CASCADE;
+         DROP FUNCTION mcp_mv_peek(int);",
     )
     .await
     .expect("cleanup");

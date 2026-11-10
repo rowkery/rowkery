@@ -75,7 +75,8 @@ pub async fn check(
                 } else {
                     guard::pg_relations(&plan)
                 };
-                crate::lineage::pg_copied(store, target, &mut touched, &marks).await?;
+                let copied_mask =
+                    crate::lineage::pg_copied(store, target, &mut touched, &marks, guarded).await?;
                 let written = functions::scan_sql(&change.sql);
                 crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
                 let above = if guarded {
@@ -84,6 +85,10 @@ pub async fn check(
                     crate::lineage::Above::default()
                 };
                 refuse_unshared(target, &above, &touched)?;
+                // After the check above: this refusal names the table the copy was made of.
+                if let Some(why) = copied_mask {
+                    return Err(why);
+                }
                 masked_mention(
                     store,
                     target,

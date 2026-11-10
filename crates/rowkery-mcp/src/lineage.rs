@@ -180,20 +180,24 @@ pub(crate) async fn pg_read_relations(
 /// `pg_depend` records nothing for them), followed through the views and
 /// materialized views in it, with the partitions and child tables under
 /// each table (the query may read them through their parent). A sequence or
-/// type it uses is no table. Not followed: what a function in the query
-/// reads, as in any statement.
+/// type it uses is no table.
 ///
 /// Refused outright, because a stored copy can't be checked column by
-/// column: one built from a table with sensitive columns (the copy holds
-/// their values under names of its own), and one built from a catalog that
-/// holds credentials. Refused too when the server's rules can't be read as
-/// expected, since nothing then says what the copy holds.
+/// column: one built from a catalog that holds credentials, and one built
+/// from a table with sensitive columns (the copy holds their values under
+/// names of its own). That second refusal names the table, so it is handed
+/// back for the caller to give once it knows the table is shared. Refused
+/// too when nothing says what the copy holds: the server's rules can't be
+/// read as expected, or (`guarded`: something is kept back or masked) the
+/// stored query calls a function defined in the database, whose reads no
+/// rule records.
 pub(crate) async fn pg_copied(
     store: &mut Store,
     target: &Target,
     touched: &mut Vec<(Option<String>, String)>,
     marks: &[mask::Marked],
-) -> Result<(), String> {
+    guarded: bool,
+) -> Result<Option<String>, String> {
     let lit = |v: &str| {
         rowkery_core::query_util::sql_literal(EngineKind::Postgres, &Value::Text(v.to_string()))
     };
@@ -210,7 +214,7 @@ pub(crate) async fn pg_copied(
     names.sort();
     names.dedup();
     if names.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     // Asked first and alone: nearly every statement reads no materialized
     // view, and then nothing below runs.
@@ -226,7 +230,7 @@ pub(crate) async fn pg_copied(
         .rows
         .is_empty()
     {
-        return Ok(());
+        return Ok(None);
     }
     // The relations a rule's query names, as its stored tree spells them.
     // pg_roles reads pg_authid on every server, so a tree that doesn't show
@@ -243,7 +247,7 @@ pub(crate) async fn pg_copied(
     // Each walk starts at the view itself. UNION, not UNION ALL: a relation
     // is reached once per materialized view however many paths lead to it,
     // and neither rules nor pg_inherits have cycles, so the walk ends.
-    let sql = format!(
+    let walk = format!(
         "WITH RECURSIVE built(mv, rel) AS ( \
            SELECT v.oid, v.oid FROM ({views}) v \
            UNION SELECT b.mv, x.rel FROM built b CROSS JOIN LATERAL ( \
@@ -256,18 +260,45 @@ pub(crate) async fn pg_copied(
                JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass \
                  AND d.objid = r.oid AND d.refclassid = 'pg_catalog.pg_class'::regclass \
                WHERE k.oid = b.rel AND k.relkind IN ('v', 'm') \
-             UNION ALL SELECT i.inhrelid FROM pg_catalog.pg_inherits i WHERE i.inhparent = b.rel) x) \
-         SELECT mn.nspname::text, m.relname::text, sn.nspname::text, s.relname::text \
+             UNION ALL SELECT i.inhrelid FROM pg_catalog.pg_inherits i WHERE i.inhparent = b.rel) x)"
+    );
+    let text = |v: Option<&Value>| match v {
+        Some(Value::Text(t)) => t.clone(),
+        _ => String::new(),
+    };
+    if guarded {
+        // A function of the database's own in the copy's query, or in a
+        // view under it. Compiled IMMUTABLE code (an extension's) computes
+        // on its arguments; an aggregate may step through any function.
+        let calls = format!(
+            "{walk} SELECT mn.nspname::text, m.relname::text, pn.nspname::text, p.proname::text \
+               FROM built b JOIN pg_catalog.pg_class m ON m.oid = b.mv \
+               JOIN pg_catalog.pg_namespace mn ON mn.oid = m.relnamespace \
+               JOIN pg_catalog.pg_rewrite r ON r.ev_class = b.rel \
+               JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass \
+                 AND d.objid = r.oid AND d.refclassid = 'pg_catalog.pg_proc'::regclass \
+               JOIN pg_catalog.pg_proc p ON p.oid = d.refobjid \
+               JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace \
+               JOIN pg_catalog.pg_language l ON l.oid = p.prolang \
+               WHERE pn.nspname NOT IN ('pg_catalog', 'information_schema') \
+                 AND NOT (l.lanname IN ('c', 'internal') AND p.provolatile = 'i' AND p.prokind = 'f') \
+               LIMIT 1"
+        );
+        if let Some(r) = store.read(target, &calls).await?.rows.first() {
+            return Err(guard::copied_through_code_refusal(
+                &format!("{}.{}", text(r.first()), text(r.get(1))),
+                &format!("{}.{}", text(r.get(2)), text(r.get(3))),
+            ));
+        }
+    }
+    let sql = format!(
+        "{walk} SELECT mn.nspname::text, m.relname::text, sn.nspname::text, s.relname::text \
            FROM built b JOIN pg_catalog.pg_class m ON m.oid = b.mv \
            JOIN pg_catalog.pg_namespace mn ON mn.oid = m.relnamespace \
            JOIN pg_catalog.pg_class s ON s.oid = b.rel \
            JOIN pg_catalog.pg_namespace sn ON sn.oid = s.relnamespace \
            WHERE b.rel <> b.mv AND s.relkind IN ('r', 'p', 'm', 'f')"
     );
-    let text = |v: Option<&Value>| match v {
-        Some(Value::Text(t)) => t.clone(),
-        _ => String::new(),
-    };
     // (the materialized view, a relation it was built from)
     let built: Vec<((String, String), (String, String))> = store
         .read(target, &sql)
@@ -282,7 +313,7 @@ pub(crate) async fn pg_copied(
         })
         .collect();
     if built.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     if let Some(((schema, name), _)) = built
         .iter()
@@ -296,32 +327,28 @@ pub(crate) async fn pg_copied(
         .iter()
         .map(|(_, (s, t))| (Some(s.clone()), t.clone()))
         .collect();
+    let mut masked = None;
     if !marks.is_empty() {
         // A mark on a table covers its partitions and child tables.
         let up = above(store, target, &sources).await?;
-        for ((schema, name), (s, t)) in &built {
+        masked = built.iter().find_map(|((schema, name), (s, t))| {
             let marked = |s: &str, t: &str| marks.iter().any(|m| m.schema == s && m.table == t);
-            let from = std::iter::once((s.as_str(), t.as_str()))
+            std::iter::once((s.as_str(), t.as_str()))
                 .chain(
                     up.of(s, t)
                         .iter()
                         .map(|l| (l.schema.as_str(), l.name.as_str())),
                 )
-                .find(|(s, t)| marked(s, t));
-            if let Some((s, t)) = from {
-                return Err(mask::copy_refusal(
-                    &format!("{schema}.{name}"),
-                    &format!("{s}.{t}"),
-                ));
-            }
-        }
+                .find(|(s, t)| marked(s, t))
+                .map(|(s, t)| mask::copy_refusal(&format!("{schema}.{name}"), &format!("{s}.{t}")))
+        });
     }
     for source in sources {
         if !touched.contains(&source) {
             touched.push(source);
         }
     }
-    Ok(())
+    Ok(masked)
 }
 
 #[cfg(test)]

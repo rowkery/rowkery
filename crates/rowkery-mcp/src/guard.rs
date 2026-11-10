@@ -571,6 +571,12 @@ pub fn copied_credentials_refusal(view: &str) -> String {
     )
 }
 
+pub fn copied_through_code_refusal(view: &str, function: &str) -> String {
+    format!(
+        "Refused: {view} is a materialized view built with {function}(), a function defined in the database. What that function read isn't recorded, so Rowkery can't tell whether the copy holds tables the user hasn't shared or masked columns. Query the tables it was built from instead."
+    )
+}
+
 pub const COPY_UNREADABLE: &str =
     "Refused: this reads a materialized view, and Rowkery couldn't read from the server what it was built from, so it can't tell whether the copy holds tables the user hasn't shared. Query the tables it was built from instead.";
 
