@@ -586,8 +586,8 @@ pub struct BrowseOptions {
     /// `order` then the key, and continue by keyset from `after`.
     #[serde(default)]
     pub key: Vec<String>,
-    /// The last loaded row, by column name: the next page holds the rows
-    /// that sort after it.
+    /// The last loaded row's sort and key cells, by column name: the next
+    /// page holds the rows that sort after it.
     #[serde(default)]
     pub after: Option<HashMap<String, Value>>,
 }

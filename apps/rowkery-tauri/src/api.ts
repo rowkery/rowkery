@@ -1028,7 +1028,7 @@ export interface BrowseOptions {
   offset?: number;
   /** The primary key: pages order by it last and continue after `after`. */
   key?: string[];
-  /** The last loaded row by column name; the next page starts after it. */
+  /** The last loaded row's sort and key cells by column name; the next page starts after it. */
   after?: Record<string, Value>;
 }
 

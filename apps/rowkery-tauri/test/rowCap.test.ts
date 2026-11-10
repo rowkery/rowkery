@@ -38,5 +38,9 @@ describe("row cap", () => {
     // A binary key or sort, or a column that wasn't selected: left out, so core pages by OFFSET.
     expect(pageAfter(["payload", "id"], cell)).toEqual({ id: { Int: 1000 } });
     expect(pageAfter(["hidden", "id"], cell)).toEqual({ id: { Int: 1000 } });
+    // JSON would send NaN as null, which core can't read as a cell.
+    row.score = { Float: NaN };
+    row.rate = { Float: 0.5 };
+    expect(pageAfter(["score", "rate", "id"], cell)).toEqual({ rate: { Float: 0.5 }, id: { Int: 1000 } });
   });
 });
