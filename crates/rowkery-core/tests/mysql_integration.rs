@@ -479,6 +479,53 @@ async fn browse_pages_by_key_with_odd_values() {
     assert_eq!(after_backslash[0][0], Value::Text("it's".into()));
 }
 
+/// Export › SQL INSERT writes a file this server reads back as the same rows.
+#[tokio::test]
+async fn a_sql_insert_export_loads_back() {
+    use rowkery_core::export::{ExportFormat, ExportWriter};
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS `it select`, `it select 2`;
+         CREATE TABLE `it select` (`from` INT PRIMARY KEY, `where` VARCHAR(40), j JSON, d DOUBLE,
+            b VARBINARY(8), big BIGINT UNSIGNED);
+         CREATE TABLE `it select 2` LIKE `it select`;
+         INSERT INTO `it select` VALUES
+            (1, 'back\\\\slash', '{\"s\": \"é\\\\\"q\"}', 1.7976931348623157e308, x'00ff27', 18446744073709551615),
+            (2, 'tr\\\\'' ick', '[1, null]', 1e-300, x'', 0),
+            (3, 'it''s \"q\" 😀', NULL, 0.1, NULL, NULL),
+            (4, 'two\\r\\nlines', NULL, 0, NULL, NULL)",
+    )
+    .await
+    .unwrap();
+    let (batches, result) = run(&mut s, "SELECT * FROM `it select` ORDER BY `from`").await;
+    result.unwrap();
+    let mut w = ExportWriter::new(
+        Vec::new(),
+        ExportFormat::SqlInsert {
+            engine: EngineKind::Mysql,
+            schema: config().database,
+            table: "it select 2".into(),
+        },
+    );
+    w.columns(&batches[0].columns).unwrap();
+    for row in batches.iter().flat_map(|b| &b.rows) {
+        w.row(row).unwrap();
+    }
+    let file = String::from_utf8(w.finish().unwrap()).unwrap();
+    session_execute(&mut s, &file)
+        .await
+        .unwrap_or_else(|e| panic!("{e}\n{file}"));
+    let copy = rows(&mut s, "SELECT * FROM `it select 2` ORDER BY `from`").await;
+    let source: Vec<Vec<Value>> = batches.into_iter().flat_map(|b| b.rows).collect();
+    assert_eq!(copy, source, "{file}");
+    assert_eq!(copy[0][1], Value::Text("back\\slash".into()));
+    assert_eq!(copy[1][1], Value::Text("tr\\' ick".into()));
+    assert_eq!(copy[3][1], Value::Text("two\r\nlines".into()));
+    assert!(file.starts_with("SET NAMES utf8mb4;\n"), "{file}");
+    assert!(file.contains("_utf8mb4 X'74776F0D0A6C696E6573'"), "{file}");
+}
+
 #[tokio::test]
 async fn tls_as_the_form_asks() {
     // Prefer always connects: TLS when the server has it.

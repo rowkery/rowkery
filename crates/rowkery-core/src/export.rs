@@ -90,6 +90,12 @@ impl<W: Write> ExportWriter<W> {
                 engine: EngineKind::Postgres,
                 ..
             } => writeln!(self.out, "SET standard_conforming_strings = on;"),
+            // The file is UTF-8, and the mysql client reads it as latin1
+            // unless told (the mariadb client as utf8mb3, without emoji).
+            ExportFormat::SqlInsert {
+                engine: EngineKind::Mysql,
+                ..
+            } => writeln!(self.out, "SET NAMES utf8mb4;"),
             ExportFormat::SqlInsert { .. } => Ok(()),
         }
     }
@@ -125,10 +131,15 @@ impl<W: Write> ExportWriter<W> {
                     .map(|c| quote_ident(*engine, &c.name))
                     .collect();
                 let values: Vec<String> = row.iter().map(|v| literal(*engine, v)).collect();
+                // A result that reads no one table has no schema to name.
+                let target = if schema.is_empty() {
+                    quote_ident(*engine, table)
+                } else {
+                    qualified_table_sql(*engine, schema, table)
+                };
                 writeln!(
                     self.out,
-                    "INSERT INTO {} ({}) VALUES ({});",
-                    qualified_table_sql(*engine, schema, table),
+                    "INSERT INTO {target} ({}) VALUES ({});",
                     names.join(", "),
                     values.join(", ")
                 )
@@ -205,8 +216,17 @@ fn literal(engine: EngineKind, v: &Value) -> String {
         Value::Null => "NULL".into(),
         Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         Value::Int(n) => n.to_string(),
+        // MySQL reads a long plain number as DECIMAL, which holds 65 digits.
+        Value::Float(f) if f.is_finite() && engine == EngineKind::Mysql => {
+            crate::query_util::mysql_float(*f)
+        }
         Value::Float(f) if f.is_finite() => f.to_string(),
         Value::Float(f) => format!("'{f}'"),
+        // Reading a file, the mysql client makes `\r\n` a `\n` and stops
+        // at a NUL, inside a string too.
+        Value::Text(t) if engine == EngineKind::Mysql && t.contains(['\r', '\0']) => {
+            crate::query_util::mysql_hex_text(t)
+        }
         Value::Text(t) if engine == EngineKind::Mysql => crate::query_util::mysql_text(t),
         Value::Text(t) => format!("'{}'", t.replace('\'', "''")),
         Value::Bytes(b) => match engine {
@@ -321,6 +341,63 @@ mod tests {
         // SQLite strings have no escapes: no SET.
         assert!(lite.starts_with("INSERT INTO t ("), "{lite}");
         assert!(lite.contains("X'DEAD');\n"), "{lite}");
+        // A query's result that reads no one table: no schema, not `"".results`.
+        for engine in [EngineKind::Postgres, EngineKind::Mysql] {
+            let out = write(ExportFormat::SqlInsert {
+                engine,
+                schema: String::new(),
+                table: "results".into(),
+            });
+            assert!(out.contains("INSERT INTO results (id, "), "{out}");
+        }
+    }
+
+    /// MySQL names go in backticks (`"…"` is a string there), a backslash
+    /// can't be an escape, and a double keeps its value.
+    #[test]
+    fn sql_inserts_for_mysql() {
+        let mut w = ExportWriter::new(
+            Vec::new(),
+            ExportFormat::SqlInsert {
+                engine: EngineKind::Mysql,
+                schema: "shop".into(),
+                table: "select".into(),
+            },
+        );
+        let names = ["from", "note", "f", "data"];
+        w.columns(&names.map(|n| Column {
+            name: n.into(),
+            type_name: "text".into(),
+        }))
+        .unwrap();
+        w.row(&[
+            Value::Int(1),
+            Value::Text("tr\\' ick".into()),
+            Value::Float(f64::MAX),
+            Value::Bytes(vec![0xde, 0xad]),
+        ])
+        .unwrap();
+        w.row(&[
+            Value::Int(2),
+            Value::Text("it's".into()),
+            Value::Float(0.1),
+            Value::Null,
+        ])
+        .unwrap();
+        w.row(&[
+            Value::Int(3),
+            Value::Text("a\r\nb\0".into()),
+            Value::Float(0.0),
+            Value::Null,
+        ])
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(w.finish().unwrap()).unwrap(),
+            "SET NAMES utf8mb4;\n\
+             INSERT INTO shop.`select` (`from`, note, f, data) VALUES (1, _utf8mb4 X'74725C272069636B', 1.7976931348623157e308, X'DEAD');\n\
+             INSERT INTO shop.`select` (`from`, note, f, data) VALUES (2, 'it''s', 0.1, NULL);\n\
+             INSERT INTO shop.`select` (`from`, note, f, data) VALUES (3, _utf8mb4 X'610D0A6200', 0, NULL);\n"
+        );
     }
 
     #[test]
