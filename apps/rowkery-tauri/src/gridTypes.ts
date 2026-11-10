@@ -45,6 +45,8 @@ export interface GridEditing {
   /** Why nothing can be edited (↵ shows it in the tray), or null when it can. */
   refusal: string | null;
   onRefused: () => void;
+  /** True when a loaded row's key can't name it: the tray says why, and nothing is edited. */
+  refuseRow: (row: number) => boolean;
   /** Per result column: its editor, or null where the column isn't edited. */
   editors: (ColumnEditor | null)[];
   /** Pending inserts, newest first, as cells per result column (undefined: DEFAULT). */

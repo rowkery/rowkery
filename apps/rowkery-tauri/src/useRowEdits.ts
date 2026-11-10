@@ -7,8 +7,10 @@ import {
   changeCount,
   columnEditor,
   commitNeedsReview,
+  cutBytes,
   editRefusal,
   emptyBuffer,
+  loadedKey,
   parseInput,
   removeInsert,
   revertCell,
@@ -113,20 +115,21 @@ export function useRowEdits(o: Options) {
     });
   }, [columns, table, engine, o.enums]);
 
-  /** A loaded row's key, or null when it can't name the row (a key cell missing, NULL or bytes). */
-  const keyOf = useCallback(
-    (r: number): KeyCells | null => {
-      const key: KeyCells = [];
-      for (const column of pk) {
-        const ci = names.indexOf(column);
-        if (ci < 0 || r >= rows.length || rows.isNull(r, ci)) return null;
-        const value = rows.get(r, ci);
-        if ("Bytes" in value) return null;
-        key.push({ column, value });
-      }
-      return key.length ? key : null;
+  const keyOf = useCallback((r: number) => loadedKey(pk, names, rows, r), [pk, names, rows]);
+
+  /** Why a loaded row's key can't name it, or null when it can. */
+  const keyRefusal = useCallback(
+    (r: number): string | null => {
+      if (keyOf(r)) return null;
+      const cut =
+        r < rows.length &&
+        pk.some((column) => {
+          const ci = names.indexOf(column);
+          return ci >= 0 && cutBytes(rows.get(r, ci));
+        });
+      return cut ? "This row's binary key is over 16 bytes, so it can't be edited here" : "This row's key can't name it";
     },
-    [pk, names, rows],
+    [keyOf, pk, names, rows],
   );
 
   // Loaded rows by key, only while rows are edited or marked.
@@ -187,11 +190,11 @@ export function useRowEdits(o: Options) {
       if (name === undefined) return;
       if ("insert" in target) return update((b) => setInsertCell(b, target.insert, name, value));
       const key = keyOf(target.row);
-      if (!key) return optsRef.current.onRefused("This row's key can't name it");
+      if (!key) return optsRef.current.onRefused(keyRefusal(target.row) ?? "");
       const was = rows.isNull(target.row, col) ? null : rows.get(target.row, col);
       update((b) => stageCell(b, key, name, value, was, editors[col]?.kind));
     },
-    [names, keyOf, rows, update, editors],
+    [names, keyOf, keyRefusal, rows, update, editors],
   );
 
   const insertRow = useCallback(() => {
@@ -225,10 +228,12 @@ export function useRowEdits(o: Options) {
   const toggleDelete = useCallback(
     (picked: number[]) => {
       const keys = picked.map(keyOf);
-      if (!keys.length || keys.some((k) => !k)) return optsRef.current.onRefused("These rows' keys can't name them");
+      const unnamed = picked.find((_, i) => !keys[i]);
+      if (unnamed !== undefined) return optsRef.current.onRefused(keyRefusal(unnamed) ?? "");
+      if (!keys.length) return;
       update((b) => toggleDeletes(b, keys as KeyCells[]));
     },
-    [keyOf, update],
+    [keyOf, keyRefusal, update],
   );
 
   /** A pasted block, cell by cell from the ring; what falls outside, or doesn't parse, is left. */
@@ -307,6 +312,11 @@ export function useRowEdits(o: Options) {
     return {
       refusal,
       onRefused: () => refusal && optsRef.current.onRefused(refusal),
+      refuseRow: (row) => {
+        const why = keyRefusal(row);
+        if (why) optsRef.current.onRefused(why);
+        return !!why;
+      },
       editors,
       inserts: (buffer?.inserts ?? []).map((ins) => ({
         id: ins.id,
@@ -329,7 +339,7 @@ export function useRowEdits(o: Options) {
       focusInsert,
       onSelection: (picked, col) => setSelection({ rows: picked, col }),
     };
-  }, [tableTab, o.shown, refusal, editors, buffer, version, names, states, stage, update, keyOf, insertRow, duplicate, toggleDelete, paste, searchKey, focusInsert]);
+  }, [tableTab, o.shown, refusal, editors, buffer, version, names, states, stage, update, keyOf, keyRefusal, insertRow, duplicate, toggleDelete, paste, searchKey, focusInsert]);
 
   const rowsEditable = !!editing && !refusal;
   const cellEditable = rowsEditable && selection.col >= 0 && !!editors[selection.col];

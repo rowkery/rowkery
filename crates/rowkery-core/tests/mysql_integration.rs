@@ -648,6 +648,53 @@ fn deleted(table: &str, n: u64) -> TableRows {
     }
 }
 
+/// A `BINARY(16)` key (a UUID, usually) names its row by every byte.
+#[tokio::test]
+async fn edits_name_a_row_by_a_binary_key() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_ed_bin; CREATE TABLE it_ed_bin (id BINARY(16) PRIMARY KEY,          label VARCHAR(20)); INSERT INTO it_ed_bin VALUES          (X'00112233445566778899AABBCCDDEEFF', 'a'), (X'00112233445566778899AABBCCDDEE00', 'b'),          (X'27275C5C000000000000000000000000', 'c')",
+    )
+    .await
+    .unwrap();
+    let table = edit_table(
+        "it_ed_bin",
+        &[("id", "binary(16)"), ("label", "varchar(20)")],
+    );
+    let id = |hex: &str| {
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        vec![cell("id", Value::Bytes(bytes))]
+    };
+    let changes = [
+        Change::Update {
+            key: id("00112233445566778899AABBCCDDEEFF"),
+            set: vec![cell("label", Value::Text("changed".into()))],
+        },
+        Change::Delete {
+            key: id("27275C5C000000000000000000000000"),
+        },
+    ];
+    let statements = build_row_changes(EngineKind::Mysql, &table, &changes).unwrap();
+    assert_eq!(
+        statements[0].predicate.as_deref(),
+        Some("id = X'00112233445566778899aabbccddeeff'")
+    );
+    let counts = apply(&mut s, &table, &changes, None).await.unwrap();
+    assert_eq!((counts.updated, counts.deleted), (1, 1));
+    // The row alike but for its last byte stays.
+    assert_eq!(
+        rows(&mut s, "SELECT label FROM it_ed_bin ORDER BY id").await,
+        [[Value::Text("b".into())], [Value::Text("changed".into())]]
+    );
+    session_execute(&mut s, "DROP TABLE it_ed_bin")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn edits_write_exact_literals_one_row_each() {
     let mut s = open(config()).await.unwrap();

@@ -1,6 +1,6 @@
 import type { EditTable, RowChange } from "./api";
 import { decimalKey, decimalOf } from "./decimal";
-import { valueText } from "./resultStore";
+import { valueText, type ResultRows } from "./resultStore";
 import type { ColumnNode, EnumNode, SafeMode, TableNode, Value } from "./types";
 import type { EngineKind } from "./engines";
 
@@ -100,6 +100,26 @@ export function columnValueKey(v: Value | null | undefined, kind?: EditorKind): 
 /** Two values are the same edit for a column of `kind` (see `columnValueKey`). */
 export const sameValue = (a: Value | null | undefined, b: Value | null | undefined, kind?: EditorKind) =>
   columnValueKey(a, kind) === columnValueKey(b, kind);
+
+/** Bytes the grid holds only the start of (result frames carry 16 per cell): no value to match a row on. */
+export const cutBytes = (v: Value | null | undefined) => !!v && "Bytes" in v && v.byteLength !== v.Bytes.length;
+
+/**
+ * Loaded row `r`'s key as cells of the columns `pk`, or null when it can't
+ * name the row: a key cell missing or NULL, or bytes cut short (`cutBytes`).
+ * Whole bytes do (a `BINARY(16)` UUID).
+ */
+export function loadedKey(pk: string[], names: string[], rows: ResultRows, r: number): KeyCells | null {
+  const key: KeyCells = [];
+  for (const column of pk) {
+    const ci = names.indexOf(column);
+    if (ci < 0 || r >= rows.length || rows.isNull(r, ci)) return null;
+    const value = rows.get(r, ci);
+    if (cutBytes(value)) return null;
+    key.push({ column, value: "Bytes" in value ? { Bytes: value.Bytes } : value });
+  }
+  return key.length ? key : null;
+}
 
 export function rowKey(key: KeyCells): string {
   return JSON.stringify(key.map((k) => [k.column, valueKey(k.value)]));
