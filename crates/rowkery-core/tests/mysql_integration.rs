@@ -1312,7 +1312,7 @@ async fn several_edits_need_a_table_that_rolls_back() {
 /// Runs `sql` as a SQL file: its scan, then the run.
 async fn run_file(
     s: &mut MysqlSession,
-    sql: &str,
+    sql: impl AsRef<[u8]>,
     whole_file: bool,
 ) -> (
     rowkery_core::sql_file::Scan,
@@ -1321,9 +1321,10 @@ async fn run_file(
     use rowkery_core::sql_file::{run_mysql, scan, RunOptions};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f.sql");
+    let sql = sql.as_ref();
     std::fs::write(&path, sql).unwrap();
     let scanned = scan(&path, EngineKind::Mysql, |_| true).unwrap();
-    assert_eq!(scanned.refused, None, "{sql}");
+    assert_eq!(scanned.refused, None, "{}", String::from_utf8_lossy(sql));
     let options = RunOptions {
         whole_file,
         keep_going: false,
@@ -1433,6 +1434,54 @@ async fn sql_files_run_as_the_mysql_client_runs_them() {
         count(&mut s, "SELECT COUNT(*) FROM it_file_p WHERE id = 5").await,
         1
     );
+}
+
+/// mysqldump writes BLOB, BINARY and BIT values as raw bytes unless told
+/// `--hex-blob`: the file isn't UTF-8, and its values still arrive whole.
+#[tokio::test]
+async fn a_dump_with_raw_binary_values_loads() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(&mut s, "DROP TABLE IF EXISTS it_file_bin")
+        .await
+        .unwrap();
+    // The rows as mysqldump 8.4 wrote them (a backslash before a byte that
+    // only looks like the start of a longer character).
+    let dump = b"/*!50503 SET NAMES utf8mb4 */;\n\
+        CREATE TABLE `it_file_bin` (`id` binary(16) NOT NULL, `b8` bit(8), `b64` bit(64), `vb` varbinary(16), `bl` blob, `note` varchar(20), PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+        LOCK TABLES `it_file_bin` WRITE;\n\
+        INSERT INTO `it_file_bin` VALUES (_binary '\\0\x11\\\"3DUfw\x88\x99\xaa\xbb\\\xcc\\\xdd\\\xee\xff',_binary '\xaa',_binary '\xff\xff\xff\xff\xff\xff\xff\xff',_binary '\\\xde\xad\xbe\\\xef',_binary '\x89PNG\\r\\n\\Z\\n','caf\xc3\xa9; it\\'s'),(_binary '\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff',_binary '\\0',_binary '\\0\\0\\0\\0\\0\\0\\0\x05',_binary '',_binary '\\'\\\\\xfe',NULL);\n\
+        UNLOCK TABLES;\n";
+    let (scanned, report) = run_file(&mut s, &dump[..], false).await;
+    assert_eq!(report.failed, None, "{report:?}");
+    assert_eq!(report.done, scanned.statements);
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT HEX(id), b8 + 0, CAST(b64 + 0 AS CHAR), HEX(vb), HEX(bl), note FROM it_file_bin ORDER BY id"
+        )
+        .await,
+        [
+            [
+                Value::Text("00112233445566778899AABBCCDDEEFF".into()),
+                Value::Int(170),
+                Value::Text("18446744073709551615".into()),
+                Value::Text("DEADBEEF".into()),
+                Value::Text("89504E470D0A1A0A".into()),
+                Value::Text("caf\u{e9}; it's".into()),
+            ],
+            [
+                Value::Text("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".into()),
+                Value::Int(0),
+                Value::Text("5".into()),
+                Value::Text("".into()),
+                Value::Text("275CFE".into()),
+                Value::Null,
+            ]
+        ]
+    );
+    session_execute(&mut s, "DROP TABLE it_file_bin")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
