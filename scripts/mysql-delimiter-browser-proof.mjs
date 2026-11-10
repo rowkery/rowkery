@@ -127,6 +127,18 @@ await idle();
 ran = (await runs()).map(flat);
 check(ran.length === 1 && ran[0] === "CREATE PROCEDURE one() BEGIN SELECT 1; END", `one statement, without its DELIMITER line or $$ (${ran.join(" | ")})`);
 
+// ⌘↵ with the caret in a statement that ends at `//`: sent as the editor
+// read it, its own `;` inside, not cut again without the DELIMITER line.
+await clearRuns();
+const branch = "DELIMITER //\nIF 1 THEN SELECT 1; ELSE SELECT 2; END IF//\nSELECT 3//";
+await setSql(branch);
+await select(20, 20);
+await page.keyboard.press("Control+Enter");
+await page.waitForFunction(() => window.__RUNS__.length >= 1);
+await idle();
+ran = (await runs()).map(flat);
+check(ran.length === 1 && ran[0] === "IF 1 THEN SELECT 1; ELSE SELECT 2; END IF", `the statement at the caret went whole (${ran.join(" | ")})`);
+
 // MariaDB's compound statement outside a routine is one statement.
 await clearRuns();
 const block = "BEGIN NOT ATOMIC\n  UPDATE counters SET n = 0;\n  UPDATE counters SET n = n + 2;\nEND;\nSELECT n FROM counters;";

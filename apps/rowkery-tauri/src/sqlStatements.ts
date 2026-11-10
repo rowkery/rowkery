@@ -193,8 +193,10 @@ const executableAt = (text: string, i: number) => text[i + 2] === "!" || (text[i
  * The mysql client finds its delimiter inside a `/*! … *\/` too.
  */
 function delimiterIn(text: string, d: string, from: number, end: number): number {
-  const k = text.indexOf(d, from);
-  return k >= 0 && k < end ? k : -1;
+  // Searched no further than the comment: a script of many comments and
+  // no delimiter in it would be read whole for each one.
+  const k = text.slice(from, end + d.length - 1).indexOf(d);
+  return k >= 0 ? from + k : -1;
 }
 
 /**

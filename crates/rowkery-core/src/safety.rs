@@ -1918,6 +1918,14 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
                 read()
             }
         }
+        // MariaDB's compound statement outside a routine. It runs whatever
+        // it holds, which is cut apart here at each `;`.
+        "BEGIN"
+            if toks.get(1).is_some_and(|t| t.is("NOT"))
+                && toks.get(2).is_some_and(|t| t.is("ATOMIC")) =>
+        {
+            write_verb("BEGIN NOT ATOMIC")
+        }
         "SET" | "RESET" | "BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT"
         | "SAVEPOINT" | "RELEASE" | "DISCARD" | "DEALLOCATE" | "PREPARE" => {
             session(unlocks_writes(first, toks))
@@ -2968,6 +2976,21 @@ mod tests {
             kind("EXPLAIN (ANALYZE) DELETE FROM t"),
             StatementKind::Write
         );
+    }
+
+    #[test]
+    fn a_compound_statement_is_a_write() {
+        let checks = check_sql("BEGIN NOT ATOMIC DELETE FROM t; END", Dialect::Mysql);
+        assert_eq!(checks[0].kind, StatementKind::Write);
+        assert_eq!(checks[0].verb, "BEGIN NOT ATOMIC");
+        // A transaction's start stays the session's own.
+        for sql in ["BEGIN", "BEGIN WORK", "BEGIN NOT DEFERRABLE"] {
+            assert_eq!(
+                check_sql(sql, Dialect::Either)[0].kind,
+                StatementKind::Session,
+                "{sql}"
+            );
+        }
     }
 
     #[test]

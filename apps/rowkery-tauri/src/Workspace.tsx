@@ -2437,7 +2437,10 @@ export function Workspace({
     const target = !browse && !paging ? sqlEditorRef.current?.getRunTarget() : undefined;
     // A selection of several statements (a script with BEGIN … COMMIT) runs
     // as Run All does: a server prepares one statement at a time.
-    if (!browse && !paging && !tableRun && !confirmed && !part) {
+    // Not the editor's own statement at the caret: cut out of a MySQL
+    // script, it reads otherwise without the `DELIMITER` line above it.
+    const one = target?.statement && target.sql === text;
+    if (!browse && !paging && !tableRun && !confirmed && !part && !one) {
       const ranges = sqlStatementRanges(text, sqlDialect);
       // MySQL: one statement between `DELIMITER` lines too. Those are the
       // mysql client's, and only the statement is sent.
