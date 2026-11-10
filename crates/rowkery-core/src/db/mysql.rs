@@ -1732,9 +1732,17 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
             })
             .filter(|seconds| *seconds != 0)
     };
-    if expiry.is_some() {
-        session_execute(session, "SET SESSION information_schema_stats_expiry = 0").await?;
-    }
+    // A server that won't take the setting answers from its cache, as before.
+    let expiry = match expiry {
+        Some(seconds)
+            if session_execute(session, "SET SESSION information_schema_stats_expiry = 0")
+                .await
+                .is_ok() =>
+        {
+            Some(seconds)
+        }
+        _ => None,
+    };
     let tables = text_rows(
         session,
         &format!(
