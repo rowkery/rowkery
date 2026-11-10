@@ -62,6 +62,8 @@ pub struct SqliteDriver {
     file_read_only: bool,
     /// The file the connection opened, to notice it was replaced.
     opened: Option<FileId>,
+    /// The most bytes one text or binary value may hold on this connection.
+    max_value_bytes: Option<i32>,
 }
 
 /// Which file a path named when it was opened (device and inode on Unix;
@@ -93,7 +95,17 @@ impl SqliteDriver {
             read_only: false,
             file_read_only: false,
             opened: None,
+            max_value_bytes: None,
         }
+    }
+
+    /// Caps every text and binary value on the connection, built by a
+    /// function or read from a row (`SQLITE_LIMIT_LENGTH`): a statement that
+    /// would hold a larger one fails with "string or blob too big" before
+    /// SQLite makes room for it. No statement can raise it again.
+    pub fn max_value_bytes(mut self, bytes: i32) -> Self {
+        self.max_value_bytes = Some(bytes);
+        self
     }
 
     /// Refuses writes at the SQLite level (`PRAGMA query_only`) for
@@ -400,6 +412,9 @@ impl Driver for SqliteDriver {
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
+        }
+        if let Some(bytes) = self.max_value_bytes {
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes);
         }
         let interrupt = conn.get_interrupt_handle();
         self.conn = Some(Arc::new(Mutex::new(conn)));
