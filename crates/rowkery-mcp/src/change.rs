@@ -376,7 +376,7 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
     use rusqlite::OpenFlags;
     use std::sync::{Arc, Mutex};
 
-    let conn = rusqlite::Connection::open_with_flags(
+    let mut conn = rusqlite::Connection::open_with_flags(
         rowkery_core::connections::expand_home(path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -432,7 +432,8 @@ pub fn sqlite_facts(path: &str, sql: &str) -> Result<SqliteFacts, String> {
             }
         }
         Authorization::Allow
-    }));
+    }))
+    .map_err(|e| e.to_string())?;
     conn.prepare(sql).map_err(|e| e.to_string())?;
     drop(conn);
     let mut facts = Arc::try_unwrap(facts)

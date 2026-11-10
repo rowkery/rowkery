@@ -726,7 +726,7 @@ pub fn sqlite_tables_read(path: &str, sql: &str) -> Result<Vec<(String, String)>
     use rusqlite::OpenFlags;
     use std::sync::{Arc, Mutex};
 
-    let conn = rusqlite::Connection::open_with_flags(
+    let mut conn = rusqlite::Connection::open_with_flags(
         rowkery_core::connections::expand_home(path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -743,7 +743,8 @@ pub fn sqlite_tables_read(path: &str, sql: &str) -> Result<Vec<(String, String)>
             }
         }
         Authorization::Allow
-    }));
+    }))
+    .map_err(|e| e.to_string())?;
     conn.prepare(sql).map_err(|e| e.to_string())?;
     let mut list = seen.lock().map(|l| l.clone()).unwrap_or_default();
     let opened = sqlite_opened(&conn, sql)?;
@@ -873,7 +874,7 @@ pub fn sqlite_mask_check(
     const REFUSAL: &str = "Refused: on SQLite a masked column can only be returned as it is, from the main SELECT, with no sorting, grouping, subqueries or combined results in the same query.";
     let key = |t: &str, c: &str| (t.to_lowercase(), c.to_lowercase());
     let marked: Vec<(String, String)> = marked.iter().map(|(t, c)| key(t, c)).collect();
-    let conn = rusqlite::Connection::open_with_flags(
+    let mut conn = rusqlite::Connection::open_with_flags(
         rowkery_core::connections::expand_home(path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -907,7 +908,8 @@ pub fn sqlite_mask_check(
             }
         }
         Authorization::Allow
-    }));
+    }))
+    .map_err(|e| e.to_string())?;
     // The origin of each result column needs the raw statement.
     let c_sql = CString::new(sql).map_err(|e| e.to_string())?;
     let mut origins: Vec<Option<(String, String)>> = Vec::new();
@@ -938,7 +940,8 @@ pub fn sqlite_mask_check(
         }
         ffi::sqlite3_finalize(stmt);
     }
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .map_err(|e| e.to_string())?;
     let reads = reads.lock().map(|m| m.clone()).unwrap_or_default();
     // A `USING` or `NATURAL` join compares its columns without the
     // authorizer hearing of it, so the counts above miss a join on a marked
