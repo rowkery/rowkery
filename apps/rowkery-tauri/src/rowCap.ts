@@ -1,3 +1,5 @@
+import type { Value } from "./types";
+
 /**
  * The most rows one tab holds (core's `MAX_TAB_ROWS`). Paging stops there:
  * a fetch never asks for more than is left of it, and core leaves out what a
@@ -15,6 +17,23 @@ export const CAPPED_MESSAGE = `Stopped at ${MAX_TAB_ROWS.toLocaleString("en-US")
 export function nextFetchRows(page: number, loaded: number, cap = MAX_TAB_ROWS): number {
   const room = Math.max(0, cap - loaded);
   return page > 0 ? Math.min(page, room) : room;
+}
+
+/**
+ * The last loaded row as the next page's `after`: only the columns pages are
+ * ordered by (the sort, then the key). A bytes cell is left out: the grid
+ * may hold just its first bytes, so it is no value to continue from. So is
+ * NaN or an infinity, which JSON has no number for. Core pages by OFFSET
+ * when a column is missing.
+ */
+export function pageAfter(names: string[], cell: (name: string) => Value | undefined): Record<string, Value> {
+  const after: Record<string, Value> = {};
+  for (const name of names) {
+    const v = cell(name);
+    if (v === undefined || "Bytes" in v || ("Float" in v && !Number.isFinite(v.Float))) continue;
+    after[name] = v;
+  }
+  return after;
 }
 
 /** Whether a tab with `loaded` rows has reached the cap. */
