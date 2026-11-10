@@ -1712,6 +1712,37 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
         ),
     )
     .await?;
+    // MySQL 8 answers TABLE_ROWS and the sizes from a cache it keeps for
+    // `information_schema_stats_expiry` seconds (a day by default), so a
+    // table filled since reads 0 rows. Read them fresh, then put the
+    // session's own value back. MariaDB and MySQL 5.7 have no such cache.
+    let expiry = if mariadb {
+        None
+    } else {
+        text_rows(session, "SELECT @@SESSION.information_schema_stats_expiry")
+            .await
+            .ok()
+            .and_then(|rows| {
+                rows.first()?
+                    .first()?
+                    .as_deref()?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .filter(|seconds| *seconds != 0)
+    };
+    // A server that won't take the setting answers from its cache, as before.
+    let expiry = match expiry {
+        Some(seconds)
+            if session_execute(session, "SET SESSION information_schema_stats_expiry = 0")
+                .await
+                .is_ok() =>
+        {
+            Some(seconds)
+        }
+        _ => None,
+    };
     let tables = text_rows(
         session,
         &format!(
@@ -1720,7 +1751,15 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
              ORDER BY TABLE_SCHEMA, TABLE_NAME"
         ),
     )
-    .await?;
+    .await;
+    if let Some(seconds) = expiry {
+        let _ = session_execute(
+            session,
+            &format!("SET SESSION information_schema_stats_expiry = {seconds}"),
+        )
+        .await;
+    }
+    let tables = tables?;
     let columns = text_rows(
         session,
         &format!(

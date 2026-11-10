@@ -375,6 +375,48 @@ async fn read_only_is_read_only_at_the_server() {
     );
 }
 
+/// MySQL 8 caches a table's row count for a day once anything has read it:
+/// the catalog reads it fresh, and leaves the session's setting as it was.
+#[tokio::test]
+async fn row_estimates_follow_a_table_just_filled() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_fresh; CREATE TABLE it_fresh (id INT PRIMARY KEY)",
+    )
+    .await
+    .unwrap();
+    let estimate = |catalog: &rowkery_core::db::SchemaCatalog| {
+        catalog
+            .table("rowkery", "it_fresh")
+            .unwrap()
+            .row_estimate
+            .clone()
+    };
+    // Read while empty: MySQL 8 now has 0 in its cache.
+    let before = session_introspect(&mut s).await.unwrap();
+    assert_eq!(estimate(&before), RowEstimate::Approximate(0));
+    let values: Vec<String> = (1..=500).map(|i| format!("({i})")).collect();
+    session_execute(
+        &mut s,
+        &format!("INSERT INTO it_fresh VALUES {}", values.join(", ")),
+    )
+    .await
+    .unwrap();
+    // No ANALYZE TABLE, which would refresh the cache by itself. The
+    // engine's own count is an estimate: near 500, never the cached 0.
+    let after = session_introspect(&mut s).await.unwrap();
+    assert!(
+        matches!(estimate(&after), RowEstimate::Approximate(n) if n > 0),
+        "{:?}",
+        estimate(&after)
+    );
+    if s.flavor() == Flavor::Mysql {
+        let kept = rows(&mut s, "SELECT @@SESSION.information_schema_stats_expiry").await;
+        assert_ne!(kept[0][0], Value::Int(0));
+    }
+}
+
 #[tokio::test]
 async fn a_cancel_stops_the_running_statement() {
     let mut s = open(config()).await.unwrap();
