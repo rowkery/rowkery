@@ -21,5 +21,5 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 mysql-integration = []
 
 [dev-dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 tempfile = "3"
