@@ -227,6 +227,10 @@ fn check_tokens(toks: &[Tok]) -> StatementCheck {
 /// changes nothing, so running it twice is the same as once. A read that
 /// calls another (`SELECT write_fn()`) may write from inside it.
 pub fn plain_read(sql: &str, dialect: Dialect) -> bool {
+    let mysql = dialect == Dialect::Mysql;
+    if mysql && mysql_may_hide_a_call(sql) {
+        return false;
+    }
     let statements: Vec<Vec<Tok>> = tokenize(sql, dialect)
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -234,8 +238,96 @@ pub fn plain_read(sql: &str, dialect: Dialect) -> bool {
     !statements.is_empty()
         && statements.iter().all(|toks| {
             let check = check_tokens(toks);
-            check.kind == StatementKind::Read && !check.unlocks_writes && !calls_function(toks)
+            check.kind == StatementKind::Read
+                && !check.unlocks_writes
+                && !calls_function(toks)
+                && !(mysql && mysql_may_write(toks))
         })
+}
+
+/// [`COMPUTING_FUNCTIONS`] that MySQL and MariaDB don't build in (MariaDB
+/// alone has `TO_CHAR`): there a bare call runs a stored function of that
+/// name, which may write.
+const NOT_IN_MYSQL: &[&str] = &[
+    "AGE",
+    "ARRAY_AGG",
+    "ARRAY_LENGTH",
+    "BOOL_AND",
+    "BOOL_OR",
+    "BTRIM",
+    "DATE_PART",
+    "DATE_TRUNC",
+    "GENERATE_SERIES",
+    "JSONB_AGG",
+    "JSONB_BUILD_OBJECT",
+    "JSON_AGG",
+    "JSON_BUILD_OBJECT",
+    "SPLIT_PART",
+    "STRING_AGG",
+    "STRPOS",
+    "TO_CHAR",
+    "TO_DATE",
+    "TO_NUMBER",
+    "TO_TIMESTAMP",
+    "TRUNC",
+    "UNNEST",
+];
+
+/// MySQL text where a call could go unseen by the tokens, read over-widely
+/// (a string holding any of these counts too):
+///
+/// - a `/*! … */` or `/*M! … */`, which the server runs or skips by its
+///   version, so `f /*!99999 AS */ (1)` calls `f` on every server so far;
+/// - a vertical tab, a space to the server alone;
+/// - a built-in's name with a space or comment before its `(`: MySQL then
+///   takes several of them (`max (a)`, `count (*)`) for a stored function.
+fn mysql_may_hide_a_call(sql: &str) -> bool {
+    let b = sql.as_bytes();
+    let upper = sql.to_ascii_uppercase();
+    if upper.contains("/*!") || upper.contains("/*M!") || b.contains(&0x0B) {
+        return true;
+    }
+    b.iter().enumerate().any(|(i, c)| {
+        if *c != b'(' || i == 0 {
+            return false;
+        }
+        let gap = b[..i]
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_whitespace())
+            .count();
+        let word_end = i - gap;
+        if gap == 0 {
+            // A comment's end: what stands before it isn't looked for.
+            return b[i - 1] == b'/' && i >= 2 && b[i - 2] == b'*';
+        }
+        if word_end >= 2 && &b[word_end - 2..word_end] == b"*/" {
+            return true;
+        }
+        let start = word_end
+            - b[..word_end]
+                .iter()
+                .rev()
+                .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
+                .count();
+        COMPUTING_FUNCTIONS
+            .binary_search(&&upper[start..word_end])
+            .is_ok()
+    })
+}
+
+/// A MySQL read that may write all the same: a call to a name MySQL has no
+/// built-in for, or a MariaDB sequence moved on (`NEXT VALUE FOR s`,
+/// `s.nextval`).
+fn mysql_may_write(toks: &[Tok]) -> bool {
+    let word = |t: &Tok, w: &str| t.is(w);
+    toks.windows(2).any(|w| {
+        (w[1] == Tok::Open
+            && matches!(&w[0], Tok::Word(name, _) if NOT_IN_MYSQL.contains(&name.as_str())))
+            || (w[0] == Tok::Dot && word(&w[1], "NEXTVAL"))
+    }) || toks
+        .windows(3)
+        .any(|w| word(&w[0], "NEXT") && word(&w[1], "VALUE") && word(&w[2], "FOR"))
 }
 
 /// Calls no function but the built-ins that only compute, as far as its
@@ -3008,6 +3100,45 @@ mod tests {
         }
         // Kept sorted: it is searched by halves.
         assert!(COMPUTING_FUNCTIONS.windows(2).all(|w| w[0] < w[1]));
+        assert!(NOT_IN_MYSQL.iter().all(|n| COMPUTING_FUNCTIONS.contains(n)));
+    }
+
+    #[test]
+    fn mysql_plain_reads_are_read_as_mysql_resolves_names() {
+        for sql in [
+            "SELECT count(*), max(a), lower(b), coalesce(a, 0) FROM t WHERE id IN (1, 2)",
+            "SELECT * FROM `select` s JOIN (SELECT 1) y ON (true) # c",
+            "SELECT PREVIOUS VALUE FOR s",
+            "SHOW CREATE TABLE t",
+        ] {
+            assert!(plain_read(sql, Dialect::Mysql), "{sql}");
+        }
+        for sql in [
+            // No built-in by these names: a stored function is called.
+            "SELECT age(1)",
+            "SELECT trunc(a), to_char(a) FROM t",
+            // With a space MySQL takes these for a stored function too.
+            "SELECT max (a) FROM t",
+            "SELECT count\n(*) FROM t",
+            "SELECT max /* c */ (a) FROM t",
+            // A sequence moves on.
+            "SELECT NEXT VALUE FOR s",
+            "SELECT next  value\nfor s",
+            "SELECT s.nextval",
+            "SELECT nextval(s)",
+            // The server skips the comment and calls f; a vertical tab is
+            // a space to it.
+            "SELECT f /*!99999 AS */ (1)",
+            "SELECT f /*M!999999 AS */ (1)",
+            "SELECT f\u{b}(1)",
+        ] {
+            assert!(!plain_read(sql, Dialect::Mysql), "{sql}");
+        }
+        // Other engines read these names and spaces their own way.
+        assert!(plain_read(
+            "SELECT max (a), age(b) FROM t",
+            Dialect::Postgres
+        ));
     }
 
     /// What only one engine has is read as that engine reads it, so
