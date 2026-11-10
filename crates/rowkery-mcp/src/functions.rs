@@ -16,6 +16,11 @@
 //! appears in the plan and can read tables that aren't shared. `pg_sleep` is
 //! refused too: it only holds the agent's one session.
 //!
+//! When only ticked tables are shared, the built-ins that look things up in
+//! the catalog ([`CATALOG`]) and the types that print an id as a name
+//! ([`NAMING_TYPES`]) are refused as well: they answer for any table, by
+//! name or by number, and the catalog itself isn't shared.
+//!
 //! Names are resolved against `pg_proc`, not trusted as written: a bare name
 //! that a schema other than `pg_catalog` also defines may be resolved to
 //! that one, so it is refused unless every such overload is compiled
@@ -537,25 +542,85 @@ pub const ALLOWED: &[&str] = &[
     "xml", "xml_is_well_formed",
     // Enums; TABLESAMPLE's methods.
     "enum_first", "enum_last", "enum_range", "system", "bernoulli",
-    // Who and where, and what the system views that describe tables call
-    // (information_schema, pg_tables, pg_views, pg_indexes).
+    // Who and where.
     "current_database", "current_schema", "current_schemas", "current_user", "session_user",
-    "version", "pg_typeof", "pg_collation_for", "format_type", "pg_get_userbyid", "pg_get_expr",
-    "pg_get_constraintdef", "pg_get_indexdef", "pg_get_viewdef", "pg_get_triggerdef",
-    "pg_get_ruledef", "pg_get_partkeydef", "pg_get_serial_sequence", "pg_get_function_arguments",
+    "version", "pg_collation_for", "aclexplode", "pg_is_other_temp_schema", "pg_my_temp_schema",
+    "pg_options_to_table", "pg_column_size", "pg_encoding_to_char", "pg_char_to_encoding",
+    "getdatabaseencoding", "pg_client_encoding", "pg_is_in_recovery", "pg_get_keywords",
+];
+
+/// Built-ins that look an object up in the catalog by name or id and say
+/// something about it: what the system views that describe tables call
+/// (information_schema, pg_tables, pg_views, pg_indexes). Allowed like
+/// [`ALLOWED`] where the catalog can be read; refused when only ticked
+/// tables are shared, since they answer for the others too, and for every
+/// id in a `generate_series`. `pg_typeof` is here for its result: beside
+/// it a plain number becomes a `regtype` without the type being written.
+/// The last two are IMMUTABLE and would otherwise pass: one prints the
+/// table a partition belongs to, the other names a table in its error.
+#[rustfmt::skip]
+pub const CATALOG: &[&str] = &[
+    "pg_typeof", "format_type", "pg_get_userbyid", "pg_get_expr", "pg_get_constraintdef",
+    "pg_get_indexdef", "pg_get_viewdef", "pg_get_triggerdef", "pg_get_ruledef",
+    "pg_get_partkeydef", "pg_get_serial_sequence", "pg_get_function_arguments",
     "pg_get_function_identity_arguments", "pg_get_function_result", "pg_get_function_arg_default",
     "pg_get_statisticsobjdef", "obj_description", "col_description", "shobj_description",
     "pg_has_role", "has_any_column_privilege", "has_column_privilege", "has_database_privilege",
     "has_foreign_data_wrapper_privilege", "has_function_privilege", "has_language_privilege",
     "has_schema_privilege", "has_sequence_privilege", "has_server_privilege",
-    "has_table_privilege", "has_tablespace_privilege", "has_type_privilege", "aclexplode",
+    "has_table_privilege", "has_tablespace_privilege", "has_type_privilege",
     "pg_table_is_visible", "pg_type_is_visible", "pg_function_is_visible",
-    "pg_is_other_temp_schema", "pg_my_temp_schema", "pg_options_to_table",
     "pg_column_is_updatable", "pg_relation_is_updatable", "pg_relation_size", "pg_table_size",
-    "pg_indexes_size", "pg_total_relation_size", "pg_column_size", "pg_encoding_to_char",
-    "pg_char_to_encoding", "getdatabaseencoding", "pg_client_encoding", "row_security_active",
-    "pg_is_in_recovery", "pg_get_keywords",
+    "pg_indexes_size", "pg_total_relation_size", "row_security_active",
+    "pg_partition_root", "satisfies_hash_partition",
 ];
+
+/// Types whose values print as the name of the object with that id (and
+/// their array types): `18423::regclass` is a table's name.
+pub const NAMING_TYPES: &[&str] = &[
+    "regclass",
+    "regtype",
+    "regproc",
+    "regprocedure",
+    "regoper",
+    "regoperator",
+    "regnamespace",
+    "regrole",
+    "_regclass",
+    "_regtype",
+    "_regproc",
+    "_regprocedure",
+    "_regoper",
+    "_regoperator",
+    "_regnamespace",
+    "_regrole",
+];
+
+const USE_THE_TOOLS: &str =
+    "With only some tables shared, use list_tables, describe_table and search_schema instead.";
+
+/// Why a statement that names what `scan` holds is refused on a connection
+/// that shares only ticked tables, where the catalog isn't shared.
+pub fn catalog_refusal(scan: &Scan) -> Option<String> {
+    if let Some(call) = scan
+        .calls
+        .iter()
+        .find(|c| CATALOG.contains(&c.name.as_str()))
+    {
+        return Some(format!(
+            "Refused: {}() looks things up in Postgres's catalog, which describes tables the user hasn't shared too. {USE_THE_TOOLS}",
+            call.name
+        ));
+    }
+    let ty = scan
+        .words
+        .iter()
+        .find(|w| NAMING_TYPES.contains(&w.as_str()))?;
+    Some(format!(
+        "Refused: the type {} turns an id into the name of a table, type or function, the ones the user hasn't shared too. {USE_THE_TOOLS}",
+        ty.trim_start_matches('_')
+    ))
+}
 
 /// Functions refused by name, built in or not, whatever their volatility,
 /// and why.
@@ -668,6 +733,7 @@ pub fn call_refusal(call: &Call, facts: &Facts) -> Option<String> {
     if builtin.is_empty()
         || builtin.iter().all(|f| f.schema == "information_schema")
         || ALLOWED.contains(&n.as_str())
+        || CATALOG.contains(&n.as_str())
         || builtin.iter().all(|f| f.volatility == 'i')
     {
         return None;
@@ -752,7 +818,15 @@ pub async fn check_pg(
                 .collect()
         })
         .collect();
-    match refusal(scan, &facts_from_rows(&rows), before_plan) {
+    // Unreadable sharing counts as nothing shared, as everywhere.
+    let ticked = !matches!(
+        crate::access::tables(&target.record, &target.database),
+        Some(crate::access::Tables::AllBut(_))
+    );
+    // A call refused for what it does says so first (nextval in a default).
+    match refusal(scan, &facts_from_rows(&rows), before_plan)
+        .or_else(|| ticked.then(|| catalog_refusal(scan)).flatten())
+    {
         Some(why) => Err(why),
         None => Ok(()),
     }
@@ -957,14 +1031,48 @@ mod tests {
 
     #[test]
     fn every_allowed_name_is_safe() {
-        for name in ALLOWED {
+        for name in ALLOWED.iter().chain(CATALOG) {
             assert!(
                 refused_builtin(name).is_none(),
                 "{name} is both allowed and refused"
             );
         }
+        assert!(!ALLOWED.iter().any(|name| CATALOG.contains(name)));
         for name in ["now", "date_trunc", "to_char", "generate_series", "format"] {
             assert!(ALLOWED.contains(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn catalog_lookups_are_named() {
+        for (sql, part) in [
+            ("SELECT obj_description('t'::oid)", "obj_description()"),
+            (
+                "SELECT pg_catalog.pg_get_indexdef(g) FROM generate_series(1, 9) g",
+                "pg_get_indexdef()",
+            ),
+            ("SELECT PG_TYPEOF(1)", "pg_typeof()"),
+            (
+                "SELECT g::oid::regclass::text FROM generate_series(1, 9) g",
+                "the type regclass",
+            ),
+            (
+                "SELECT CAST(g AS RegType) FROM generate_series(1, 9) g",
+                "the type regtype",
+            ),
+            ("SELECT '{1}'::_regclass", "the type regclass"),
+            ("SELECT ARRAY[1]::regproc[]", "the type regproc"),
+        ] {
+            let why = catalog_refusal(&scan_sql(sql)).unwrap_or_default();
+            assert!(why.contains(part), "{sql}: {why}");
+        }
+        for sql in [
+            "SELECT count(*), lower(name), now() FROM t",
+            "SELECT to_tsvector('english'::regconfig, body) FROM t",
+            // A string or a quoted name is not the type.
+            "SELECT 'regclass', t.\"Regclass\" FROM t",
+        ] {
+            assert_eq!(catalog_refusal(&scan_sql(sql)), None, "{sql}");
         }
     }
 
