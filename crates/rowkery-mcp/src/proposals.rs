@@ -1279,7 +1279,7 @@ fn sqlite_run(
     let expected = commit.map(|(seen, _)| seen);
     use rowkery_core::db::sqlite::sqlite_value_to_core;
     let err = |e: rusqlite::Error| e.to_string();
-    let conn =
+    let mut conn =
         rusqlite::Connection::open(rowkery_core::connections::expand_home(path)).map_err(err)?;
     let wait = if expected.is_some() {
         LOCK_TIMEOUT
@@ -1288,7 +1288,7 @@ fn sqlite_run(
     };
     conn.busy_timeout(wait).map_err(err)?;
     conn.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
-    let mut counter = reach::SqliteCounter::install(&conn);
+    let mut counter = reach::SqliteCounter::install(&mut conn).map_err(err)?;
     let result = (|| -> Result<(Vec<StatementPreview>, Option<RunResult>), String> {
         if let Some(seen) = expected {
             let mut counts = Vec::new();
@@ -1367,7 +1367,7 @@ fn sqlite_run(
             let mut stmt = conn
                 .prepare(&format!("{}\nRETURNING *", change.sql))
                 .map_err(err)?;
-            let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+            let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
             let key_at: Vec<usize> = key
                 .iter()
                 .filter_map(|k| columns.iter().position(|c| c.eq_ignore_ascii_case(k)))

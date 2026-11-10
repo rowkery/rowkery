@@ -1587,6 +1587,42 @@ pub fn assigned_columns(sql: &str) -> Vec<String> {
     out
 }
 
+/// The names in `sql` as SQLite reads it, upper-cased: its bare words
+/// first, then what it quotes (`"…"`, `` `…` ``, `[…]`, and `'…'`, which
+/// SQLite takes for a name where one is due), quotes off; a string holding
+/// a backslash is left out. `None` when the text may be read another way
+/// or holds a parameter, for a guard that asks to refuse.
+pub fn sqlite_names(sql: &str) -> Option<(Vec<String>, Vec<String>)> {
+    // SQLite skips a byte-order mark where a token would start, and reads
+    // `?1`, `:a`, `@a`, `#a` and `$a(…)` as one parameter each, whatever
+    // the parentheses hold. The lexer does neither, so text holding either
+    // is not read at all: a guard has no use for a parameter nobody binds.
+    if sql.contains('\u{FEFF}') {
+        return None;
+    }
+    let b = sql.as_bytes();
+    let mut i = 0;
+    while let Some((lexeme, end)) = lex(b, i, true, Dialect::Sqlite) {
+        if matches!(lexeme, Lexeme::Skip | Lexeme::Other)
+            && matches!(b[i], b'$' | b'?' | b'@' | b'#' | b':')
+        {
+            return None;
+        }
+        i = end;
+    }
+    let (mut bare, mut quoted) = (Vec::new(), Vec::new());
+    for tok in tokenize(sql, Dialect::Sqlite).iter().flatten() {
+        match tok {
+            Tok::Unclear => return None,
+            Tok::Word(word, _) => bare.push(word.clone()),
+            Tok::Quoted(_) => quoted.push(tok.name()?),
+            Tok::Str(Some(text)) => quoted.push(text.to_ascii_uppercase()),
+            _ => {}
+        }
+    }
+    Some((bare, quoted))
+}
+
 /// Every identifier in `sql`, lower-cased, quotes taken off (strings and
 /// comments left out): which columns a statement names.
 pub fn identifiers(sql: &str) -> Vec<String> {
@@ -2399,6 +2435,55 @@ mod tests {
             one("SELECT a INTO TEMP backup FROM t").target.as_deref(),
             Some("backup")
         );
+    }
+
+    #[test]
+    fn sqlite_names_reads_text_as_sqlite_does() {
+        let joins = |sql: &str| {
+            sqlite_names(sql)
+                .is_none_or(|(bare, _)| bare.iter().any(|w| w == "USING" || w == "NATURAL"))
+        };
+        for sql in [
+            "select * from a join b using (x)",
+            "select * from a NaTuRaL join b",
+            "select * from a join b/**/using(x)",
+            "select * from a join [b]using(x)",
+            "select * from a join \"b\"using(x)",
+            "select * from a join `b`using(x)",
+            // No backslash escapes, no E'' strings and no dollar bodies.
+            "select 'a\\' from a join b using (x) --'",
+            "select E'a\\' from a join b using (x) --'",
+            "select $$ from a join b using (x) where $$",
+            // `[it's]` is one name; the string never opens.
+            "select [it's] from a join b using (x) --'",
+            // Nothing nests: the comment ends at the first `*/`.
+            "select /* /* */ 1 from a join b using (x) /* */",
+            // Text that never closes may be read either way.
+            "select * from a /* using",
+            // SQLite skips a byte-order mark before a word.
+            "select * from a join b \u{FEFF}using (x)",
+            "select * from a \u{FEFF}natural join b",
+            // One parameter each to SQLite, whatever the parentheses hold.
+            "select $a(--), x from a natural join b",
+            "select :a('), x from a natural join b --'",
+            "select @a(/*), x from a natural join b",
+            "select * from a join b on ?1natural join c",
+        ] {
+            assert!(joins(sql), "{sql}");
+        }
+        for sql in [
+            "select * from a join b on b.x = a.x",
+            "select 'using', \"natural\", [using], `natural` from a",
+            "select * from a -- natural\n join b on 1",
+            "select * from a /* using */ join b on 1",
+            "select using_it, unnatural, pay$ from a where b = 'a@b.c: $5 #1?'",
+        ] {
+            assert!(!joins(sql), "{sql}");
+        }
+        let (bare, quoted) =
+            sqlite_names("select 1 from V1 join \"my v\", [b c], `d`, 'e f'").unwrap();
+        assert!(bare.contains(&"V1".to_string()));
+        assert_eq!(quoted, ["MY V", "B C", "D", "E F"]);
     }
 
     #[test]
