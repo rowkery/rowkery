@@ -611,14 +611,18 @@ mod tests {
         assert_eq!(check(Client::ClaudeDesktop, &e).problem, None);
     }
 
+    /// A folder of the test's own. Tests run side by side and two can read
+    /// the clock in the same tick, so the count is what keeps them apart.
     fn tmp() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "rowkery-mcp-connect-{}-{}",
+            "rowkery-mcp-connect-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
