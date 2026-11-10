@@ -1106,11 +1106,12 @@ async fn run_read(
             let (lines, scans) = guard::pg_plan(&plan);
             let scans: Vec<(Option<String>, String)> =
                 scans.into_iter().map(|s| (s.schema, s.table)).collect();
-            let touched = if rule.restricts() || !marks.is_empty() {
+            let mut touched = if rule.restricts() || !marks.is_empty() {
                 lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
             } else {
                 guard::pg_relations(&plan)
             };
+            lineage::pg_copied(store, target, &mut touched, &marks).await?;
             refuse_credentials(store, target, &plan, &touched, &written).await?;
             (lines, scans, touched, Some(plan))
         }

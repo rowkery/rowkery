@@ -70,11 +70,12 @@ pub async fn check(
                 // What it's a partition or child table of matters only when
                 // something is hidden or masked.
                 let guarded = rule_restricts(target) || !marks.is_empty();
-                let touched = if guarded {
+                let mut touched = if guarded {
                     crate::lineage::pg_read_relations(store, target, &explain_sql, &plan).await?
                 } else {
                     guard::pg_relations(&plan)
                 };
+                crate::lineage::pg_copied(store, target, &mut touched, &marks).await?;
                 let written = functions::scan_sql(&change.sql);
                 crate::refuse_credentials(store, target, &plan, &touched, &written).await?;
                 let above = if guarded {

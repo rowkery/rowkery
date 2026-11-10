@@ -2313,3 +2313,277 @@ async fn a_join_pushed_down_to_a_foreign_server_is_checked() {
     .expect("cleanup");
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
+
+/// A materialized view is a stored copy of the tables its query read, and
+/// its plan names only the view: it answers for those tables all the same.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_materialized_view_answers_for_what_it_was_built_from() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-mv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_mv_t_people, mcp_mv_t_secrets, mcp_mv_t_open, mcp_mv_t_led CASCADE;
+         DROP MATERIALIZED VIEW IF EXISTS mcp_mv_auth, mcp_mv_stats;
+         CREATE TABLE mcp_mv_t_people (id int PRIMARY KEY, name text, ssn text);
+         INSERT INTO mcp_mv_t_people VALUES (1, 'Ada', '111-22-3333');
+         CREATE TABLE mcp_mv_t_secrets (id int PRIMARY KEY, api_key text);
+         INSERT INTO mcp_mv_t_secrets VALUES (1, 'sk-live-123');
+         CREATE TABLE mcp_mv_t_open (id int PRIMARY KEY, label text);
+         INSERT INTO mcp_mv_t_open VALUES (1, 'fine');
+         CREATE TABLE mcp_mv_t_led (id int, amount int) PARTITION BY RANGE (id);
+         CREATE TABLE mcp_mv_t_led_1 PARTITION OF mcp_mv_t_led FOR VALUES FROM (0) TO (100);
+         INSERT INTO mcp_mv_t_led VALUES (1, 42);
+         CREATE MATERIALIZED VIEW mcp_mv_people AS SELECT id, ssn AS tax FROM mcp_mv_t_people;
+         CREATE MATERIALIZED VIEW mcp_mv_names AS SELECT id, name FROM mcp_mv_t_people;
+         CREATE MATERIALIZED VIEW mcp_mv_row AS SELECT row_to_json(p)::text AS j FROM mcp_mv_t_people p;
+         CREATE MATERIALIZED VIEW mcp_mv_secrets AS SELECT * FROM mcp_mv_t_secrets;
+         CREATE VIEW mcp_mv_v_secrets AS SELECT api_key FROM mcp_mv_t_secrets;
+         CREATE MATERIALIZED VIEW mcp_mv_via_view AS SELECT api_key AS k FROM mcp_mv_v_secrets;
+         CREATE MATERIALIZED VIEW mcp_mv_chain AS SELECT api_key AS k FROM mcp_mv_secrets;
+         CREATE MATERIALIZED VIEW mcp_mv_sub AS
+           SELECT o.id, (SELECT max(api_key) FROM mcp_mv_t_secrets) AS k FROM mcp_mv_t_open o;
+         CREATE MATERIALIZED VIEW mcp_mv_cte AS
+           WITH s AS (SELECT api_key FROM mcp_mv_t_secrets) SELECT api_key AS k FROM s;
+         CREATE VIEW mcp_mv_v_over AS SELECT k FROM mcp_mv_chain;
+         CREATE MATERIALIZED VIEW mcp_mv_open AS SELECT id, label FROM mcp_mv_t_open;
+         CREATE MATERIALIZED VIEW mcp_mv_led AS SELECT amount FROM mcp_mv_t_led;
+         CREATE MATERIALIZED VIEW mcp_mv_led_1 AS SELECT amount FROM mcp_mv_t_led_1;",
+    )
+    .await
+    .expect("fixtures");
+    let share = |hidden: &[&str], ticked: Option<&[&str]>, masked: &[&str]| {
+        let mut pg = pg_config();
+        pg.allow_mcp = true;
+        pg.mcp_hidden_tables = hidden.iter().map(|t| format!("public.{t}")).collect();
+        pg.mcp_access = ticked.map(|tables| {
+            [(
+                pg.database.clone(),
+                McpDbAccess {
+                    mode: McpTableMode::Picked,
+                    tables: tables.iter().map(|t| format!("public.{t}")).collect(),
+                },
+            )]
+            .into_iter()
+            .collect()
+        });
+        pg.masked_columns = [(
+            pg.database.clone(),
+            masked.iter().map(|c| format!("public.{c}")).collect(),
+        )]
+        .into_iter()
+        .collect();
+        save(pg);
+        RowkeryMcp::default()
+    };
+    const COPIES: [&str; 6] = [
+        "SELECT * FROM mcp_mv_secrets",
+        // Through a view, another materialized view, a subquery and a WITH
+        // query in its definition.
+        "SELECT k FROM mcp_mv_via_view",
+        "SELECT k FROM mcp_mv_chain",
+        "SELECT k FROM mcp_mv_sub",
+        "SELECT k FROM mcp_mv_cte",
+        // Read through a view, or joined to a shared table.
+        "SELECT o.label, v.k FROM mcp_mv_t_open o JOIN mcp_mv_v_over v ON true",
+    ];
+
+    // Nothing kept back: every one reads.
+    let mcp = share(&[], None, &[]);
+    for sql in COPIES {
+        query(&mcp, sql).await.expect(sql);
+    }
+
+    // A hidden table: every copy of it is kept back like a view over it.
+    let mcp = share(&["mcp_mv_t_secrets"], None, &[]);
+    for sql in COPIES {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(err, crate::guard::HIDDEN_REFUSAL, "{sql}");
+    }
+    let err = call(
+        &mcp,
+        "explain",
+        json!({ "connection": ID, "sql": "SELECT * FROM mcp_mv_secrets" }),
+    )
+    .await
+    .expect_err("explain");
+    assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
+    let err = call(
+        &mcp,
+        "propose_change",
+        json!({
+            "connection": ID,
+            "sql": "UPDATE mcp_mv_t_open SET label = 'x' WHERE id IN (SELECT id FROM mcp_mv_secrets)",
+            "reason": "test",
+        }),
+    )
+    .await
+    .expect_err("a proposal that reads the copy");
+    assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
+    // One over shared tables only still reads.
+    let open = query(&mcp, "SELECT label FROM mcp_mv_open")
+        .await
+        .expect("a copy of shared tables");
+    assert_eq!(open["rows"], json!([["fine"]]));
+    query(&mcp, "SELECT tax FROM mcp_mv_people")
+        .await
+        .expect("nothing masked yet");
+    // One made after the schema was read is judged the same.
+    session_execute(
+        &setup,
+        "CREATE MATERIALIZED VIEW mcp_mv_late AS SELECT api_key AS k FROM mcp_mv_t_secrets",
+    )
+    .await
+    .expect("a later copy");
+    let err = query(&mcp, "SELECT k FROM mcp_mv_late")
+        .await
+        .expect_err("made later");
+    assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
+
+    // A hidden partition is in its parent's copy, and a hidden parent's
+    // rows are in its partition's.
+    for hidden in ["mcp_mv_t_led_1", "mcp_mv_t_led"] {
+        let mcp = share(&[hidden], None, &[]);
+        for sql in [
+            "SELECT amount FROM mcp_mv_led",
+            "SELECT amount FROM mcp_mv_led_1",
+        ] {
+            let err = query(&mcp, sql).await.expect_err(sql);
+            assert_eq!(err, crate::guard::HIDDEN_REFUSAL, "{hidden}: {sql}");
+        }
+    }
+
+    // Ticked tables: a ticked copy needs every table it was built from
+    // ticked, and a ticked parent brings its partitions.
+    let mcp = share(
+        &[],
+        Some(&[
+            "mcp_mv_secrets",
+            "mcp_mv_chain",
+            "mcp_mv_open",
+            "mcp_mv_t_open",
+            "mcp_mv_led",
+            "mcp_mv_t_led",
+        ]),
+        &[],
+    );
+    for sql in ["SELECT * FROM mcp_mv_secrets", "SELECT k FROM mcp_mv_chain"] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(err, crate::guard::HIDDEN_REFUSAL, "{sql}");
+    }
+    let led = query(&mcp, "SELECT amount FROM mcp_mv_led")
+        .await
+        .expect("a ticked parent's copy");
+    assert_eq!(led["rows"], json!([[42]]));
+    query(&mcp, "SELECT label FROM mcp_mv_open")
+        .await
+        .expect("ticked with its table");
+    // Its table left unticked: kept back.
+    let mcp = share(&[], Some(&["mcp_mv_open"]), &[]);
+    let err = query(&mcp, "SELECT label FROM mcp_mv_open")
+        .await
+        .expect_err("its table isn't ticked");
+    assert_eq!(err, crate::guard::HIDDEN_REFUSAL);
+
+    // A sensitive column: its values sit in the copy under another name
+    // (or inside a whole row), so no copy of that table is read at all.
+    let mcp = share(&[], None, &["mcp_mv_t_people.ssn"]);
+    for (sql, view) in [
+        ("SELECT tax FROM mcp_mv_people", "mcp_mv_people"),
+        (
+            "SELECT id FROM mcp_mv_people WHERE tax LIKE '1%'",
+            "mcp_mv_people",
+        ),
+        ("SELECT j FROM mcp_mv_row", "mcp_mv_row"),
+        ("SELECT name FROM mcp_mv_names", "mcp_mv_names"),
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert_eq!(
+            err,
+            crate::mask::copy_refusal(&format!("public.{view}"), "public.mcp_mv_t_people"),
+            "{sql}"
+        );
+    }
+    let err = call(
+        &mcp,
+        "propose_change",
+        json!({
+            "connection": ID,
+            "sql": "UPDATE mcp_mv_t_open SET label = 'x' WHERE id IN (SELECT id FROM mcp_mv_people WHERE tax LIKE '1%')",
+            "reason": "test",
+        }),
+    )
+    .await
+    .expect_err("a proposal that filters on the copy");
+    assert!(err.contains("materialized view built from"), "{err}");
+    // The table itself answers with the stand-in, and other copies read.
+    let own = query(&mcp, "SELECT ssn FROM mcp_mv_t_people")
+        .await
+        .expect("the table");
+    let shown = own["rows"][0][0].as_str().unwrap_or_default();
+    assert!(shown.starts_with("masked:"), "{own}");
+    query(&mcp, "SELECT k FROM mcp_mv_chain")
+        .await
+        .expect("no sensitive column under it");
+    // A mark on a partitioned table covers a copy of its partition.
+    let mcp = share(&[], None, &["mcp_mv_t_led.amount"]);
+    for sql in [
+        "SELECT amount FROM mcp_mv_led",
+        "SELECT amount FROM mcp_mv_led_1",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.contains("materialized view built from"), "{sql}: {err}");
+    }
+
+    // A copy of a catalog that holds passwords, whatever is shared (only a
+    // superuser can make one).
+    let made = session_execute(
+        &setup,
+        "CREATE MATERIALIZED VIEW mcp_mv_auth AS SELECT rolname, rolpassword AS p FROM pg_shadow s JOIN pg_authid a ON a.oid = s.usesysid",
+    )
+    .await
+    .is_ok();
+    if made {
+        let mcp = share(&[], None, &[]);
+        let err = query(&mcp, "SELECT p FROM mcp_mv_auth")
+            .await
+            .expect_err("a copy of pg_authid");
+        assert_eq!(
+            err,
+            crate::guard::copied_credentials_refusal("public.mcp_mv_auth")
+        );
+        query(&mcp, "SELECT label FROM mcp_mv_open")
+            .await
+            .expect("other copies");
+    }
+
+    // A copy of the planner's statistics holds sampled values of every
+    // table, so it's kept back whenever a table is.
+    let made = session_execute(
+        &setup,
+        "CREATE MATERIALIZED VIEW mcp_mv_stats AS SELECT most_common_vals::text AS v FROM pg_stats",
+    )
+    .await
+    .is_ok();
+    if made {
+        let mcp = share(&["mcp_mv_t_secrets"], None, &[]);
+        let err = query(&mcp, "SELECT v FROM mcp_mv_stats")
+            .await
+            .expect_err("a copy of pg_statistic");
+        assert_eq!(err, crate::guard::STATISTICS_REFUSAL);
+    }
+
+    session_execute(
+        &setup,
+        "DROP MATERIALIZED VIEW IF EXISTS mcp_mv_auth, mcp_mv_stats;
+         DROP TABLE mcp_mv_t_people, mcp_mv_t_secrets, mcp_mv_t_open, mcp_mv_t_led CASCADE;",
+    )
+    .await
+    .expect("cleanup");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
