@@ -493,7 +493,8 @@ async fn a_sql_insert_export_loads_back() {
          INSERT INTO `it select` VALUES
             (1, 'back\\\\slash', '{\"s\": \"é\\\\\"q\"}', 1.7976931348623157e308, x'00ff27', 18446744073709551615),
             (2, 'tr\\\\'' ick', '[1, null]', 1e-300, x'', 0),
-            (3, 'it''s \"q\" 😀', NULL, 0.1, NULL, NULL)",
+            (3, 'it''s \"q\" 😀', NULL, 0.1, NULL, NULL),
+            (4, 'two\\r\\nlines', NULL, 0, NULL, NULL)",
     )
     .await
     .unwrap();
@@ -520,6 +521,9 @@ async fn a_sql_insert_export_loads_back() {
     assert_eq!(copy, source, "{file}");
     assert_eq!(copy[0][1], Value::Text("back\\slash".into()));
     assert_eq!(copy[1][1], Value::Text("tr\\' ick".into()));
+    assert_eq!(copy[3][1], Value::Text("two\r\nlines".into()));
+    assert!(file.starts_with("SET NAMES utf8mb4;\n"), "{file}");
+    assert!(file.contains("_utf8mb4 X'74776F0D0A6C696E6573'"), "{file}");
 }
 
 #[tokio::test]

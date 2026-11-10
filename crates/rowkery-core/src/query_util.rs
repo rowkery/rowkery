@@ -106,11 +106,17 @@ pub fn mysql_float(f: f64) -> String {
 /// charset introducer, which takes the column's collation like any string.
 pub fn mysql_text(text: &str) -> String {
     if text.contains('\\') {
-        let hex: String = text.bytes().map(|b| format!("{b:02X}")).collect();
-        format!("_utf8mb4 X'{hex}'")
+        mysql_hex_text(text)
     } else {
         format!("'{}'", text.replace('\'', "''"))
     }
+}
+
+/// `text` as its UTF-8 bytes in hex with a charset introducer: a string to
+/// MySQL, with nothing in it for a server or a client to read otherwise.
+pub fn mysql_hex_text(text: &str) -> String {
+    let hex: String = text.bytes().map(|b| format!("{b:02X}")).collect();
+    format!("_utf8mb4 X'{hex}'")
 }
 
 #[cfg(test)]
