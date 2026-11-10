@@ -1054,6 +1054,26 @@ mod tests {
     }
 
     #[test]
+    fn text_holding_two_statements_runs_neither() {
+        // rusqlite 0.41 turns down text with a second statement in it; before
+        // that the first ran and the rest was dropped without a word.
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut run = |sql: &str| driver.query_stream(sql, |_, _| Ok(()));
+        let err =
+            run("INSERT INTO items (name) VALUES ('c'); INSERT INTO items (name) VALUES ('d')")
+                .expect_err("two statements");
+        assert!(err.to_string().contains("Multiple statements"), "{err}");
+        // A comment or a stray `;` after the statement is not a second one.
+        assert_eq!(
+            run("SELECT id FROM items; -- all of them").expect("comment"),
+            2
+        );
+        assert_eq!(run("SELECT id FROM items; ;\n").expect("stray"), 2);
+    }
+
+    #[test]
     fn big_cells_send_a_batch_before_its_row_count() {
         let (_file, path) = temp_db();
         let mut driver = SqliteDriver::new(path);
