@@ -985,6 +985,9 @@ pub const MYSQL_LEXICAL_MODES: [&str; 7] = [
 /// part of a longer character. A run checks both before each statement
 /// (`session_lexical_mode`).
 fn mysql_hex_binary(sql: &[u8]) -> Option<Vec<u8>> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    // What can run on from a hex literal, or into one, as a single word.
+    let word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
     #[derive(PartialEq)]
     enum Last {
         Other,
@@ -1006,14 +1009,26 @@ fn mysql_hex_binary(sql: &[u8]) -> Option<Vec<u8>> {
                 out.extend_from_slice(text);
                 continue;
             }
-            Lexeme::String { .. } if last == Last::Hex => return None,
+            // `/*! 'tail' */` is a string to the server as much as a bare one.
+            Lexeme::String { .. } | Lexeme::Executable { .. } if last == Last::Hex => return None,
             Lexeme::String { .. } if std::str::from_utf8(text).is_err() => {
                 if last != Last::Introducer {
                     return None;
                 }
+                // A quote ends a word and `0x…` doesn't: `_binary'…'alias`
+                // would run together into one name.
+                if out.last().is_some_and(|b| word_byte(*b)) {
+                    out.push(b' ');
+                }
                 out.extend_from_slice(b"0x");
                 for byte in mysql_string_bytes(text)? {
-                    out.extend_from_slice(format!("{byte:02X}").as_bytes());
+                    out.extend_from_slice(&[
+                        HEX[usize::from(byte >> 4)],
+                        HEX[usize::from(byte & 15)],
+                    ]);
+                }
+                if sql.get(i).is_some_and(|b| word_byte(*b)) {
+                    out.push(b' ');
                 }
                 last = Last::Hex;
                 continue;
@@ -2263,7 +2278,12 @@ mod tests {
         assert_eq!(
             statements(b"SELECT _binary'\xff\\0\\b\\n\\r\\t\\Z\\%\\_\\\\\\'\\\"\\a\\\xfe''\"'")
                 .unwrap(),
-            ["SELECT _binary0xFF00080A0D091A5C255C5F5C272261FE2722"]
+            ["SELECT _binary 0xFF00080A0D091A5C255C5F5C272261FE2722"]
+        );
+        // A word on either side stays its own word.
+        assert_eq!(
+            statements(b"SELECT _binary'\xff'abc, _binary '\xfe' /* c */ FROM t").unwrap(),
+            ["SELECT _binary 0xFF abc, _binary 0xFE /* c */ FROM t"]
         );
         // Anywhere else such bytes mean what the column makes of them
         // (mariadb-dump writes binary values as plain strings): refused, and
@@ -2274,6 +2294,7 @@ mod tests {
             b"SELECT t._binary '\xff';",
             b"SELECT _binary '\xff' 'tail';",
             b"SELECT _binary 'head' '\xff';",
+            b"SELECT _binary '\xff' /*!50000 'tail' */;",
             b"SELECT 1 /* \xff */;",
             b"SELECT `\xff`;",
             b"SELECT _binary '\xff",

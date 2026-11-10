@@ -81,7 +81,7 @@ Grid edits use the same tray, Review SQL and <kbd>⌘S</kbd> commit as on Postgr
 
 - MySQL commits by itself before `CREATE`, `DROP`, `ALTER`, `LOCK TABLES` and similar statements. A file holding any of them runs one statement at a time, and the summary says why. A file of plain reads and writes can still run as one transaction.
 - Before anything runs, Rowkery refuses a file that sets `sql_mode` with `ANSI`, `NO_BACKSLASH_ESCAPES`, `ORACLE`, `DB2`, `MSSQL`, `POSTGRESQL` or `MAXDB`, a file that sets a character set other than UTF-8 (older dumps often hold `SET NAMES latin1`: save the file as UTF-8 first), and a routine body that has no `DELIMITER` line around it. The message says what to change.
-- **Binary values.** mysqldump writes BLOB, BINARY and BIT values as raw bytes (`_binary '…'`), so its file isn't plain text. Rowkery sends each such value as hex (`_binary 0x…`), the same bytes. mariadb-dump writes them as ordinary strings, which Rowkery refuses because it can't tell what the server would make of them: make that dump with `--hex-blob`.
+- **Binary values.** mysqldump writes BLOB, BINARY and BIT values as raw bytes (`_binary '…'`), so its file isn't plain text. Rowkery sends each such value that isn't text as hex (`_binary 0x…`), the same bytes at twice the length, so a single value over half the server's `max_allowed_packet` no longer fits. mariadb-dump writes them as ordinary strings, which Rowkery refuses because it can't tell what the server would make of them: make that dump with `--hex-blob`.
 - `mysql` client commands such as `\G` are refused, since only that client can run them.
 
 ## Query plans
