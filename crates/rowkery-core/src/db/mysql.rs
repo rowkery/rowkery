@@ -1725,7 +1725,7 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
         session,
         &format!(
             "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
-             COLUMN_DEFAULT, COLUMN_COMMENT FROM information_schema.COLUMNS \
+             COLUMN_DEFAULT, COLUMN_COMMENT, EXTRA FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA {where_schema} \
              ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"
         ),
@@ -1851,6 +1851,14 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
             Some(d) if mariadb => Some(unquote_literal(&d).unwrap_or(d)),
             d => d,
         };
+        // An AUTO_INCREMENT column fills itself but has no COLUMN_DEFAULT:
+        // without this an inserted or duplicated row would send its key.
+        let default = default.or_else(|| {
+            cell(r, 7)
+                .to_ascii_lowercase()
+                .contains("auto_increment")
+                .then(|| "auto_increment".into())
+        });
         let comment = cell(r, 6);
         out[s].tables[t].columns.push(ColumnNode {
             name: cell(r, 2),

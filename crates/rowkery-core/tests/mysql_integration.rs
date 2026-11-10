@@ -232,7 +232,7 @@ async fn the_catalog_lists_databases_as_schemas() {
         &mut s,
         "DROP VIEW IF EXISTS it_cat_view; DROP TABLE IF EXISTS it_cat_child;
          DROP TABLE IF EXISTS it_cat_parent;
-         CREATE TABLE it_cat_parent (id INT PRIMARY KEY, code VARCHAR(10) NOT NULL DEFAULT 'x' COMMENT 'the code',
+         CREATE TABLE it_cat_parent (id INT AUTO_INCREMENT PRIMARY KEY, code VARCHAR(10) NOT NULL DEFAULT 'x' COMMENT 'the code',
            UNIQUE KEY it_code (code)) COMMENT 'parents';
          CREATE TABLE it_cat_child (a INT, b INT, parent_id INT, PRIMARY KEY (a, b),
            CONSTRAINT it_fk FOREIGN KEY (parent_id) REFERENCES it_cat_parent (id) ON DELETE CASCADE);
@@ -266,6 +266,10 @@ async fn the_catalog_lists_databases_as_schemas() {
     assert_eq!(code.comment.as_deref(), Some("the code"));
     // MariaDB's `'x'` reads as MySQL's `x`.
     assert_eq!(code.default.as_deref(), Some("x"));
+    // An AUTO_INCREMENT key fills itself, like a default.
+    assert_eq!(parent.columns[0].default.as_deref(), Some("auto_increment"));
+    let child = catalog.table("rowkery", "it_cat_child").unwrap();
+    assert_eq!(child.columns[0].default, None);
     // Arguments past GROUP_CONCAT's 1024 bytes are all there.
     let long_arg = format!("a_{}", "x".repeat(60));
     let params: Vec<String> = (0..20).map(|i| format!("{long_arg}{i} INT")).collect();
