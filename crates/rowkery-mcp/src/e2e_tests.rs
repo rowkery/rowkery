@@ -1910,6 +1910,191 @@ async fn a_proposal_counts_what_its_cascades_and_triggers_write() {
     std::env::remove_var("ROWKERY_CONFIG_DIR");
 }
 
+/// With only ticked tables shared the catalog isn't shared, and Postgres's
+/// own helpers and name-printing types don't answer in its place: not for
+/// a table named outright, and not for every id in a range.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn catalog_lookups_keep_to_what_is_shared() {
+    let dir = std::env::temp_dir().join(format!("rowkery-mcp-e2e-ch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ROWKERY_CONFIG_DIR", dir.to_string_lossy().to_string());
+    let password = std::env::var("ROWKERY_PG_PASSWORD").unwrap_or_else(|_| "rowkery".into());
+    store_secret(ID, SecretKind::DbPassword, &password).expect("store password");
+    let setup = open_session(ID.into(), pg_config()).await.expect("connect");
+    session_execute(
+        &setup,
+        "DROP TABLE IF EXISTS mcp_ch_secrets, mcp_ch_open, mcp_ch_parts, mcp_ch_jobs CASCADE;
+         DROP TYPE IF EXISTS mcp_ch_pair; DROP DOMAIN IF EXISTS mcp_ch_ref;
+         CREATE DOMAIN mcp_ch_ref AS regclass;
+         CREATE TYPE mcp_ch_pair AS (kind regtype, n int);
+         CREATE TABLE mcp_ch_jobs (id int PRIMARY KEY, target mcp_ch_ref[]);
+         CREATE TABLE mcp_ch_secrets (id serial PRIMARY KEY, api_key text);
+         COMMENT ON TABLE mcp_ch_secrets IS 'Stripe live keys';
+         COMMENT ON COLUMN mcp_ch_secrets.api_key IS 'rotate monthly';
+         CREATE VIEW mcp_ch_v_secrets AS SELECT api_key FROM mcp_ch_secrets;
+         CREATE TABLE mcp_ch_parts (id int) PARTITION BY HASH (id);
+         CREATE TABLE mcp_ch_parts_0 PARTITION OF mcp_ch_parts FOR VALUES WITH (MODULUS 1, REMAINDER 0);
+         CREATE TABLE mcp_ch_open (id serial PRIMARY KEY, label text);
+         COMMENT ON TABLE mcp_ch_open IS 'fine to read';
+         INSERT INTO mcp_ch_open (label) VALUES ('a');",
+    )
+    .await
+    .expect("fixtures");
+    let share = |mode: McpTableMode, tables: &[&str]| {
+        let mut pg = pg_config();
+        pg.allow_mcp = true;
+        pg.mcp_access = Some(
+            [(
+                pg.database.clone(),
+                McpDbAccess {
+                    mode,
+                    tables: tables.iter().map(|t| format!("public.{t}")).collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        save(pg);
+        RowkeryMcp::default()
+    };
+    let mcp = share(McpTableMode::Picked, &["mcp_ch_open", "mcp_ch_jobs"]);
+    for sql in [
+        // A table the agent names.
+        "SELECT obj_description('mcp_ch_secrets'::regclass)",
+        "SELECT obj_description('mcp_ch_secrets'::regclass, 'pg_class')",
+        "SELECT col_description('mcp_ch_secrets'::regclass, 2)",
+        "SELECT pg_get_indexdef('mcp_ch_secrets_pkey'::regclass)",
+        "SELECT pg_get_viewdef('mcp_ch_v_secrets'::regclass)",
+        "SELECT pg_get_viewdef('mcp_ch_v_secrets')",
+        "SELECT pg_get_serial_sequence('mcp_ch_secrets', 'id')",
+        "SELECT has_table_privilege('mcp_ch_secrets', 'select')",
+        "SELECT has_column_privilege('mcp_ch_secrets', 'api_key', 'select')",
+        "SELECT pg_relation_size('mcp_ch_secrets')",
+        "SELECT pg_size_pretty(pg_total_relation_size('mcp_ch_secrets'))",
+        "SELECT pg_column_is_updatable('mcp_ch_secrets', 2::smallint, false)",
+        "SELECT pg_get_partkeydef('mcp_ch_parts'::regclass)",
+        "SELECT pg_partition_root('mcp_ch_parts_0')",
+        "SELECT row_security_active('mcp_ch_secrets')",
+        "SELECT 'mcp_ch_secrets'::regclass::oid",
+        "SELECT 'mcp_ch_secrets'::regtype::oid",
+        "SELECT CAST('mcp_ch_secrets' AS regclass)",
+        "SELECT regclass('mcp_ch_secrets')",
+        "SELECT pg_catalog.regclass 'mcp_ch_secrets'",
+        // Every table, by walking the ids.
+        "SELECT g::oid::regclass::text FROM generate_series(16384, 99999) g",
+        "SELECT g::oid::regtype::text FROM generate_series(16384, 99999) g",
+        "SELECT g::regclass FROM generate_series(16384, 99999) g",
+        "SELECT ARRAY[g]::regclass[] FROM generate_series(16384, 99999) g",
+        "SELECT ('{' || g || '}')::_regtype FROM generate_series(16384, 99999) g",
+        "SELECT g::oid::regprocedure::text FROM generate_series(16384, 99999) g",
+        "SELECT format_type(g::oid, NULL) FROM generate_series(16384, 99999) g",
+        "SELECT obj_description(g::oid, 'pg_class') FROM generate_series(16384, 99999) g",
+        "SELECT col_description(g::oid, 2) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_indexdef(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_viewdef(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_ruledef(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_constraintdef(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_triggerdef(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_function_arguments(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_statisticsobjdef(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_relation_size(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_table_is_visible(g::oid) FROM generate_series(16384, 99999) g",
+        "SELECT pg_get_userbyid(g::oid) FROM generate_series(10, 20) g",
+        "SELECT shobj_description(g::oid, 'pg_database') FROM generate_series(1, 5) g",
+        // A number beside pg_typeof becomes a type's name with no type written.
+        "SELECT CASE WHEN g > 0 THEN g ELSE pg_typeof(1) END FROM generate_series(16384, 99999) g",
+        "SELECT COALESCE(NULLIF(pg_typeof(1), pg_typeof(1)), g) FROM generate_series(16384, 99999) g",
+        // Or beside a field of a catalog's row type, a type of the
+        // database's own, or a ticked table's column. In VALUES the plan
+        // shows no expression at all.
+        "SELECT x::text FROM generate_series(16384, 99999) g, LATERAL (VALUES ((NULL::pg_catalog.pg_sequences).data_type), (g)) v(x)",
+        "SELECT (json_populate_record(NULL::pg_catalog.pg_sequences, json_build_object('data_type', g))).data_type::text FROM generate_series(16384, 99999) g",
+        "SELECT (jsonb_populate_record(NULL::pg_sequences, '{\"data_type\":\"mcp_ch_secrets\"}')).data_type::oid",
+        "SELECT (json_populate_record(NULL::mcp_ch_pair, json_build_object('kind', g))).kind::text FROM generate_series(16384, 99999) g",
+        "SELECT g::mcp_ch_ref::text FROM generate_series(16384, 99999) g",
+        "SELECT (json_populate_record(j, json_build_object('target', ARRAY[g]))).target::text FROM mcp_ch_jobs j, generate_series(16384, 99999) g",
+        // Roles, through the type privileges are written in.
+        "SELECT makeaclitem(g::oid, 10, 'SELECT', false)::text FROM generate_series(10, 9999) g",
+        "SELECT acldefault('r', g::oid)::text FROM generate_series(10, 9999) g",
+        // The table's name in the server's error.
+        "SELECT satisfies_hash_partition(g::oid, 1, 0, 1) FROM generate_series(16384, 99999) g",
+        // On a ticked table too: the tools describe those.
+        "SELECT obj_description('mcp_ch_open'::regclass)",
+        "SELECT pg_typeof(label)::text FROM mcp_ch_open",
+    ] {
+        let err = query(&mcp, sql).await.expect_err(sql);
+        assert!(err.starts_with("Refused: "), "{sql}: {err}");
+        let err = call(&mcp, "explain", json!({ "connection": ID, "sql": sql }))
+            .await
+            .expect_err(sql);
+        assert!(err.starts_with("Refused: "), "explain {sql}: {err}");
+    }
+    let err = query(
+        &mcp,
+        "SELECT pg_get_indexdef(g::oid) FROM generate_series(1, 9) g",
+    )
+    .await
+    .expect_err("a lookup");
+    assert!(
+        err.ends_with("use list_tables, describe_table and search_schema instead."),
+        "{err}"
+    );
+    // What a ticked table needs still runs: its rows, text search with a
+    // named configuration, and a proposed row whose key the table fills in.
+    for sql in [
+        "SELECT id, label, tableoid FROM mcp_ch_open",
+        "SELECT to_tsvector('english'::regconfig, label) @@ plainto_tsquery('a') FROM mcp_ch_open",
+        "SELECT current_database(), current_user, version()",
+    ] {
+        query(&mcp, sql).await.expect(sql);
+    }
+    call(
+        &mcp,
+        "propose_change",
+        json!({ "connection": ID, "sql": "INSERT INTO mcp_ch_open (label) VALUES ('b')", "reason": "test" }),
+    )
+    .await
+    .expect("a proposal on a serial key");
+    let err = call(
+        &mcp,
+        "propose_change",
+        json!({ "connection": ID, "sql": "UPDATE mcp_ch_open SET label = obj_description('mcp_ch_secrets'::regclass) WHERE id = 1", "reason": "test" }),
+    )
+    .await
+    .expect_err("a lookup in a proposal");
+    assert!(err.contains("use list_tables"), "{err}");
+    let listed = call(
+        &mcp,
+        "describe_table",
+        json!({ "connection": ID, "table": "mcp_ch_open" }),
+    )
+    .await
+    .expect("describe");
+    assert!(listed.to_string().contains("label"), "{listed}");
+
+    // A whole database is shared with its catalog, so the helpers answer.
+    let mcp = share(McpTableMode::All, &[]);
+    for sql in [
+        "SELECT obj_description('mcp_ch_open'::regclass)",
+        "SELECT pg_get_indexdef('mcp_ch_open_pkey'::regclass)",
+        "SELECT pg_typeof(label)::text, pg_size_pretty(pg_relation_size('mcp_ch_open')) FROM mcp_ch_open",
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+    ] {
+        query(&mcp, sql).await.expect(sql);
+    }
+
+    session_execute(
+        &setup,
+        "DROP TABLE mcp_ch_secrets, mcp_ch_open, mcp_ch_parts, mcp_ch_jobs CASCADE;
+         DROP TYPE mcp_ch_pair; DROP DOMAIN mcp_ch_ref;",
+    )
+    .await
+    .expect("cleanup");
+    std::env::remove_var("ROWKERY_CONFIG_DIR");
+}
+
 // The env lock spans the whole test, awaits included: each test has its own runtime.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]

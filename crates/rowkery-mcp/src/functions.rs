@@ -16,6 +16,12 @@
 //! appears in the plan and can read tables that aren't shared. `pg_sleep` is
 //! refused too: it only holds the agent's one session.
 //!
+//! When only ticked tables are shared, the built-ins that look things up in
+//! the catalog ([`CATALOG`]) and the types that print an id as a name
+//! ([`NAMING_TYPES`], and whatever is built on or returns one) are refused
+//! as well: they answer for any table, by name or by number, and the
+//! catalog itself isn't shared.
+//!
 //! Names are resolved against `pg_proc`, not trusted as written: a bare name
 //! that a schema other than `pg_catalog` also defines may be resolved to
 //! that one, so it is refused unless every such overload is compiled
@@ -406,6 +412,10 @@ pub struct Facts {
     pub views: Vec<(String, String)>,
     /// Domains and types whose checks or casts run database code.
     pub types: Vec<(String, String)>,
+    /// Types that are, or are built on, a [`NAMING_TYPES`] one: (schema, name).
+    pub naming_types: Vec<(String, String)>,
+    /// Functions whose result is such a type.
+    pub naming_calls: Vec<String>,
 }
 
 fn core(schema: &str) -> bool {
@@ -413,14 +423,49 @@ fn core(schema: &str) -> bool {
 }
 
 /// The catalog query behind [`Facts`], for these names and operators. Each
-/// name goes in as hex, so nothing in it is read as SQL.
-pub fn facts_sql(names: &[String], operators: &[String]) -> String {
+/// name goes in as hex, so nothing in it is read as SQL. `naming` asks for
+/// the naming types and functions too, which matter only where the catalog
+/// isn't shared.
+pub fn facts_sql(names: &[String], operators: &[String], naming: bool) -> String {
     fn list(items: &[String]) -> String {
         let hex: Vec<String> = items.iter().map(|s| text_literal(s)).collect();
         format!("ARRAY[{}]::text[]", hex.join(", "))
     }
+    // The functions are found by a join, not a test per `pg_proc` row: the
+    // planner prices that test so high that it compiles the query (JIT),
+    // which takes two seconds.
+    let naming_rows = if naming {
+        "UNION ALL SELECT 'n', s.nspname::text, t.typname::text, '', '', '' \
+          FROM pg_type t JOIN pg_namespace s ON s.oid = t.typnamespace \
+          WHERE t.oid IN (SELECT oid FROM naming) AND t.typname::text IN (SELECT name FROM named) \
+        UNION ALL SELECT 'm', s.nspname::text, p.proname::text, '', '', '' \
+          FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace \
+          WHERE p.proname::text IN (SELECT name FROM named) \
+          AND p.oid IN (SELECT q.oid FROM pg_proc q WHERE q.prorettype IN (SELECT oid FROM naming) \
+            UNION SELECT q.oid FROM pg_proc q \
+            CROSS JOIN LATERAL unnest(q.proallargtypes, q.proargmodes) AS o(t, m) \
+            WHERE o.m IN ('o', 'b', 't') AND o.t IN (SELECT oid FROM naming))"
+    } else {
+        ""
+    };
+    // `names_on`: a table's or view's row type is built on its columns'
+    // types like a composite type, and a multirange (Postgres 14 on) on its
+    // range's subtype.
     format!(
         "WITH RECURSIVE \
+        named AS (SELECT unnest({names}) AS name), \
+        names_on(child, parent) AS (\
+          SELECT oid, typbasetype FROM pg_type WHERE typbasetype <> 0 \
+          UNION ALL SELECT oid, typelem FROM pg_type WHERE typelem <> 0 \
+          UNION ALL SELECT rngtypid, rngsubtype FROM pg_range \
+          UNION ALL SELECT (to_jsonb(r) ->> 'rngmultitypid')::oid, r.rngsubtype FROM pg_range r \
+            WHERE to_jsonb(r) ? 'rngmultitypid' \
+          UNION ALL SELECT k.reltype, a.atttypid FROM pg_class k JOIN pg_attribute a \
+            ON a.attrelid = k.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE k.reltype <> 0), \
+        naming(oid) AS (\
+          SELECT t.oid FROM pg_type t WHERE t.typnamespace = 'pg_catalog'::regnamespace \
+            AND t.typname::text = ANY ({seeds}) \
+          UNION SELECT e.child FROM names_on e JOIN naming n ON n.oid = e.parent), \
         stepped AS (SELECT DISTINCT a.aggfnoid::oid AS oid FROM pg_aggregate a \
           CROSS JOIN LATERAL unnest(ARRAY[a.aggtransfn, a.aggfinalfn, a.aggcombinefn, \
             a.aggserialfn, a.aggdeserialfn, a.aggmtransfn, a.aggminvtransfn, \
@@ -473,9 +518,11 @@ pub fn facts_sql(names: &[String], operators: &[String]) -> String {
           WHERE c.oid IN (SELECT oid FROM tainted) AND c.relname::text = ANY ({names}) \
         UNION ALL SELECT 't', s.nspname::text, t.typname::text, '', '', '' \
           FROM pg_type t JOIN pg_namespace s ON s.oid = t.typnamespace \
-          WHERE t.oid IN (SELECT oid FROM bad_types) AND t.typname::text = ANY ({names})",
+          WHERE t.oid IN (SELECT oid FROM bad_types) AND t.typname::text = ANY ({names}) \
+        {naming_rows}",
         names = list(names),
         ops = list(operators),
+        seeds = list(&NAMING_TYPES.map(String::from)),
     )
 }
 
@@ -502,6 +549,8 @@ pub fn facts_from_rows(rows: &[Vec<String>]) -> Facts {
             "o" => f.operators.push(pair),
             "v" => f.views.push(pair),
             "t" => f.types.push(pair),
+            "n" => f.naming_types.push(pair),
+            "m" => f.naming_calls.push(pair.1),
             _ => {}
         }
     }
@@ -537,25 +586,97 @@ pub const ALLOWED: &[&str] = &[
     "xml", "xml_is_well_formed",
     // Enums; TABLESAMPLE's methods.
     "enum_first", "enum_last", "enum_range", "system", "bernoulli",
-    // Who and where, and what the system views that describe tables call
-    // (information_schema, pg_tables, pg_views, pg_indexes).
+    // Who and where.
     "current_database", "current_schema", "current_schemas", "current_user", "session_user",
-    "version", "pg_typeof", "pg_collation_for", "format_type", "pg_get_userbyid", "pg_get_expr",
-    "pg_get_constraintdef", "pg_get_indexdef", "pg_get_viewdef", "pg_get_triggerdef",
-    "pg_get_ruledef", "pg_get_partkeydef", "pg_get_serial_sequence", "pg_get_function_arguments",
+    "version", "pg_collation_for", "aclexplode", "pg_is_other_temp_schema", "pg_my_temp_schema",
+    "pg_options_to_table", "pg_column_size", "pg_encoding_to_char", "pg_char_to_encoding",
+    "getdatabaseencoding", "pg_client_encoding", "pg_is_in_recovery", "pg_get_keywords",
+];
+
+/// Built-ins that look an object up in the catalog by name or id and say
+/// something about it: what the system views that describe tables call
+/// (information_schema, pg_tables, pg_views, pg_indexes). Allowed like
+/// [`ALLOWED`] where the catalog can be read; refused when only ticked
+/// tables are shared, since they answer for the others too, and for every
+/// id in a `generate_series`. `pg_typeof` is here for its result: beside
+/// it a plain number becomes a `regtype` without the type being written.
+/// The last two are IMMUTABLE and would otherwise pass: one prints the
+/// table a partition belongs to, the other names a table in its error.
+#[rustfmt::skip]
+pub const CATALOG: &[&str] = &[
+    "pg_typeof", "format_type", "pg_get_userbyid", "pg_get_expr", "pg_get_constraintdef",
+    "pg_get_indexdef", "pg_get_viewdef", "pg_get_triggerdef", "pg_get_ruledef",
+    "pg_get_partkeydef", "pg_get_serial_sequence", "pg_get_function_arguments",
     "pg_get_function_identity_arguments", "pg_get_function_result", "pg_get_function_arg_default",
     "pg_get_statisticsobjdef", "obj_description", "col_description", "shobj_description",
     "pg_has_role", "has_any_column_privilege", "has_column_privilege", "has_database_privilege",
     "has_foreign_data_wrapper_privilege", "has_function_privilege", "has_language_privilege",
     "has_schema_privilege", "has_sequence_privilege", "has_server_privilege",
-    "has_table_privilege", "has_tablespace_privilege", "has_type_privilege", "aclexplode",
+    "has_table_privilege", "has_tablespace_privilege", "has_type_privilege",
     "pg_table_is_visible", "pg_type_is_visible", "pg_function_is_visible",
-    "pg_is_other_temp_schema", "pg_my_temp_schema", "pg_options_to_table",
     "pg_column_is_updatable", "pg_relation_is_updatable", "pg_relation_size", "pg_table_size",
-    "pg_indexes_size", "pg_total_relation_size", "pg_column_size", "pg_encoding_to_char",
-    "pg_char_to_encoding", "getdatabaseencoding", "pg_client_encoding", "row_security_active",
-    "pg_is_in_recovery", "pg_get_keywords",
+    "pg_indexes_size", "pg_total_relation_size", "row_security_active",
+    "pg_partition_root", "satisfies_hash_partition",
 ];
+
+/// Types whose values print as the name of the object with that id:
+/// `18423::regclass` is a table's name, and an `aclitem` names roles. The
+/// catalog says what is built on them (arrays, domains, a catalog's row
+/// type with such a column) and which functions return them.
+pub const NAMING_TYPES: [&str; 9] = [
+    "regclass",
+    "regtype",
+    "regproc",
+    "regprocedure",
+    "regoper",
+    "regoperator",
+    "regnamespace",
+    "regrole",
+    "aclitem",
+];
+
+const USE_THE_TOOLS: &str =
+    "With only some tables shared, use list_tables, describe_table and search_schema instead.";
+
+/// Why a statement that names what `scan` holds is refused on a connection
+/// that shares only ticked tables, where the catalog isn't shared.
+///
+/// A naming type needn't be written to be used: beside a catalog row
+/// type's `regtype` field (`(NULL::pg_sequences).data_type`) a plain number
+/// becomes one, so every name is looked up, not matched as text.
+pub fn catalog_refusal(scan: &Scan, facts: &Facts) -> Option<String> {
+    const NAMES: &str = "turns an id into the name of a table, type, function or role, the ones the user hasn't shared too";
+    if let Some(call) = scan
+        .calls
+        .iter()
+        .find(|c| CATALOG.contains(&c.name.as_str()))
+    {
+        return Some(format!(
+            "Refused: {}() looks things up in Postgres's catalog, which describes tables the user hasn't shared too. {USE_THE_TOOLS}",
+            call.name
+        ));
+    }
+    if let Some(call) = scan
+        .calls
+        .iter()
+        .find(|c| facts.naming_calls.contains(&c.name))
+    {
+        return Some(format!(
+            "Refused: {}() returns a type that {NAMES}. {USE_THE_TOOLS}",
+            call.name
+        ));
+    }
+    let (schema, ty) = facts
+        .naming_types
+        .iter()
+        .find(|(_, t)| scan.words.contains(t))?;
+    let base = ty.trim_start_matches('_');
+    Some(if schema == "pg_catalog" && NAMING_TYPES.contains(&base) {
+        format!("Refused: the type {base} {NAMES}. {USE_THE_TOOLS}")
+    } else {
+        format!("Refused: {schema}.{ty} holds a type that {NAMES}. {USE_THE_TOOLS}")
+    })
+}
 
 /// Functions refused by name, built in or not, whatever their volatility,
 /// and why.
@@ -668,6 +789,7 @@ pub fn call_refusal(call: &Call, facts: &Facts) -> Option<String> {
     if builtin.is_empty()
         || builtin.iter().all(|f| f.schema == "information_schema")
         || ALLOWED.contains(&n.as_str())
+        || CATALOG.contains(&n.as_str())
         || builtin.iter().all(|f| f.volatility == 'i')
     {
         return None;
@@ -739,7 +861,14 @@ pub async fn check_pg(
     before_plan: bool,
 ) -> Result<(), String> {
     let (names, operators) = scan.lookups();
-    let found = store.read(target, &facts_sql(&names, &operators)).await?;
+    // Unreadable sharing counts as nothing shared, as everywhere.
+    let ticked = !matches!(
+        crate::access::tables(&target.record, &target.database),
+        Some(crate::access::Tables::AllBut(_))
+    );
+    let found = store
+        .read(target, &facts_sql(&names, &operators, ticked))
+        .await?;
     let rows: Vec<Vec<String>> = found
         .rows
         .iter()
@@ -752,7 +881,11 @@ pub async fn check_pg(
                 .collect()
         })
         .collect();
-    match refusal(scan, &facts_from_rows(&rows), before_plan) {
+    let facts = facts_from_rows(&rows);
+    // A call refused for what it does says so first (nextval in a default).
+    match refusal(scan, &facts, before_plan)
+        .or_else(|| ticked.then(|| catalog_refusal(scan, &facts)).flatten())
+    {
         Some(why) => Err(why),
         None => Ok(()),
     }
@@ -807,6 +940,18 @@ mod tests {
             operators: vec![("public".into(), "===".into())],
             views: vec![("public".into(), "leaky_view".into())],
             types: vec![("public".into(), "checked_email".into())],
+            naming_types: [
+                "regclass",
+                "_regclass",
+                "regtype",
+                "regproc",
+                "pg_sequences",
+            ]
+            .map(|t| ("pg_catalog".into(), t.into()))
+            .into_iter()
+            .chain([("public".into(), "jobs".into())])
+            .collect(),
+            naming_calls: vec!["makeaclitem".into()],
         }
     }
 
@@ -957,20 +1102,64 @@ mod tests {
 
     #[test]
     fn every_allowed_name_is_safe() {
-        for name in ALLOWED {
+        for name in ALLOWED.iter().chain(CATALOG) {
             assert!(
                 refused_builtin(name).is_none(),
                 "{name} is both allowed and refused"
             );
         }
+        assert!(!ALLOWED.iter().any(|name| CATALOG.contains(name)));
         for name in ["now", "date_trunc", "to_char", "generate_series", "format"] {
             assert!(ALLOWED.contains(&name), "{name}");
         }
     }
 
     #[test]
+    fn catalog_lookups_are_named() {
+        for (sql, part) in [
+            ("SELECT obj_description('t'::oid)", "obj_description()"),
+            (
+                "SELECT pg_catalog.pg_get_indexdef(g) FROM generate_series(1, 9) g",
+                "pg_get_indexdef()",
+            ),
+            ("SELECT PG_TYPEOF(1)", "pg_typeof()"),
+            (
+                "SELECT g::oid::regclass::text FROM generate_series(1, 9) g",
+                "the type regclass",
+            ),
+            (
+                "SELECT CAST(g AS RegType) FROM generate_series(1, 9) g",
+                "the type regtype",
+            ),
+            ("SELECT '{1}'::_regclass", "the type regclass"),
+            ("SELECT ARRAY[1]::regproc[]", "the type regproc"),
+            // The type is never written: the row type's field brings it.
+            (
+                "SELECT x::text FROM (VALUES ((NULL::pg_sequences).data_type), (1)) v(x)",
+                "pg_catalog.pg_sequences holds a type",
+            ),
+            ("SELECT j FROM jobs j", "public.jobs holds a type"),
+            (
+                "SELECT makeaclitem(g::oid, 10, 'SELECT', false)::text FROM generate_series(1, 9) g",
+                "makeaclitem() returns a type",
+            ),
+        ] {
+            let why = catalog_refusal(&scan_sql(sql), &facts()).unwrap_or_default();
+            assert!(why.contains(part), "{sql}: {why}");
+        }
+        for sql in [
+            "SELECT count(*), lower(name), now() FROM t",
+            "SELECT to_tsvector('english'::regconfig, body) FROM t",
+            // A string or a quoted name is not the type.
+            "SELECT 'regclass', t.\"Regclass\" FROM t",
+        ] {
+            assert_eq!(catalog_refusal(&scan_sql(sql), &facts()), None, "{sql}");
+        }
+    }
+
+    #[test]
     fn facts_query_hides_its_input() {
-        let sql = facts_sql(&["x'); DROP TABLE t; --".into()], &[]);
+        let sql = facts_sql(&["x'); DROP TABLE t; --".into()], &[], true);
         assert!(!sql.contains("DROP"));
         assert!(sql.contains("ARRAY[]::text[]"));
         let f = facts_from_rows(&[
