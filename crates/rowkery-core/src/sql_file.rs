@@ -1384,6 +1384,7 @@ fn starts_insert(sql: &str) -> bool {
 /// another after it, or a parameter left unbound (which it would read as
 /// NULL), nothing runs. Any rows it returns are read and dropped.
 fn run_one_sqlite(conn: &rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
+    use rusqlite::fallible_iterator::FallibleIterator;
     let mut batch = rusqlite::Batch::new(conn, sql);
     let Some(mut statement) = batch.next()? else {
         return Ok(());

@@ -208,7 +208,7 @@ pub struct SqliteCounter {
 
 impl SqliteCounter {
     /// Hooks `conn`; the caller removes the hook when it's done counting.
-    pub fn install(conn: &rusqlite::Connection) -> Self {
+    pub fn install(conn: &mut rusqlite::Connection) -> rusqlite::Result<Self> {
         use rusqlite::hooks::Action;
         let seen = Tally::default();
         let hook = seen.clone();
@@ -224,8 +224,8 @@ impl SqliteCounter {
                     seen.entry((db.to_string(), table.to_string())).or_default()[at] += 1;
                 }
             },
-        ));
-        Self { seen, total: 0 }
+        ))?;
+        Ok(Self { seen, total: 0 })
     }
 
     /// Starts counting from here.
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn sqlite_counts_cascades_triggers_and_without_rowid_rows() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE customers(id INTEGER PRIMARY KEY);
@@ -622,7 +622,7 @@ mod tests {
              INSERT INTO tags VALUES (1, 1), (2, 1), (3, 1);",
         )
         .unwrap();
-        let mut counter = SqliteCounter::install(&conn);
+        let mut counter = SqliteCounter::install(&mut conn).unwrap();
         counter.mark(&conn).unwrap();
         conn.execute("DELETE FROM customers WHERE id = 1", [])
             .unwrap();
