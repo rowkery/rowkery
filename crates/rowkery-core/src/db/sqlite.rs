@@ -62,9 +62,13 @@ pub struct SqliteDriver {
     file_read_only: bool,
     /// The file the connection opened, to notice it was replaced.
     opened: Option<FileId>,
-    /// The most bytes one text or binary value may hold on this connection.
+    /// The most bytes one text or binary value may hold on this connection,
+    /// and the values of one row together.
     max_value_bytes: Option<i32>,
 }
+
+/// What SQLite says of a value over `SQLITE_LIMIT_LENGTH`.
+pub const TOO_BIG: &str = "string or blob too big";
 
 /// Which file a path named when it was opened (device and inode on Unix;
 /// elsewhere only that it exists).
@@ -102,7 +106,9 @@ impl SqliteDriver {
     /// Caps every text and binary value on the connection, built by a
     /// function or read from a row (`SQLITE_LIMIT_LENGTH`): a statement that
     /// would hold a larger one fails with "string or blob too big" before
-    /// SQLite makes room for it. No statement can raise it again.
+    /// SQLite makes room for it. No statement can raise it again. A row
+    /// whose values together pass the cap fails the same way, before they
+    /// are copied out of SQLite.
     pub fn max_value_bytes(mut self, bytes: i32) -> Self {
         self.max_value_bytes = Some(bytes);
         self
@@ -332,8 +338,17 @@ impl SqliteDriver {
                 break;
             }
             let mut values = Vec::with_capacity(column_count);
+            let mut row_bytes = 0usize;
             for i in 0..column_count {
                 let value = row.get_ref(i).map_err(map_query_error)?;
+                if let (Some(cap), ValueRef::Text(b) | ValueRef::Blob(b)) =
+                    (self.max_value_bytes, value)
+                {
+                    row_bytes += b.len();
+                    if row_bytes > cap as usize {
+                        return Err(DriverError::Message(TOO_BIG.into()));
+                    }
+                }
                 let value = sqlite_value_to_core(value);
                 batch_bytes += value.heap_bytes();
                 values.push(value);

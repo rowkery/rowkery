@@ -159,8 +159,8 @@ fn message(err: DriverError, timeout: Duration) -> String {
             "Stopped after {} s (statement timeout). Filter on an indexed column or aggregate less.",
             timeout.as_secs()
         ),
-        DriverError::Message(m) if m.contains(TOO_BIG) => format!(
-            "Stopped: a value this reads or builds is over {} MB, more than an agent's query takes. Leave that column out, or read its size with length().",
+        DriverError::Message(m) if m.contains(rowkery_core::db::sqlite::TOO_BIG) => format!(
+            "Stopped: a value this reads or builds, or one row of them together, is over {} MB, more than an agent's query takes. Leave that column out, or read its size with length().",
             SQLITE_VALUE_BYTES >> 20
         ),
         other => other.to_string(),
@@ -168,13 +168,11 @@ fn message(err: DriverError, timeout: Duration) -> String {
 }
 
 /// The largest text or binary value an agent's SQLite statement may build or
-/// read. An answer keeps 200 characters of a cell, but SQLite and the reader
-/// each hold the whole value first: a 1 GB one cost the server process
-/// nearly 3 GB. Past this the statement fails instead.
+/// read, and the most one row's values may hold together. An answer keeps
+/// 200 characters of a cell, but SQLite and the reader each hold the whole
+/// value first: a 1 GB one cost the server process nearly 3 GB. Past this
+/// the statement fails instead.
 const SQLITE_VALUE_BYTES: i32 = 64 << 20;
-
-/// What SQLite says of a value over [`SQLITE_VALUE_BYTES`].
-const TOO_BIG: &str = "string or blob too big";
 
 /// Opens the file with writes refused (`PRAGMA query_only`) and the size of
 /// one value capped.
@@ -1015,7 +1013,9 @@ mod tests {
             .unwrap()
             .execute_batch(
                 "CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, body BLOB);
-                 INSERT INTO docs VALUES (1, 'small', x'00'), (2, 'big', zeroblob(70000000));",
+                 INSERT INTO docs VALUES (1, 'small', x'00'), (2, 'big', zeroblob(70000000));
+                 CREATE TABLE wide (a BLOB, b BLOB, c BLOB);
+                 INSERT INTO wide VALUES (zeroblob(30000000), zeroblob(30000000), zeroblob(30000000));",
             )
             .unwrap();
         let read = |sql: &str| {
@@ -1036,10 +1036,12 @@ mod tests {
             "SELECT zeroblob(1000000000)",
             "SELECT * FROM docs",
             "SELECT hex(zeroblob(40000000))",
+            // Each value under the limit, the row over it.
+            "SELECT * FROM wide",
         ] {
             let err = read(sql).expect_err(sql);
             assert!(
-                err.starts_with("Stopped: a value this reads or builds is over 64 MB"),
+                err.starts_with("Stopped: a value this reads or builds, or one row of them together, is over 64 MB"),
                 "{sql}: {err}"
             );
         }
@@ -1055,6 +1057,7 @@ mod tests {
         );
         assert_eq!(read("SELECT * FROM docs WHERE id = 1").unwrap().len(), 1);
         assert_eq!(read("SELECT zeroblob(8000000)").unwrap().len(), 1);
+        assert_eq!(read("SELECT a, b FROM wide").unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
