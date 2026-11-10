@@ -10,7 +10,7 @@ homepage.workspace = true
 [dependencies]
 rowkery-core = { path = "../rowkery-core" }
 # `hooks`: the authorizer that lists the tables a SQLite statement reads.
-rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
 rmcp = { version = "3", default-features = false, features = ["server", "transport-io"] }
 # The keyed hash behind masked values (`mask::stand_in`).
 hmac = "0.12"
