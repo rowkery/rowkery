@@ -6,7 +6,9 @@
 // tinyint(1), the enum's labels from COLUMN_TYPE, a date taking now(),
 // none for a blob); a delete whose cascades are counted and whose
 // trigger isn't stops before COMMIT, says both, and Commit all (no number:
-// some rows aren't counted) sends that reach back and commits.
+// some rows aren't counted) sends that reach back and commits. A row keyed
+// by a BINARY(16) column edits by that key (rowkery/reports#68); one keyed
+// by 32 bytes, of which the grid holds 16, opens no editor and says why.
 //
 //   cd apps/rowkery-tauri && npx vite --port 1420 &
 //   node scripts/mysql-edits-browser-proof.mjs [outDir] [light|dark]
@@ -47,6 +49,8 @@ function stubTauri(theme) {
             name: "shop",
             tables: [
               table("customers", customers),
+              table("sessions", [col("token", "binary(16)", { nullable: false }), col("device", "varchar(40)")], { primary_key: ["token"] }),
+              table("files", [col("digest", "binary(32)", { nullable: false }), col("name", "varchar(40)")], { primary_key: ["digest"] }),
               table("orders", [col("id", "int", { nullable: false }), col("customer_id", "int")], {
                 foreign_keys: [{ name: "orders_ibfk_1", columns: ["customer_id"], ref_schema: "shop", ref_table: "customers", ref_columns: ["id"], on_delete: "CASCADE" }],
               }),
@@ -80,6 +84,17 @@ function stubTauri(theme) {
         case "browse_table_sql":
           return `SELECT * FROM shop.${args.table}\nLIMIT ${args.limit ?? 1000};`;
         case "run_query": {
+          // A frame carries 16 bytes of a binary cell and its whole length.
+          const keyed = (key, bytes, label) => ({
+            columns: [{ name: key, type_name: "binary" }, { name: label, type_name: "varchar" }],
+            rows: [1, 2].map((n) => [{ Bytes: Array.from({ length: 16 }, (_, i) => n * 16 + i), byteLength: bytes }, T(`row ${n}`)]),
+            row_count: 2,
+            elapsed_ms: 2,
+            error: null,
+            cancelled: false,
+          });
+          if (String(args.sql).includes("shop.sessions")) return keyed("token", 16, "device");
+          if (String(args.sql).includes("shop.files")) return keyed("digest", 32, "name");
           const cols = customers.map((c) => ({ name: c.name, type_name: c.type_name.split("(")[0] }));
           return { columns: cols, rows, row_count: rows.length, elapsed_ms: 2, error: null, cancelled: false };
         }
@@ -180,5 +195,35 @@ const last = applied.at(-1);
 check(last.table.schema === "shop" && last.table.table === "customers", "the edits go to shop.customers");
 check(last.reach?.uncounted?.[0] === "triggers on shop.customers" && last.reach.tables[0].deleted === 3, "Commit all sends back the reach it showed");
 check((await page.locator(`${ws} [data-edit-tray]`).textContent()).startsWith("Deleted 1"), `committed: ${await page.locator(`${ws} [data-edit-tray]`).textContent()}`);
+
+// A BINARY(16) key names its row: the edit stages and commits by it.
+const openTable = async (name) => {
+  await page.locator(`${ws} [data-testid="sb-row-main"][title="shop.${name}"]`).last().dblclick();
+  await page.waitForFunction(([ws, n]) => document.querySelectorAll(`${ws} [data-testid="rg-body"] [data-row]`).length === n, [ws, 2]);
+};
+const second = (row) => page.locator(`${ws} [data-testid="rg-body"] [data-row="${row}"] [data-col="1"]`);
+await openTable("sessions");
+await second(0).click();
+await page.keyboard.press("Enter");
+check((await editorKind()) === "text", "a row keyed by BINARY(16) opens its editor");
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("phone");
+await page.keyboard.press("Enter");
+check((await second(0).textContent()).trim() === "phone", "the edit stages");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(`${ws} [data-edit-tray="done"]`);
+const byKey = (await page.evaluate(() => window.__CALLS__.filter(([c]) => c === "apply_changes").map(([, a]) => a))).at(-1);
+const sent = JSON.stringify(byKey.changes);
+check(byKey.table.table === "sessions" && sent.includes(`"Bytes":[${Array.from({ length: 16 }, (_, i) => 16 + i).join(",")}]`), `it commits by the whole key: ${sent}`);
+await shot("3-binary-key");
+
+// A 32-byte key, 16 bytes loaded: no editor, and the tray says why.
+await openTable("files");
+await second(0).click();
+await page.keyboard.press("Enter");
+check((await editorKind()) === null, "a row whose binary key is cut opens no editor");
+const why = (await page.locator(`${ws} [data-edit-tray="refused"]`).textContent()).trim();
+check(why === "This row's binary key is over 16 bytes, so it can't be edited here", `the tray: ${why}`);
+await shot("4-binary-key-too-long");
 
 await browser.close();

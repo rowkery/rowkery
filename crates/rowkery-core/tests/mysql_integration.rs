@@ -654,7 +654,7 @@ async fn edits_name_a_row_by_a_binary_key() {
     let mut s = open(config()).await.unwrap();
     session_execute(
         &mut s,
-        "DROP TABLE IF EXISTS it_ed_bin; CREATE TABLE it_ed_bin (id BINARY(16) PRIMARY KEY,          label VARCHAR(20)); INSERT INTO it_ed_bin VALUES          (X'00112233445566778899AABBCCDDEEFF', 'a'), (X'00112233445566778899AABBCCDDEE00', 'b'),          (X'27275C5C000000000000000000000000', 'c')",
+        "DROP TABLE IF EXISTS it_ed_bin; CREATE TABLE it_ed_bin (id BINARY(16) PRIMARY KEY, label VARCHAR(20)); INSERT INTO it_ed_bin VALUES (X'00112233445566778899AABBCCDDEEFF', 'a'), (X'00112233445566778899AABBCCDDEE00', 'b'), (X'27275C5C000000000000000000000000', 'c')",
     )
     .await
     .unwrap();

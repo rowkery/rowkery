@@ -117,10 +117,9 @@ export function useRowEdits(o: Options) {
 
   const keyOf = useCallback((r: number) => loadedKey(pk, names, rows, r), [pk, names, rows]);
 
-  /** Why a loaded row's key can't name it, or null when it can. */
+  /** Why loaded row `r`, whose key can't name it (`keyOf` is null), can't be edited. */
   const keyRefusal = useCallback(
-    (r: number): string | null => {
-      if (keyOf(r)) return null;
+    (r: number): string => {
       const cut =
         r < rows.length &&
         pk.some((column) => {
@@ -129,7 +128,7 @@ export function useRowEdits(o: Options) {
         });
       return cut ? "This row's binary key is over 16 bytes, so it can't be edited here" : "This row's key can't name it";
     },
-    [keyOf, pk, names, rows],
+    [pk, names, rows],
   );
 
   // Loaded rows by key, only while rows are edited or marked.
@@ -190,7 +189,7 @@ export function useRowEdits(o: Options) {
       if (name === undefined) return;
       if ("insert" in target) return update((b) => setInsertCell(b, target.insert, name, value));
       const key = keyOf(target.row);
-      if (!key) return optsRef.current.onRefused(keyRefusal(target.row) ?? "");
+      if (!key) return optsRef.current.onRefused(keyRefusal(target.row));
       const was = rows.isNull(target.row, col) ? null : rows.get(target.row, col);
       update((b) => stageCell(b, key, name, value, was, editors[col]?.kind));
     },
@@ -229,7 +228,7 @@ export function useRowEdits(o: Options) {
     (picked: number[]) => {
       const keys = picked.map(keyOf);
       const unnamed = picked.find((_, i) => !keys[i]);
-      if (unnamed !== undefined) return optsRef.current.onRefused(keyRefusal(unnamed) ?? "");
+      if (unnamed !== undefined) return optsRef.current.onRefused(keyRefusal(unnamed));
       if (!keys.length) return;
       update((b) => toggleDeletes(b, keys as KeyCells[]));
     },
@@ -313,9 +312,9 @@ export function useRowEdits(o: Options) {
       refusal,
       onRefused: () => refusal && optsRef.current.onRefused(refusal),
       refuseRow: (row) => {
-        const why = keyRefusal(row);
-        if (why) optsRef.current.onRefused(why);
-        return !!why;
+        if (keyOf(row)) return false;
+        optsRef.current.onRefused(keyRefusal(row));
+        return true;
       },
       editors,
       inserts: (buffer?.inserts ?? []).map((ins) => ({
