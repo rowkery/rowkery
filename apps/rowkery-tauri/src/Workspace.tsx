@@ -2439,7 +2439,10 @@ export function Workspace({
     // as Run All does: a server prepares one statement at a time.
     if (!browse && !paging && !tableRun && !confirmed && !part) {
       const ranges = sqlStatementRanges(text, sqlDialect);
-      if (ranges.length > 1)
+      // MySQL: one statement between `DELIMITER` lines too. Those are the
+      // mysql client's, and only the statement is sent.
+      const cut = sqlDialect === "mysql" && ranges.length === 1 && ranges[0].end - ranges[0].start < text.trim().length;
+      if (ranges.length > 1 || cut)
         return runStatements(text, ranges, target && target.sql === text ? target.start : null, tabId);
     }
     const runStart = part ? part.at : target && target.sql === text ? target.start : null;
