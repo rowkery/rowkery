@@ -215,6 +215,24 @@ describe("parseFragment", () => {
     expect(parseFragment(`"Order" != 3`, COLUMNS)).toMatchObject({ column: "Order", op: "<>", value: "3" });
   });
 
+  // Only ASCII words counted as values once, and `name = Chloé` reached the
+  // database bare: "column chloé does not exist".
+  test("a word in any script is a value, and so names a column", () => {
+    expect(chipsToWhere([parseFragment("status = Chloé", COLUMNS)!])).toBe("status = 'Chloé'");
+    expect(chipsToWhere([parseFragment("status <> 山田", COLUMNS)!], "mysql")).toBe("status <> '山田'");
+    expect(chipsToWhere([parseFragment("status = Zürich-2", COLUMNS)!], "sqlite")).toBe("status = 'Zürich-2'");
+    // Decomposed: e + a combining acute.
+    expect(parseFragment("status = Chloe\u0301", COLUMNS)).toMatchObject({ op: "=", value: "Chloe\u0301" });
+    expect(parseFragment("status between Ångström and Öl", COLUMNS)).toMatchObject({ value: "Ångström", value2: "Öl" });
+    const named = [...COLUMNS, { name: "名前", type_name: "text" }];
+    expect(chipsToWhere([parseFragment("名前 = 山田", named)!], "mysql")).toBe("`名前` = '山田'");
+    // Two words are still SQL to the parser: they need quotes.
+    expect(parseFragment("status = São Paulo", COLUMNS)).toEqual({ kind: "expr", sql: "status = São Paulo" });
+    // A name the table doesn't have stays what it was.
+    expect(parseFragment("café = 1", COLUMNS)).toEqual({ kind: "expr", sql: "café = 1" });
+    expect(parseFragment("café in paris", COLUMNS)).toBeNull();
+  });
+
   test("anything else that is SQL becomes an expression chip", () => {
     const sql = "created_at > now() - interval '1 day'";
     expect(parseFragment(sql, COLUMNS)).toEqual({ kind: "expr", sql });
