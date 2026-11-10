@@ -1925,7 +1925,11 @@ async fn catalog_lookups_keep_to_what_is_shared() {
     let setup = open_session(ID.into(), pg_config()).await.expect("connect");
     session_execute(
         &setup,
-        "DROP TABLE IF EXISTS mcp_ch_secrets, mcp_ch_open, mcp_ch_parts CASCADE;
+        "DROP TABLE IF EXISTS mcp_ch_secrets, mcp_ch_open, mcp_ch_parts, mcp_ch_jobs CASCADE;
+         DROP TYPE IF EXISTS mcp_ch_pair; DROP DOMAIN IF EXISTS mcp_ch_ref;
+         CREATE DOMAIN mcp_ch_ref AS regclass;
+         CREATE TYPE mcp_ch_pair AS (kind regtype, n int);
+         CREATE TABLE mcp_ch_jobs (id int PRIMARY KEY, target mcp_ch_ref[]);
          CREATE TABLE mcp_ch_secrets (id serial PRIMARY KEY, api_key text);
          COMMENT ON TABLE mcp_ch_secrets IS 'Stripe live keys';
          COMMENT ON COLUMN mcp_ch_secrets.api_key IS 'rotate monthly';
@@ -1955,7 +1959,7 @@ async fn catalog_lookups_keep_to_what_is_shared() {
         save(pg);
         RowkeryMcp::default()
     };
-    let mcp = share(McpTableMode::Picked, &["mcp_ch_open"]);
+    let mcp = share(McpTableMode::Picked, &["mcp_ch_open", "mcp_ch_jobs"]);
     for sql in [
         // A table the agent names.
         "SELECT obj_description('mcp_ch_secrets'::regclass)",
@@ -2002,6 +2006,18 @@ async fn catalog_lookups_keep_to_what_is_shared() {
         // A number beside pg_typeof becomes a type's name with no type written.
         "SELECT CASE WHEN g > 0 THEN g ELSE pg_typeof(1) END FROM generate_series(16384, 99999) g",
         "SELECT COALESCE(NULLIF(pg_typeof(1), pg_typeof(1)), g) FROM generate_series(16384, 99999) g",
+        // Or beside a field of a catalog's row type, a type of the
+        // database's own, or a ticked table's column. In VALUES the plan
+        // shows no expression at all.
+        "SELECT x::text FROM generate_series(16384, 99999) g, LATERAL (VALUES ((NULL::pg_catalog.pg_sequences).data_type), (g)) v(x)",
+        "SELECT (json_populate_record(NULL::pg_catalog.pg_sequences, json_build_object('data_type', g))).data_type::text FROM generate_series(16384, 99999) g",
+        "SELECT (jsonb_populate_record(NULL::pg_sequences, '{\"data_type\":\"mcp_ch_secrets\"}')).data_type::oid",
+        "SELECT (json_populate_record(NULL::mcp_ch_pair, json_build_object('kind', g))).kind::text FROM generate_series(16384, 99999) g",
+        "SELECT g::mcp_ch_ref::text FROM generate_series(16384, 99999) g",
+        "SELECT (json_populate_record(j, json_build_object('target', ARRAY[g]))).target::text FROM mcp_ch_jobs j, generate_series(16384, 99999) g",
+        // Roles, through the type privileges are written in.
+        "SELECT makeaclitem(g::oid, 10, 'SELECT', false)::text FROM generate_series(10, 9999) g",
+        "SELECT acldefault('r', g::oid)::text FROM generate_series(10, 9999) g",
         // The table's name in the server's error.
         "SELECT satisfies_hash_partition(g::oid, 1, 0, 1) FROM generate_series(16384, 99999) g",
         // On a ticked table too: the tools describe those.
@@ -2071,7 +2087,8 @@ async fn catalog_lookups_keep_to_what_is_shared() {
 
     session_execute(
         &setup,
-        "DROP TABLE mcp_ch_secrets, mcp_ch_open, mcp_ch_parts CASCADE;",
+        "DROP TABLE mcp_ch_secrets, mcp_ch_open, mcp_ch_parts, mcp_ch_jobs CASCADE;
+         DROP TYPE mcp_ch_pair; DROP DOMAIN mcp_ch_ref;",
     )
     .await
     .expect("cleanup");
