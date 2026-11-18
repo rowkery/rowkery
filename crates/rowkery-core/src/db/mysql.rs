@@ -1712,6 +1712,37 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
         ),
     )
     .await?;
+    // MySQL 8 answers TABLE_ROWS and the sizes from a cache it keeps for
+    // `information_schema_stats_expiry` seconds (a day by default), so a
+    // table filled since reads 0 rows. Read them fresh, then put the
+    // session's own value back. MariaDB and MySQL 5.7 have no such cache.
+    let expiry = if mariadb {
+        None
+    } else {
+        text_rows(session, "SELECT @@SESSION.information_schema_stats_expiry")
+            .await
+            .ok()
+            .and_then(|rows| {
+                rows.first()?
+                    .first()?
+                    .as_deref()?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .filter(|seconds| *seconds != 0)
+    };
+    // A server that won't take the setting answers from its cache, as before.
+    let expiry = match expiry {
+        Some(seconds)
+            if session_execute(session, "SET SESSION information_schema_stats_expiry = 0")
+                .await
+                .is_ok() =>
+        {
+            Some(seconds)
+        }
+        _ => None,
+    };
     let tables = text_rows(
         session,
         &format!(
@@ -1720,12 +1751,20 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
              ORDER BY TABLE_SCHEMA, TABLE_NAME"
         ),
     )
-    .await?;
+    .await;
+    if let Some(seconds) = expiry {
+        let _ = session_execute(
+            session,
+            &format!("SET SESSION information_schema_stats_expiry = {seconds}"),
+        )
+        .await;
+    }
+    let tables = tables?;
     let columns = text_rows(
         session,
         &format!(
             "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
-             COLUMN_DEFAULT, COLUMN_COMMENT FROM information_schema.COLUMNS \
+             COLUMN_DEFAULT, COLUMN_COMMENT, EXTRA FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA {where_schema} \
              ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"
         ),
@@ -1851,6 +1890,14 @@ pub async fn session_introspect(session: &mut MysqlSession) -> Result<SchemaCata
             Some(d) if mariadb => Some(unquote_literal(&d).unwrap_or(d)),
             d => d,
         };
+        // An AUTO_INCREMENT column fills itself but has no COLUMN_DEFAULT:
+        // without this an inserted or duplicated row would send its key.
+        let default = default.or_else(|| {
+            cell(r, 7)
+                .to_ascii_lowercase()
+                .contains("auto_increment")
+                .then(|| "auto_increment".into())
+        });
         let comment = cell(r, 6);
         out[s].tables[t].columns.push(ColumnNode {
             name: cell(r, 2),
