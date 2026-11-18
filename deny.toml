@@ -19,6 +19,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained (merged into zbus 6): D-Bus under tauri-plugin-notification, Linux only; no notify-rust release uses zbus 6 yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, as RUSTSEC-2026-0370" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, with no flaw reported: rmcp and its schemars pull it in for date types in the MCP schema; no rmcp release is without it yet" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained: a build-time macro under Tauri's Linux GTK stack" },
 ]
 
