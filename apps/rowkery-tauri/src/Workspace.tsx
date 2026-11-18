@@ -112,7 +112,7 @@ import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } fr
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { forgetTabTitles, noteTabTitles, transactionBlocksClose } from "./openTransactions";
-import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
+import { atCap, CAPPED_MESSAGE, nextFetchRows, pageAfter } from "./rowCap";
 import { parseConnectionUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
 import { emptyWindowPose } from "./penguinPlacement";
@@ -2865,7 +2865,10 @@ export function Workspace({
       offset: loaded ? loaded.rows.length : 0,
       after:
         loaded && last >= 0
-          ? Object.fromEntries(loaded.columns.map((c, i) => [c.name, loaded.rows.get(last, i)]))
+          ? pageAfter([...(tab.sort ?? []).map((o) => o.column), ...(pk ?? [])], (name) => {
+              const i = loaded.columns.findIndex((c) => c.name === name);
+              return i < 0 ? undefined : loaded.rows.get(last, i);
+            })
           : undefined,
     };
   };
