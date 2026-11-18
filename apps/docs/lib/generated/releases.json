@@ -1,5 +1,9 @@
 [
   {
+    "version": "v1.1.0",
+    "markdown": "Rowkery 1.1.0 adds MySQL and MariaDB.\n\n## New\n\n- **MySQL and MariaDB connections.** Pick **MySQL · MariaDB** in the New connection form, or paste a `mysql://`, `mariadb://` or `jdbc:mysql://` URL. SSL and SSH tunnels work as on Postgres.\n- Browse, filter and edit rows, Quick Look, Import CSV, Run SQL file (mysqldump and mariadb-dump files too), ⌘E plans, the Sessions view and the database picker (⇧⌘D) all work on MySQL and MariaDB.\n- Safe mode covers MySQL: Read-only refuses stored functions and `INTO OUTFILE`, and switching the character set can't hide a write.\n- **Star Rowkery on GitHub** in the Help menu and ⌘K. On the fifth day you use Rowkery, a card in the schema column asks, until you star or close it.\n\n## Not yet\n\n- Agents can't use MySQL or MariaDB connections, and Health is Postgres and SQLite only.\n"
+  },
+  {
     "version": "v1.0.0",
     "markdown": "Rowkery 1.0.0 is the first beta.\n\n## New\n\n- **Signed with an Apple Developer ID and notarized.** A fresh download opens like any other app, with no Open Anyway step.\n- After this update, macOS asks once more for each connection's keychain item. Choose **Always Allow**, and later updates won't ask again.\n"
   },

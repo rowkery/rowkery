@@ -1,6 +1,7 @@
 // MySQL and MariaDB split as the mysql client reads them: `#` comments,
 // `--` only before a space, backslash escapes, no `$$` bodies, and a
-// routine's BEGIN … END body kept whole.
+// routine's BEGIN … END body kept whole. `DELIMITER` lines read as the Run
+// SQL file reader reads them (`crates/rowkery-core/src/sql_file.rs`).
 import { describe, expect, test } from "vitest";
 import { sqlStatementRanges } from "../src/sqlStatements";
 
@@ -76,5 +77,51 @@ describe("MySQL statement split", () => {
 
   test("a transaction's BEGIN is no body", () => {
     expect(split("BEGIN; UPDATE t SET a = 1; COMMIT;")).toEqual(["BEGIN;", "UPDATE t SET a = 1;", "COMMIT;"]);
+    expect(split("BEGIN WORK; SELECT 1; END")).toEqual(["BEGIN WORK;", "SELECT 1;", "END"]);
+    expect(split("BEGIN NOT; SELECT 1")).toEqual(["BEGIN NOT;", "SELECT 1"]);
+  });
+
+  test("MariaDB's BEGIN NOT ATOMIC … END stays whole", () => {
+    const block = "BEGIN NOT ATOMIC\n  IF 1 THEN SELECT 1; END IF;\n  BEGIN SELECT 2; END;\n  SELECT 3;\nEND";
+    expect(split(`SELECT 0; ${block}; SELECT 4`)).toEqual(["SELECT 0;", `${block};`, "SELECT 4"]);
+    expect(split("begin not atomic select 1; select 2; end")).toEqual(["begin not atomic select 1; select 2; end"]);
+    // Postgres and SQLite have no such block.
+    expect(split("BEGIN NOT ATOMIC SELECT 1; END", false)).toEqual(["BEGIN NOT ATOMIC SELECT 1;", "END"]);
+  });
+
+  test("a DELIMITER line sets what ends a statement, and neither is sent", () => {
+    const proc = "CREATE PROCEDURE p() BEGIN SELECT 3; SELECT 4; END";
+    expect(split(`DELIMITER //\n${proc}//\nDELIMITER ;\nSELECT 5; SELECT 6;`)).toEqual([proc, "SELECT 5;", "SELECT 6;"]);
+    // Any case, any delimiter (one that starts a comment or a string too), the rest of its line unread.
+    expect(split("delimiter // and more\nSELECT 1; SELECT 2//\nSELECT '//'//\nDelimiter ;\nSELECT 3;")).toEqual([
+      "SELECT 1; SELECT 2",
+      "SELECT '//'",
+      "SELECT 3;",
+    ]);
+    expect(split("DELIMITER --\nSELECT 1-- SELECT `--`--")).toEqual(["SELECT 1", "SELECT `--`"]);
+    // Inside a word or a /*! … */ as the client finds it; not in a string, a name or a plain comment.
+    expect(split("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2;\n")).toEqual([
+      "CREATE PROCEDURE p() BEGIN SELECT 1; END",
+      "SELECT 2;",
+    ]);
+    expect(split("DELIMITER ab\nSELECT cab SELECT 1")).toEqual(["SELECT c", "SELECT 1"]);
+    expect(split("DELIMITER $$\nSELECT /*!50000 1 $$\nSELECT /* 3 $$ */ 4$$\nSELECT 'x$$'$$\n# no $$ here\nSELECT 5")).toEqual([
+      "SELECT /*!50000 1",
+      "SELECT /* 3 $$ */ 4",
+      "SELECT 'x$$'",
+      "# no $$ here\nSELECT 5",
+    ]);
+    // After a statement on its own line; Windows line ends.
+    expect(split("SELECT 1;\r\nDELIMITER ;;\r\nSELECT 2;;\r\nSELECT 3")).toEqual(["SELECT 1;", "SELECT 2", "SELECT 3"]);
+  });
+
+  test("DELIMITER is the client's word only where a statement starts", () => {
+    expect(split("SELECT\ndelimiter FROM t; SELECT 2")).toEqual(["SELECT\ndelimiter FROM t;", "SELECT 2"]);
+    expect(split("(SELECT 1)\nDELIMITER //\n; SELECT 2")).toEqual(["(SELECT 1)\nDELIMITER //\n;", "SELECT 2"]);
+    // Nothing to set, or a backslash: left for the server to answer.
+    expect(split("DELIMITER\nSELECT 1; SELECT 2")).toEqual(["DELIMITER\nSELECT 1;", "SELECT 2"]);
+    expect(split("DELIMITER \\\\\nSELECT 1; SELECT 2")).toEqual(["DELIMITER \\\\\nSELECT 1;", "SELECT 2"]);
+    // Postgres and SQLite have no such line.
+    expect(split("DELIMITER //\nSELECT 1; SELECT 2//", false)).toEqual(["DELIMITER //\nSELECT 1;", "SELECT 2//"]);
   });
 });

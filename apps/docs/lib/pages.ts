@@ -20,6 +20,7 @@ export const GROUPS: DocGroup[] = [
       { href: "/setting-up-a-connection/", title: "Setting up a connection", file: "setting-up-a-connection/page.mdx" },
       { href: "/windows-and-switching/", title: "Windows and switching", file: "windows-and-switching/page.mdx" },
       { href: "/environments-and-safe-mode/", title: "Environments and safe mode", file: "environments-and-safe-mode/page.mdx" },
+      { href: "/mysql-and-mariadb/", title: "MySQL and MariaDB", file: "mysql-and-mariadb/page.mdx" },
       { href: "/hosted-postgres/", title: "Hosted Postgres", file: "hosted-postgres/page.mdx" },
       { href: "/google-cloud-sql/", title: "Google Cloud SQL", file: "google-cloud-sql/page.mdx" },
     ],

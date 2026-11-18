@@ -343,6 +343,11 @@
         "accelerator": null
       },
       {
+        "id": "star-on-github",
+        "title": "Star Rowkery on GitHub",
+        "accelerator": null
+      },
+      {
         "separator": true
       },
       {

@@ -227,6 +227,10 @@ fn check_tokens(toks: &[Tok]) -> StatementCheck {
 /// changes nothing, so running it twice is the same as once. A read that
 /// calls another (`SELECT write_fn()`) may write from inside it.
 pub fn plain_read(sql: &str, dialect: Dialect) -> bool {
+    let mysql = dialect == Dialect::Mysql;
+    if mysql && mysql_may_hide_a_call(sql) {
+        return false;
+    }
     let statements: Vec<Vec<Tok>> = tokenize(sql, dialect)
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -234,8 +238,96 @@ pub fn plain_read(sql: &str, dialect: Dialect) -> bool {
     !statements.is_empty()
         && statements.iter().all(|toks| {
             let check = check_tokens(toks);
-            check.kind == StatementKind::Read && !check.unlocks_writes && !calls_function(toks)
+            check.kind == StatementKind::Read
+                && !check.unlocks_writes
+                && !calls_function(toks)
+                && !(mysql && mysql_may_write(toks))
         })
+}
+
+/// [`COMPUTING_FUNCTIONS`] that MySQL and MariaDB don't build in (MariaDB
+/// alone has `TO_CHAR`): there a bare call runs a stored function of that
+/// name, which may write.
+const NOT_IN_MYSQL: &[&str] = &[
+    "AGE",
+    "ARRAY_AGG",
+    "ARRAY_LENGTH",
+    "BOOL_AND",
+    "BOOL_OR",
+    "BTRIM",
+    "DATE_PART",
+    "DATE_TRUNC",
+    "GENERATE_SERIES",
+    "JSONB_AGG",
+    "JSONB_BUILD_OBJECT",
+    "JSON_AGG",
+    "JSON_BUILD_OBJECT",
+    "SPLIT_PART",
+    "STRING_AGG",
+    "STRPOS",
+    "TO_CHAR",
+    "TO_DATE",
+    "TO_NUMBER",
+    "TO_TIMESTAMP",
+    "TRUNC",
+    "UNNEST",
+];
+
+/// MySQL text where a call could go unseen by the tokens, read over-widely
+/// (a string holding any of these counts too):
+///
+/// - a `/*! … */` or `/*M! … */`, which the server runs or skips by its
+///   version, so `f /*!99999 AS */ (1)` calls `f` on every server so far;
+/// - a vertical tab, a space to the server alone;
+/// - a built-in's name with a space or comment before its `(`: MySQL then
+///   takes several of them (`max (a)`, `count (*)`) for a stored function.
+fn mysql_may_hide_a_call(sql: &str) -> bool {
+    let b = sql.as_bytes();
+    let upper = sql.to_ascii_uppercase();
+    if upper.contains("/*!") || upper.contains("/*M!") || b.contains(&0x0B) {
+        return true;
+    }
+    b.iter().enumerate().any(|(i, c)| {
+        if *c != b'(' || i == 0 {
+            return false;
+        }
+        let gap = b[..i]
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_whitespace())
+            .count();
+        let word_end = i - gap;
+        if gap == 0 {
+            // A comment's end: what stands before it isn't looked for.
+            return b[i - 1] == b'/' && i >= 2 && b[i - 2] == b'*';
+        }
+        if word_end >= 2 && &b[word_end - 2..word_end] == b"*/" {
+            return true;
+        }
+        let start = word_end
+            - b[..word_end]
+                .iter()
+                .rev()
+                .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
+                .count();
+        COMPUTING_FUNCTIONS
+            .binary_search(&&upper[start..word_end])
+            .is_ok()
+    })
+}
+
+/// A MySQL read that may write all the same: a call to a name MySQL has no
+/// built-in for, or a MariaDB sequence moved on (`NEXT VALUE FOR s`,
+/// `s.nextval`).
+fn mysql_may_write(toks: &[Tok]) -> bool {
+    let word = |t: &Tok, w: &str| t.is(w);
+    toks.windows(2).any(|w| {
+        (w[1] == Tok::Open
+            && matches!(&w[0], Tok::Word(name, _) if NOT_IN_MYSQL.contains(&name.as_str())))
+            || (w[0] == Tok::Dot && word(&w[1], "NEXTVAL"))
+    }) || toks
+        .windows(3)
+        .any(|w| word(&w[0], "NEXT") && word(&w[1], "VALUE") && word(&w[2], "FOR"))
 }
 
 /// Calls no function but the built-ins that only compute, as far as its
@@ -1587,6 +1679,42 @@ pub fn assigned_columns(sql: &str) -> Vec<String> {
     out
 }
 
+/// The names in `sql` as SQLite reads it, upper-cased: its bare words
+/// first, then what it quotes (`"…"`, `` `…` ``, `[…]`, and `'…'`, which
+/// SQLite takes for a name where one is due), quotes off; a string holding
+/// a backslash is left out. `None` when the text may be read another way
+/// or holds a parameter, for a guard that asks to refuse.
+pub fn sqlite_names(sql: &str) -> Option<(Vec<String>, Vec<String>)> {
+    // SQLite skips a byte-order mark where a token would start, and reads
+    // `?1`, `:a`, `@a`, `#a` and `$a(…)` as one parameter each, whatever
+    // the parentheses hold. The lexer does neither, so text holding either
+    // is not read at all: a guard has no use for a parameter nobody binds.
+    if sql.contains('\u{FEFF}') {
+        return None;
+    }
+    let b = sql.as_bytes();
+    let mut i = 0;
+    while let Some((lexeme, end)) = lex(b, i, true, Dialect::Sqlite) {
+        if matches!(lexeme, Lexeme::Skip | Lexeme::Other)
+            && matches!(b[i], b'$' | b'?' | b'@' | b'#' | b':')
+        {
+            return None;
+        }
+        i = end;
+    }
+    let (mut bare, mut quoted) = (Vec::new(), Vec::new());
+    for tok in tokenize(sql, Dialect::Sqlite).iter().flatten() {
+        match tok {
+            Tok::Unclear => return None,
+            Tok::Word(word, _) => bare.push(word.clone()),
+            Tok::Quoted(_) => quoted.push(tok.name()?),
+            Tok::Str(Some(text)) => quoted.push(text.to_ascii_uppercase()),
+            _ => {}
+        }
+    }
+    Some((bare, quoted))
+}
+
 /// Every identifier in `sql`, lower-cased, quotes taken off (strings and
 /// comments left out): which columns a statement names.
 pub fn identifiers(sql: &str) -> Vec<String> {
@@ -1917,6 +2045,14 @@ fn plain_check(toks: &[Tok]) -> StatementCheck {
             } else {
                 read()
             }
+        }
+        // MariaDB's compound statement outside a routine. It runs whatever
+        // it holds, which is cut apart here at each `;`.
+        "BEGIN"
+            if toks.get(1).is_some_and(|t| t.is("NOT"))
+                && toks.get(2).is_some_and(|t| t.is("ATOMIC")) =>
+        {
+            write_verb("BEGIN NOT ATOMIC")
         }
         "SET" | "RESET" | "BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT"
         | "SAVEPOINT" | "RELEASE" | "DISCARD" | "DEALLOCATE" | "PREPARE" => {
@@ -2391,6 +2527,55 @@ mod tests {
             one("SELECT a INTO TEMP backup FROM t").target.as_deref(),
             Some("backup")
         );
+    }
+
+    #[test]
+    fn sqlite_names_reads_text_as_sqlite_does() {
+        let joins = |sql: &str| {
+            sqlite_names(sql)
+                .is_none_or(|(bare, _)| bare.iter().any(|w| w == "USING" || w == "NATURAL"))
+        };
+        for sql in [
+            "select * from a join b using (x)",
+            "select * from a NaTuRaL join b",
+            "select * from a join b/**/using(x)",
+            "select * from a join [b]using(x)",
+            "select * from a join \"b\"using(x)",
+            "select * from a join `b`using(x)",
+            // No backslash escapes, no E'' strings and no dollar bodies.
+            "select 'a\\' from a join b using (x) --'",
+            "select E'a\\' from a join b using (x) --'",
+            "select $$ from a join b using (x) where $$",
+            // `[it's]` is one name; the string never opens.
+            "select [it's] from a join b using (x) --'",
+            // Nothing nests: the comment ends at the first `*/`.
+            "select /* /* */ 1 from a join b using (x) /* */",
+            // Text that never closes may be read either way.
+            "select * from a /* using",
+            // SQLite skips a byte-order mark before a word.
+            "select * from a join b \u{FEFF}using (x)",
+            "select * from a \u{FEFF}natural join b",
+            // One parameter each to SQLite, whatever the parentheses hold.
+            "select $a(--), x from a natural join b",
+            "select :a('), x from a natural join b --'",
+            "select @a(/*), x from a natural join b",
+            "select * from a join b on ?1natural join c",
+        ] {
+            assert!(joins(sql), "{sql}");
+        }
+        for sql in [
+            "select * from a join b on b.x = a.x",
+            "select 'using', \"natural\", [using], `natural` from a",
+            "select * from a -- natural\n join b on 1",
+            "select * from a /* using */ join b on 1",
+            "select using_it, unnatural, pay$ from a where b = 'a@b.c: $5 #1?'",
+        ] {
+            assert!(!joins(sql), "{sql}");
+        }
+        let (bare, quoted) =
+            sqlite_names("select 1 from V1 join \"my v\", [b c], `d`, 'e f'").unwrap();
+        assert!(bare.contains(&"V1".to_string()));
+        assert_eq!(quoted, ["MY V", "B C", "D", "E F"]);
     }
 
     #[test]
@@ -2971,6 +3156,21 @@ mod tests {
     }
 
     #[test]
+    fn a_compound_statement_is_a_write() {
+        let checks = check_sql("BEGIN NOT ATOMIC DELETE FROM t; END", Dialect::Mysql);
+        assert_eq!(checks[0].kind, StatementKind::Write);
+        assert_eq!(checks[0].verb, "BEGIN NOT ATOMIC");
+        // A transaction's start stays the session's own.
+        for sql in ["BEGIN", "BEGIN WORK", "BEGIN NOT DEFERRABLE"] {
+            assert_eq!(
+                check_sql(sql, Dialect::Either)[0].kind,
+                StatementKind::Session,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
     fn plain_reads_call_no_function() {
         for sql in [
             "SELECT * FROM t WHERE id IN (1, 2) AND EXISTS (SELECT 1 FROM u)",
@@ -3008,6 +3208,45 @@ mod tests {
         }
         // Kept sorted: it is searched by halves.
         assert!(COMPUTING_FUNCTIONS.windows(2).all(|w| w[0] < w[1]));
+        assert!(NOT_IN_MYSQL.iter().all(|n| COMPUTING_FUNCTIONS.contains(n)));
+    }
+
+    #[test]
+    fn mysql_plain_reads_are_read_as_mysql_resolves_names() {
+        for sql in [
+            "SELECT count(*), max(a), lower(b), coalesce(a, 0) FROM t WHERE id IN (1, 2)",
+            "SELECT * FROM `select` s JOIN (SELECT 1) y ON (true) # c",
+            "SELECT PREVIOUS VALUE FOR s",
+            "SHOW CREATE TABLE t",
+        ] {
+            assert!(plain_read(sql, Dialect::Mysql), "{sql}");
+        }
+        for sql in [
+            // No built-in by these names: a stored function is called.
+            "SELECT age(1)",
+            "SELECT trunc(a), to_char(a) FROM t",
+            // With a space MySQL takes these for a stored function too.
+            "SELECT max (a) FROM t",
+            "SELECT count\n(*) FROM t",
+            "SELECT max /* c */ (a) FROM t",
+            // A sequence moves on.
+            "SELECT NEXT VALUE FOR s",
+            "SELECT next  value\nfor s",
+            "SELECT s.nextval",
+            "SELECT nextval(s)",
+            // The server skips the comment and calls f; a vertical tab is
+            // a space to it.
+            "SELECT f /*!99999 AS */ (1)",
+            "SELECT f /*M!999999 AS */ (1)",
+            "SELECT f\u{b}(1)",
+        ] {
+            assert!(!plain_read(sql, Dialect::Mysql), "{sql}");
+        }
+        // Other engines read these names and spaces their own way.
+        assert!(plain_read(
+            "SELECT max (a), age(b) FROM t",
+            Dialect::Postgres
+        ));
     }
 
     /// What only one engine has is read as that engine reads it, so

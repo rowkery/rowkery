@@ -641,6 +641,14 @@ export const COMMANDS: Command[] = [
     canRun: always,
   },
   {
+    // Opens github.com/rowkery/rowkery (core holds the URL); also ends the star card.
+    id: "star-on-github",
+    title: "Star Rowkery on GitHub",
+    menuTitle: "Star Rowkery on GitHub",
+    synonyms: ["github", "star", "source", "repository", "open source"],
+    canRun: always,
+  },
+  {
     // THIRD_PARTY_NOTICES.md (scripts/notices.mjs) in a sheet.
     id: "third-party-notices",
     title: "Third-party notices",
@@ -1045,7 +1053,7 @@ export const MENU_BAR: { submenu: MenuSubmenu; items: (string | null)[] }[] = [
     items: ["history-back", "history-forward", null, "next-tab", "prev-tab", null, "focus-editor"],
   },
   { submenu: "Window", items: ["new-window", "close-window", null, "next-window", "prev-window", null, "agents"] },
-  { submenu: "Help", items: ["keyboard-shortcuts", "show-key-hints", null, "report-issue", null, "third-party-notices"] },
+  { submenu: "Help", items: ["keyboard-shortcuts", "show-key-hints", null, "report-issue", "star-on-github", null, "third-party-notices"] },
 ];
 
 /** Ids of every command in the menu bar. */

@@ -13,7 +13,9 @@ import {
 import {
   AgentIcon,
   ChevronDownIcon,
+  CloseIcon,
   DownloadIcon,
+  GitHubIcon,
   EyeIcon,
   EyeOffIcon,
   SettingsIcon,
@@ -41,6 +43,7 @@ import { GridMenu, useContextMenu } from "./GridMenu";
 import { panelRowMenu } from "./contextMenus";
 import { showToast } from "./notify";
 import { setPresenting, usePresenting } from "./presenting";
+import { endStarAsk, starOnGitHub, useStarAskDue } from "./starAsk";
 import { updateWaiting, useUpdatePref, useUpdateState, type UpdateState } from "./updates";
 import type { SettingsSection } from "./SettingsPage";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -506,6 +509,35 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(
     );
   },
 );
+
+/**
+ * The GitHub star card (`starAsk.ts`): above the foot once Rowkery has been
+ * used on five days, until Star on GitHub or × ends it. Hidden while
+ * Presenting (a shared screen is no place for it).
+ */
+export function StarCard() {
+  const due = useStarAskDue();
+  const presenting = usePresenting();
+  if (!due || presenting) return null;
+  return (
+    <div className="sb-star" data-testid="star-card">
+      <button type="button" className="sb-star-x" data-testid="star-dismiss" aria-label="Don't ask again" title="Don't ask again" onClick={endStarAsk}>
+        <CloseIcon size={12} />
+      </button>
+      <p className="sb-star-title">Like Rowkery so far?</p>
+      <p className="sb-star-text">A star on GitHub gives the team motivation to keep maintaining it.</p>
+      <button
+        type="button"
+        className="sb-star-go"
+        data-testid="star-go"
+        onClick={starOnGitHub}
+      >
+        <GitHubIcon size={13} />
+        Star on GitHub
+      </button>
+    </div>
+  );
+}
 
 /**
  * The schema column's foot (2026-10-13, reordered 2026-10-17): past a rule,

@@ -10,7 +10,7 @@ export const metadata = { title: "Sessions" };
 
 Choose **View › Sessions**, or **Show sessions** in <kbd>⌘K</kbd> (it also answers to `locks`, `blocking`, `kill` and `pg_stat_activity`). It opens as a tab called **Sessions** beside your query tabs. Each window has at most one; asking again shows the one you have. It's saved with your other tabs.
 
-Sessions is for Postgres connections, and it needs the window to be connected.
+Sessions is for Postgres, MySQL and MariaDB connections, and it needs the window to be connected. This page describes Postgres; [MySQL and MariaDB](/mysql-and-mariadb/#sessions) lists what differs there.
 
 <Shot src="/img/sessions-list.webp" width={1360} height={560} alt="The Sessions tab: a state ≠ idle filter with an ×, 7 of 9, and Live. The list has columns pid, who, state, for, waiting on, blocked by and query. One row reads You · Query 1 with blocking 1; others carry tags such as Lock: relation and IO: DataFileRead, and one query reads Not visible to your login." />
 

@@ -6,6 +6,8 @@ export const metadata = { title: "Importing a CSV" };
 
 <p className="lead">Load a CSV or TSV file into a table you already have. Rowkery matches the file's columns to the table's, shows its first rows in the grid, and writes every row in one transaction, so a file goes in whole or not at all.</p>
 
+On MySQL and MariaDB, **Skip** and a few other things work differently: see [MySQL and MariaDB](/mysql-and-mariadb/#importing-a-csv).
+
 <Shot src="/img/importing-csv-panel.webp" width={1016} height={603} alt="Import CSV beside the orders grid: orders-october.csv, 12,431 rows, 8 columns; Connection shop; Table orders; If a key already exists set to Skip; Empty cells set to NULL; First row set to Header; Columns 7 of 8 matched, with utm_source skipped; the file's first rows tinted in the grid; Cancel and Import 12,431 rows." />
 
 ## Starting an import

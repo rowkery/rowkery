@@ -21,7 +21,8 @@ import { sqlToRun, statementRangeAtOffset, type CharRange, type SqlDialect } fro
 export interface SqlEditorHandle {
   getSqlToRun: () => string;
   /** What ⌘↵ would run and where it starts in the text (error positions count from there). */
-  getRunTarget: () => { sql: string; start: number };
+  /** `statement`: the editor's own statement at the caret, not a selection. */
+  getRunTarget: () => { sql: string; start: number; statement?: boolean };
   /** Puts the caret at `offset` (the editor keeps focus) and scrolls it into view. */
   jumpTo: (offset: number) => void;
   /** Replaces `from..to` with `text` as one undo step. */
@@ -411,7 +412,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
     const { selectionStart: a, selectionEnd: b } = ta;
     if (a !== b) return { sql: value.slice(Math.min(a, b), Math.max(a, b)), start: Math.min(a, b) };
     const range = statementRangeAtOffset(value, a, ranges);
-    return range ? { sql: value.slice(range.start, range.end), start: range.start } : { sql: "", start: 0 };
+    return range ? { sql: value.slice(range.start, range.end), start: range.start, statement: true } : { sql: "", start: 0 };
   }, []);
 
   const jumpTo = useCallback((offset: number) => {

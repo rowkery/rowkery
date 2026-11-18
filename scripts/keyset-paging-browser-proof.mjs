@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Table tab paging (stubbed `invoke` recording each `browse_table`): pages of
 // 1,000 by default; scrolling to the last rows loads the next page, asked for
-// by keyset (`key` = the primary key, `after` = the last row loaded); the SQL
+// by keyset (`key` = the primary key, `after` = the last row's sort and key
+// columns, never a binary cell, so a table with binary data pages too); the SQL
 // line's end reads "1,000 of ≈2,500 rows" until the last page; its LIMIT menu
 // (1,000 · 5,000 · All, which is up to the 1,000,000-row cap) reloads at
 // the new size; a table without a primary
@@ -30,7 +31,7 @@ function stubTauri() {
   localStorage.clear();
   const col = (name, type_name) => ({ name, type_name, nullable: true });
   const table = (name, primary_key) => ({ name, columns: [col("id", "int8"), col("label", "text")], primary_key, indexes: [], foreign_keys: [], row_estimate: { Approximate: 2500 }, partition_of: null });
-  const tables = [table("events", ["id"]), table("logs", [])];
+  const tables = [table("events", ["id"]), table("logs", []), table("files", ["id"])];
   const TOTAL = 2500;
   window.__BROWSES__ = [];
   let nextId = 0;
@@ -52,9 +53,12 @@ function stubTauri() {
           const queryId = ++nextId;
           setTimeout(() => {
             const send = (f) => onFrame.onmessage({ query_id: queryId, ...f });
-            send({ t: "columns", columns: [{ name: "id", type_name: "int8" }, { name: "label", type_name: "text" }] });
+            // `files` holds binary data: a cell is its first bytes and its real size.
+            const binary = rest.table === "files";
+            const second = (n) => (binary ? { Bytes: [n % 256, 1, 2], byteLength: 4096 } : { Text: `e${n}` });
+            send({ t: "columns", columns: [{ name: "id", type_name: "int8" }, { name: "label", type_name: binary ? "bytea" : "text" }] });
             for (let i = 0; i < n; i += 500) {
-              send({ t: "rows", seq: i / 500, rows: Array.from({ length: Math.min(500, n - i) }, (_, j) => [{ Int: from + i + j + 1 }, { Text: `e${from + i + j + 1}` }]) });
+              send({ t: "rows", seq: i / 500, rows: Array.from({ length: Math.min(500, n - i) }, (_, j) => [{ Int: from + i + j + 1 }, second(from + i + j + 1)]) });
             }
             send({ t: "done", status: "ok", row_count: n, affected_rows: null, elapsed_ms: 3, first_row_ms: 1, frames: 1, error: null, sqlstate: null, error_position: null, hold: null });
           }, 5);
@@ -118,7 +122,7 @@ await toBottom();
 await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "2000", ws);
 await settle();
 b = await browses();
-check(b.length === 2 && b[1].after?.id?.Int === 1000 && b[1].after?.label?.Text === "e1000" && b[1].offset === 1000, `scrolling to the end asks for the rows after id 1000 (${JSON.stringify(b[1]?.after)})`);
+check(b.length === 2 && JSON.stringify(b[1].after) === '{"id":{"Int":1000}}' && b[1].offset === 1000, `scrolling to the end asks for the rows after id 1000, by the key alone (${JSON.stringify(b[1]?.after)})`);
 
 await toBottom();
 await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "2500", ws);
@@ -167,4 +171,14 @@ await page.click(`${ws} [data-load-more]`);
 await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "2000", ws);
 b = await browses();
 check(b.at(-1).key.length === 0 && b.at(-1).offset === 1000, "its next page goes by offset 1,000");
+
+// A table with binary data: the next page is asked for without the binary cell.
+await page.click(`${ws} [data-table="rowkery.public.files"] [data-testid="sb-row-main"]`);
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "1000", ws);
+await settle();
+await page.click(`${ws} [data-load-more]`);
+await page.waitForFunction((ws) => document.querySelector(`${ws} [data-testid="results-grid-wrap"]`)?.getAttribute("data-row-count") === "2000", ws);
+b = (await browses()).filter((x) => x.table === "files");
+check(b.length === 2 && JSON.stringify(b[1].after) === '{"id":{"Int":1000}}', `binary data: the second page continues after id 1000 (${JSON.stringify(b[1]?.after)})`);
+await page.screenshot({ path: `${OUT}/3-binary-table.png` });
 await browser.close();

@@ -100,7 +100,8 @@ import { TableStructure } from "./TableStructure";
 import { SchemaMap } from "./SchemaMap";
 import { depthKey, lastTableView, mapDepthFor, setLastTableView, setMapDepth } from "./viewMemory";
 import { mapGuessOn, setMapGuess } from "./mapGuess";
-import { Sidebar, SidebarFoot } from "./Sidebar";
+import { Sidebar, SidebarFoot, StarCard } from "./Sidebar";
+import { noteUseDay, starOnGitHub } from "./starAsk";
 import { createPortal } from "react-dom";
 import { connectionLook } from "./engines";
 import { SqlEditor, type EditorCompletion, type SqlEditorHandle } from "./SqlEditor";
@@ -111,7 +112,7 @@ import { exportBanner, importBanner, notifyDone, queryBanner, type QueryJob } fr
 import { settlePending, showErrorToastIfFree, showOfferToast, showToast, showUndoToast, type Undoable } from "./notify";
 import { commitLost, importLost, isLostAnswer } from "./runOutcome";
 import { forgetTabTitles, noteTabTitles, transactionBlocksClose } from "./openTransactions";
-import { atCap, CAPPED_MESSAGE, nextFetchRows } from "./rowCap";
+import { atCap, CAPPED_MESSAGE, nextFetchRows, pageAfter } from "./rowCap";
 import { parseConnectionUrl } from "./connectionUrl";
 import { ConnectFailed, EmptyWindow, useConnectFailure } from "./EmptyWindow";
 import { emptyWindowPose } from "./penguinPlacement";
@@ -345,6 +346,7 @@ const OVER_PAGE = new Set([
   "third-party-notices",
   "report-issue",
   "check-updates",
+  "star-on-github",
   "show-key-hints",
   "hide-tips",
   "timings",
@@ -2435,9 +2437,15 @@ export function Workspace({
     const target = !browse && !paging ? sqlEditorRef.current?.getRunTarget() : undefined;
     // A selection of several statements (a script with BEGIN … COMMIT) runs
     // as Run All does: a server prepares one statement at a time.
-    if (!browse && !paging && !tableRun && !confirmed && !part) {
+    // Not the editor's own statement at the caret: cut out of a MySQL
+    // script, it reads otherwise without the `DELIMITER` line above it.
+    const one = target?.statement && target.sql === text;
+    if (!browse && !paging && !tableRun && !confirmed && !part && !one) {
       const ranges = sqlStatementRanges(text, sqlDialect);
-      if (ranges.length > 1)
+      // MySQL: one statement between `DELIMITER` lines too. Those are the
+      // mysql client's, and only the statement is sent.
+      const cut = sqlDialect === "mysql" && ranges.length === 1 && ranges[0].end - ranges[0].start < text.trim().length;
+      if (ranges.length > 1 || cut)
         return runStatements(text, ranges, target && target.sql === text ? target.start : null, tabId);
     }
     const runStart = part ? part.at : target && target.sql === text ? target.start : null;
@@ -2863,7 +2871,10 @@ export function Workspace({
       offset: loaded ? loaded.rows.length : 0,
       after:
         loaded && last >= 0
-          ? Object.fromEntries(loaded.columns.map((c, i) => [c.name, loaded.rows.get(last, i)]))
+          ? pageAfter([...(tab.sort ?? []).map((o) => o.column), ...(pk ?? [])], (name) => {
+              const i = loaded.columns.findIndex((c) => c.name === name);
+              return i < 0 ? undefined : loaded.rows.get(last, i);
+            })
           : undefined,
     };
   };
@@ -3947,7 +3958,7 @@ export function Workspace({
   const connected = connState === "connected";
   const sessions = useSessions(
     windowId,
-    active && isSessionsTab && connected && activeConnection?.kind === "postgres",
+    active && isSessionsTab && connected && (activeConnection?.kind === "postgres" || activeConnection?.kind === "mysql"),
   );
   const health = useHealth(
     windowId,
@@ -3967,6 +3978,8 @@ export function Workspace({
   // No tip while the shown tab runs; one earned meanwhile waits for the rows.
   useEffect(() => {
     if (active) setQueryRunning(running);
+    // A day Rowkery was used, for the GitHub star card.
+    if (running) noteUseDay();
   }, [active, running]);
   const filterKeys = commandKeys("filter-rows", macOverlay);
   const hasRows = !!result && result.columns.length > 0;
@@ -4262,6 +4275,7 @@ export function Workspace({
     if (id === "keyboard-shortcuts") return actions.openShortcuts();
     if (id === "third-party-notices") return actions.openNotices();
     if (id === "check-updates") return actions.checkForUpdates();
+    if (id === "star-on-github") return starOnGitHub();
     if (id === "settings") return actions.openSettings();
     if (id === "show-key-hints") return showKeyHints();
     if (id === "find-results") return openFind();
@@ -4575,14 +4589,17 @@ export function Workspace({
           }
           envTag={activeConnection?.environment ? <EnvTag env={activeConnection.environment} /> : null}
           foot={
-            <SidebarFoot
-              mcpOn={mcpOn}
-              agentsOpen={agentsOpen}
-              proposals={proposalCount}
-              onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
-              settingsOpen={settingsOpen}
-              onSettings={(section) => actions.openSettings(section)}
-            />
+            <>
+              <StarCard />
+              <SidebarFoot
+                mcpOn={mcpOn}
+                agentsOpen={agentsOpen}
+                proposals={proposalCount}
+                onAgents={() => (onToggleAgents ? onToggleAgents() : runCommand("agents"))}
+                settingsOpen={settingsOpen}
+                onSettings={(section) => actions.openSettings(section)}
+              />
+            </>
           }
           menu={active && <ZoneMenu zone="panel" state={commandState} onRun={runCommand} />}
           keyStrip={active && <KeyStrip zone="panel" state={commandState} />}

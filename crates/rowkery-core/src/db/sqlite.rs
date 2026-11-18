@@ -62,7 +62,13 @@ pub struct SqliteDriver {
     file_read_only: bool,
     /// The file the connection opened, to notice it was replaced.
     opened: Option<FileId>,
+    /// The most bytes one text or binary value may hold on this connection,
+    /// and the values of one row together.
+    max_value_bytes: Option<i32>,
 }
+
+/// What SQLite says of a value over `SQLITE_LIMIT_LENGTH`.
+pub const TOO_BIG: &str = "string or blob too big";
 
 /// Which file a path named when it was opened (device and inode on Unix;
 /// elsewhere only that it exists).
@@ -93,7 +99,19 @@ impl SqliteDriver {
             read_only: false,
             file_read_only: false,
             opened: None,
+            max_value_bytes: None,
         }
+    }
+
+    /// Caps every text and binary value on the connection, built by a
+    /// function or read from a row (`SQLITE_LIMIT_LENGTH`): a statement that
+    /// would hold a larger one fails with "string or blob too big" before
+    /// SQLite makes room for it. No statement can raise it again. A row
+    /// whose values together pass the cap fails the same way, before they
+    /// are copied out of SQLite.
+    pub fn max_value_bytes(mut self, bytes: i32) -> Self {
+        self.max_value_bytes = Some(bytes);
+        self
     }
 
     /// Refuses writes at the SQLite level (`PRAGMA query_only`) for
@@ -173,7 +191,7 @@ impl SqliteDriver {
         let conn = self
             .connection()
             .map_err(|e| ApplyFailure::other(e.into_message()))?;
-        let conn = conn
+        let mut conn = conn
             .lock()
             .map_err(|_| ApplyFailure::other("lock poisoned"))?;
         if !conn.is_autocommit() {
@@ -185,25 +203,31 @@ impl SqliteDriver {
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| ApplyFailure::other(e.to_string()))?;
         // The hook goes with the batch: nothing else on the tab counts.
-        let mut counter = SqliteCounter::install(&conn);
-        let rollback = || {
+        fn rollback(conn: &mut rusqlite::Connection) {
             let _ = conn.execute_batch("ROLLBACK");
-            conn.update_hook(None::<fn(Action, &str, &str, i64)>);
+            let _ = conn.update_hook(None::<fn(Action, &str, &str, i64)>);
+        }
+        let mut counter = match SqliteCounter::install(&mut conn) {
+            Ok(counter) => counter,
+            Err(err) => {
+                rollback(&mut conn);
+                return Err(ApplyFailure::other(err.to_string()));
+            }
         };
         let mut counts = ApplyCounts::default();
         if let Err(err) = counter.mark(&conn) {
-            rollback();
+            rollback(&mut conn);
             return Err(ApplyFailure::other(err.to_string()));
         }
         for (index, statement) in statements.iter().enumerate() {
             match conn.execute(&statement.sql, []) {
                 Ok(1) => counts.add(statement.verb, 1),
                 Ok(rows) => {
-                    rollback();
+                    rollback(&mut conn);
                     return Err(ApplyFailure::count(index, statement, rows as u64));
                 }
                 Err(err) => {
-                    rollback();
+                    rollback(&mut conn);
                     return Err(ApplyFailure::error(index, statement, err.to_string()));
                 }
             }
@@ -230,17 +254,17 @@ impl SqliteDriver {
                 beyond(all, &schema, &table, counts.rows())
             }
             Err(err) => {
-                rollback();
+                rollback(&mut conn);
                 return Err(ApplyFailure::other(err.to_string()));
             }
         };
         if !reach.is_empty() && approved != Some(&reach) {
-            rollback();
+            rollback(&mut conn);
             return Err(ApplyFailure::reaches(reach));
         }
-        conn.update_hook(None::<fn(Action, &str, &str, i64)>);
+        let _ = conn.update_hook(None::<fn(Action, &str, &str, i64)>);
         if let Err(err) = conn.execute_batch("COMMIT") {
-            rollback();
+            rollback(&mut conn);
             return Err(ApplyFailure::other(err.to_string()));
         }
         Ok(counts)
@@ -320,8 +344,17 @@ impl SqliteDriver {
                 break;
             }
             let mut values = Vec::with_capacity(column_count);
+            let mut row_bytes = 0usize;
             for i in 0..column_count {
                 let value = row.get_ref(i).map_err(map_query_error)?;
+                if let (Some(cap), ValueRef::Text(b) | ValueRef::Blob(b)) =
+                    (self.max_value_bytes, value)
+                {
+                    row_bytes += b.len();
+                    if row_bytes > cap as usize {
+                        return Err(DriverError::Message(TOO_BIG.into()));
+                    }
+                }
                 let value = sqlite_value_to_core(value);
                 batch_bytes += value.heap_bytes();
                 values.push(value);
@@ -399,6 +432,10 @@ impl Driver for SqliteDriver {
         }
         if self.read_only {
             conn.pragma_update(None, "query_only", true)
+                .map_err(|e| DriverError::Message(e.to_string()))?;
+        }
+        if let Some(bytes) = self.max_value_bytes {
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes)
                 .map_err(|e| DriverError::Message(e.to_string()))?;
         }
         let interrupt = conn.get_interrupt_handle();
@@ -931,7 +968,6 @@ fn result_columns(stmt: &rusqlite::Statement<'_>) -> Vec<Column> {
     // rusqlite panics on a declared type that isn't UTF-8; read it as none.
     let declared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         stmt.columns()
-            .into_iter()
             .map(|c| c.decl_type().map(str::to_string))
             .collect::<Vec<_>>()
     }))
@@ -1046,6 +1082,26 @@ mod tests {
         run("CREATE TRIGGER items_gone AFTER DELETE ON items BEGIN INSERT INTO audit VALUES ('deleted ' || old.id); END;");
         run("DELETE FROM items WHERE id = 1");
         assert_eq!(run("SELECT note FROM audit"), 1);
+    }
+
+    #[test]
+    fn text_holding_two_statements_runs_neither() {
+        // rusqlite 0.41 turns down text with a second statement in it; before
+        // that the first ran and the rest was dropped without a word.
+        let (_file, path) = temp_db();
+        let mut driver = SqliteDriver::new(path);
+        driver.connect().expect("connect");
+        let mut run = |sql: &str| driver.query_stream(sql, |_, _| Ok(()));
+        let err =
+            run("INSERT INTO items (name) VALUES ('c'); INSERT INTO items (name) VALUES ('d')")
+                .expect_err("two statements");
+        assert!(err.to_string().contains("Multiple statements"), "{err}");
+        // A comment or a stray `;` after the statement is not a second one.
+        assert_eq!(
+            run("SELECT id FROM items; -- all of them").expect("comment"),
+            2
+        );
+        assert_eq!(run("SELECT id FROM items; ;\n").expect("stray"), 2);
     }
 
     #[test]

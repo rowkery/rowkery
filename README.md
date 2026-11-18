@@ -14,7 +14,7 @@
 
 # Rowkery
 
-Rowkery is a Mac app for Postgres and SQLite. You browse and edit your data from the keyboard, and you can share the tables you pick with an AI agent, which reads them through a server built into the app. Only you can change anything.
+Rowkery is a Mac app for Postgres, MySQL, MariaDB and SQLite. You browse and edit your data from the keyboard, and you can share the tables you pick with an AI agent, which reads them through a server built into the app. Only you can change anything.
 
 It's free and open source, there's no account, and it connects straight from your Mac to your database.
 
@@ -136,7 +136,7 @@ Releases are published to this repo's GitHub Releases. The app reads the update 
 
 | Path | What's there |
 | --- | --- |
-| `crates/rowkery-core` | Rust core: Postgres, SQLite and Cloud SQL, introspection, queries, edits, health checks |
+| `crates/rowkery-core` | Rust core: Postgres, MySQL/MariaDB, SQLite and Cloud SQL, introspection, queries, edits, health checks |
 | `crates/rowkery-bridge` | The window API the app calls (`open_window`, `run_window_query`, …) |
 | `crates/rowkery-mcp` | The MCP server agents talk to, its guards and the proposal queue |
 | `apps/rowkery-tauri` | The Mac app: Tauri 2, React, TypeScript |
