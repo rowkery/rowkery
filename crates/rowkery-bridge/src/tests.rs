@@ -4116,7 +4116,10 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
             "CREATE TABLE k (id INTEGER PRIMARY KEY, name TEXT);
                  INSERT INTO k VALUES (1, 'a'), (2, 'b'), (3, 'c');
                  CREATE TABLE dup (id INTEGER, name TEXT);
-                 INSERT INTO dup VALUES (1, 'x'), (2, 'y'), (2, 'z');",
+                 INSERT INTO dup VALUES (1, 'x'), (2, 'y'), (2, 'z');
+                 CREATE TABLE bk (id BLOB PRIMARY KEY, name TEXT);
+                 INSERT INTO bk VALUES (x'00112233445566778899AABBCCDDEEFF', 'a'),
+                     (x'00112233445566778899AABBCCDDEE00', 'b'), (x'27275C00', 'c');",
         )
         .expect("seed");
     let bridge = super::CoreBridge::spawn();
@@ -4324,6 +4327,45 @@ fn sqlite_apply_changes_commits_or_rolls_back_whole() {
         .expect_err("another connection's edits");
     assert!(err.contains("another connection"), "{err}");
     assert_eq!(name_of(2), Some(Value::Text("confirmed".into())));
+
+    // A blob key names its row by every byte: the row beside it, alike
+    // but for the last byte, stays.
+    let bk = edit_table("main", "bk", &[("id", "BLOB"), ("name", "TEXT")], &["id"]);
+    let uuid = |last: u8| {
+        let mut id = vec![
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee,
+        ];
+        id.push(last);
+        Value::Bytes(id)
+    };
+    let out = bridge
+        .apply_changes(
+            "off",
+            "off",
+            1,
+            bk,
+            vec![
+                Change::Update {
+                    key: vec![cell("id", uuid(0xff))],
+                    set: vec![cell("name", Value::Text("changed".into()))],
+                },
+                Change::Delete {
+                    key: vec![cell("id", Value::Bytes(vec![0x27, 0x27, 0x5c, 0x00]))],
+                },
+            ],
+            None,
+            None,
+        )
+        .expect("apply");
+    let ApplyOutcome::Committed { counts, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!((counts.updated, counts.deleted), (1, 1));
+    assert_eq!(
+        read("SELECT group_concat(name) FROM (SELECT name FROM bk ORDER BY id)"),
+        Some(Value::Text("b,changed".into()))
+    );
 
     // Nothing to commit, or no key: refused before anything runs.
     assert!(bridge
@@ -4649,6 +4691,55 @@ fn postgres_apply_changes_commits_or_rolls_back_whole() {
         check("SELECT name FROM public.it_edits WHERE id = 10"),
         Some(text("confirmed"))
     );
+
+    // A bytea key names its row by every byte: the row beside it, alike
+    // but for the last byte, stays.
+    for sql in [
+        "DROP TABLE IF EXISTS public.it_edits_bk",
+        "CREATE TABLE public.it_edits_bk (id bytea PRIMARY KEY, name text)",
+        "INSERT INTO public.it_edits_bk VALUES ('\\x00112233445566778899aabbccddeeff', 'a'), \
+             ('\\x00112233445566778899aabbccddee00', 'b'), ('\\x27275c00', 'c')",
+    ] {
+        assert_eq!(run(sql).1, None, "{sql}");
+    }
+    let bk = edit_table(
+        "public",
+        "it_edits_bk",
+        &[("id", "bytea"), ("name", "text")],
+        &["id"],
+    );
+    let mut uuid = vec![
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+    ];
+    uuid.push(0xff);
+    let out = bridge
+        .apply_changes(
+            "off",
+            "off",
+            1,
+            bk,
+            vec![
+                Change::Update {
+                    key: vec![cell("id", Value::Bytes(uuid))],
+                    set: vec![cell("name", text("changed"))],
+                },
+                Change::Delete {
+                    key: vec![cell("id", Value::Bytes(vec![0x27, 0x27, 0x5c, 0x00]))],
+                },
+            ],
+            None,
+            None,
+        )
+        .expect("apply");
+    let ApplyOutcome::Committed { counts, .. } = out else {
+        panic!("{out:?}")
+    };
+    assert_eq!((counts.updated, counts.deleted), (1, 1));
+    assert_eq!(
+        check("SELECT string_agg(name, ',' ORDER BY id) FROM public.it_edits_bk"),
+        Some(text("b,changed"))
+    );
+    assert_eq!(run("DROP TABLE public.it_edits_bk").1, None);
 
     assert_eq!(run("DROP TABLE public.it_edits").1, None);
     std::env::remove_var("ROWKERY_CONFIG_DIR");

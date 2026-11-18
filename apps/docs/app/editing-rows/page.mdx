@@ -63,7 +63,7 @@ The editor fits the column's type and refuses values the database would reject:
 | JSON | A larger editor; <kbd>⌘↵</kbd> stages it, and invalid JSON says **Not valid JSON** |
 | Foreign key | A picker: type part of a key or a name to search the table it points at (**Search customers…**); up to 8 matches, each labelled |
 
-Binary columns (`bytea`, `blob`) have no editor, and neither do cells shown only as their type.
+Binary columns (`bytea`, `blob`) have no editor, and neither do cells shown only as their type. A row whose key is a binary column, such as a `BINARY(16)` UUID, edits like any other while the key is 16 bytes or less. The grid loads only the first 16 bytes of a longer binary value, which can't name the row, so such a row isn't edited here and the tray says so.
 
 <Shot src="/img/editing-rows-enum-editor.webp" width={522} height={114} alt="The status cell of an order open as an editor with re typed, and a list under it holding the one matching value, refunded." />
 

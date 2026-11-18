@@ -443,6 +443,7 @@ function ResultsGridView({
       }
       if ("row" in target) {
         if (target.row >= rows.length || editing.rowState(target.row)?.mark === "delete") return;
+        if (editing.refuseRow(target.row)) return;
         // A value core couldn't decode (`<tsvector>`) is never written back.
         if (!rows.isNull(target.row, col) && rows.text(target.row, col) === `<${columns[col]?.type_name}>`) return;
       }

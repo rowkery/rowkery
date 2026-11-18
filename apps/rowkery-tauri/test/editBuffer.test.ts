@@ -12,6 +12,7 @@ import {
   columnEditor,
   editRefusal,
   emptyBuffer,
+  loadedKey,
   parseInput,
   parsePaste,
   revertCell,
@@ -22,6 +23,7 @@ import {
   toggleDeletes,
   valueKey,
 } from "../src/editBuffer";
+import { ResultRows } from "../src/resultStore";
 import type { TableNode } from "../src/types";
 
 const key = (id: number) => [{ column: "id", value: { Int: id } }];
@@ -269,5 +271,44 @@ describe("a commit takes only what it sent", () => {
     // Nothing new: nothing left.
     expect(withoutCommitted(sent, sent)).toBeUndefined();
     expect(withoutCommitted(undefined, sent)).toBeUndefined();
+  });
+});
+
+describe("a loaded row's key", () => {
+  const uuid = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+  const rows = ResultRows.fromValues([
+    [{ Bytes: uuid, byteLength: 16 }, { Text: "whole" }],
+    // A 32-byte key: the grid holds its first 16 bytes only.
+    [{ Bytes: uuid, byteLength: 32 }, { Text: "cut" }],
+    [{ Null: null }, { Text: "null" }],
+    [{ Bytes: [], byteLength: 0 }, { Text: "empty" }],
+    // Without its size nothing says the bytes are all of it.
+    [{ Bytes: uuid }, { Text: "unsized" }],
+  ]);
+  const names = ["id", "label"];
+
+  test("whole bytes name the row, as core takes them", () => {
+    const key = loadedKey(["id"], names, rows, 0);
+    expect(key).toEqual([{ column: "id", value: { Bytes: uuid } }]);
+    // No `byteLength`: core's `Value::Bytes` is the bytes alone.
+    expect(JSON.stringify(key)).not.toContain("byteLength");
+    expect(loadedKey(["id"], names, rows, 3)).toEqual([{ column: "id", value: { Bytes: [] } }]);
+    const b = toggleDeletes(emptyBuffer("main.t", "c"), [key!]);
+    expect(bufferChanges(b)).toEqual([{ op: "delete", key: [{ column: "id", value: { Bytes: uuid } }] }]);
+  });
+
+  test("bytes cut short, NULL or missing don't", () => {
+    expect(loadedKey(["id"], names, rows, 1)).toBeNull();
+    expect(loadedKey(["id"], names, rows, 2)).toBeNull();
+    expect(loadedKey(["id"], names, rows, 4)).toBeNull();
+    expect(loadedKey(["id"], names, rows, 9)).toBeNull();
+    expect(loadedKey(["gone"], names, rows, 0)).toBeNull();
+    expect(loadedKey([], names, rows, 0)).toBeNull();
+    // One cut cell spoils a composite key.
+    expect(loadedKey(["label", "id"], names, rows, 1)).toBeNull();
+    expect(loadedKey(["label", "id"], names, rows, 0)).toEqual([
+      { column: "label", value: { Text: "whole" } },
+      { column: "id", value: { Bytes: uuid } },
+    ]);
   });
 });
