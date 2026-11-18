@@ -481,12 +481,24 @@ impl<R: Read> Reader<R> {
     /// Ends the statement at `buf[first..stop]`, consuming through `end`.
     fn statement(&mut self, first: usize, stop: usize, end: usize) -> Result<Statement, ReadError> {
         let line = self.line_at(first);
-        let sql = String::from_utf8(self.buf[first..stop].to_vec()).map_err(|_| {
-            ReadError::at(
-                line,
-                "This statement isn't UTF-8 text. Save the file as UTF-8 and read it again.",
-            )
-        })?;
+        let text = &self.buf[first..stop];
+        let sql = match std::str::from_utf8(text) {
+            Ok(sql) => sql.to_string(),
+            Err(_) if self.dialect == Dialect::Mysql => mysql_hex_binary(text)
+                .and_then(|sql| String::from_utf8(sql).ok())
+                .ok_or_else(|| {
+                    ReadError::at(
+                        line,
+                        "This statement holds bytes that aren't UTF-8 text. If they are binary values in a dump, make the dump again with --hex-blob. Otherwise save the file as UTF-8 and read it again.",
+                    )
+                })?,
+            Err(_) => {
+                return Err(ReadError::at(
+                    line,
+                    "This statement isn't UTF-8 text. Save the file as UTF-8 and read it again.",
+                ))
+            }
+        };
         let pending = std::mem::take(&mut self.stmt);
         // A body that never closes would run the rest of the file as one
         // statement, past what the summary shows.
@@ -958,6 +970,114 @@ pub const MYSQL_LEXICAL_MODES: [&str; 7] = [
     "POSTGRESQL",
     "MAXDB",
 ];
+
+/// A MySQL statement holding bytes that aren't UTF-8, with each
+/// `_binary '…'` value that holds them written as `_binary 0x…`: the same
+/// bytes in a string of the same kind, as text Rowkery can keep. mysqldump
+/// writes BLOB, BINARY and BIT values that way unless told `--hex-blob`.
+///
+/// `None` when such bytes sit anywhere else (a plain string as mariadb-dump
+/// writes them, a name, a comment): what the server makes of those depends
+/// on where the value goes, so no other spelling means the same everywhere.
+///
+/// Escapes read as the server reads them with backslash escapes on and
+/// UTF-8 as its client character set, where neither `\` nor a quote can be
+/// part of a longer character. A run checks both before each statement
+/// (`session_lexical_mode`).
+fn mysql_hex_binary(sql: &[u8]) -> Option<Vec<u8>> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    // What can run on from a hex literal, or into one, as a single word.
+    let word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    #[derive(PartialEq)]
+    enum Last {
+        Other,
+        Dot,
+        /// The word `_binary`, not after a `.` (which makes it a name).
+        Introducer,
+        /// A value this wrote in hex: a string right after it would have
+        /// been joined to it, and isn't to `0x…`.
+        Hex,
+    }
+    let mut out = Vec::with_capacity(sql.len() + sql.len() / 2);
+    let mut last = Last::Other;
+    let mut i = 0;
+    while let Some((lexeme, end)) = lex(sql, i, true, Dialect::Mysql) {
+        let text = &sql[i..end];
+        i = end;
+        match lexeme {
+            Lexeme::Space | Lexeme::LineComment | Lexeme::BlockComment { .. } => {
+                out.extend_from_slice(text);
+                continue;
+            }
+            // `/*! 'tail' */` is a string to the server as much as a bare one.
+            Lexeme::String { .. } | Lexeme::Executable { .. } if last == Last::Hex => return None,
+            Lexeme::String { .. } if std::str::from_utf8(text).is_err() => {
+                if last != Last::Introducer {
+                    return None;
+                }
+                // A quote ends a word and `0x…` doesn't: `_binary'…'alias`
+                // would run together into one name.
+                if out.last().is_some_and(|b| word_byte(*b)) {
+                    out.push(b' ');
+                }
+                out.extend_from_slice(b"0x");
+                for byte in mysql_string_bytes(text)? {
+                    out.extend_from_slice(&[
+                        HEX[usize::from(byte >> 4)],
+                        HEX[usize::from(byte & 15)],
+                    ]);
+                }
+                if sql.get(i).is_some_and(|b| word_byte(*b)) {
+                    out.push(b' ');
+                }
+                last = Last::Hex;
+                continue;
+            }
+            _ => out.extend_from_slice(text),
+        }
+        last = match lexeme {
+            Lexeme::Dot => Last::Dot,
+            Lexeme::Word if last != Last::Dot && text.eq_ignore_ascii_case(b"_binary") => {
+                Last::Introducer
+            }
+            _ => Last::Other,
+        };
+    }
+    Some(out)
+}
+
+/// The bytes of the MySQL string `text` (`'…'`, quotes included) as the
+/// server unescapes them (`sql_lex.cc`'s `get_text`): `\0`, `\b`, `\n`,
+/// `\r`, `\t` and `\Z` are control bytes, `\%` and `\_` keep their
+/// backslash, any other escaped byte is itself, and `''` is one quote.
+/// `None` when it isn't one closed `'…'`.
+fn mysql_string_bytes(text: &[u8]) -> Option<Vec<u8>> {
+    let inner = text.strip_prefix(b"'")?.strip_suffix(b"'")?;
+    let mut out = Vec::with_capacity(inner.len());
+    let mut bytes = inner.iter().copied();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'\\' => match bytes.next()? {
+                b'0' => out.push(0),
+                b'b' => out.push(8),
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'Z' => out.push(0x1A),
+                c @ (b'%' | b'_') => out.extend_from_slice(&[b'\\', c]),
+                c => out.push(c),
+            },
+            b'\'' => {
+                if bytes.next()? != b'\'' {
+                    return None;
+                }
+                out.push(b'\'');
+            }
+            _ => out.push(byte),
+        }
+    }
+    Some(out)
+}
 
 /// MySQL's client character sets other than UTF-8. Rowkery's text is
 /// UTF-8, and the server reads it otherwise under any of these: in gbk,
@@ -2131,6 +2251,65 @@ mod tests {
         assert_eq!(copy.line, Some(1));
         let bytes = refused(b"SELECT 'caf\xe9';", EngineKind::Postgres);
         assert!(bytes.message.contains("UTF-8"));
+    }
+
+    #[test]
+    fn a_mysqldump_binary_value_is_kept_as_hex() {
+        let statements = |sql: &[u8]| -> Result<Vec<String>, ReadError> {
+            let mut reader = Reader::new(sql, Dialect::Mysql);
+            let mut out = Vec::new();
+            while let Some(piece) = reader.next_piece()? {
+                if let Piece::Statement(s) = piece {
+                    out.push(s.sql);
+                }
+            }
+            Ok(out)
+        };
+        // As mysqldump 8.4 writes a BINARY(16) key, a BIT(8) and a BLOB
+        // holding a PNG's first bytes; text beside them stays as it is.
+        let dump = b"INSERT INTO `t` VALUES (_binary '\\0\x11\\\"3DUfw\x88\x99\xaa\xbb\\\xcc\\\xdd\\\xee\xff','caf\xc3\xa9',_binary '\xaa'),\n(_binary '\\'\\'\\\\\\\\\\0',_binary 'plain; text',_binary '\x89PNG\\r\\n\\Z\\n');\nSELECT 2;\n";
+        assert_eq!(
+            statements(dump).unwrap(),
+            [
+                "INSERT INTO `t` VALUES (_binary 0x00112233445566778899AABBCCDDEEFF,'caf\u{e9}',_binary 0xAA),\n(_binary '\\'\\'\\\\\\\\\\0',_binary 'plain; text',_binary 0x89504E470D0A1A0A)",
+                "SELECT 2"
+            ]
+        );
+        // Every escape as the server reads it.
+        assert_eq!(
+            statements(b"SELECT _binary'\xff\\0\\b\\n\\r\\t\\Z\\%\\_\\\\\\'\\\"\\a\\\xfe''\"'")
+                .unwrap(),
+            ["SELECT _binary 0xFF00080A0D091A5C255C5F5C272261FE2722"]
+        );
+        // A word on either side stays its own word.
+        assert_eq!(
+            statements(b"SELECT _binary'\xff'abc, _binary '\xfe' /* c */ FROM t").unwrap(),
+            ["SELECT _binary 0xFF abc, _binary 0xFE /* c */ FROM t"]
+        );
+        // Anywhere else such bytes mean what the column makes of them
+        // (mariadb-dump writes binary values as plain strings): refused, and
+        // the message says what works.
+        for sql in [
+            &b"INSERT INTO t VALUES ('\xff');"[..],
+            b"INSERT INTO t VALUES (_binary \"\xff\");",
+            b"SELECT t._binary '\xff';",
+            b"SELECT _binary '\xff' 'tail';",
+            b"SELECT _binary 'head' '\xff';",
+            b"SELECT _binary '\xff' /*!50000 'tail' */;",
+            b"SELECT 1 /* \xff */;",
+            b"SELECT `\xff`;",
+            b"SELECT _binary '\xff",
+        ] {
+            let refused = statements(sql).unwrap_err();
+            assert!(refused.message.contains("--hex-blob"), "{refused:?}");
+        }
+        // Postgres and SQLite have no such values.
+        let mut reader = Reader::new(&b"SELECT _binary '\xff';"[..], Dialect::Postgres);
+        assert!(!reader
+            .next_piece()
+            .unwrap_err()
+            .message
+            .contains("hex-blob"));
     }
 
     /// The shape of a mariadb-dump 11.4 file (mysqldump 8 writes the same
