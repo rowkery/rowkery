@@ -232,7 +232,7 @@ async fn the_catalog_lists_databases_as_schemas() {
         &mut s,
         "DROP VIEW IF EXISTS it_cat_view; DROP TABLE IF EXISTS it_cat_child;
          DROP TABLE IF EXISTS it_cat_parent;
-         CREATE TABLE it_cat_parent (id INT PRIMARY KEY, code VARCHAR(10) NOT NULL DEFAULT 'x' COMMENT 'the code',
+         CREATE TABLE it_cat_parent (id INT AUTO_INCREMENT PRIMARY KEY, code VARCHAR(10) NOT NULL DEFAULT 'x' COMMENT 'the code',
            UNIQUE KEY it_code (code)) COMMENT 'parents';
          CREATE TABLE it_cat_child (a INT, b INT, parent_id INT, PRIMARY KEY (a, b),
            CONSTRAINT it_fk FOREIGN KEY (parent_id) REFERENCES it_cat_parent (id) ON DELETE CASCADE);
@@ -266,6 +266,10 @@ async fn the_catalog_lists_databases_as_schemas() {
     assert_eq!(code.comment.as_deref(), Some("the code"));
     // MariaDB's `'x'` reads as MySQL's `x`.
     assert_eq!(code.default.as_deref(), Some("x"));
+    // An AUTO_INCREMENT key fills itself, like a default.
+    assert_eq!(parent.columns[0].default.as_deref(), Some("auto_increment"));
+    let child = catalog.table("rowkery", "it_cat_child").unwrap();
+    assert_eq!(child.columns[0].default, None);
     // Arguments past GROUP_CONCAT's 1024 bytes are all there.
     let long_arg = format!("a_{}", "x".repeat(60));
     let params: Vec<String> = (0..20).map(|i| format!("{long_arg}{i} INT")).collect();
@@ -375,6 +379,48 @@ async fn read_only_is_read_only_at_the_server() {
     );
 }
 
+/// MySQL 8 caches a table's row count for a day once anything has read it:
+/// the catalog reads it fresh, and leaves the session's setting as it was.
+#[tokio::test]
+async fn row_estimates_follow_a_table_just_filled() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS it_fresh; CREATE TABLE it_fresh (id INT PRIMARY KEY)",
+    )
+    .await
+    .unwrap();
+    let estimate = |catalog: &rowkery_core::db::SchemaCatalog| {
+        catalog
+            .table("rowkery", "it_fresh")
+            .unwrap()
+            .row_estimate
+            .clone()
+    };
+    // Read while empty: MySQL 8 now has 0 in its cache.
+    let before = session_introspect(&mut s).await.unwrap();
+    assert_eq!(estimate(&before), RowEstimate::Approximate(0));
+    let values: Vec<String> = (1..=500).map(|i| format!("({i})")).collect();
+    session_execute(
+        &mut s,
+        &format!("INSERT INTO it_fresh VALUES {}", values.join(", ")),
+    )
+    .await
+    .unwrap();
+    // No ANALYZE TABLE, which would refresh the cache by itself. The
+    // engine's own count is an estimate: near 500, never the cached 0.
+    let after = session_introspect(&mut s).await.unwrap();
+    assert!(
+        matches!(estimate(&after), RowEstimate::Approximate(n) if n > 0),
+        "{:?}",
+        estimate(&after)
+    );
+    if s.flavor() == Flavor::Mysql {
+        let kept = rows(&mut s, "SELECT @@SESSION.information_schema_stats_expiry").await;
+        assert_ne!(kept[0][0], Value::Int(0));
+    }
+}
+
 #[tokio::test]
 async fn a_cancel_stops_the_running_statement() {
     let mut s = open(config()).await.unwrap();
@@ -477,6 +523,53 @@ async fn browse_pages_by_key_with_odd_values() {
     );
     let after_backslash = rows(&mut s, &page(&opts)).await;
     assert_eq!(after_backslash[0][0], Value::Text("it's".into()));
+}
+
+/// Export › SQL INSERT writes a file this server reads back as the same rows.
+#[tokio::test]
+async fn a_sql_insert_export_loads_back() {
+    use rowkery_core::export::{ExportFormat, ExportWriter};
+    let mut s = open(config()).await.unwrap();
+    session_execute(
+        &mut s,
+        "DROP TABLE IF EXISTS `it select`, `it select 2`;
+         CREATE TABLE `it select` (`from` INT PRIMARY KEY, `where` VARCHAR(40), j JSON, d DOUBLE,
+            b VARBINARY(8), big BIGINT UNSIGNED);
+         CREATE TABLE `it select 2` LIKE `it select`;
+         INSERT INTO `it select` VALUES
+            (1, 'back\\\\slash', '{\"s\": \"é\\\\\"q\"}', 1.7976931348623157e308, x'00ff27', 18446744073709551615),
+            (2, 'tr\\\\'' ick', '[1, null]', 1e-300, x'', 0),
+            (3, 'it''s \"q\" 😀', NULL, 0.1, NULL, NULL),
+            (4, 'two\\r\\nlines', NULL, 0, NULL, NULL)",
+    )
+    .await
+    .unwrap();
+    let (batches, result) = run(&mut s, "SELECT * FROM `it select` ORDER BY `from`").await;
+    result.unwrap();
+    let mut w = ExportWriter::new(
+        Vec::new(),
+        ExportFormat::SqlInsert {
+            engine: EngineKind::Mysql,
+            schema: config().database,
+            table: "it select 2".into(),
+        },
+    );
+    w.columns(&batches[0].columns).unwrap();
+    for row in batches.iter().flat_map(|b| &b.rows) {
+        w.row(row).unwrap();
+    }
+    let file = String::from_utf8(w.finish().unwrap()).unwrap();
+    session_execute(&mut s, &file)
+        .await
+        .unwrap_or_else(|e| panic!("{e}\n{file}"));
+    let copy = rows(&mut s, "SELECT * FROM `it select 2` ORDER BY `from`").await;
+    let source: Vec<Vec<Value>> = batches.into_iter().flat_map(|b| b.rows).collect();
+    assert_eq!(copy, source, "{file}");
+    assert_eq!(copy[0][1], Value::Text("back\\slash".into()));
+    assert_eq!(copy[1][1], Value::Text("tr\\' ick".into()));
+    assert_eq!(copy[3][1], Value::Text("two\r\nlines".into()));
+    assert!(file.starts_with("SET NAMES utf8mb4;\n"), "{file}");
+    assert!(file.contains("_utf8mb4 X'74776F0D0A6C696E6573'"), "{file}");
 }
 
 #[tokio::test]
@@ -1359,7 +1452,7 @@ async fn several_edits_need_a_table_that_rolls_back() {
 /// Runs `sql` as a SQL file: its scan, then the run.
 async fn run_file(
     s: &mut MysqlSession,
-    sql: &str,
+    sql: impl AsRef<[u8]>,
     whole_file: bool,
 ) -> (
     rowkery_core::sql_file::Scan,
@@ -1368,9 +1461,10 @@ async fn run_file(
     use rowkery_core::sql_file::{run_mysql, scan, RunOptions};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f.sql");
+    let sql = sql.as_ref();
     std::fs::write(&path, sql).unwrap();
     let scanned = scan(&path, EngineKind::Mysql, |_| true).unwrap();
-    assert_eq!(scanned.refused, None, "{sql}");
+    assert_eq!(scanned.refused, None, "{}", String::from_utf8_lossy(sql));
     let options = RunOptions {
         whole_file,
         keep_going: false,
@@ -1480,6 +1574,54 @@ async fn sql_files_run_as_the_mysql_client_runs_them() {
         count(&mut s, "SELECT COUNT(*) FROM it_file_p WHERE id = 5").await,
         1
     );
+}
+
+/// mysqldump writes BLOB, BINARY and BIT values as raw bytes unless told
+/// `--hex-blob`: the file isn't UTF-8, and its values still arrive whole.
+#[tokio::test]
+async fn a_dump_with_raw_binary_values_loads() {
+    let mut s = open(config()).await.unwrap();
+    session_execute(&mut s, "DROP TABLE IF EXISTS it_file_bin")
+        .await
+        .unwrap();
+    // The rows as mysqldump 8.4 wrote them (a backslash before a byte that
+    // only looks like the start of a longer character).
+    let dump = b"/*!50503 SET NAMES utf8mb4 */;\n\
+        CREATE TABLE `it_file_bin` (`id` binary(16) NOT NULL, `b8` bit(8), `b64` bit(64), `vb` varbinary(16), `bl` blob, `note` varchar(20), PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+        LOCK TABLES `it_file_bin` WRITE;\n\
+        INSERT INTO `it_file_bin` VALUES (_binary '\\0\x11\\\"3DUfw\x88\x99\xaa\xbb\\\xcc\\\xdd\\\xee\xff',_binary '\xaa',_binary '\xff\xff\xff\xff\xff\xff\xff\xff',_binary '\\\xde\xad\xbe\\\xef',_binary '\x89PNG\\r\\n\\Z\\n','caf\xc3\xa9; it\\'s'),(_binary '\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff',_binary '\\0',_binary '\\0\\0\\0\\0\\0\\0\\0\x05',_binary '',_binary '\\'\\\\\xfe',NULL);\n\
+        UNLOCK TABLES;\n";
+    let (scanned, report) = run_file(&mut s, &dump[..], false).await;
+    assert_eq!(report.failed, None, "{report:?}");
+    assert_eq!(report.done, scanned.statements);
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT HEX(id), b8 + 0, CAST(b64 + 0 AS CHAR), HEX(vb), HEX(bl), note FROM it_file_bin ORDER BY id"
+        )
+        .await,
+        [
+            [
+                Value::Text("00112233445566778899AABBCCDDEEFF".into()),
+                Value::Int(170),
+                Value::Text("18446744073709551615".into()),
+                Value::Text("DEADBEEF".into()),
+                Value::Text("89504E470D0A1A0A".into()),
+                Value::Text("caf\u{e9}; it's".into()),
+            ],
+            [
+                Value::Text("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".into()),
+                Value::Int(0),
+                Value::Text("5".into()),
+                Value::Text("".into()),
+                Value::Text("275CFE".into()),
+                Value::Null,
+            ]
+        ]
+    );
+    session_execute(&mut s, "DROP TABLE it_file_bin")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

@@ -990,10 +990,10 @@ async fn export_results(
         return Ok(None);
     };
     let path_text = path.to_string_lossy().to_string();
-    let kind = if engine == "postgres" {
-        EngineKind::Postgres
-    } else {
-        EngineKind::Sqlite
+    let kind = match engine.as_str() {
+        "postgres" => EngineKind::Postgres,
+        "mysql" => EngineKind::Mysql,
+        _ => EngineKind::Sqlite,
     };
     let format = rowkery_core::export::ExportFormat::from_path(&path_text, kind, &schema, &table);
     let file =
@@ -1535,6 +1535,7 @@ fn reads_only(engine: String, sql: String) -> bool {
     let dialect = match engine.as_str() {
         "postgres" => Dialect::Postgres,
         "sqlite" => Dialect::Sqlite,
+        "mysql" => Dialect::Mysql,
         _ => return false,
     };
     const CURSOR: [&str; 6] = ["FETCH", "MOVE", "DECLARE", "CLOSE", "LISTEN", "UNLISTEN"];
@@ -2717,7 +2718,15 @@ mod tests {
         assert!(!pg("FETCH 50 FROM c"));
         assert!(!pg("DECLARE c CURSOR FOR SELECT 1"));
         assert!(!pg("SELECT 1; DELETE FROM kiosks"));
-        assert!(!reads_only("mysql".into(), "SELECT 1".into()));
+        assert!(!reads_only("oracle".into(), "SELECT 1".into()));
+        let my = |sql: &str| reads_only("mysql".into(), sql.into());
+        assert!(my("SELECT * FROM `select` WHERE `from` = 1 # c"));
+        assert!(my("SHOW CREATE TABLE kiosks"));
+        assert!(!my("UPDATE kiosks SET a = 1"));
+        assert!(!my("SELECT write_fn()"));
+        assert!(!my("SELECT * FROM kiosks INTO OUTFILE '/tmp/k'"));
+        assert!(!my("SELECT 1 /*!80000 ; DELETE FROM kiosks */"));
+        assert!(!my("HANDLER kiosks READ NEXT"));
     }
 
     #[test]

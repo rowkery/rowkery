@@ -380,9 +380,13 @@ export function chipsFromFilter(filter: string | undefined): FilterChip[] {
  * `pending`, `Berlin` or `admin@x.com` is never read as `pend IN g`.
  */
 const FRAGMENT =
-  /^("(?:[^"]|"")+"|`(?:[^`]|``)+`|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*(=|<>|!=|>=|<=|>|<)\s*|\s+(ilike|like|in|between|is\s+distinct\s+from|is\s+not\s+null|is\s+null|is\s+not)(?:\s+|(?=\()|$))(.*)$/is;
-/** A value that is plainly a value: a number, a quoted string, one word. */
-const SIMPLE_VALUE = /^(-?(\d+\.?\d*|\.\d+)|'(?:[^']|'')*'|[A-Za-z0-9_.:@-]+)$/;
+  /^("(?:[^"]|"")+"|`(?:[^`]|``)+`|[\p{L}_][\p{L}\p{M}\p{N}_$]*)(?:\s*(=|<>|!=|>=|<=|>|<)\s*|\s+(ilike|like|in|between|is\s+distinct\s+from|is\s+not\s+null|is\s+null|is\s+not)(?:\s+|(?=\()|$))(.*)$/isu;
+/**
+ * A value that is plainly a value: a number, a quoted string, one word. A
+ * word is letters of any script (`Chloé`, `山田`): only ASCII ones would send
+ * the rest to the database bare, where they read as a column's name.
+ */
+const SIMPLE_VALUE = /^(-?(\d+\.?\d*|\.\d+)|'(?:[^']|'')*'|[\p{L}\p{M}\p{N}_.:@-]+)$/u;
 
 /**
  * What the chip editor's value field holds, once ↵ is pressed: a bare

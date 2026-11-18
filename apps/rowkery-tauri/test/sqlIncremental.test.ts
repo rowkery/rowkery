@@ -80,6 +80,18 @@ const FIXTURES: Record<string, string> = {
     "  CASE n WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE;",
     "END; select $$ ; $$;",
   ].join("\n"),
+  delimiter: [
+    "-- a procedure, as the mysql client takes it",
+    "DELIMITER //",
+    "CREATE PROCEDURE p() BEGIN SELECT 3; SELECT '//'; END//",
+    "SELECT /*!50000 1; //",
+    "SELECT /*!50000 2;",
+    "  3 // 4 */ 5//",
+    "delimiter ;",
+    "BEGIN NOT ATOMIC SELECT 1; IF 1 THEN SELECT 2; END IF; END; select 6;",
+    "DELIMITER $$",
+    "select 7$$ select `$$` /* $$ */ $$",
+  ].join("\n"),
 };
 
 const TOKENS = [
@@ -87,6 +99,7 @@ const TOKENS = [
   " ", "  ", "\t", "\r", "x", "select", "SELECT", "date", ".", "1", "1e", "e", "5", "(", "é", "_",
   "BEGIN", "begin ", " END", "END;", "CASE", "ATOMIC", "CREATE ", "TRIGGER ", " t ", ")", "FUNCTION", "[", "x.",
   "#", "\\", "\\'", "--x", "-- ", " IF", " LOOP", "END IF", "PROCEDURE ", "DEFINER", "EVENT ",
+  "DELIMITER //\n", "\nDELIMITER ;\n", "delimiter x", "//", "/*!", " NOT", "DELIMITER ",
 ];
 
 function check(
