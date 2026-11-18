@@ -48,6 +48,8 @@ If that session is closed while the tab is idle (the server restarted, the netwo
 
 Backticks quote names, `#` starts a comment, and the editor splits statements, colours them and formats them (<kbd>⌘I</kbd>) the MySQL way. Completion offers MySQL's functions and statements such as `SHOW`, `DESCRIBE` and `USE`. Tables in the tab's database go in bare, and tables in other databases get the database's name in front (`audit.events`).
 
+A routine's `BEGIN … END` body runs as one statement, and so does MariaDB's `BEGIN NOT ATOMIC … END`. A script written for the `mysql` client can be pasted as it is: after a `DELIMITER //` line, statements end at `//`, and neither the line nor the `//` is sent to the server.
+
 ## Safe mode
 
 Read-only and Confirm writes work as on Postgres ([Environments and safe mode](/environments-and-safe-mode/)), with a few MySQL rules:
