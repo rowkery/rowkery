@@ -990,10 +990,10 @@ async fn export_results(
         return Ok(None);
     };
     let path_text = path.to_string_lossy().to_string();
-    let kind = if engine == "postgres" {
-        EngineKind::Postgres
-    } else {
-        EngineKind::Sqlite
+    let kind = match engine.as_str() {
+        "postgres" => EngineKind::Postgres,
+        "mysql" => EngineKind::Mysql,
+        _ => EngineKind::Sqlite,
     };
     let format = rowkery_core::export::ExportFormat::from_path(&path_text, kind, &schema, &table);
     let file =
