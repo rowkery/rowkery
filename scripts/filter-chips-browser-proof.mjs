@@ -344,6 +344,15 @@ await page.waitForSelector(`${ws}[data-conn-state="connected"]`);
 await page.waitForFunction((sel) => document.querySelectorAll(sel).length > 0, `${line} [data-chip]`);
 check(JSON.stringify(await chips()) === JSON.stringify(before), `restored chips: ${(await chips()).map((c) => c[1]).join(" AND ")}`);
 
+// A value typed in any script is a value, not a column's name.
+await page.keyboard.press("Control+f");
+await page.waitForSelector(editor);
+await page.keyboard.insertText("note = Chloé");
+await page.keyboard.press("Enter");
+await waitLine("Chloé");
+await idle();
+check(JSON.stringify((await chips()).at(-1)) === JSON.stringify(["pred", "note = 'Chloé'"]), `an accented value is quoted: ${JSON.stringify((await chips()).at(-1))}`);
+
 // ⌘F on a query tab: find in the loaded rows.
 await page.click(`${ws} [data-testid="query-tab-add"]`);
 await page.waitForSelector(`${ws} textarea[data-testid="sql-editor"]`);
