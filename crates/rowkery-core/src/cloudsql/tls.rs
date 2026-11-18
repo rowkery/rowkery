@@ -65,7 +65,7 @@ fn generate_key() -> Result<ClientKey, CloudSqlError> {
         CloudSqlError::Instance(format!("Couldn't make the connection key: {e}"))
     };
     let mut rng = rand_core_010::UnwrapErr(getrandom::SysRng);
-    let key = rsa::RsaPrivateKey::new(&mut rng, 2048).map_err(|e| bad(&e))?;
+    let key = rsa::PrivateKey::new(&mut rng, 2048).map_err(|e| bad(&e))?;
     let pkcs8 = key.to_pkcs8_der().map_err(|e| bad(&e))?.as_bytes().to_vec();
     let spki = key
         .to_public_key()
@@ -252,8 +252,8 @@ mod tests {
         use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
         let key = generate_key().unwrap();
         let der = pem_blocks(&key.public_pem, "RSA PUBLIC KEY").remove(0);
-        let public = rsa::RsaPublicKey::from_public_key_der(&der).unwrap();
-        let private = rsa::RsaPrivateKey::from_pkcs8_der(&key.pkcs8).unwrap();
+        let public = rsa::PublicKey::from_public_key_der(&der).unwrap();
+        let private = rsa::PrivateKey::from_pkcs8_der(&key.pkcs8).unwrap();
         assert_eq!(public, private.to_public_key());
     }
 }

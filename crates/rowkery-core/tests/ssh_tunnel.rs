@@ -40,9 +40,13 @@ impl server::Handler for Bastion {
         })
     }
 
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
         Ok(
-            if user == USER && key.key_data() == self.client_key.key_data() {
+            if user == USER && key.public_key.key_data() == self.client_key.key_data() {
                 Auth::Accept
             } else {
                 Auth::reject()
